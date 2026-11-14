@@ -199,6 +199,20 @@
   -webkit-overflow-scrolling: touch;
 }
 
+.model-sheet__trigger { min-height: 54px; }
+.model-sheet__trigger .model-trigger__id,
+.model-sheet__trigger .model-trigger__effort { font-size: 12px; }
+.model-sheet__trigger:disabled { opacity: 0.6; cursor: default; }
+.model-sheet__choices {
+  max-height: min(45dvh, 360px);
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 4px;
+}
+
 .model-sheet__group-head {
   display: flex;
   align-items: center;
@@ -325,3 +339,23 @@
   color: var(--muted);
   font-size: 13px;
 }
+
+.model-sheet__footer {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+}
+
+.model-sheet__confirm {
+  width: 100%;
+  min-height: 44px;
+  border: 0;
+  border-radius: 9px;
+  padding: 10px 16px;
+  font: inherit;
+  color: var(--accent-fg);
+  background: var(--accent-fill, var(--accent));
+  cursor: pointer;
+}
+.model-sheet__confirm:hover:not(:disabled) { background: var(--accent-fill-hover, var(--accent)); }
+.model-sheet__confirm:disabled { opacity: 0.5; cursor: default; }
+.model-sheet__confirm:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }

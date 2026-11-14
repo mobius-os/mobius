@@ -114,6 +114,9 @@ SERVING_SHA_FILE = Path("/tmp/serving-sha")
 # Persist a conflict so Settings keeps showing it across reloads (the merge is
 # aborted, so no git state alone can signal it). Records the target sha + paths.
 CONFLICT_FLAG = Path("/data/.platform-conflict")
+# Resolver identity retained through prepared/swapped activation, not a second update marker.
+def _completed_resolver_path(repo: Path) -> Path:
+  return repo / ".git" / "mobius-update-resolver.json"
 # Persist that the last reconcile could not refresh origin. Deploy verification
 # treats this as an explicit exemption from the freshness assertion; the next
 # successful fetch clears it.
@@ -3858,6 +3861,35 @@ def _retire_swap(repo: Path, record: PreparedUpdate) -> None:
   except Exception:
     log.warning("platform: could not update contribution provenance", exc_info=True)
   _clear_prepared_update(repo)
+  _archive_confirmed_update_resolver(repo, record["target"])
+
+
+def _archive_confirmed_update_resolver(repo: Path, target: str) -> None:
+  """Archive only after the exact update is confirmed; retain on DB failure."""
+  try:
+    binding = json.loads(_completed_resolver_path(repo).read_text(encoding="utf-8"))
+  except (OSError, ValueError):
+    return
+  if binding.get("target") != target:
+    return
+  try:
+    # A booted source is not finished while host/proxy/image activation remains.
+    if _platform_activation_impact(repo, read_host=True)["required_actions"]:
+      return
+  except Exception:
+    log.warning("platform: could not verify resolver activation", exc_info=True)
+    return
+  try:
+    from app import chat_archive, models
+    from app.database import SessionLocal
+    with SessionLocal() as db:
+      chat = db.get(models.Chat, binding.get("chat_id"))
+      if chat is not None and chat.deleted_at is None and chat.created_by_app_id is None:
+        chat_archive.archive_chat(db, chat)
+  except Exception:
+    log.warning("platform: confirmed update resolver could not be archived", exc_info=True)
+    return
+  _completed_resolver_path(repo).unlink(missing_ok=True)
 
 
 def cancel_unfinished_update(repo: Path = PLATFORM_REPO) -> None:
@@ -3881,6 +3913,7 @@ def cancel_unfinished_update(repo: Path = PLATFORM_REPO) -> None:
     if CONFLICT_FLAG.exists():
       _drop_parked_resolution(repo)
     _clear_prepared_update(repo)
+    _completed_resolver_path(repo).unlink(missing_ok=True)
 
 
 def bind_update_operation(
@@ -5014,6 +5047,10 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
         target=target, image_digest=parked.get("image_digest"), checkout=worktree,
       )
       app_git.remove_overlay_worktree(repo, worktree)
+      if flag.get("chat_id"):
+        _atomic_write_text(_completed_resolver_path(repo), json.dumps({
+          "target": target, "chat_id": flag["chat_id"],
+        }))
       CONFLICT_FLAG.unlink(missing_ok=True)
       return "prepared"
     # Late edits were parked against the booted update; live edits made since
@@ -5084,6 +5121,10 @@ def continue_platform_overlay_update(repo: Path = PLATFORM_REPO) -> str:
       _restore_working_edits(repo, local)
     if result.status != "updated":
       return result.status
+    if flag.get("chat_id"):
+      _atomic_write_text(_completed_resolver_path(repo), json.dumps({
+        "target": target, "chat_id": flag["chat_id"],
+      }))
     # Record what the checkout holds once transient edit commits are unwound.
     head = _rev(repo, local)
     if not parked.get("replay"):
@@ -5803,6 +5844,9 @@ def platform_status(
   # Newer releases stacked up behind the update in flight wait until it
   # finishes or is cancelled; ``target`` is the last-fetched selected release.
   pending = unfinished_update(repo)
+  if (pending is None and not activation["required_actions"]
+      and read_prepared_update() is None and upstream_sha):
+    _archive_confirmed_update_resolver(repo, upstream_sha)
   pinned = pending["target_sha"] if pending else None
   newer_available = bool(
     target and pinned and target != pinned
@@ -6471,6 +6515,7 @@ _resolver_creation_lock = asyncio.Lock()
 
 async def create_platform_conflict_resolver_chat(
   db: Session, repo: Path = PLATFORM_REPO, *, replace_chat_id: str | None = None,
+  agent=None,
 ) -> PlatformConflictResolverChatOut:
   """Create or return the owner-clicked resolver chat for a platform conflict.
 
@@ -6495,9 +6540,14 @@ async def create_platform_conflict_resolver_chat(
     parked = flag.get("overlay")
     if not target_sha:
       raise PlatformUpdateError("Platform conflict target is unavailable.")
-    result = await spawn_platform_conflict_chat(
-      db, conflict_paths, target_sha, parked,
-    )
+    if agent is None:
+      result = await spawn_platform_conflict_chat(
+        db, conflict_paths, target_sha, parked,
+      )
+    else:
+      result = await spawn_platform_conflict_chat(
+        db, conflict_paths, target_sha, parked, agent=agent,
+      )
     if result is None:
       raise PlatformUpdateError("Could not open resolver chat.")
 
@@ -6511,7 +6561,7 @@ async def create_platform_conflict_resolver_chat(
 
 
 async def resume_platform_conflict_resolver(
-  db: Session, repo: Path = PLATFORM_REPO,
+  db: Session, repo: Path = PLATFORM_REPO, *, agent=None,
 ) -> PlatformConflictResolverChatOut:
   """Start the stalled resolver again: a new turn in its bound chat when it
   exists and is idle, otherwise a new resolver chat bound to the update.
@@ -6526,7 +6576,7 @@ async def resume_platform_conflict_resolver(
     raise PlatformUpdateError("No unresolved platform update conflict.")
   chat = _bound_resolver_chat(db, flag)
   if chat is None:
-    return await create_platform_conflict_resolver_chat(db, repo)
+    return await create_platform_conflict_resolver_chat(db, repo, agent=agent)
   if _resolver_is_busy(db, chat):
     return PlatformConflictResolverChatOut(chat_id=chat.id, created=False, started=False)
   try:
@@ -6535,7 +6585,7 @@ async def resume_platform_conflict_resolver(
       content=_platform_conflict_resolver_resume_message(flag),
     )
   except ProgrammaticChatModelRequired:
-    return await create_platform_conflict_resolver_chat(db, repo, replace_chat_id=chat.id)
+    return await create_platform_conflict_resolver_chat(db, repo, replace_chat_id=chat.id, agent=agent)
   return PlatformConflictResolverChatOut(chat_id=chat.id, created=False, started=started)
 
 
@@ -6704,6 +6754,7 @@ async def spawn_platform_conflict_chat(
   conflict_paths: list[str],
   target_sha: str,
   overlay: dict | None = None,
+  *, agent=None,
 ) -> PlatformConflictResolverChatOut | None:
   """Open a visible agent chat to reconcile the new platform version into
   the checked-out working branch — the platform analogue of a per-app
@@ -6711,22 +6762,17 @@ async def spawn_platform_conflict_chat(
   binds the update's chat (``create_platform_conflict_resolver_chat``)."""
   import uuid
 
-  from app import models, providers
+  from app import models, update_chat
   from app.chat_start import start_programmatic_chat_turn
   from app.chat_writer import create_chat
-  from app.config import get_settings
   from app.push import notify_owner
 
   title = "Resolve platform update conflict"
   owner = db.query(models.Owner).first()
   if owner is None:
     return None
-  data_dir = get_settings().data_dir
-  # Automatic app-agent work: resolve the provider from the owner's
-  # background-agents list, walked to the first entry with usage quota, instead
-  # of the interactive default. The owner can switch it in-chat afterwards.
-  from app import background_agents
-  _bg_choice = background_agents.resolve_background_chat_choice(data_dir, db)
+  # Omission uses the background list; an explicit choice is frozen exactly.
+  _bg_choice = update_chat.resolve_update_chat_choice(db, agent)
   provider = _bg_choice["provider"]
   agent_settings = _bg_choice["agent_settings"]
 

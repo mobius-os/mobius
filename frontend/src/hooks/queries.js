@@ -456,9 +456,10 @@ async function fetchModelPrefs() {
     try {
       const res = await api.owner.modelPrefs.get()
       const data = await jsonOrThrow(res, 'model prefs fetch failed:')
-      return { hidden_ids: data?.hidden_ids || [] }
+      return { hidden_ids: data?.hidden_ids || [], recent_ids: data?.recent_ids || [],
+        selected_agent: data?.selected_agent || null }
     } catch {
-      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], unavailable: true }
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], recent_ids: [], unavailable: true }
     }
   }
 }
@@ -479,7 +480,7 @@ async function sendModelPrefsChanges(changes) {
   try {
     const res = await api.owner.modelPrefs.update(changes, { timeoutMs: MODEL_PREFS_SAVE_TIMEOUT_MS })
     const saved = res.ok ? await res.json() : null
-    return Array.isArray(saved?.hidden_ids) ? saved.hidden_ids : null
+    return Array.isArray(saved?.hidden_ids) ? saved : null
   } catch {
     prefsSaveOutcomeUnknown = true
     return null
@@ -501,23 +502,32 @@ async function saveModelPrefsChanges(queryClient, changes) {
       if (hide) hidden.add(id)
       else hidden.delete(id)
     }
-    return { hidden_ids: [...hidden] }
+    return { ...prev, hidden_ids: [...hidden] }
   })
   const save = latestPrefsSave.then(() => sendModelPrefsChanges(changes))
   latestPrefsSave = save
-  const hiddenIds = await save
+  const saved = await save
   if (latestPrefsSave === save) {
-    if (hiddenIds) queryClient.setQueryData(modelPrefsKey, { hidden_ids: hiddenIds })
-    if (!hiddenIds || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+    if (saved) queryClient.setQueryData(modelPrefsKey, previous => ({
+      ...previous,
+      hidden_ids: saved.hidden_ids,
+      // A model pick can commit while this visibility request is in flight.
+      // Its newer local recency must not be replaced by an older reply.
+      recent_ids: previous?.recent_ids ?? saved.recent_ids ?? [],
+    }))
+    if (!saved || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
     prefsSaveOutcomeUnknown = false
   }
-  return Boolean(hiddenIds)
+  return Boolean(saved)
 }
 
 function modelPrefsQueryOptions({ enabled = true } = {}) {
   return {
     queryKey: modelPrefsKey,
     queryFn: fetchModelPrefs,
+    // A newly opened job picker must confirm the latest saved agent, not a
+    // still-fresh snapshot from before a chat model or effort change.
+    staleTime: 0,
     enabled,
     retry: false,
   }

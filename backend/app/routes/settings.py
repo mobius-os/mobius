@@ -462,7 +462,8 @@ async def list_model_registry(
   Accepts app-scoped tokens, unlike the rest of this module: the
   registry is read-only and model ids aren't secrets, and mini-apps
   with a model picker (e.g. a per-conversation model selector) need
-  the list. Settings reads/writes and owner prefs stay owner-only.
+  the list. General settings and preference writes stay owner-only;
+  the model-picker preference projection is also read-only for apps.
   """
   data_dir = get_app_settings().data_dir
   registry = await providers.list_models(data_dir, force_refresh=refresh)
@@ -482,7 +483,19 @@ def get_model_prefs(
   An explicitly saved `{"hidden_ids": []}` is distinct and shows every
   registry entry.
   """
-  return {"hidden_ids": providers.hidden_model_ids(owner.model_prefs_json)}
+  data_dir = get_app_settings().data_dir
+  provider = providers.owner_default_provider(data_dir, owner.provider)
+  settings = providers.effective_agent_settings(data_dir, None, provider)
+  # Apps can seed a job picker without reading unrelated owner settings.
+  selected = ({"provider": provider, "model": settings["model"],
+               "effort": settings["effort"]} if settings.get("model") else None)
+  return {
+    "hidden_ids": providers.hidden_model_ids(owner.model_prefs_json),
+    "recent_ids": providers.picker_recent_model_ids(
+      owner.model_prefs_json, data_dir,
+    ),
+    "selected_agent": selected,
+  }
 
 
 @owner_router.patch("/model-prefs", dependencies=[Depends(reject_cross_site)])
@@ -513,9 +526,14 @@ def update_model_prefs(
       hidden.append(model_id)
     elif not hide and model_id in hidden:
       hidden.remove(model_id)
-  owner.model_prefs_json = {"hidden_ids": hidden}
+  prefs = dict(owner.model_prefs_json or {})
+  prefs["hidden_ids"] = hidden
+  owner.model_prefs_json = prefs
   db.commit()
-  return {"hidden_ids": hidden}
+  return {
+    "hidden_ids": hidden,
+    "recent_ids": providers.picker_recent_model_ids(prefs, get_app_settings().data_dir),
+  }
 
 
 @owner_router.get("/walkthrough")

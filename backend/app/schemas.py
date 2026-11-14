@@ -14,6 +14,7 @@ from pydantic import (
 from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
 from app.manifest_identity import requested_manifest_source
 from app.providers import PROVIDERS, _model_belongs_to_other_provider
+from app.update_chat import UpdateAgentChoice
 
 
 class SetupRequest(BaseModel):
@@ -706,6 +707,7 @@ class AppConflictResolverChatOut(BaseModel):
 
 
 class AppConflictResolverChatRequest(BaseModel):
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 
@@ -716,6 +718,7 @@ class AppConflictResolverBatchChatRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   app_ids: list[int] = Field(min_length=1, max_length=50)
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 

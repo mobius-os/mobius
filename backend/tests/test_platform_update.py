@@ -745,10 +745,15 @@ def test_boot_revert_returns_to_the_saved_state_only_after_a_swap(clone_env):
 def test_a_prepared_update_can_be_cancelled_until_it_is_swapped_in(clone_env):
   origin, platform = clone_env
   served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  flag = pu._read_conflict_flag()
+  pu._write_conflict_flag(target, flag["paths"], "resolver-chat", flag["overlay"])
   assert pu.continue_platform_overlay_update(platform) == "prepared"
+  marker = pu._completed_resolver_path(platform)
+  assert json.loads(marker.read_text())["chat_id"] == "resolver-chat"
   assert pu.unfinished_update(platform)["cancellable"] is True
 
   pu.cancel_unfinished_update(platform)
+  assert not marker.exists()
   assert pu.unfinished_update(platform) is None
   assert _served_sha(platform) == served
   assert pu.swap_in_prepared_update(cutover=True, repo=platform) is False
@@ -2045,7 +2050,7 @@ def test_uncommitted_edits_stay_uncommitted_across_a_parked_conflict(clone_env):
   assert not worktree.exists()
 
 
-def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
+def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env, db, chat):
   origin, platform = clone_env
   served = _served_sha(platform)
   (platform / "backend/app/main.py").write_text(
@@ -2063,6 +2068,8 @@ def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
   assert _served_sha(platform) == served
   assert "LINE_A = 'DIRTY'" in (platform / "backend/app/main.py").read_text()
 
+  pu._write_conflict_flag(target, res.conflict_paths, chat.id, res.overlay)
+
   worktree = Path(res.overlay["worktree"])
   (worktree / "backend/app/main.py").write_text(
     _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'MERGED'"),
@@ -2076,6 +2083,15 @@ def test_a_dirty_edit_that_itself_conflicts_is_parked_and_continued(clone_env):
   assert _git(platform, "status", "--porcelain").stdout.splitlines() == [
     " M backend/app/main.py",
   ]
+  marker = pu._completed_resolver_path(platform)
+  assert json.loads(marker.read_text()) == {"target": target, "chat_id": chat.id}
+  db.refresh(chat)
+  assert chat.archived_at is None
+  pu._write_activation_marker(target, [], upstream_sha=target)
+  assert not pu.platform_status(platform)["activation"]["required_actions"]
+  db.refresh(chat)
+  assert chat.archived_at is not None
+  assert not marker.exists()
 
 
 def test_dirty_resolution_merges_with_a_late_commit(clone_env):
@@ -10099,3 +10115,38 @@ async def test_the_resolver_is_the_chat_its_update_binds_not_one_with_its_title(
   assert [call["chat_id"] for call in started] == [first["chat_id"]]
   assert str(worktree) in started[0]["content"]
   assert pu._read_conflict_flag()["chat_id"] == first["chat_id"]
+
+
+def test_confirmed_resolver_archive_retries_after_activation_clears(
+  clone_env, db, chat, monkeypatch,
+):
+  """A retained resolver marker waits for real activation, then status files it."""
+  from app import models
+  _origin, platform = clone_env
+  target = pu.recorded_upstream_sha(platform)
+  marker = pu._completed_resolver_path(platform)
+  marker.write_text(json.dumps({"target": target, "chat_id": chat.id}))
+  pu._write_activation_marker(target, ["backend/app/main.py"], upstream_sha=target)
+
+  pending = pu.platform_status(platform)
+  db.refresh(chat)
+  assert pending["activation"]["required_actions"]
+  assert chat.archived_at is None
+  assert marker.exists()
+
+  pu._write_activation_marker(target, [], upstream_sha=target)
+  from app import database
+  real_session = database.SessionLocal
+  monkeypatch.setattr(database, "SessionLocal", lambda: (_ for _ in ()).throw(
+    RuntimeError("database temporarily unavailable"),
+  ))
+  pu.platform_status(platform)
+  db.refresh(chat)
+  assert chat.archived_at is None and marker.exists()
+  monkeypatch.setattr(database, "SessionLocal", real_session)
+  complete = pu.platform_status(platform)
+  db.refresh(chat)
+  assert not complete["activation"]["required_actions"]
+  assert chat.archived_at is not None
+  assert db.get(models.Chat, chat.id).deleted_at is None
+  assert not marker.exists()

@@ -54,7 +54,7 @@ async function reloadShell() {
   } catch { return false }
 }
 
-export default function usePlatformUpdates({ active, refreshToken, onOpenChat }) {
+export default function usePlatformUpdates({ active, refreshToken, onOpenChat, chooseAgent }) {
   const queryClient = useQueryClient()
   const versionQuery = versionQueries.current.useQuery()
   // Persisted status is display provenance only. Update actions continue to
@@ -303,13 +303,15 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
     } finally { pending.current = false }
   }
 
-  async function resolve() {
+  async function resolve(selectedAgent) {
     if (pending.current || busy || !onOpenChat) return
     if (platform?.conflict_chat_id) { onOpenChat(platform.conflict_chat_id); return }
     pending.current = true
-    setPhase('resolving'); setError('')
     try {
-      const body = await responseBody(await api.platform.conflictResolverChat())
+      const agent = selectedAgent?.model ? selectedAgent : await chooseAgent()
+      if (!agent) return
+      setPhase('resolving'); setError('')
+      const body = await responseBody(await api.platform.conflictResolverChat({ agent }))
       // The confirmed chat is the result of this request. A secondary status
       // read must not hold navigation hostage (or turn its failure into a gap).
       if (body?.chat_id) onOpenChat(body.chat_id)
@@ -323,9 +325,12 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
   async function resume() {
     if (pending.current || busy) return
     pending.current = true
-    setPhase('resolving'); setError('')
     try {
-      const body = await responseBody(await api.platform.conflictResolverChat({ resume: true }))
+      // An existing update keeps its owning chat and agent across recovery.
+      const agent = platform?.conflict_chat_id ? null : await chooseAgent()
+      if (!platform?.conflict_chat_id && !agent) return
+      setPhase('resolving'); setError('')
+      const body = await responseBody(await api.platform.conflictResolverChat({ resume: true, ...(agent ? { agent } : {}) }))
       if (body?.chat_id && onOpenChat) onOpenChat(body.chat_id)
       void refreshPlatform({ preserveCurrentOnFailure: true })
     } catch (cause) { setError(cause.message || 'Could not resume this update.') }
@@ -380,6 +385,6 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat })
   return {
     platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
     progress, reconnecting: !!reconnect, slow, check, execute, restart, resolve, resume, cancel,
-    withdrawHostRequest, keepSettling, clearError,
+    withdrawHostRequest, keepSettling, clearError, chooseAgent,
   }
 }

@@ -4792,7 +4792,7 @@ async def _install_candidate(
   # reruns this whole install, post-commit effects included.
   try:
     async with fs_locks.source_dir_lock(app.source_dir):
-      await clear_pending_conflict_update(db, app)
+      await clear_pending_conflict_update(db, app, completed=True)
   except (OSError, subprocess.SubprocessError, SQLAlchemyError):
     db.rollback()
     log.warning("install: could not clear the finished pending update", exc_info=True)

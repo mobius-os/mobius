@@ -657,6 +657,31 @@ def test_patch_chat_provider_and_model_in_same_request(
   assert body["provider"] == "codex"
   assert body["agent_settings_json"] == {"model": "gpt-5.4-codex"}
   assert _read_global_settings()["provider"] == "codex"
+  prefs = client.get("/api/owner/model-prefs", headers=auth).json()
+  assert prefs["recent_ids"] == ["gpt-5.4-codex"]
+
+
+def test_picker_recency_only_tracks_confirmed_model_choices(client, auth, chat):
+  """Effort saves and rejected provider changes cannot reorder owner picks."""
+  url = f"/api/chats/{chat.id}"
+  first = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"model": "claude-sonnet-4-6"},
+  })
+  assert first.status_code == 200, first.text
+  second = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"model": "claude-opus-4-7"},
+  })
+  assert second.status_code == 200, second.text
+  effort = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"effort": "high"},
+  })
+  assert effort.status_code == 200, effort.text
+  rejected = client.patch(url, headers=auth, json={
+    "provider": "codex", "agent_settings_json": {"model": "claude-sonnet-4-6"},
+  })
+  assert rejected.status_code == 422
+  prefs = client.get("/api/owner/model-prefs", headers=auth).json()
+  assert prefs["recent_ids"] == ["claude-opus-4-7", "claude-sonnet-4-6"]
 
 
 def test_run_chat_passes_merged_settings_into_claude_sdk(
