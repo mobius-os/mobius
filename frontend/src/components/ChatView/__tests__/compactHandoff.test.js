@@ -211,9 +211,9 @@ test('dozens of helpers fold into one summary line that opens into groups', asyn
   assert.match(open, /chat__handoffs--open/)
   assert.match(open, /aria-expanded="true"/)
   assert.equal((open.match(/chat__helper-row/g) || []).length, 13)
-  const order = ['Working · 12', 'Waiting · 4'].map(label => open.indexOf(label))
+  const order = ['>Working</p>', '>Waiting</p>'].map(label => open.indexOf(label))
   assert.ok(order.every(index => index > 0) && order[0] < order[1], 'working is listed before waiting')
-  assert.ok(open.indexOf('asks-parent') > open.indexOf('Waiting · 4'), 'a helper asking its coordinator waits with the waits')
+  assert.ok(open.indexOf('asks-parent') > open.indexOf('>Waiting</p>'), 'a helper asking its coordinator waits with the waits')
   // The choice belongs to that chat only.
   assert.doesNotMatch(renderWithModels(h(WaitingChip, { ...props, chatId: 'other-chat' })), /chat__helper-row/)
 })
@@ -242,4 +242,17 @@ test('settled waits remain read-only transcript records after the active Waiting
     assert.match(html, /3 checks · 2m 5s/)
     assert.doesNotMatch(html, /<button|Stop waiting|View recovery/)
   }
+})
+
+
+test('a single helper group does not repeat the summary heading or count', async () => {
+  const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  const { persistDisclosureOpen } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  persistDisclosureOpen('single-helper-group', 'foot-handoffs', true)
+  const helpers = Array.from({ length: 4 }, (_, i) => ({ delegation_id: `solo-${i}`, task_key: `helper-${i}`, provider: 'claude', status: 'running' }))
+  const html = renderWithModels(h(WaitingChip, { chatId: 'single-helper-group', helpers }))
+  assert.match(html, /4 helpers working/)
+  assert.equal((html.match(/chat__helper-row/g) || []).length, 4)
+  assert.doesNotMatch(html, /chat__handoff-group-label|Working · 4/)
+  assert.match(html, /aria-label="Working: 4"/)
 })

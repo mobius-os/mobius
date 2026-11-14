@@ -238,6 +238,7 @@ export default function WaitingChip({
     />
   )
   const summarized = shouldSummarizeHandoffs({ helpers, waits, unlistedHelpers })
+  const groups = summarized ? handoffGroups({ helpers, waits }) : []
   return <>
     <section className={`chat__waits chat__handoffs${summarized && listOpen ? ' chat__handoffs--open' : ''}`} aria-label="Handoffs">
       {resourcePause && (
@@ -255,9 +256,9 @@ export default function WaitingChip({
           open={listOpen}
           onToggle={() => setListOpen(value => !value)}
         />
-        {listOpen && handoffGroups({ helpers, waits }).map(group => (
+        {listOpen && groups.map(group => (
           <div key={group.key} className="chat__handoff-group" role="group" aria-label={`${group.label}: ${group.count}`}>
-            <p className="chat__handoff-group-label" aria-hidden="true">{`${group.label} · ${group.count}`}</p>
+            {groups.length > 1 && <p className="chat__handoff-group-label" aria-hidden="true">{group.label}</p>}
             {group.helpers.length > 0 && (
               <HelperList helpers={group.helpers} chatId={chatId} onOpenHelper={setOpenHelper} label={`${group.label} helpers`} />
             )}
