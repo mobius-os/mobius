@@ -39,7 +39,6 @@ import json
 import os
 import shutil
 import time
-import tempfile
 import uuid
 from collections.abc import Awaitable
 from dataclasses import dataclass, replace
@@ -2914,60 +2913,50 @@ async def run_codex_sdk_turn(
     data_dir = get_settings().data_dir
 
   ownership = await acquire_codex_session_activity_async(data_dir)
-  catalogue_directory = None
   try:
-    if provider_id == "mobius":
-      from app.providers import PROVIDERS, _fetch_model_entries, _write_responses_catalog
-      import copy
-      await _fetch_model_entries(data_dir, "mobius")
-      provider = copy.copy(PROVIDERS["mobius"])
-      provider.declaration = copy.deepcopy(provider.declaration)
-      if helper_host_key is not None:
-        from app.helper_hosts import setup_digest
-        helper_host_key = replace(helper_host_key, setup=setup_digest(
-          helper_host_key.setup, provider.declaration,
+    async with contextlib.AsyncExitStack() as runtime:
+      if provider_id == "mobius":
+        from app.providers import mobius_runtime_snapshot
+        agent_settings = dict(agent_settings or {})
+        snapshot = await runtime.enter_async_context(mobius_runtime_snapshot(
+          data_dir, agent_settings.get("model"), agent_settings.get("effort"),
         ))
-      agent_settings = dict(agent_settings or {})
-      agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
-      if not agent_settings["model"] or not provider.declaration["models"]:
-        return {**prompt_not_sent_result(session_id),
-                "error": "This Möbius model is unavailable. Refresh models and choose a current model."}
-      if provider.model_effort_levels(agent_settings["model"]) == []:
-        agent_settings["effort"] = None
-      base_env = {**base_env, "MOBIUS_AGENT_MODEL": agent_settings["model"]}
-      # A concurrent refresh or another chat must not rewrite the catalogue
-      # this app-server reads. The run owns this temporary immutable snapshot.
-      catalogue_directory = tempfile.TemporaryDirectory(prefix="mobius-models-")
-      catalog_path = Path(catalogue_directory.name) / "catalog.json"
-      _write_responses_catalog(catalog_path, provider.declaration, broker=True)
-      provider_config_overrides = provider.codex_config_overrides(catalog_path)
-    return await _run_codex_sdk_turn(
-      user_message=user_message,
-      session_id=session_id,
-      base_env=base_env,
-      cwd=cwd,
-      chat_id=chat_id,
-      bc=bc,
-      pending_questions=pending_questions,
-      db=db,
-      agent_settings=agent_settings,
-      system_prompt=system_prompt,
-      resumed_context=resumed_context,
-      fork_from=fork_from,
-      should_abort=should_abort,
-      retire_native_goal=retire_native_goal,
-      run_policy=run_policy,
-      connector_plan=connector_plan,
-      provider_id=provider_id,
-      provider_config_overrides=provider_config_overrides,
-      data_dir=data_dir,
-      coordination_enabled=coordination_enabled,
-      helper_host_key=helper_host_key,
-      goal_brief_refresh=goal_brief_refresh,
-    )
+        if not snapshot.model:
+          return {**prompt_not_sent_result(session_id),
+                  "error": "This Möbius model is unavailable. Refresh models and choose a current model."}
+        if helper_host_key is not None:
+          from app.helper_hosts import setup_digest
+          helper_host_key = replace(helper_host_key, setup=setup_digest(
+            helper_host_key.setup, snapshot.declaration,
+          ))
+        agent_settings.update(model=snapshot.model, effort=snapshot.effort)
+        base_env = {**base_env, "MOBIUS_AGENT_MODEL": snapshot.model}
+        provider_config_overrides = snapshot.config_overrides
+      return await _run_codex_sdk_turn(
+        user_message=user_message,
+        session_id=session_id,
+        base_env=base_env,
+        cwd=cwd,
+        chat_id=chat_id,
+        bc=bc,
+        pending_questions=pending_questions,
+        db=db,
+        agent_settings=agent_settings,
+        system_prompt=system_prompt,
+        resumed_context=resumed_context,
+        fork_from=fork_from,
+        should_abort=should_abort,
+        retire_native_goal=retire_native_goal,
+        run_policy=run_policy,
+        connector_plan=connector_plan,
+        provider_id=provider_id,
+        provider_config_overrides=provider_config_overrides,
+        data_dir=data_dir,
+        coordination_enabled=coordination_enabled,
+        helper_host_key=helper_host_key,
+        goal_brief_refresh=goal_brief_refresh,
+      )
   finally:
-    if catalogue_directory is not None:
-      catalogue_directory.cleanup()
     ownership.release()
     from app.file_cache import reclaim_provider_cache
     await reclaim_provider_cache("codex")

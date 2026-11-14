@@ -26,17 +26,21 @@ import asyncio
 import base64
 import copy
 import hashlib
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
 import json
 import logging
 import math
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -463,9 +467,9 @@ def effective_agent_settings(
         continue
       merged[k] = v
   if prov == "mobius":
-    merged["model"] = PROVIDERS["mobius"].resolve_model(merged["model"])
-    if PROVIDERS["mobius"].model_effort_levels(merged["model"]) == []:
-      merged["effort"] = None
+    merged["model"], merged["effort"] = PROVIDERS["mobius"].resolve_selection(
+      merged["model"], merged["effort"],
+    )
   return merged
 
 
@@ -1150,6 +1154,26 @@ class MobiusProvider(BaseProvider):
         return row.get("effort_levels")
     return None
 
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """Apply declared retirement and effort policy without changing saved state.
+
+    A formerly valid effort may not exist on the successor's scale. Use that
+    model's declared default, not a provider-wide guess; an empty scale sends
+    no override at all.
+    """
+    resolved = self.resolve_model(model)
+    for row in self.declaration["models"]:
+      if row["id"] == resolved:
+        levels = row["effort_levels"]
+        if not levels:
+          return resolved, None
+        if effort is not None and effort not in levels:
+          return resolved, row["default_effort"]
+        break
+    return resolved, effort
+
   def validate_model_effort(self, model: str | None, effort: str | None) -> bool:
     levels = self.model_effort_levels(model)
     if levels is None:
@@ -1283,6 +1307,40 @@ class MobiusProvider(BaseProvider):
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
+
+
+@dataclass(frozen=True)
+class MobiusRuntimeSnapshot:
+  model: str | None
+  effort: str | None
+  declaration: dict[str, Any]
+  config_overrides: list[str]
+
+
+@asynccontextmanager
+async def mobius_runtime_snapshot(
+  data_dir: str, model: str | None, effort: str | None,
+) -> AsyncIterator[MobiusRuntimeSnapshot]:
+  """Freeze one discovered service catalogue for the entire CLI/SDK lifetime.
+
+  The provider owns discovery, selection and the temporary catalogue. Callers
+  retain this context until their Codex process has stopped, not merely until
+  startup, so a concurrent registry refresh cannot alter the running model.
+  """
+  await _fetch_model_entries(data_dir, "mobius")
+  provider = copy.copy(PROVIDERS["mobius"])
+  provider.declaration = copy.deepcopy(provider.declaration)
+  resolved_model, resolved_effort = provider.resolve_selection(model, effort)
+  if not resolved_model or not provider.declaration["models"]:
+    yield MobiusRuntimeSnapshot(None, None, provider.declaration, [])
+    return
+  with tempfile.TemporaryDirectory(prefix="mobius-models-") as directory:
+    catalog_path = Path(directory) / "catalog.json"
+    _write_responses_catalog(catalog_path, provider.declaration, broker=True)
+    yield MobiusRuntimeSnapshot(
+      resolved_model, resolved_effort, provider.declaration,
+      provider.codex_config_overrides(catalog_path),
+    )
 
 
 class AppModelProvider(BaseProvider):

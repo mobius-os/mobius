@@ -70,6 +70,10 @@ without rewriting chat history, delegations or preferences. Missing successors
 remain unavailable rather than silently choosing the default. Services must
 publish explicit replacements before retiring saved IDs. Existing services
 without this optional field continue to work unchanged.
+When a saved effort is absent from the resolved model's nonempty scale, the
+runtime uses that model's service-declared `default_effort`; an empty scale
+omits the effort override. The saved choice and per-provider effort memory
+remain unchanged, so a later catalogue can restore the owner's preference.
 
 The existing five-minute model-registry refresh owns discovery; failures retry
 after thirty seconds and preserve the complete last-good snapshot. A private,
@@ -77,7 +81,9 @@ identity-scoped disk cache survives restarts, but cannot cross account changes.
 With no valid snapshot the list is empty: the client does not invent models.
 Defaults and runtime capabilities come from the same snapshot. Each agent run
 owns a temporary frozen SDK catalogue, so another refresh cannot change its
-startup metadata. The SDK template's usable-window ratio is applied equally
+startup metadata. Disposable Codex compaction uses the same discovery,
+retirement, effort, and frozen-catalogue lifecycle as an ordinary turn. The
+SDK template's usable-window ratio is applied equally
 to picker context display; the service may also publish an explicit
 `auto_compact_token_limit`. New wire protocols still require runtime updates.
 

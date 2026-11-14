@@ -76,6 +76,17 @@ def test_one_snapshot_updates_runtime_picker_and_explicit_successor(discovery, t
   assert providers._fallback_models('mobius')[0]['context_window'] == 180000
 
 
+def test_retired_model_changed_effort_uses_service_default_without_rewriting_saved_choice(discovery, tmp_path):
+  provider, _ = discovery
+  provider._refresh_catalogue(str(tmp_path))
+  saved = {'model': 'retired-vision', 'effort': 'medium',
+           'effort_by_provider': {'mobius': 'medium'}}
+  effective = providers.effective_agent_settings(str(tmp_path), saved, 'mobius')
+  assert (effective['model'], effective['effort']) == ('new-vision', 'low')
+  assert saved == {'model': 'retired-vision', 'effort': 'medium',
+                   'effort_by_provider': {'mobius': 'medium'}}
+
+
 @pytest.mark.asyncio
 async def test_refresh_adds_removes_models_and_offline_keeps_last_good(discovery, tmp_path):
   provider, state = discovery
@@ -167,8 +178,12 @@ def test_empty_effort_scale_is_valid_and_writes_runtime_catalogue(discovery, tmp
   assert runtime['models'][0]['supported_reasoning_levels'] == []
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("efforts,expected_effort", [(["low", "high"], "low"), ([], None)])
-async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, tmp_path, monkeypatch, efforts, expected_effort):
+@pytest.mark.parametrize("efforts,saved_effort,expected_effort", [
+  (["low", "high"], "low", "low"),
+  (["low", "high"], "medium", "low"),
+  ([], "low", None),
+])
+async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, tmp_path, monkeypatch, efforts, saved_effort, expected_effort):
   from app import codex_sdk_runner
   provider, state = discovery
   state["catalogue"]["data"][0].update(effort_levels=efforts, default_effort=efforts[0] if efforts else None)
@@ -193,10 +208,75 @@ async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, 
     user_message='synthetic', session_id=None, base_env={}, cwd=str(tmp_path),
     chat_id='synthetic', bc=None, pending_questions={}, db=None,
     provider_id='mobius', data_dir=str(tmp_path),
-    agent_settings={'model': 'retired-vision', 'effort': 'low'},
+    agent_settings={'model': 'retired-vision', 'effort': saved_effort},
   )
   assert result['error'] is None
   assert not captured['path'].exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('efforts,default_effort,expected_effort', [
+  (['low', 'high'], 'low', 'model_reasoning_effort="low"'),
+  ([], None, None),
+])
+async def test_cold_compaction_resolves_retirement_and_freezes_catalogue_through_process(
+  discovery, tmp_path, monkeypatch, efforts, default_effort, expected_effort,
+):
+  from app import compaction
+  provider, state = discovery
+  state['catalogue']['data'][0].update(
+    effort_levels=efforts, default_effort=default_effort,
+  )
+  captured = {}
+
+  class Process:
+    returncode = 0
+
+    async def communicate(self, payload):
+      assert payload == b'summarize'
+      path = captured['path']
+      before = path.read_bytes()
+      assert json.loads(before)['models'][0]['display_name'] == 'New vision'
+      state['catalogue']['data'][0]['name'] = 'Later release'
+      provider._refresh_catalogue(str(tmp_path))
+      assert path.read_bytes() == before
+      return b'{"type":"agent_message","text":"briefing"}\n', b''
+
+  async def spawn(*cmd, **kwargs):
+    assert cmd[cmd.index('--model') + 1] == 'new-vision'
+    effort_overrides = [value for value in cmd if value.startswith('model_reasoning_effort=')]
+    assert effort_overrides == ([expected_effort] if expected_effort else [])
+    configured = [cmd[index + 1] for index, value in enumerate(cmd[:-1])
+                  if value == '--config']
+    assert [value for value in configured if value.startswith('web_search=')][-1] == 'web_search="disabled"'
+    assert {'agents.enabled=false', 'features.shell_tool=false'} <= set(configured)
+    path_option = next(value for value in cmd if value.startswith('model_catalog_json='))
+    captured['path'] = Path(json.loads(path_option.split('=', 1)[1]))
+    assert kwargs['env']['MOBIUS_LOCAL_BROKER_KEY'] == 'local-broker'
+    return Process()
+
+  monkeypatch.setattr(compaction.shutil, 'which', lambda _: '/bin/codex')
+  monkeypatch.setattr(compaction.asyncio, 'create_subprocess_exec', spawn)
+  result = await compaction._run_codex_summarize_turn(
+    'summarize', data_dir=str(tmp_path), provider_id='mobius',
+    model='retired-vision', effort='medium',
+  )
+  assert result == 'briefing'
+  assert state['calls'] == 2
+  assert not captured['path'].exists()
+
+
+@pytest.mark.asyncio
+async def test_compaction_unmapped_retired_model_never_dispatches(discovery, tmp_path, monkeypatch):
+  from app import compaction
+  async def forbidden(*args, **kwargs):
+    pytest.fail('unavailable model must not reach Codex')
+  monkeypatch.setattr(compaction.asyncio, 'create_subprocess_exec', forbidden)
+  with pytest.raises(compaction.CompactionError, match='unavailable'):
+    await compaction._run_codex_summarize_turn(
+      'summarize', data_dir=str(tmp_path), provider_id='mobius',
+      model='unknown-retired', effort='medium',
+    )
 
 
 @pytest.mark.asyncio
