@@ -5,8 +5,8 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
-import uuid
-from contextlib import asynccontextmanager
+from collections.abc import Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -19,10 +19,12 @@ from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
 log = logging.getLogger(__name__)
 
 # Project creation and TTL purge both mutate the owner-managed ``data/projects``
-# namespace. Serializing them prevents an orphan sweep from observing a freshly
-# created root in the narrow interval before its database row commits. Recovery
-# uses the same lock so a project cannot cross the TTL boundary in both paths.
+# namespace. The lock orders their database checks and commits; recovery uses
+# it so a project cannot cross the TTL boundary in both paths. Folder assembly
+# may run outside it (a GitHub clone can take minutes): the marked-root sweep
+# skips every ``.creating-`` folder registered in ``_ASSEMBLING``.
 PROJECT_LIFECYCLE_LOCK = threading.RLock()
+_ASSEMBLING: set[Path] = set()
 
 
 @asynccontextmanager
@@ -84,51 +86,115 @@ def _owned_native_root(project_id: str, root_path: str) -> Path | None:
   return expected
 
 
-def _remove_owned_root(root: Path) -> None:
+RETIRED_ROOT_PREFIX = ".purging-"
+CREATING_ROOT_PREFIX = ".creating-"
+
+
+def _remove_marked_root(path: Path) -> None:
+  if path.is_symlink():
+    path.unlink(missing_ok=True)
+  elif path.exists():
+    shutil.rmtree(path)
+
+
+def retire_owned_root(root: Path) -> None:
+  """Delete an owned root whose database row has already committed away.
+
+  The root is renamed to a ``.purging-`` sibling before deletion, so a delete
+  that fails or is interrupted leaves an explicitly marked leftover for
+  ``sweep_marked_roots`` to finish. Leftover cleanup never infers ownership
+  from a missing database row: an empty, restored, or misdirected database
+  would otherwise erase every owner folder it does not know about. If the
+  rename itself fails, the folder keeps its name and stays on disk.
+  """
   if root.is_symlink():
     root.unlink(missing_ok=True)
-  elif root.exists():
-    shutil.rmtree(root)
-
-
-def _sweep_orphaned_native_roots(db: Session) -> None:
-  """Retry cleanup left after a crash between DB commit and filesystem delete."""
-  data_root = Path(get_settings().data_dir).resolve()
-  projects_root = data_root / "projects"
-  if not projects_root.is_dir() or projects_root.is_symlink():
     return
-  live_ids = {
-    str(project_id)
-    for (project_id,) in db.query(models.Project.id).all()
-  }
-  for child in projects_root.iterdir():
-    try:
-      uuid.UUID(child.name)
-    except (ValueError, AttributeError):
-      continue
-    if child.name in live_ids:
-      continue
-    try:
-      _remove_owned_root(child)
-    except OSError:
-      log.exception("Could not remove orphaned native project root %s", child)
+  if not root.exists():
+    return
+  retired = root.with_name(RETIRED_ROOT_PREFIX + root.name)
+  _remove_marked_root(retired)
+  root.rename(retired)
+  shutil.rmtree(retired)
+
+
+class RootStillAssembling(Exception):
+  """Another request is still assembling the same new root."""
+
+
+@contextmanager
+def creation_staging_root(root: Path) -> Iterator[Path]:
+  """Yield an empty, marked sibling in which a new native root is assembled.
+
+  ``place_and_commit_new_root`` renames the finished folder onto ``root`` just
+  before its row commits, so a crash while assembling leaves only this
+  ``.creating-`` folder. While this scope is open the sweep leaves the folder
+  alone, even without PROJECT_LIFECYCLE_LOCK held; once the process is gone,
+  the next sweep or the next attempt for the same id removes it. An unmarked
+  leftover would instead be kept and refuse every retry of a deterministic id.
+  Raises RootStillAssembling while another request assembles the same root.
+  """
+  staging = root.with_name(CREATING_ROOT_PREFIX + root.name)
+  key = root.parent.resolve() / staging.name
+  with PROJECT_LIFECYCLE_LOCK:
+    if key in _ASSEMBLING:
+      raise RootStillAssembling(staging)
+    _ASSEMBLING.add(key)
+  try:
+    _remove_marked_root(staging)
+    staging.mkdir(parents=True)
+    yield staging
+  finally:
+    # A placed root has already moved away; anything else is unfinished.
+    shutil.rmtree(staging, ignore_errors=True)
+    with PROJECT_LIFECYCLE_LOCK:
+      _ASSEMBLING.discard(key)
+
+
+def place_and_commit_new_root(db: Session, staging: Path, root: Path) -> None:
+  """Move an assembled root into place and commit its pending row.
+
+  The rename runs immediately before the commit, so only a crash inside that
+  commit can leave an unmarked root without a row. That leftover is kept and
+  refuses retries rather than risking owner files.
+  """
+  staging.rename(root)
+  try:
+    db.commit()
+  except Exception:
+    shutil.rmtree(root, ignore_errors=True)
+    raise
+
+
+def sweep_marked_roots(parent: Path, prefixes: tuple[str, ...]) -> None:
+  """Finish removing leftovers that this module marked with ``prefixes``."""
+  if not parent.is_dir() or parent.is_symlink():
+    return
+  with PROJECT_LIFECYCLE_LOCK:
+    for child in parent.iterdir():
+      if not child.name.startswith(prefixes) or child in _ASSEMBLING:
+        continue
+      try:
+        _remove_marked_root(child)
+      except OSError:
+        log.exception("Could not finish removing marked root %s", child)
 
 
 def purge_expired_project_tombstones(db: Session) -> list[str]:
   """Release expired project/chat pairs, preserving externally owned roots.
 
   The project rows commit away before any filesystem deletion. Thus a failed
-  transaction leaves the project fully recoverable. A crash after that commit
-  may leave only an owner-managed orphan under ``data/projects``; the next sweep
-  recognizes that exact UUID namespace and retries it. Linked roots outside
-  that namespace are never passed to filesystem cleanup.
+  transaction leaves the project fully recoverable. A failed or interrupted
+  delete after that commit leaves a marked ``.purging-`` leftover under
+  ``data/projects`` that the next pass finishes, together with any
+  ``.creating-`` folder an interrupted creation left. Linked roots outside that
+  namespace are never passed to filesystem cleanup.
   """
   cutoff = now_naive_utc() - SOFT_DELETE_TTL
   with PROJECT_LIFECYCLE_LOCK:
     from app.shared_app_retention import (
       delete_project_shared_apps,
       purge_expired_shared_apps,
-      remove_snapshot_root,
     )
     purge_expired_shared_apps(db)
     # Source-copy links expire independently of the original project. Drop the
@@ -164,14 +230,16 @@ def purge_expired_project_tombstones(db: Session) -> list[str]:
       db.expire_all()
       for root in roots:
         try:
-          _remove_owned_root(root)
+          retire_owned_root(root)
         except OSError:
-          # The row is already gone, so the UUID orphan sweep can retry safely.
           log.exception("Could not remove expired native project root %s", root)
       for root in shared_app_roots:
         try:
-          remove_snapshot_root(root)
+          retire_owned_root(root)
         except OSError:
           log.exception("Could not remove project-owned shared-app snapshot %s", root)
-    _sweep_orphaned_native_roots(db)
+    sweep_marked_roots(
+      Path(get_settings().data_dir).resolve() / "projects",
+      (RETIRED_ROOT_PREFIX, CREATING_ROOT_PREFIX),
+    )
     return project_ids

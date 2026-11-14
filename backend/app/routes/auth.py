@@ -4,7 +4,10 @@ Owner-authorized credential minting and provider-link mutations reject delegated
 execution bearers; otherwise a child could exchange inherited tool access for a
 new unrestricted owner or app credential and bypass its delegation boundary. The
 app-frame token is the one exception: it is narrower than the bearer presented
-and carries the same delegation lineage, so it stays a delegated credential.
+and carries the same delegation lineage, so it stays a delegated credential. A
+top-level agent's app token carries the agent's chat (``via_agent_chat``): it still
+works wherever an app token does, but a route that wants the owner's own tap
+refuses it, so an agent cannot turn its bearer into a clean app credential there.
 """
 
 import asyncio
@@ -568,11 +571,10 @@ def create_app_token_endpoint(
       "message": "This app requires your approval before it opens.",
     })
   owner = principal.owner
-  # Preserve the delegation lineage on the down-scoped token. create_agent_token
-  # keeps agent_chat == delegation_chat, so principal.chat_id is the child chat
-  # a delegated bearer must carry; a plain owner has neither claim.
+  # Restrictive lineage is separate from chat/run execution identity. Preserve
+  # the signed provenance, never reconstruct it from the current caller chat.
   delegation_id = principal.delegation_id
-  delegation_chat = principal.chat_id if delegation_id is not None else None
+  delegation_chat = principal.delegation_chat
   token = auth.create_app_token(
     body.app_id,
     owner.username,
@@ -582,6 +584,7 @@ def create_app_token_endpoint(
     delegation_id=delegation_id,
     delegation_chat=delegation_chat,
     browser=principal.browser,
+    via_agent_chat=principal.chat_id,
   )
   return {"token": token}
 
@@ -590,6 +593,7 @@ def create_app_token_endpoint(
 def create_app_job_token_endpoint(
   body: schemas.AppTokenRequest,
   owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ):
   """Mint a narrower-lifetime app token for one supervised job run."""
@@ -617,6 +621,7 @@ def create_app_job_token_endpoint(
       consent=app_consent.session_id(app),
       expires_delta=timedelta(hours=2),
       job_secrets=(app.capability_contract or {}).get("data", {}).get("job_secret_read", []),
+      via_agent_chat=principal.chat_id,
     )
   }
 

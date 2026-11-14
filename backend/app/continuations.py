@@ -159,11 +159,17 @@ def release_holds(rows: list[Any], released_at: str) -> list[Any]:
   ]
 
 
+def runnable_pending(pending: Iterable[Any] | None) -> list[Mapping[str, Any]]:
+  """The queued rows that can run without the owner: every row a Stop did
+  not hold."""
+  return [row for row in pending or () if isinstance(row, Mapping) and not row.get("held")]
+
+
 def has_runnable_pending(pending: Iterable[Any] | None) -> bool:
-  """Whether the queue holds work that can run without the owner: any row a
-  Stop did not hold. Held rows are not runnable work, so checks that mean
-  "something is queued to run" use this rather than a non-empty queue."""
-  return any(isinstance(row, Mapping) and not row.get("held") for row in pending or ())
+  """Whether the queue holds work that can run without the owner. Held rows
+  are not runnable work, so checks that mean "something is queued to run"
+  use this rather than a non-empty queue."""
+  return bool(runnable_pending(pending))
 
 
 def pending_message_group_key(message: Mapping[str, Any]) -> tuple:
@@ -326,6 +332,16 @@ LOW_STORAGE_NOTICE = (
   " avoid large writes. Delete only files this chat created; ask the"
   " owner before deleting anything else."
 )
+PROCESS_LIMIT_NOTICE = (
+  "The owner let this turn start near the shared process and thread limit;"
+  " avoid starting browsers, servers or parallel tools. Stop only processes"
+  " this chat started; ask the owner before stopping anything else."
+)
+# What a Continue anyway turn is told about each floor it was admitted past.
+CONTINUE_ANYWAY_NOTICES = {
+  "storage": LOW_STORAGE_NOTICE,
+  "processes": PROCESS_LIMIT_NOTICE,
+}
 
 
 def continuation_protocol_source(
@@ -345,6 +361,7 @@ def continuation_protocol_source(
     "usage_limit": "Resume the interrupted owner work after a provider-limit check. Provider availability is not yet confirmed.",
     "memory": "Resume the interrupted owner work now that memory pressure has cleared.",
     "storage": "Resume the interrupted owner work now that storage pressure has cleared.",
+    "processes": "Resume the interrupted owner work now that process and thread pressure has cleared.",
     "compaction": (
       "The oversized provider session was replaced using the saved detailed handoff "
       "and uncovered conversation. Continue the interrupted work from that briefing, "

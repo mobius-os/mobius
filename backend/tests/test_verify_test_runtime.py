@@ -6,6 +6,8 @@ import shutil
 import subprocess
 import sys
 
+import pytest
+
 from app.platform_activation import dependency_fingerprint_paths
 from scripts.verify_test_runtime import PLATFORM_ROOT, platform_head, validate_runtime
 
@@ -781,6 +783,62 @@ def test_documented_browser_commands_use_disposable_runner():
   assert '/home/' not in test_script
 
 
+def _assert_pinned_action(workflow: str, action: str):
+  uses = re.findall(
+    rf"^\s*(?:-\s*)?uses:\s+{re.escape(action)}@(\S+)([^\n]*)$",
+    workflow, re.MULTILINE,
+  )
+  assert uses, f"Required action missing: {action}"
+  for ref, comment in uses:
+    assert re.fullmatch(r"[0-9a-fA-F]{40}", ref), f"{action} needs a full commit SHA"
+    assert re.fullmatch(r"\s+#\s+v\d+(?:\.\d+){0,2}\s*", comment), (
+      f"{action} needs a version comment"
+    )
+
+
+@pytest.mark.parametrize("ref, comment", [
+  ("v7", " # v7"),
+  ("a" * 39, " # v7"),
+  ("a" * 41, " # v7"),
+  ("g" * 40, " # v7"),
+  ("a" * 40, ""),
+  ("a" * 40, " # pinned"),
+])
+def test_action_pin_contract_rejects_mutable_or_undocumented_refs(ref, comment):
+  with pytest.raises(AssertionError):
+    _assert_pinned_action(f"  - uses: actions/checkout@{ref}{comment}\n", "actions/checkout")
+
+
+def test_action_pin_contract_checks_every_use_and_requires_the_step():
+  with pytest.raises(AssertionError, match="Required action missing"):
+    _assert_pinned_action("steps: []", "actions/checkout")
+  with pytest.raises(AssertionError, match="full commit SHA"):
+    _assert_pinned_action(
+      f"- uses: actions/checkout@{'a' * 40} # v7\n- uses: actions/checkout@v7\n",
+      "actions/checkout",
+    )
+
+
+@pytest.mark.parametrize("action", [
+  "actions/checkout", "docker/setup-buildx-action", "docker/login-action",
+  "docker/build-push-action",
+])
+def test_workflow_contract_accepts_action_pin_bumps(monkeypatch, action):
+  workflow_path = ROOT / ".github" / "workflows" / "main-image.yml"
+  original_read = Path.read_text
+  workflow = workflow_path.read_text(encoding="utf-8")
+  bumped, replacements = re.subn(
+    rf"({re.escape(action)}@)[0-9a-f]{{40}}", rf"\g<1>{'b' * 40}", workflow,
+  )
+  assert replacements > 0
+
+  def read_text(path, *args, **kwargs):
+    return bumped if path == workflow_path else original_read(path, *args, **kwargs)
+
+  monkeypatch.setattr(Path, "read_text", read_text)
+  test_manual_and_pull_request_runs_cover_suites_and_main_image()
+
+
 def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   test_workflow = (ROOT / ".github" / "workflows" / "test.yml").read_text(
     encoding="utf-8"
@@ -867,10 +925,11 @@ def test_manual_and_pull_request_runs_cover_suites_and_main_image():
   assert image_workflow.count("for _ in $(seq 1 12)") == 2
   assert "recovery" not in image_workflow.lower()
   assert "core-releases" not in image_workflow
-  assert "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1" in image_workflow
-  assert "docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c" in image_workflow
-  assert "docker/login-action@dbcb813823bdd20940b903addbd779551569679f" in image_workflow
-  assert "docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a" in image_workflow
+  for action in (
+    "actions/checkout", "docker/setup-buildx-action", "docker/login-action",
+    "docker/build-push-action",
+  ):
+    _assert_pinned_action(image_workflow, action)
   assert "DOCKER_BUILD_RECORD_UPLOAD: 'false'" in image_workflow
 
 

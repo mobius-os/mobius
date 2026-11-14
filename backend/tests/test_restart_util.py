@@ -1,7 +1,8 @@
 """restart_this_worker — the reliable, drain-gated in-process restart behind the
 Settings + platform "Restart" buttons (design §2.2). The normal path asks the
-frozen supervisor to acknowledge the exact intent and terminate pid 1; a direct
-SIGTERM is only the fail-closed handshake fallback. Every path arms a hard-kill
+frozen poller to acknowledge the exact intent and rerun the boot in place; a
+direct SIGKILL, which the host sees as a failure and revives on any restart
+policy, is only the fail-closed handshake fallback. Every path arms a hard-kill
 backstop and drains first. These tests pin those boundaries without killing the
 test process (os.kill is mocked)."""
 
@@ -422,7 +423,10 @@ def test_restart_handshake_failure_restarts_without_authorization(monkeypatch):
 
   asyncio.run(ru.restart_this_worker())
 
-  assert calls == [(os.getpid(), signal.SIGTERM)]
+  # A SIGTERM stop would reach the host as a clean exit (tini -e 143), which
+  # Railway's default ON_FAILURE never revives; SIGKILL ends the boot as a
+  # failure that every restart policy replaces.
+  assert calls == [(os.getpid(), signal.SIGKILL)]
 
 
 def test_external_cutover_drains_without_requesting_self_restart(monkeypatch):
@@ -478,6 +482,67 @@ def test_external_cutover_drains_without_requesting_self_restart(monkeypatch):
     "nonce": "nonce-12345678",
     "runs": [{"chat_id": "chat-12345678", "run_token": "run-12345678"}],
   }]
+
+
+def _cutover_whose_restart_request_fails(monkeypatch, *, publish_fails):
+  """Arm a cutover where ordinary restart requests can never be published."""
+  _FakeTimer.instances = []
+  calls = []
+  monkeypatch.setattr(ru.os, "kill", lambda pid, sig: calls.append((pid, sig)))
+  monkeypatch.setattr(ru.threading, "Timer", _FakeTimer)
+  monkeypatch.setattr(
+    restart_ledger, "authorized_cutover_challenge", lambda value: value == "cutover-12345678",
+  )
+  monkeypatch.setattr(restart_ledger, "current_boot_id", lambda: "boot-12345678")
+  monkeypatch.setattr(restart_ledger, "new_nonce", lambda: "nonce-12345678")
+
+  def _publish(**kwargs):
+    del kwargs
+    if publish_fails:
+      raise OSError("volume unavailable")
+
+  def _request_fails(**kwargs):
+    del kwargs
+    raise OSError("volume unavailable")
+
+  monkeypatch.setattr(restart_ledger, "publish_cutover_intent", _publish)
+  monkeypatch.setattr(restart_ledger, "request_restart", _request_fails)
+
+  async def _prepare(_nonce):
+    return []
+
+  async def _drain(timeout=0, *, restart_nonce="", prepared_runs=None):
+    del timeout, restart_nonce
+    return prepared_runs or []
+
+  monkeypatch.setattr(chat_mod, "prepare_restart_intents", _prepare)
+  monkeypatch.setattr(chat_mod, "drain_all_for_restart", _drain)
+  chat_mod.draining = False
+  return calls
+
+
+def test_failed_cutover_handoff_ends_the_boot_as_a_failure(monkeypatch):
+  calls = _cutover_whose_restart_request_fails(monkeypatch, publish_fails=True)
+
+  with pytest.raises(OSError):
+    asyncio.run(ru.prepare_container_cutover("cutover-12345678"))
+
+  # Neither the cutover nor a planned restart could be handed to the root
+  # side, so no in-place restart will follow: the host must replace the
+  # container, and only a failure exit makes ON_FAILURE do that.
+  assert calls == [(os.getpid(), signal.SIGKILL)]
+
+
+def test_abandoned_cutover_that_cannot_restart_ends_the_boot_as_a_failure(monkeypatch):
+  calls = _cutover_whose_restart_request_fails(monkeypatch, publish_fails=False)
+
+  result = asyncio.run(ru.prepare_container_cutover("cutover-12345678"))
+  assert result["status"] == "prepared"
+  assert calls == []
+
+  watchdog = _FakeTimer.instances[0]
+  watchdog.fn()
+  assert calls == [(os.getpid(), signal.SIGKILL)]
 
 
 def test_competing_restart_cards_share_one_worker_drain_and_dispatch(monkeypatch):

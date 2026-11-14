@@ -3,6 +3,8 @@ from app.chat_writer import create_chat
 
 import io
 
+import pytest
+
 from app import auth as token_auth
 from test_app_fixtures import create_local_app
 
@@ -99,6 +101,67 @@ def test_delegated_helper_mints_app_token_but_keeps_delegation_boundary(
     f"/api/apps/{app_id}/secrets/API_KEY", json={"value": "s3cr3t"},
     headers=app_token_auth,
   ).status_code == 403
+
+
+def test_app_frame_mint_preserves_delegation_provenance_not_agent_identity(
+  client, owner_token, db,
+):
+  from app import models
+  from app.deps import get_principal
+
+  owner = db.query(models.Owner).one()
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="lineage-frame",
+  )["id"]
+  token = token_auth.create_access_token({
+    "sub": owner.username,
+    "agent_chat": "calling-agent",
+    "delegation_id": "original-delegation",
+    "delegation_chat": "original-child",
+  }, token_epoch=owner.token_epoch)
+  response = client.post(
+    "/api/auth/app-token", json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert response.status_code == 200, response.text
+  frame_token = response.json()["token"]
+  principal = get_principal(frame_token, db)
+  assert principal.delegation_id == "original-delegation"
+  assert principal.delegation_chat == "original-child"
+  assert principal.chat_id is None and principal.run_id is None
+  # App credentials remain unable to remint a frame or grant owner controls.
+  frame_auth = {"Authorization": f"Bearer {frame_token}"}
+  assert client.post(
+    "/api/auth/app-token", json={"app_id": app_id}, headers=frame_auth,
+  ).status_code == 403
+  assert client.put(
+    f"/api/apps/{app_id}/secrets/test-key", json={"value": "synthetic"},
+    headers=frame_auth,
+  ).status_code == 403
+
+
+@pytest.mark.parametrize("missing", ["delegation_id", "delegation_chat"])
+def test_app_frame_mint_refuses_incomplete_delegation_without_server_error(
+  client, owner_token, db, missing,
+):
+  from app import models
+
+  owner = db.query(models.Owner).one()
+  app_id = create_local_app(
+    client, {"Authorization": f"Bearer {owner_token}"}, name="partial-lineage",
+  )["id"]
+  claims = {
+    "sub": owner.username, "delegation_id": "original-delegation",
+    "delegation_chat": "original-child",
+  }
+  claims.pop(missing)
+  token = token_auth.create_access_token(claims, token_epoch=owner.token_epoch)
+  response = client.post(
+    "/api/auth/app-token", json={"app_id": app_id},
+    headers={"Authorization": f"Bearer {token}"},
+  )
+  assert response.status_code == 401, response.text
+  assert response.json() == {"detail": "Incomplete delegation lineage."}
 
 
 def test_app_token_cannot_access_settings(client, owner_token):

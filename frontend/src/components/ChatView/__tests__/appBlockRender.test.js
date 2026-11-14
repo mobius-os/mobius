@@ -30,7 +30,8 @@ test('a block renders its snapshot and app link without mounting the app', () =>
   assert.match(html, /<dt>Author<\/dt><dd>octocat<\/dd>/)
   assert.match(html, /<a href="https:\/\/github\.com\/owner\/repo" target="_blank" rel="noopener noreferrer">owner\/repo<\/a>/)
   assert.match(html, /md-app-block__badge is-success">Ready</)
-  assert.match(html, /href="\/shell\/\?app=example&amp;intent=open%3Aitem-42"[^>]*>Open in Example/)
+  // The header link shows the app's name; its accessible name says it opens the app.
+  assert.match(html, /href="\/shell\/\?app=example&amp;intent=open%3Aitem-42"><span class="md-app-block__sr-only">Open in <\/span>Example<svg/)
   assert.match(html, /aria-expanded="false"[^>]*>.*Show details here<\/button>/)
   assert.doesNotMatch(html, /md-app-block__view|<iframe/)
 })
@@ -45,7 +46,7 @@ test('an action and the expand control only name views the reader can open', () 
 test('link-only blocks have no expand control or action', () => {
   const html = render({ ...base, inline: false, action: { label: 'Send', intent: 'send:1' } })
   assert.doesNotMatch(html, /md-app-block__toggle|md-app-block__action/)
-  assert.match(html, /Open in Example/)
+  assert.match(html, /<span class="md-app-block__sr-only">Open in <\/span>Example/)
 })
 
 test('items render as generic linked rows with their own badges, facts and actions', () => {
@@ -71,7 +72,7 @@ test('every shape explains a missing or deleted app and offers no view', () => {
   for (const apps of [[], [{ ...installed[0], deleted_at: '2026-10-01T00:00:00Z' }]]) {
     for (const shape of shapes) {
       const html = render(shape, apps)
-      assert.match(html, /example is not installed\. The saved snapshot remains here\./)
+      assert.match(html, /The example app is not installed\. The saved snapshot remains here\./)
       assert.doesNotMatch(html, /md-app-block__toggle|md-app-block__action|md-app-block__view/)
     }
   }
@@ -119,7 +120,7 @@ const live = fields => ({ label: '', disabled: false, busy: false, confirming: f
 test('Confirm takes the action\'s own fixed-size place with Not now beside it', () => {
   const idle = controls(live({ label: 'Contribute all', status: 'Ready', links: [{ label: 'View PR', url: 'https://example.com/pr/1' }] }))
   assert.match(idle, /md-app-block__pill is-neutral">Ready</, 'status is a pill, not a coloured sentence')
-  assert.match(idle, /class="md-app-block__link" href="https:\/\/example\.com\/pr\/1" target="_blank" rel="noopener noreferrer">View PR<svg/)
+  assert.match(idle, /class="md-app-block__link" href="https:\/\/example\.com\/pr\/1" target="_blank" rel="noopener noreferrer" aria-label="View PR, opens in a new tab">View PR<svg/)
   assert.match(idle, /class="md-app-block__action"[^>]*>Contribute all<\/button>/)
   const confirming = controls(live({ confirming: true, confirmation: [{ title: 'Exact', facts: [] }] }))
   assert.match(confirming, />Not now<\/button><button type="button" class="md-app-block__action">Confirm<\/button>/)
@@ -308,7 +309,7 @@ test('expand:false offers no inline view; the action opens the app at its intent
   const html = render(noExpand)
   assert.doesNotMatch(html, /md-app-block__toggle|Show details here|aria-pressed|md-app-block__view/)
   assert.match(html, /<a class="md-app-block__action" href="\/shell\/\?app=example&amp;intent=send%3Aall">Publish<\/a>/)
-  assert.match(html, /intent=open%3Aitem-42"[^>]*>Open in Example/)
+  assert.match(html, /intent=open%3Aitem-42"><span class="md-app-block__sr-only">Open in <\/span>Example/)
   assert.match(html, /intent=open%3Aa"[^>]*>First change</)
   // The default keeps the expand control and the in-place view action.
   const expandable = render({ ...noExpand, expand: true })
@@ -350,7 +351,8 @@ test('the app reports each row\'s status, link and note, and the header says wha
   assert.match(html, /aria-label="1 of 2 sent"/)
   assert.match(html, /<p class="md-app-block__sr-only" role="status">1 of 2 sent<\/p>/, 'the new title is announced')
   const [rowA, rowB] = html.split('<li>').slice(1)
-  assert.match(rowA, /<span class="md-app-block__item-state"><span class="md-app-block__links"><a class="md-app-block__link" href="https:\/\/github\.com\/owner\/a\/pull\/12" target="_blank" rel="noopener noreferrer">#12<svg[^]*<\/a><\/span><span class="md-app-block__pill is-success">Open<\/span><\/span>/)
+  assert.match(rowA, /<span class="md-app-block__item-state"><span class="md-app-block__links"><a class="md-app-block__link" href="https:\/\/github\.com\/owner\/a\/pull\/12" target="_blank" rel="noopener noreferrer" aria-label="#12, Row A, opens in a new tab">#12<svg[^]*<\/a><\/span><span class="md-app-block__pill is-success">Open<\/span><\/span>/,
+    'a short PR label names its row for assistive technology')
   assert.match(rowB, /<p class="md-app-block__item-note">The push was refused\.<\/p><\/div><span class="md-app-block__item-state"><span class="md-app-block__pill is-danger">Not sent<\/span>/)
   // The open-only action is a link to the block in the app, never a button.
   assert.match(html, /<footer>[^]*<a class="md-app-block__action is-secondary" href="\/shell\/\?app=example&amp;intent=open%3Aitem-42">Open Example<\/a>/)
@@ -414,6 +416,27 @@ test('value-only row facts are an explicit opt-in, from the block or the session
   }
   for (const value of ['labels', true, 'VALUES']) {
     assert.equal(appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, item_facts: value }) }).itemFacts, '')
+  }
+})
+
+test('value-only confirmation facts need their own opt-in; another app with value-only rows keeps labels at Confirm', () => {
+  const view = (fence, actions) => {
+    const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+      action: { label: 'Transfer', intent: 'transfer:t1' }, items: [{ title: 'Transfer', intent: 'open:t1', facts: [{ label: 'Project', value: 'owner/a' }] }], ...fence }) })
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], locked: false, confirmArmed: true, onEvent() {},
+      state: sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions }, 's', new Set(['transfer:t1']), new Set(['open:t1'])) }))
+  }
+  // A generic (non-Contribute) block: value-only rows, no confirmation opt-in.
+  const generic = view({ item_facts: 'values' }, confirmTransfer('Alice', 'Bob'))
+  assert.match(generic, /<section class="md-app-block md-app-block--value-facts"/)
+  assert.doesNotMatch(generic, /md-app-block--confirm-values/, 'its confirmation keeps visible labels')
+  assert.match(generic, /<li class="is-confirmation">[^]*<dt>From account<\/dt><dd>Alice<\/dd>/)
+  const opted = view({ item_facts: 'values', confirm_facts: 'values' }, confirmTransfer('Alice', 'Bob'))
+  assert.match(opted, /<section class="md-app-block md-app-block--value-facts md-app-block--confirm-values"/)
+  assert.match(opted, /<dt>From account<\/dt><dd>Alice<\/dd>/, 'the labels stay in the markup for assistive technology')
+  assert.match(view({ confirm_facts: 'values' }, [{ key: 'transfer:t1', label: 'Transfer' }]), /<section class="md-app-block md-app-block--confirm-values"/)
+  for (const value of ['labels', true, 'VALUES', null]) {
+    assert.equal(appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, confirm_facts: value }) }).confirmFacts, '')
   }
 })
 
@@ -499,16 +522,23 @@ const askView = (status, fields = {}) => {
 test('a drawn ask is the block\'s one action, with the host\'s own label; the app\'s controls are not drawn beside it', () => {
   const html = askView('ready')
   assert.equal((html.match(/class="md-app-block__action/g) || []).length, 1)
-  assert.match(html, /<footer><span class="md-app-block__controls"><button type="button" class="md-app-block__action is-ask"><svg[^>]*>.*<\/svg>Fix in chat<\/button><\/span><\/footer>/)
+  assert.match(html, /<footer><span class="md-app-block__controls"><button type="button" class="md-app-block__action is-ask"><svg[^>]*>.*<\/svg>Fix in chat<\/button><span class="md-app-block__sr-only" role="status"><\/span><\/span><\/footer>/)
   assert.doesNotMatch(html, /Open Example|>Send<|Show details/)
   assert.match(html, /is-attention">Conflicts</)
   assert.match(askView(null), /Open Example/, 'without an ask the app action stays')
 })
 
 test('after a tap the ask waits, and says why only to assistive technology', () => {
-  assert.match(askView('sending'), /is-ask" disabled="" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Asking…/)
-  assert.match(askView('asked'), /is-ask" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Asked<\/button><span id="\1" class="md-app-block__sr-only">The request is in this chat\./)
-  assert.match(askView('already'), /disabled=""[^>]*>.*Already asked<\/button><span[^>]*>This chat already has this request\./)
+  // Requesting is in flight (busy, no settled class); asked and already are settled.
+  const sending = askView('sending')
+  assert.match(sending, /is-ask is-requesting" disabled="" aria-busy="true" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Requesting…/)
+  assert.doesNotMatch(sending, /is-settled/)
+  assert.match(sending, /<span class="md-app-block__sr-only" role="status"><\/span>/, 'nothing is announced while the request is in flight')
+  const asked = askView('asked')
+  assert.match(asked, /is-ask is-settled" disabled="" aria-describedby="([^"]+)"><svg[^>]*>.*<\/svg>Requested in chat<\/button><span id="\1" class="md-app-block__sr-only">The request is in this chat\./)
+  assert.doesNotMatch(asked, /aria-busy|is-requesting/)
+  assert.match(asked, /<span class="md-app-block__sr-only" role="status">The request is in this chat\.<\/span>/, 'the acknowledgement is announced')
+  assert.match(askView('already'), /is-settled" disabled=""[^>]*>.*Requested in chat<\/button><span[^>]*>This chat already has this request\.<\/span><span class="md-app-block__sr-only" role="status">This chat already has this request\./)
   const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
 })
@@ -528,3 +558,49 @@ test('an ask is drawn only for an admitted app on the attested chat\'s newest bl
     { state: { ...state, recoveryPending: true }, admitted: true, allowed: true, context },
   ]) assert.equal(blockAsk(input), null, JSON.stringify(input))
 })
+
+// ---- lines-v1: additions green and deletions red, with the signs as text.
+const LINES = /<span class="md-app-block__lines"><span class="md-app-block__sr-only">64 lines added, 12 removed<\/span><span aria-hidden="true"><span class="is-added">\+64<\/span>\u00a0<span class="is-removed">−12<\/span><\/span><\/span>/
+
+test('a change size is drawn as +a −r with a spoken name in an app row, after its metadata', () => {
+  const html = appRowsView({ title: '2 contributions', rows: [
+    { title: 'First change', meta: 'owner/a · Layer 1 of 2', lines: { added: 64, removed: 12 } },
+    { title: 'Second change', lines: { added: 1, removed: 0 } },
+    { title: 'Third change', meta: 'owner/c · +5 −1' }] })
+  const [first, second, third] = html.split('<li>').slice(1)
+  assert.match(first, new RegExp(`<p class="md-app-block__item-meta">owner/a · Layer 1 of 2 · ${LINES.source}</p>`))
+  assert.match(second, /<p class="md-app-block__item-meta"><span class="md-app-block__lines"><span class="md-app-block__sr-only">1 line added, 0 removed<\/span>/)
+  assert.match(third, /<p class="md-app-block__item-meta">owner\/c · \+5 −1<\/p>/, 'a row without lines keeps its plain text')
+  assert.doesNotMatch(third, /is-added|is-removed/)
+})
+
+test('a change size fact is coloured in the printed card and at Confirm; its text is the fallback', () => {
+  const fence = { ...base, interaction: 'inline', item_facts: 'values', confirm_facts: 'values', action: { label: 'Send 2', intent: 'send-batch:sel-1' },
+    items: [{ title: 'Row A', intent: 'open:a', facts: [{ label: 'Project', value: 'owner/a' }, { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }] },
+      { title: 'Row B', intent: 'open:b', facts: [{ label: 'Change', value: '+7 −3', lines: { added: 7 } }] }] }
+  const printed = render(fence)
+  assert.match(printed, new RegExp(`<dt>Change</dt><dd>${LINES.source}</dd>`))
+  assert.match(printed, /<dt>Change<\/dt><dd>\+7 −3<\/dd>/, 'invalid counts show the fact\'s own text')
+  assert.match(printed, /<dt>Project<\/dt><dd>owner\/a<\/dd>/, 'nothing else is coloured')
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify(fence) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send-batch:sel-1', confirming: true,
+    confirmation: [{ title: 'Row A', facts: [{ label: 'Project', value: 'owner/a' }, { label: 'Change', value: '+64 −12', lines: { added: 64, removed: 12 } }] }] }] },
+  's', new Set(['send-batch:sel-1']), new Set(['open:a', 'open:b']))
+  const confirming = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: true, onEvent() {} }))
+  assert.match(confirming, new RegExp(`<li class="is-confirmation">[^]*<dt>Change</dt><dd>${LINES.source}</dd>`))
+  assert.match(confirming, />Not now<\/button><button type="button" class="md-app-block__action">Confirm<\/button>/)
+})
+
+test('a linked change-size fact keeps its source link around the coloured counts, on the block and on a row', () => {
+  const href = 'https://github.com/owner/a/pull/7/files'
+  const html = render({ ...base, item_facts: 'values', facts: [{ label: 'Change', value: '+64 −12', href, lines: { added: 64, removed: 12 } }],
+    items: [{ title: 'Row A', intent: 'open:a', facts: [{ label: 'Change', value: '+64 −12', href, lines: { added: 64, removed: 12 } },
+      { label: 'Source', value: 'owner/a', href: 'https://github.com/owner/a' }] }] })
+  const linked = new RegExp(`<dd><a href="${href.replace(/[./]/g, '\\$&')}" target="_blank" rel="noopener noreferrer">${LINES.source}</a></dd>`, 'g')
+  assert.equal((html.match(linked) || []).length, 2, 'the root fact and the item fact each keep their anchor')
+  assert.match(html, /<dd><a href="https:\/\/github\.com\/owner\/a" target="_blank" rel="noopener noreferrer">owner\/a<\/a><\/dd>/, 'a plain linked fact is unchanged')
+  const unsafe = render({ ...base, facts: [{ label: 'Change', value: '+1 −0', href: 'javascript:alert(1)', lines: { added: 1, removed: 0 } }] })
+  assert.doesNotMatch(unsafe, /<a href="javascript/, 'an unsafe link stays plain text')
+  assert.match(unsafe, /<dd><span class="md-app-block__lines">/)
+})
+

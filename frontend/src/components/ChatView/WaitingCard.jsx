@@ -3,7 +3,7 @@ import { ChevronRight, Clock } from '@openai/apps-sdk-ui/components/Icon'
 
 export default function WaitingCard({
   expanded, onToggle, ariaLabel, title, text, meta,
-  rows = [], action, stateLabel = 'Waiting',
+  rows = [], action, secondaryAction, stateLabel = 'Waiting',
 }) {
   const label = stateLabel ? `${stateLabel}${text ? ` · ${text}` : ''}` : text
   return (
@@ -21,6 +21,9 @@ export default function WaitingCard({
         <button type="button" className="chat__wait-cancel" onClick={action.onClick} disabled={action.disabled}>
           {action.label}
         </button>
+        {secondaryAction && <button type="button" className="chat__wait-cancel" onClick={secondaryAction.onClick}>
+          {secondaryAction.label}
+        </button>}
         {action.error && <p className="chat__wait-error" role="alert">{action.error}</p>}
       </div>}
       {expanded && <div className="chat__wait-details">

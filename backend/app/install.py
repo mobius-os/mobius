@@ -64,7 +64,7 @@ from app import app_consent, app_cron
 from app.build_admission import BuildLeaseUnavailable
 from app.app_capabilities import contract_and_digest
 from app.app_compile_contract import RolldownStalled
-from app.app_source_check import SourceCheckResult, check_app_source
+from app.app_source_check import SourceCheckResult, check_app_source, direct_hosts_from_manifest
 from app.compiler import (
   CompileError,
   compile_jsx,
@@ -1634,6 +1634,7 @@ def _source_completeness(
     source_files=manifest.get("source_files") or [],
     job=(manifest.get("schedule") or {}).get("job"),
     static_assets=(f"static/{dest}" for dest in static_assets),
+    direct_hosts=direct_hosts_from_manifest(manifest),
   )
 
 

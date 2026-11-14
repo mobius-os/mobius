@@ -186,6 +186,7 @@ def create_app_token(
   service: str | None = None,
   job_secrets: list[str] | None = None,
   browser: BrowserLineage | None = None,
+  via_agent_chat: str | None = None,
 ) -> str:
   """Creates a short-lived JWT scoped to a specific mini-app.
 
@@ -199,6 +200,11 @@ def create_app_token(
   reused by a different app (the new app has a different nonce). Omitted
   only by callers without the row; the resolver then falls back to
   row-existence.
+
+  `via_agent_chat` is the chat of the agent bearer that asked for this token. It
+  is provenance, not identity: the token stays an app credential, but a route
+  that wants the owner's own tap (``_require_owner_hands``) refuses it, so an
+  agent cannot turn its bearer into a clean app token for that route.
 
   `job_secrets` is set only by the owner-authorized job-token endpoint. It
   records the reviewed names at mint time, not a blanket service credential.
@@ -233,6 +239,8 @@ def create_app_token(
   if delegation_id is not None:
     claims["delegation_id"] = delegation_id
     claims["delegation_chat"] = delegation_chat
+  if via_agent_chat is not None:
+    claims["via_agent_chat"] = via_agent_chat
   return create_access_token(
     claims,
     expires_delta=expires_delta,
