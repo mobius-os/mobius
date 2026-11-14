@@ -22,6 +22,34 @@ function dateTimeLabel(value) {
   return formatDateTime(apiDate(value)) || 'not set'
 }
 
+/**
+ * How far away a future moment is, in calm words ("in 3 min", "in 2 h 5 min").
+ * Minutes round up so "in 1 min" never shows for a moment already due; a
+ * moment that has passed is "now" because the checker owns it from then on.
+ */
+export function untilLabel(value, now = Date.now()) {
+  const date = apiDate(value)
+  if (!date) return null
+  const ms = date.getTime() - now
+  if (ms <= 0) return 'now'
+  if (ms < 60_000) return 'in under a minute'
+  const minutes = Math.ceil(ms / 60_000)
+  if (minutes < 60) return `in ${minutes} min`
+  if (minutes < 24 * 60) {
+    const hours = Math.floor(minutes / 60)
+    const rest = minutes % 60
+    return `in ${hours} h${rest ? ` ${rest} min` : ''}`
+  }
+  const days = Math.round(minutes / (24 * 60))
+  return `in ${days} ${days === 1 ? 'day' : 'days'}`
+}
+
+// "in 3 min · 15:20": the countdown first, the clock time beside it.
+function whenLabel(value, clock, now) {
+  const until = untilLabel(value, now)
+  return [until, clock].filter(Boolean).join(' · ') || null
+}
+
 function cadenceLabel(wait) {
   if (wait.kind === 'timer') return 'one-time timer'
   const seconds = Number(wait.interval_secs) || 300
@@ -117,11 +145,14 @@ const RESUME_BLOCKERS = {
   resume_failed: ['follow-up needs attention', 'The follow-up could not start successfully; resume this chat to inspect the saved result'],
 }
 
-export function waitPresentation(wait) {
+export function waitPresentation(wait, now = Date.now()) {
   const activation = wait.kind === 'platform_activation'
   const cadence = cadenceLabel(wait)
-  const next = clockLabel(wait.next_check_at)
-  const due = clockLabel(wait.due_at)
+  const next = whenLabel(wait.next_check_at, clockLabel(wait.next_check_at), now)
+  const due = whenLabel(wait.due_at, clockLabel(wait.due_at), now)
+  // The exact check Möbius runs, shown only on request (never its output,
+  // which a command wait keeps silent by contract).
+  const command = typeof wait.command === 'string' && wait.command.trim() ? wait.command.trim() : null
   const count = Number(wait.checks_count) || 0
   const last = clockLabel(wait.last_checked_at)
   const activity = count
@@ -139,6 +170,7 @@ export function waitPresentation(wait) {
     const [summary, wakeUp] = RESUME_BLOCKERS[wait.resume_blocker]
       || ['follow-up pending', 'The result is saved until this chat can resume']
     return {
+      command,
       condition: `${outcome}; ${summary}`,
       owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
       summary: 'result saved',
@@ -150,31 +182,20 @@ export function waitPresentation(wait) {
     }
   }
 
+  const deadline = untilLabel(wait.deadline_at, now)
   return {
+    command,
     condition: waitConditionLabel(wait.description) || 'External condition',
     owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
     summary,
-    checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,
+    checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next ${next}` : ''}`,
     activity,
     timeoutLabel: activation ? 'Wake-up' : 'If it takes too long',
     timeout: activation
       ? 'A later ready restart wakes this chat; the Restart card has no time limit'
-      : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
+      : deadline
+        ? `This chat wakes to investigate ${deadline} · ${dateTimeLabel(wait.deadline_at)}`
+        : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
     usage: 'No model tokens while checking · one turn when it wakes',
-  }
-}
-
-export function helperPresentation(backgroundHelpers, handoff = null) {
-  const count = Number(backgroundHelpers?.count) || 0
-  const tasks = (backgroundHelpers?.items || [])
-    .map(item => item?.title || 'Helper work')
-    .filter(Boolean)
-  return {
-    count,
-    tasks,
-    summary: `Waiting on ${count} ${count === 1 ? 'helper' : 'helpers'}`,
-    owner: `${count} ${count === 1 ? 'helper agent' : 'helper agents'}`,
-    automatic: handoff?.kind === 'automatic',
-    usage: 'Usage unknown',
   }
 }

@@ -1,9 +1,9 @@
-/* Waiting cards reuse the established bordered status panel and keep actions visible. */
+/* Waiting cards reuse the established bordered status panel; an action that needs the owner stays visible, others sit in the details. */
 import { ChevronRight, Clock } from '@openai/apps-sdk-ui/components/Icon'
 
 export default function WaitingCard({
   expanded, onToggle, ariaLabel, title, text, meta,
-  rows = [], action, secondaryAction, stateLabel = 'Waiting',
+  rows = [], action, detailAction, stateLabel = 'Waiting',
 }) {
   const label = stateLabel ? `${stateLabel}${text ? ` · ${text}` : ''}` : text
   return (
@@ -21,9 +21,6 @@ export default function WaitingCard({
         <button type="button" className="chat__wait-cancel" onClick={action.onClick} disabled={action.disabled}>
           {action.label}
         </button>
-        {secondaryAction && <button type="button" className="chat__wait-cancel" onClick={secondaryAction.onClick}>
-          {secondaryAction.label}
-        </button>}
         {action.error && <p className="chat__wait-error" role="alert">{action.error}</p>}
       </div>}
       {expanded && <div className="chat__wait-details">
@@ -32,6 +29,12 @@ export default function WaitingCard({
             <dt>{row.label}</dt><dd>{row.value}</dd>
           </div>)}
         </dl>
+        {detailAction && <div className="chat__wait-detail-action">
+          <button type="button" className="chat__wait-cancel" onClick={detailAction.onClick} disabled={detailAction.disabled}>
+            {detailAction.label}
+          </button>
+          {detailAction.error && <p className="chat__wait-error" role="alert">{detailAction.error}</p>}
+        </div>}
       </div>}
     </section>
   )

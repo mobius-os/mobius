@@ -287,3 +287,22 @@ test('Retry is a keyboard-safe non-submitting button with a visible focus ring',
     /\.connection-status__retry:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--accent\);/,
   )
 })
+
+
+test('handoff motion is isolated from connection, queued input and the composer', () => {
+  const start = chatView.indexOf('<div ref={footHandoffsRef} className="chat__foot-handoffs">')
+  const end = chatView.indexOf('</div>', start)
+  const layer = chatView.slice(start, end)
+  assert.ok(start >= 0 && end > start)
+  assert.match(layer, /<ProgressRail/)
+  assert.match(layer, /<WaitingChip/)
+  assert.doesNotMatch(layer, /<ConnectionStatus|<QueuedMessages|<ChatInputBar/)
+  assert.match(chatView, /useFootReveal\(scrollRef, footRef, footHandoffsRef, !showEmpty && !showLoadError\)/)
+  const rule = chatCss.match(/\.chat__foot-handoffs\s*\{([^}]+)\}/)[1]
+  assert.match(rule, /transform:\s*translateY\(var\(--foot-hide\)\)/)
+  assert.match(rule, /z-index:\s*-1/)
+  assert.doesNotMatch(rule, /opacity:|clip-path:|height:/,
+    'the viewport clips the rows; hiding must not collapse their layout clearance')
+  assert.match(chatCss, /transform:\s*translateY\(min\(var\(--foot-hide, 0px\), var\(--foot-rows-travel, 0px\)\)\)/,
+    'floating navigation shares the motion but stops above input')
+})

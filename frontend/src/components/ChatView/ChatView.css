@@ -2437,8 +2437,7 @@
 .chat__foot .chat__progress-action,
 .chat__foot .chat__progress-clear,
 .chat__foot .chat__goal-plan,
-.chat__foot .chat__wait-summary,
-.chat__foot .chat__wait-cancel,
+.chat__foot .chat__waits,
 .chat__foot .chat__archived-restore,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
@@ -2455,6 +2454,7 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+  transform: translateY(min(var(--foot-hide, 0px), var(--foot-rows-travel, 0px)));
 }
 
 .chat__floating-transients {
@@ -4247,12 +4247,6 @@
 }
 
 /* Waiting uses the same bordered surface as the Goal panel. */
-.chat__handoff-slot {
-  list-style: none;
-  padding: 0;
-  margin-top: 10px;
-}
-
 .chat__waits {
   max-width: 720px;
   margin: 0 auto var(--chat-foot-rail-gap);
@@ -4336,7 +4330,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
-.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 
@@ -4382,6 +4375,173 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   font-size: 13px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+/* In the foot the handoffs stack above the composer; past ~40% of the
+   viewport they scroll inside themselves so the composer keeps its room. The
+   foot's ResizeObserver already reserves whatever height they take. */
+.chat__foot .chat__waits {
+  max-height: 40dvh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Cards keep their own height; the stack scrolls rather than squashing them. */
+.chat__foot .chat__waits > * {
+  flex-shrink: 0;
+}
+
+/* The handoff stack sits over the scrolling transcript beside the composer,
+   so it is an opaque card like the queue tray: nothing behind may read
+   through it. */
+.chat__handoffs .chat__wait-card {
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* A collapsed wait is one line: what it waits for, then its countdown. */
+.chat__handoffs .chat__wait-summary {
+  flex-wrap: nowrap;
+}
+
+.chat__handoffs .chat__wait-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__handoffs .chat__wait-meta {
+  order: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.chat__wait-detail-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* Many handoffs: one summary line that stays on top while its list scrolls
+   beneath it. The open list is backed by the page colour so nothing in the
+   transcript reads through the gaps between its cards. */
+.chat__handoffs--open {
+  background: var(--bg); /* CONTRACT: opaque page fill behind the open list */
+  border-radius: 12px;
+}
+
+.chat__handoff-summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.chat__handoff-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat__handoff-group-label {
+  margin: 4px 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* In the grouped list the stack is the one scroller; a group's helper card
+   grows with its rows instead of nesting a second scroll inside it. */
+.chat__handoff-group .chat__helper-list {
+  max-height: none;
+  overflow: visible;
+}
+
+.chat__handoff-notes {
+  padding: 4px 8px 4px 0;
+}
+
+/* A wait's exact command, revealed on request: monospace, wrapped, and
+   scrollable when long. */
+.chat__wait-command-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text, var(--accent));
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat__wait-command-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.chat__wait-command-text {
+  margin: 6px 0 0;
+  max-height: 9em;
+  overflow: auto;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Helper rows reuse the transcript's helper row inside the waiting surface. */
+.chat__helper-list {
+  max-height: 156px; /* about four rows, then the list scrolls */
+  overflow-y: auto;
+  padding: 5px 8px 5px 12px;
+}
+
+.chat__helper-list .chat__subagents-list {
+  margin: 0;
+}
+
+.chat__helper-list-note {
+  margin: 2px 0 2px 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* On a phone each helper is one compact line: name · engine · status. */
+@media (max-width: 560px) {
+  .chat__helper-list {
+    padding: 3px 8px 3px 12px;
+  }
+
+  .chat__helper-list .chat__subagent {
+    min-height: 30px;
+  }
+
+  .chat__helper-list .chat__subagent-body {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .chat__helper-list .chat__subagent-name {
+    flex: 0 1 auto;
+    max-width: 55%;
+  }
+
+  .chat__helper-list .chat__subagent-sub {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .chat__helper-list .chat__subagent-sub::before {
+    content: "· ";
+  }
 }
 
 /* Archived notice: the waiting-card shell with one Restore action. */
@@ -5149,3 +5309,26 @@ button.chat__dependency-link:disabled { cursor: default; opacity: .55; }
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: 2px;
 }
+
+
+/* Handoffs exit at the viewport bottom, behind stationary input. The chat's
+   overflow clips the transform; layout and transcript clearance stay fixed. */
+.chat__foot {
+  --foot-hide: 0px;
+  --foot-hide-fraction: 0;
+}
+.chat__foot-handoffs {
+  position: relative;
+  z-index: -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-card-gap);
+  transform: translateY(var(--foot-hide));
+}
+.chat__foot-handoffs:empty { display: none; }
+.chat__foot .chat__foot-handoffs > * { width: 100%; margin-bottom: 0; }
+.chat__foot .chat__foot-handoffs[inert],
+.chat__foot .chat__foot-handoffs[inert] * { pointer-events: none; }

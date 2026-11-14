@@ -4,6 +4,7 @@ import { createElement as h } from 'react'
 import { renderToStaticMarkup as render } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 import { goalContinuationHandoff } from '../chatHandoffPresentation.js'
+import { renderWithModels } from './modelRegistryRender.js'
 
 const vite = await createSsrRenderServer()
 after(() => vite.close())
@@ -112,25 +113,45 @@ test('legacy receipt without a result or plan keeps the complete objective acces
   assert.doesNotMatch(html, /objective--preview|<details/)
 })
 
-test('collapsed cancellable Wait exposes Stop while blocked delivery reveals its existing recovery', () => {
+test('an expanded command Wait offers its exact command behind a collapsed Command row', () => {
+  const command = "curl -fsS https://preview.test/healthz | grep -q ok"
+  const wait = { id: 'wait-c', kind: 'command', description: 'Preview responds', command, interval_secs: 300 }
+  const props = { onToggle: () => {}, onCancel: () => {} }
+  const collapsed = render(h(WaitCard, { ...props, expanded: false, wait }))
+  assert.doesNotMatch(collapsed, /Command|chat__wait-command/)
+  const expanded = render(h(WaitCard, { ...props, expanded: true, wait }))
+  assert.match(expanded, /<dt>Command<\/dt><dd><div class="chat__wait-command"><button type="button" class="chat__wait-command-toggle" aria-expanded="false">Show<\/button><\/div><\/dd>/)
+  // Hidden until asked for: the command text is not in the page yet.
+  assert.doesNotMatch(expanded, /preview\.test|<pre/)
+  for (const empty of [{ kind: 'timer' }, { kind: 'command', command: '   ' }]) {
+    const html = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, ...empty, command: empty.command ?? null } }))
+    assert.doesNotMatch(html, /<dt>Command/)
+  }
+})
+
+test('a collapsed Wait is one line with Stop in its details, while blocked delivery keeps recovery visible', () => {
   const wait = { id: 'wait-a', kind: 'timer', description: 'Deployment ready' }
   const props = { expanded: false, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {} }
   const html = render(h(WaitCard, { ...props, wait }))
-  assert.match(html, /Stop waiting/)
+  // Beside the composer a wait must stay one line; Stopping is a deliberate
+  // choice made from the expanded details.
+  assert.doesNotMatch(html, /Stop waiting|chat__wait-action/)
   assert.doesNotMatch(html, /<dl/)
+  const expanded = render(h(WaitCard, { ...props, expanded: true, wait }))
+  assert.match(expanded, /<\/dl><div class="chat__wait-detail-action"><button type="button" class="chat__wait-cancel">Stop waiting<\/button>/)
   for (const resume_blocker of ['manual_resume', 'resume_failed', 'restart']) {
     const blocked = render(h(WaitCard, { ...props, wait: { ...wait, delivery_pending: true, resume_blocker } }))
     assert.match(blocked, /View recovery/)
-    assert.doesNotMatch(blocked, /Stop waiting/)
+    const blockedDetails = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, delivery_pending: true, resume_blocker } }))
+    assert.doesNotMatch(blockedDetails, /Stop waiting/)
   }
-  const activation = render(h(WaitCard, { ...props, wait: { ...wait, kind: 'platform_activation' } }))
+  const activation = render(h(WaitCard, { ...props, expanded: true, wait: { ...wait, kind: 'platform_activation' } }))
   assert.doesNotMatch(activation, /Stop waiting/)
 })
 
 test('helper, condition and resource handoffs all use the established bordered Waiting card', async () => {
   const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
   for (const props of [
-    { backgroundHelpers: { count: 1, items: [{ task_key: 'review' }] } },
     { waits: [{ id: 'timer', kind: 'timer', description: 'Deployment ready' }] },
     { resourcePause: { pause: { kind: 'memory' } }, handoff: { kind: 'automatic', reason: 'memory' } },
     { resourcePause: { pause: { kind: 'model_capacity' } }, handoff: { kind: 'recovery' }, onRevealRecovery: () => {} },
@@ -141,15 +162,60 @@ test('helper, condition and resource handoffs all use the established bordered W
     assert.match(html, /aria-expanded="false"/)
     assert.doesNotMatch(html, /class="chat__handoff|Next move and details/)
   }
-  const helper = render(h(WaitingChip, {
-    backgroundHelpers: { count: 1, items: [] },
+})
+
+test('helpers are one openable row each, never a "Waiting on N helpers" count', async () => {
+  const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  const html = renderWithModels(h(WaitingChip, {
+    chatId: 'parent-chat',
+    helpers: [
+      { delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' },
+      { delegation_id: 'del-b', task_key: 'verify-build', provider: 'codex', status: 'needs_input' },
+    ],
     handoff: { kind: 'automatic', reason: 'helpers' },
   }))
-  assert.match(helper, /Waiting on 1 helper/)
-  assert.doesNotMatch(helper, /Waiting · Waiting/)
-  assert.match(helper, /aria-label="Expand helper waiting details: Waiting on 1 helper — resumes automatically"/)
-  const unowned = render(h(WaitingChip, { backgroundHelpers: { count: 1, items: [] } }))
-  assert.doesNotMatch(unowned, /resumes automatically/)
+  assert.match(html, /class="chat__wait-card chat__helper-list"/)
+  assert.equal((html.match(/chat__helper-row/g) || []).length, 2)
+  // Status only: the projection has no live step or start time to tick from.
+  assert.match(html, /aria-label="review-copy: Claude · Working\. Open its conversation"/)
+  assert.match(html, /aria-label="verify-build: Codex · Waiting for coordinating agent\. Open its conversation"/)
+  assert.doesNotMatch(html, /chat__subagent-elapsed|Waiting on \d helper|Usage unknown/)
+  const capped = renderWithModels(h(WaitingChip, {
+    chatId: 'parent-chat',
+    helpers: [{ delegation_id: 'del-a', task_key: 'review-copy', provider: 'claude', status: 'running' }],
+    unlistedHelpers: 3,
+  }))
+  // A server-capped list is already more than a few rows: it folds into the summary.
+  assert.match(capped, /1 helper working · 3 more helpers/)
+  // Only a server-owned automatic handoff may promise the chat resumes.
+  assert.match(html, /This chat resumes when they finish/)
+  assert.doesNotMatch(capped, /resumes/)
+})
+
+test('dozens of helpers fold into one summary line that opens into groups', async () => {
+  const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
+  const helpers = Array.from({ length: 12 }, (_, i) => ({ delegation_id: `del-${i}`, task_key: `helper-${i}`, provider: 'claude', status: 'running' }))
+  helpers.push({ delegation_id: 'ask', task_key: 'asks-parent', provider: 'codex', status: 'needs_input' })
+  const waits = [1, 2, 3].map(i => ({ id: `w${i}`, kind: 'timer', description: `Deployment ${i}` }))
+  const props = { chatId: 'summary-chat', helpers, waits, onCancel: () => {} }
+  const collapsed = renderWithModels(h(WaitingChip, props))
+  assert.match(collapsed, /class="chat__wait-card chat__handoff-summary"/)
+  assert.match(collapsed, /aria-expanded="false"/)
+  assert.match(collapsed, /12 helpers working · 1 waiting on coordinator · 3 waits/)
+  // Collapsed means one line: no rows, no wait cards, no countdown clocks.
+  assert.doesNotMatch(collapsed, /chat__helper-row|Deployment 1|chat__handoff-group/)
+
+  const { persistDisclosureOpen } = await vite.ssrLoadModule('/src/components/ChatView/disclosureState.js')
+  persistDisclosureOpen('summary-chat', 'foot-handoffs', true)
+  const open = renderWithModels(h(WaitingChip, props))
+  assert.match(open, /chat__handoffs--open/)
+  assert.match(open, /aria-expanded="true"/)
+  assert.equal((open.match(/chat__helper-row/g) || []).length, 13)
+  const order = ['Working · 12', 'Waiting · 4'].map(label => open.indexOf(label))
+  assert.ok(order.every(index => index > 0) && order[0] < order[1], 'working is listed before waiting')
+  assert.ok(open.indexOf('asks-parent') > open.indexOf('Waiting · 4'), 'a helper asking its coordinator waits with the waits')
+  // The choice belongs to that chat only.
+  assert.doesNotMatch(renderWithModels(h(WaitingChip, { ...props, chatId: 'other-chat' })), /chat__helper-row/)
 })
 
 test('Waiting panel preserves expanded evidence, action errors and disabled state', () => {
