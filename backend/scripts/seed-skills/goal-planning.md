@@ -93,6 +93,19 @@ Work in-run; turns are not a budget. An unfinished Goal remains your
 responsibility until a truthful outcome or real handoff. Do not end merely to
 refresh context, select the next task, or ask the owner to discover Unpause.
 
+Waiting for an event and deliberately pausing work are different decisions.
+Finish independent authorized work, then register the exact handoff below.
+A blocked task or a promise to resume is not registration. `update_goal(defer)`
+means a manual hold with **no automatic continuation** until a later owner
+request; do not use it to mean “continue after this dependency is ready.”
+
+- **Platform restart:** use `request_restart` after the activation preflight in
+  `platform-maintenance.md`. Each chat owing activation verification registers
+  its own Restart card, even when another chat will execute the restart. One
+  later ready boot can resume every registered chat; a peer's card or promise
+  does not register this Goal. Do not substitute a generic question or hold.
+- **Helper result:** keep the Goal open for the helper's existing automatic
+  result continuation; do not add a Wait or manual hold on top.
 - **Owner action:** give concrete instructions, explain the dependency, then
   save a question or approval card as your last action. Its answer resumes
   the same work. For a task the owner must perform elsewhere, choices such as
@@ -120,8 +133,10 @@ refresh context, select the next task, or ask the owner to discover Unpause.
   that healthy work is under way.
 - **Deferred work:** an answered **Not now** defers that step, not every other
   authorized task. Record its reason, then continue independent work without
-  retrying the declined action. When nothing useful can proceed, call
-  `update_goal(defer: 'What was deferred and why', tasks: [...])` and end normally.
+  retrying the declined action. Only when the owner chose to pause the remaining
+  work, rather than wait for an event or decision above, call
+  `update_goal(defer: 'What the owner put on manual hold and why', tasks: [...])`
+  and end normally after finishing independent authorized work.
   This records **On hold**, preserves the original outcome and checklist, and
   releases this Goal's claims without calling them completed. It does not stop
   your reply or require another question. Resolve existing helpers, questions

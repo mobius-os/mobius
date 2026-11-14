@@ -105,8 +105,16 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
   if goal.status == "open":
     payload["outcome_contract"] = (
       "Preserve the original objective. Complete only verified success; if it seems "
-      "unreachable, first seek an actionable owner decision. Temporary owner action "
-      "or approval leaves this Goal open with a saved card, not terminal failure. "
+      "unreachable, first seek an actionable owner decision. A temporary dependency "
+      "keeps this Goal open with an exact durable handoff: request_restart for this "
+      "chat's activation even when another chat handles the restart; a saved card "
+      "for owner action; wait_for_decision for an existing peer decision or a "
+      "confirmed claim dependency for peer work; declare_wait for an external "
+      "condition; a helper's existing result continuation. Finish independent "
+      "authorized work before handing off. A blocked task or peer promise is not "
+      "a registered handoff. defer means the owner deliberately chose a manual "
+      "hold with no automatic continuation until a later owner request, not "
+      "waiting for one of those events. "
       "Cannot complete records the specific reason, efforts and partial results, "
       "and unmet outcome; Cancelled requires the owner to call it off. Settle "
       "the checklist and helpers honestly in the same terminal update."
