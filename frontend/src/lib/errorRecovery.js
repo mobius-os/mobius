@@ -76,6 +76,7 @@ export function writeErrorRecoveryAttempt({
   chatId = null,
   repairRequestId = null,
   messageCid = null,
+  agent,
   now = Date.now(),
 }) {
   if (!ATTEMPT_PHASES.has(phase)) return false
@@ -87,6 +88,7 @@ export function writeErrorRecoveryAttempt({
       chatId: chatId ? String(chatId) : null,
       repairRequestId: repairRequestId ? String(repairRequestId) : null,
       messageCid: messageCid ? String(messageCid) : null,
+      ...(agent ? { agent } : {}),
     }))
     return true
   } catch {
@@ -193,6 +195,8 @@ async function startAgentRepair({
   messageCid,
   signal,
   onChatCreated,
+  agent,
+  archiveOnGoalComplete = false,
 }) {
   if (!client?.chats?.create || !client?.chats?.send) {
     throw new Error('repair chat client is unavailable')
@@ -202,7 +206,9 @@ async function startAgentRepair({
   }
   const requestOptions = { timeoutMs: AGENT_REPAIR_REQUEST_TIMEOUT_MS, signal }
   const createResponse = await client.chats.create(
-    { title: 'Fix a Möbius error', recovery_request_id: repairRequestId },
+    { title: 'Fix a Möbius error', recovery_request_id: repairRequestId,
+      ...(agent ? { agent } : {}),
+      ...(archiveOnGoalComplete ? { archive_on_goal_complete: true } : {}) },
     requestOptions,
   )
   if (createResponse.status === REPAIR_CHAT_DELETED_STATUS) {
@@ -214,7 +220,7 @@ async function startAgentRepair({
   onChatCreated?.(String(chat.id))
 
   const sendResponse = await client.chats.send(chat.id, {
-    content: prompt,
+    content: archiveOnGoalComplete ? `/goal ${prompt}` : prompt,
     cid: messageCid,
   }, requestOptions)
   if (!sendResponse.ok) throw new Error(`repair chat send ${sendResponse.status}`)
@@ -234,6 +240,8 @@ export async function runAgentRepair({
   signal,
   onAttempt,
   storage = globalThis.sessionStorage,
+  agent,
+  archiveOnGoalComplete = false,
 }) {
   const identity = createRepairIdentity(previousAttempt)
   let attempt = {
@@ -241,6 +249,7 @@ export async function runAgentRepair({
     chatId: previousAttempt?.chatId || null,
     repairRequestId: identity.repairRequestId,
     messageCid: identity.messageCid,
+    ...(previousAttempt?.agent || agent ? { agent: previousAttempt?.agent || agent } : {}),
   }
   const persist = (nextAttempt) => {
     attempt = nextAttempt
@@ -257,6 +266,8 @@ export async function runAgentRepair({
     prompt,
     client,
     base,
+    agent: attempt.agent,
+    archiveOnGoalComplete,
     repairRequestId: attempt.repairRequestId,
     messageCid: attempt.messageCid,
     signal,
@@ -273,7 +284,7 @@ export async function runAgentRepair({
     } catch (error) {
       if (!(error instanceof RepairChatDeletedError)) throw error
       // Asking again means asking for a repair chat: replace the deleted one.
-      persist({ phase: 'agent-starting', chatId: null, ...createRepairIdentity(null) })
+      persist({ ...attempt, phase: 'agent-starting', chatId: null, ...createRepairIdentity(null) })
       result = await start()
     }
     persist({
