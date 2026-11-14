@@ -51,6 +51,11 @@ class SharedInvitationResponse(BaseModel):
   action: Literal["accept", "later"]
 
 
+class GrantUpdate(BaseModel):
+  model_config = ConfigDict(extra="forbid")
+  full_access: bool
+
+
 class FinalizeAccountRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
   pending_id: str = Field(min_length=1, max_length=64)
@@ -97,6 +102,8 @@ def _grant_view(db: Session, grant) -> dict:
     "kind": grant.kind,
     "recipient_handle": grant.recipient_handle,
     "directory_cleanup_pending": grant.remote_status == "cleanup_pending",
+    # Full access is offered only on account grants (see has_full_access).
+    "full_access": bool(grant.full_access) if grant.kind == "account" else None,
   }
 
 
@@ -218,9 +225,14 @@ def _shared_instance(row) -> dict | None:
       or row.get("status") not in ("invited", "accepted")
       or type(row.get("unread")) is not bool):
     return None
-  return {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
-          "status": row["status"], "unread": row["unread"],
-          "open_url": origin + "/api/connect/browser-access/session/account/start?grant_id=" + quote(gid, safe="")}
+  instance = {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
+              "status": row["status"], "unread": row["unread"],
+              "open_url": origin + "/api/connect/browser-access/session/account/start?grant_id=" + quote(gid, safe="")}
+  # Leaving runs on the sharing instance. Only the directory can say that
+  # instance supports it (this side never contacts it), so no word, no link.
+  if row.get("leave") is True:
+    instance["leave_url"] = origin + "/shell/shared#account-leave=" + quote(gid, safe="")
+  return instance
 
 
 @router.get("/shared")
@@ -256,17 +268,35 @@ async def respond_to_shared_invitation(
 
 
 _PENDING_COOKIE = "mobius_shared_account_pending"
+# The same one-use proof flow, started to give access up rather than sign in.
+# Which cookie holds the proof is its purpose: a sign-in proof cannot leave.
+_LEAVE_COOKIE = "mobius_shared_account_leave"
 _PENDING_PATH = "/api/connect/browser-access/session/account"
+
+
+def _start_proof(db: Session, grant_id: str, cookie_name: str) -> RedirectResponse:
+  cookie, url = account_access.start(db, grant_id)
+  response = RedirectResponse(url, status_code=303, headers=_SECRET_HEADERS)
+  response.set_cookie(cookie_name, cookie, httponly=True, secure=True,
+                      samesite="lax", path=_PENDING_PATH, max_age=600)
+  return response
 
 
 @router.get("/session/account/start")
 @_limiter.limit("10/minute")
 def start_account_session(request: Request, grant_id: str, db: Session = Depends(get_db)):
-  cookie, url = account_access.start(db, grant_id)
-  response = RedirectResponse(url, status_code=303, headers=_SECRET_HEADERS)
-  response.set_cookie(_PENDING_COOKIE, cookie, httponly=True, secure=True,
-                      samesite="lax", path=_PENDING_PATH, max_age=600)
-  return response
+  return _start_proof(db, grant_id, _PENDING_COOKIE)
+
+
+@router.post("/session/account/leave/start")
+@_limiter.limit("10/minute")
+def start_account_leave(request: Request, grant_id: str, db: Session = Depends(get_db)):
+  """The recipient confirmed Leave on this origin's page; now prove the account.
+
+  Only a same-origin POST starts it, so a cross-site link alone never ends
+  someone's access, and the proof is spent the moment it returns."""
+  _cookie_request(request)
+  return _start_proof(db, grant_id, _LEAVE_COOKIE)
 
 
 @router.get("/session/account/callback")
@@ -274,13 +304,25 @@ def start_account_session(request: Request, grant_id: str, db: Session = Depends
 async def complete_account_session(
   request: Request, code: str, state: str, db: Session = Depends(get_db),
 ):
+  # The directory returns both flows here. Only a leave cookie bound to this
+  # exact state makes it a leave; otherwise it is an ordinary sign-in.
+  leaving = account_access.cookie_matches_state(db, state, request.cookies.get(_LEAVE_COOKIE, ""))
   pending, grant = account_access.pending_for_callback(
-    db, state, request.cookies.get(_PENDING_COOKIE, ""),
+    db, state, request.cookies.get(_LEAVE_COOKIE if leaving else _PENDING_COOKIE, ""),
   )
   proof_expiry = await account_access.exchange_code(pending, grant, code)
   account_access.mark_verified(db, pending.id, proof_expiry)
-  return RedirectResponse("/shell/shared#account-finalize=" + pending.id, status_code=303,
-                          headers=_SECRET_HEADERS)
+  if not leaving:
+    return RedirectResponse("/shell/shared#account-finalize=" + pending.id, status_code=303,
+                            headers=_SECRET_HEADERS)
+  left = await account_access.leave(db, pending.id)
+  response = RedirectResponse("/shell/shared#account-left=" + quote(left.id, safe=""),
+                              status_code=303, headers=_SECRET_HEADERS)
+  response.delete_cookie(_LEAVE_COOKIE, path=_PENDING_PATH,
+                         secure=True, httponly=True, samesite="lax")
+  # This browser's shared session belonged to the grant and is now dead.
+  response.delete_cookie(_COOKIE, path=_COOKIE_PATH, secure=True, httponly=True, samesite="strict")
+  return response
 
 
 @router.post("/session/account/finalize")
@@ -321,17 +363,36 @@ def logout_browser_session(body: LogoutRequest, request: Request, db: Session = 
   return response
 
 
+@router.patch("/{grant_id}", dependencies=[Depends(reject_cross_site)])
+def update_browser_grant(
+  grant_id: str, body: GrantUpdate,
+  owner: models.Owner = Depends(_manager), db: Session = Depends(get_db),
+):
+  """Turn one person's Full access on or off. It applies from their next
+  request, including to work they already started."""
+  grant = access._fresh(db, access.BrowserAccessGrant, grant_id)
+  if grant is None or grant.owner_id != owner.id:
+    raise HTTPException(404, "No such shared access.")
+  if grant.revoked_at is not None:
+    raise HTTPException(409, "This access was revoked.")
+  if grant.kind != "account":
+    raise HTTPException(409, "Full access needs a mobius.you account grant.")
+  grant.full_access = body.full_access
+  db.commit()
+  return JSONResponse({"grant": _grant_view(db, grant)}, headers=_NO_STORE)
+
+
 @router.delete("/{grant_id}", status_code=204, dependencies=[Depends(reject_cross_site)])
 async def revoke_browser_access(
   grant_id: str, owner: models.Owner = Depends(_manager), db: Session = Depends(get_db),
 ):
-  grant = access.revoke_grant(db, grant_id, owner.id)
-  ended = await _end(db, grant)
-  if not (ended.pending_commands or ended.pending_chat_ids or ended.directory_cleanup_pending):
+  grant, ended = await access.revoke_and_end(db, grant_id, owner.id)
+  if not (ended.stop_pending or ended.directory_cleanup_pending):
     return Response(status_code=204)
   body = {
     "revoked": True, "pending_commands": ended.pending_commands,
     "pending_chat_ids": ended.pending_chat_ids,
+    "stop_incomplete": ended.stop_error is not None,
   }
   if grant.kind == "account":
     body["directory_cleanup_pending"] = ended.directory_cleanup_pending
