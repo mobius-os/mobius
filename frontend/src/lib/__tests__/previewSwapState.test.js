@@ -144,6 +144,43 @@ test('a stale incoming-timeout for a superseded version is ignored', () => {
   assert.equal(s.incomingVersion, '102', 'the current incoming survives a stale timer')
 })
 
+test('a superseded incoming error cannot discard its successor or the working frame', () => {
+  const waiting = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'version', version: '101' },
+    { type: 'version', version: '102' },
+  ])
+  const afterLateError = reduceSwap(waiting, { type: 'frame-error', version: '101' })
+  assert.equal(afterLateError, waiting, 'a retired frame cannot fail the replacement')
+  assert.deepEqual(reduceSwap(afterLateError, { type: 'frame-mounted', version: '102' }), {
+    liveVersion: '102', liveLoaded: true, incomingVersion: null, swaps: 1,
+  })
+})
+
+test('late mount after incoming timeout cannot promote the abandoned version', () => {
+  const timedOut = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'version', version: '101' },
+    { type: 'incoming-timeout', version: '101' },
+  ])
+  assert.deepEqual(timedOut, {
+    liveVersion: '100', liveLoaded: true, incomingVersion: null, swaps: 0,
+  })
+  assert.equal(reduceSwap(timedOut, { type: 'frame-mounted', version: '101' }), timedOut)
+  assert.deepEqual(reduceSwap(timedOut, { type: 'version', version: '102' }), {
+    liveVersion: '100', liveLoaded: true, incomingVersion: '102', swaps: 0,
+  }, 'the last working frame remains available for the next replacement')
+})
+
+test('late settle of the retargeted first-load frame cannot hide the new frame overlay', () => {
+  const retargeted = run('100', [{ type: 'version', version: '101' }])
+  assert.equal(reduceSwap(retargeted, { type: 'frame-mounted', version: '100' }), retargeted)
+  assert.equal(reduceSwap(retargeted, { type: 'frame-error', version: '100' }), retargeted)
+  assert.deepEqual(reduceSwap(retargeted, { type: 'frame-mounted', version: '101' }), {
+    liveVersion: '101', liveLoaded: true, incomingVersion: null, swaps: 0,
+  })
+})
+
 test('reverting to the live version while an incoming is loading cancels the incoming', () => {
   const s = run('100', [
     { type: 'frame-mounted', version: '100' },
@@ -152,6 +189,20 @@ test('reverting to the live version while an incoming is loading cancels the inc
   ])
   assert.equal(s.liveVersion, '100')
   assert.equal(s.incomingVersion, null, 'no reason to keep loading 101')
+})
+
+test('a canceled incoming cannot later mount, fail, or time out the retained live frame', () => {
+  const canceled = run('100', [
+    { type: 'frame-mounted', version: '100' },
+    { type: 'version', version: '101' },
+    { type: 'version', version: '100' },
+  ])
+  assert.deepEqual(canceled, {
+    liveVersion: '100', liveLoaded: true, incomingVersion: null, swaps: 0,
+  })
+  for (const type of ['frame-mounted', 'frame-error', 'incoming-timeout']) {
+    assert.equal(reduceSwap(canceled, { type, version: '101' }), canceled, type)
+  }
 })
 
 test('two successive swaps increment the swap counter', () => {
