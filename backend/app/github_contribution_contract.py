@@ -27,9 +27,9 @@ def coauthor_trailer_required(record: dict | None) -> bool:
 
 
 SUBMIT_TIMEOUT_SECONDS = 90
-# A reviewed push runs the repository's mandatory pre-push gate before it can
-# reach GitHub. Keep its deadline distinct from ordinary GitHub reads: the full
-# frontend unit gate now takes about five minutes on a busy live platform, and
-# a push cut off mid-gate is recorded as ambiguous and blocks plain retries,
-# while a stalled read should still fail fast enough to remain actionable.
+# A reviewed push first runs the repository's mandatory pre-push gate as its
+# own local step, without credentials, and only then opens the push. Keep the
+# gate's deadline distinct from ordinary GitHub reads: the full frontend unit
+# gate now takes about five minutes on a busy live platform, while a stalled
+# read or push should still fail fast enough to remain actionable.
 PUSH_TIMEOUT_SECONDS = 900

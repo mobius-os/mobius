@@ -173,13 +173,55 @@ def _git(
   *args: str,
   check: bool = True,
 ) -> subprocess.CompletedProcess:
-  timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
+  if args[:1] == ("push",):
+    gate = _pre_push_gate(repo, args[1:], check=check)
+    if gate is not None and gate.returncode != 0:
+      return gate
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
-    timeout=timeout,
+    timeout=_SUBMIT_TIMEOUT,
     env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
+  )
+
+
+def _pre_push_gate(
+  repo: Path, push_args: tuple[str, ...], *, check: bool,
+) -> subprocess.CompletedProcess | None:
+  """Run the repository's pre-push hook as its own step before a push.
+
+  Git would run it inside the push, where the token is present, and hooks are
+  inert there. The hook runs here instead, in the credential-free local
+  environment, with the arguments and stdin Git gives a pre-push hook. It is
+  the hook Git runs when the checkout does not redirect hooks elsewhere, which
+  is also where the platform installs its gate.
+  """
+  common = _git(
+    repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
+  ).stdout.strip()
+  hook = Path(common) / "hooks" / "pre-push"
+  if not (hook.is_file() and os.access(hook, os.X_OK)):
+    return None
+  leases: dict[str, str] = {}
+  positional: list[str] = []
+  for arg in push_args:
+    if arg.startswith("--force-with-lease="):
+      ref, _, sha = arg.partition("=")[2].partition(":")
+      leases[ref] = sha
+    elif not arg.startswith("-"):
+      positional.append(arg)
+  remote, *refspecs = positional
+  named = _git(repo, "remote", "get-url", remote, check=False)
+  url = named.stdout.strip() if named.returncode == 0 else remote
+  lines = []
+  for refspec in refspecs:
+    source, _, destination = refspec.partition(":")
+    local_sha = _git(repo, "rev-parse", "--verify", f"{source}^{{commit}}").stdout.strip()
+    lines.append(f"{source} {local_sha} {destination} {leases.get(destination) or '0' * 40}\n")
+  return _run_cmd(
+    [str(hook), remote, url], cwd=repo, check=check, timeout=_PUSH_TIMEOUT,
+    env=_git_env(repo), input_text="".join(lines),
   )
 
 

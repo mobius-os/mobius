@@ -44,10 +44,15 @@ def checkout(tmp_path, monkeypatch):
 
 def test_only_network_commands_carry_github_credentials(checkout, monkeypatch):
   seen = {}
-  monkeypatch.setattr(git_ops, "_run_cmd",
-                      lambda argv, *, env, **_k: seen.setdefault(argv[3] if argv[0] == "git" else "gh", env))
-  for command in ("status", "rev-parse", "update-ref", "diff", "fetch", "push", "ls-remote"):
+
+  def run(argv, *, env, **_k):
+    seen.setdefault(argv[3] if argv[0] == "git" else "gh", env)
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+  monkeypatch.setattr(git_ops, "_run_cmd", run)
+  for command in ("status", "rev-parse", "update-ref", "diff", "fetch", "ls-remote"):
     git_ops._git(checkout, command)
+  git_ops._git(checkout, "push", "origin", "HEAD:refs/heads/topic")
   git_ops._gh(checkout, "api", "user")
   for local in ("status", "rev-parse", "update-ref", "diff"):
     assert "GH_TOKEN" not in seen[local] and "GH_CONFIG_DIR" not in seen[local], local
@@ -68,20 +73,70 @@ def test_a_checkout_fsmonitor_never_runs(checkout, tmp_path):
   assert not marker.exists()
 
 
-def test_a_checkout_pre_push_hook_never_runs_and_the_push_lands(checkout, tmp_path):
-  script, marker = probe(tmp_path, "pre-push")
-  hook = checkout / ".git" / "hooks" / "pre-push"
-  hook.write_bytes(script.read_bytes())
+def install_hook(repo: Path, body: str) -> None:
+  hook = repo / ".git" / "hooks" / "pre-push"
+  hook.write_text(body)
   hook.chmod(0o755)
+
+
+def bare_remote(tmp_path: Path) -> Path:
   remote = tmp_path / "remote.git"
   subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
-  plain_git(checkout, "push", "-q", str(remote), "HEAD:refs/heads/probe")
-  assert marker.exists()
-  marker.unlink()
+  return remote
 
-  pushed = git_ops._git(checkout, "push", str(remote), "HEAD:refs/heads/topic", check=False)
+
+def test_the_pre_push_gate_runs_once_without_credentials_then_the_push_lands(
+  checkout, tmp_path,
+):
+  record = tmp_path / "gate"
+  install_hook(checkout, f'#!/bin/sh\n{{ echo "$@"; cat; env; }} >> {record}\n')
+  remote = bare_remote(tmp_path)
+  head = plain_git(checkout, "rev-parse", "HEAD").stdout.strip()
+
+  pushed = git_ops._git(checkout, "push", "--force-with-lease=refs/heads/topic:",
+                        str(remote), "HEAD:refs/heads/topic", check=False)
+
   assert pushed.returncode == 0, pushed.stderr
-  assert not marker.exists()
+  seen = record.read_text()
+  # Exactly once: the network push itself never runs the hook.
+  assert seen.count(f"{remote} {remote}\n") == 1
+  assert f"HEAD {head} refs/heads/topic {'0' * 40}\n" in seen
+  assert "GH_TOKEN" not in seen and "GH_CONFIG_DIR" not in seen
+  assert plain_git(remote, "rev-parse", "refs/heads/topic").stdout.strip() == head
+
+
+def test_a_refusing_gate_stops_the_push_with_its_output(checkout, tmp_path):
+  install_hook(checkout, "#!/bin/sh\necho '[pre-push] verdict=blocked cause=checks checks=x' >&2\nexit 1\n")
+  remote = bare_remote(tmp_path)
+
+  refused = git_ops._git(checkout, "push", str(remote), "HEAD:refs/heads/topic", check=False)
+
+  assert refused.returncode != 0
+  assert "verdict=blocked" in refused.stderr
+  assert plain_git(remote, "rev-parse", "--verify", "--quiet", "refs/heads/topic").returncode != 0
+
+
+def test_the_platform_gate_refuses_a_reverted_private_path_without_the_token(
+  checkout, tmp_path,
+):
+  gate = Path(__file__).resolve().parents[2] / "scripts" / "githooks" / "pre-push"
+  record = tmp_path / "gate-env"
+  install_hook(checkout, f'#!/bin/sh\nenv > {record}\nexec {gate} "$@"\n')
+  commit = ("-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m")
+  (checkout / "docs").mkdir()
+  (checkout / "docs" / "notes.md").write_text("private\n")
+  plain_git(checkout, "add", "docs", check=True)
+  plain_git(checkout, *commit, "add notes", check=True)
+  plain_git(checkout, "rm", "-q", "-r", "docs", check=True)
+  plain_git(checkout, *commit, "remove notes", check=True)
+  remote = bare_remote(tmp_path)
+
+  refused = git_ops._git(checkout, "push", str(remote), "HEAD:refs/heads/topic", check=False)
+
+  assert refused.returncode != 0
+  assert "verdict=blocked cause=privacy" in refused.stderr
+  assert "GH_TOKEN" not in record.read_text()
+  assert plain_git(remote, "rev-parse", "--verify", "--quiet", "refs/heads/topic").returncode != 0
 
 
 @pytest.mark.parametrize("key", ["credential.helper", "core.askPass"])

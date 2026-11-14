@@ -6809,21 +6809,33 @@ def test_git_push_timeout_outlives_the_mandatory_pre_push_gate(
 ):
   from app import github_contribution_git as contribution_git
 
+  hook = tmp_path / "hooks" / "pre-push"
+  hook.parent.mkdir()
+  hook.write_text("#!/bin/sh\nexit 0\n")
+  hook.chmod(0o755)
   calls = []
-  monkeypatch.setattr(
-    contribution_git,
-    "_run_cmd",
-    lambda argv, **kwargs: calls.append((argv, kwargs)) or _cp(""),
-  )
+
+  def run(argv, **kwargs):
+    calls.append((argv, kwargs))
+    if "--git-common-dir" in argv:
+      return _cp(f"{tmp_path}\n")
+    if "--verify" in argv:
+      return _cp("a" * 40 + "\n")
+    return _cp("")
+
+  monkeypatch.setattr(contribution_git, "_run_cmd", run)
 
   contribution_git._git(tmp_path, "status", "--porcelain")
   contribution_git._git(tmp_path, "push", "origin", "HEAD:refs/heads/demo")
 
   ordinary = calls[0][1]["timeout"]
-  push = calls[1][1]["timeout"]
-  assert ordinary == contribution_git._SUBMIT_TIMEOUT
-  assert push == contribution_git._PUSH_TIMEOUT
-  assert push > ordinary
+  gate = next(kwargs for argv, kwargs in calls if argv[0] == str(hook))
+  push = calls[-1]
+  # The gate runs as its own local step, before and apart from the push.
+  assert push[0][3] == "push"
+  assert gate["timeout"] == contribution_git._PUSH_TIMEOUT > ordinary
+  assert gate["input_text"] == f"HEAD {'a' * 40} refs/heads/demo {'0' * 40}\n"
+  assert push[1]["timeout"] == ordinary == contribution_git._SUBMIT_TIMEOUT
 
 
 def test_push_topic_branch_surfaces_transient_result_for_authoritative_recovery(
