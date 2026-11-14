@@ -257,6 +257,15 @@ def _configure_claude_settings_defaults(context: StartupContext) -> None:
     context.logger.info("set Claude settings defaults: %s", ", ".join(added))
 
 
+def _remove_legacy_app_engine_homes(context: StartupContext) -> None:
+  """Drop app model engine homes older versions kept in app storage."""
+  from app.providers import remove_legacy_app_engine_homes
+
+  removed = remove_legacy_app_engine_homes(context.settings.data_dir)
+  if removed:
+    context.logger.info("removed legacy app engine homes: %s", ", ".join(removed))
+
+
 def _migrate_theme_surface_token(context: StartupContext) -> None:
   """Rewrite a saved theme.css's legacy --surface2 token to --surface-2.
 
@@ -742,6 +751,7 @@ PROCESS_STARTUP_TASKS = (
   ),
   StartupTask("reconcile platform skills", _reconcile_platform_skills),
   StartupTask("migrate theme surface token", _migrate_theme_surface_token),
+  StartupTask("remove legacy app engine homes", _remove_legacy_app_engine_homes),
   StartupTask(
     "initialize database",
     _initialize_database,

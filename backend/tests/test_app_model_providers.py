@@ -189,7 +189,7 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   })
   env = adapter.build_env({}, data_dir, "chat-test")
   # The engine holds only the relay token; the real key stays in the relay.
-  assert env[f"MOBIUS_MODEL_RELAY_TOKEN_{app_id}"] == providers.model_relay_token(provider_id)
+  assert env[f"MOBIUS_MODEL_RELAY_TOKEN_{app_id}"] == adapter.relay_token()
   assert "test-only-placeholder-key" not in "\n".join(env.values())
   assert "test-only-placeholder-key" not in "\n".join(adapter.codex_config_overrides())
   catalog = json.loads((Path(data_dir) / "cli-auth" / f"app-{app_id}" / "catalog.json").read_text())

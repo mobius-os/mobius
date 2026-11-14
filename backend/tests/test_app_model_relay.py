@@ -124,6 +124,110 @@ async def test_effort_lookup_for_a_removed_provider_says_it_is_not_installed():
     await providers.model_supports_effort("/data", "example/flash", provider_id="app-999999")
 
 
+def test_startup_deletes_engine_homes_left_in_app_storage(tmp_path):
+  old = tmp_path / "apps" / "4242" / "model-runtime"
+  (old / "claude" / "projects").mkdir(parents=True)
+  (old / "claude" / "settings.json").write_text('{"hooks": {}}')
+  outside = tmp_path / "outside"
+  outside.mkdir()
+  (tmp_path / "apps" / "4243").mkdir()
+  (tmp_path / "apps" / "4243" / "model-runtime").symlink_to(outside)
+  kept = tmp_path / "apps" / "4244" / "notes"
+  kept.mkdir(parents=True)
+
+  assert providers.remove_legacy_app_engine_homes(tmp_path) == ["4242", "4243"]
+  # Never moved: anything in app storage may be app-written engine config.
+  assert not old.exists() and not (tmp_path / "cli-auth" / "app-4242").exists()
+  assert not (tmp_path / "apps" / "4243" / "model-runtime").is_symlink()
+  assert outside.is_dir() and kept.is_dir()
+  assert providers.remove_legacy_app_engine_homes(tmp_path) == []
+
+
+def test_messages_provider_live_messages_steer_its_claude_turn(monkeypatch):
+  from app import chat_steering, claude_sdk_runner, codex_sdk_runner, file_cache
+  from app.runner_registry import RunnerKind, registry
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  kinds = []
+  monkeypatch.setattr(registry, "get_handle", lambda _chat, kind: kinds.append(kind))
+  assert chat_steering.has_live_steerable_turn("chat-1", "app-4242") is False
+  assert kinds == [RunnerKind.CLAUDE_SDK]
+
+  steered = []
+
+  async def claude_steer(*args):
+    steered.append("claude")
+    return True
+
+  async def codex_steer(*args):
+    steered.append("codex")
+    return True
+
+  monkeypatch.setattr(claude_sdk_runner, "steer_into_active_turn", claude_steer)
+  monkeypatch.setattr(codex_sdk_runner, "steer_into_active_turn", codex_steer)
+  import asyncio
+  assert asyncio.run(chat_steering.steer_into_active_turn("app-4242", "chat-1", "hi"))
+  assert steered == ["claude"]
+  assert file_cache.provider_tool_paths("app-4242") == file_cache.provider_tool_paths("claude")
+
+
+def test_messages_provider_reads_helper_transcripts_from_its_own_home(tmp_path):
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  env = adapter.build_env({}, str(tmp_path))
+  assert adapter.engine_home(str(tmp_path)) == Path(env["CLAUDE_CONFIG_DIR"])
+  responses = providers.AppModelProvider(4242, _manifest(protocol="responses")["model_provider"])
+  assert responses.engine_home(str(tmp_path)) == Path(responses.build_env({}, str(tmp_path))["CODEX_HOME"])
+
+
+def test_non_ascii_relay_token_is_unauthorized(client, monkeypatch):
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
+  monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
+  response = client.post(
+    "/api/model-relay/app-4242/v1/messages", content=b"{}",
+    headers={"x-api-key": "t\u00e9st".encode()},
+  )
+  assert response.status_code == 401
+
+
+def test_count_tokens_side_endpoint_reaches_the_provider(client, monkeypatch):
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
+  monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
+  monkeypatch.setattr(adapter, "read_relay_key", lambda _data_dir: providers.RelayKeyRead(REAL_KEY, None))
+  seen = []
+  monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(
+    lambda request: seen.append(request) or httpx.Response(200, json={"input_tokens": 3}),
+  )))
+  response = client.post(
+    "/api/model-relay/app-4242/v1/messages/count_tokens",
+    json={"model": "example/flash", "messages": [{"role": "user", "content": "hi"}]},
+    headers={"x-api-key": adapter.relay_token()},
+  )
+  assert response.status_code == 200 and response.json() == {"input_tokens": 3}
+  assert str(seen[0].url) == "https://models.example.com/v1/messages/count_tokens"
+  assert seen[0].headers["x-api-key"] == REAL_KEY
+
+
+def test_messages_models_may_declare_no_effort():
+  validate_manifest_contract(_manifest(models=[{"id": "example/flash", "label": "Flash", "effort_levels": []}]))
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(_manifest(protocol="responses", models=[
+      {"id": "example/flash", "label": "Flash", "effort_levels": []},
+    ]))
+
+
+@pytest.mark.asyncio
+async def test_messages_model_without_effort_drops_the_owner_default(monkeypatch):
+  adapter = providers.AppModelProvider(4242, _manifest(models=[
+    {"id": "example/flash", "label": "Flash", "effort_levels": []},
+  ])["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  assert await providers.model_supports_effort("/data", "example/flash", provider_id="app-4242") is False
+
+
 def test_normalize_folds_system_turns_into_leading_tool_results():
   tool_use = {"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}
   result = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
@@ -190,7 +294,7 @@ def test_relay_checks_token_then_forwards_normalized_body_with_real_key(
   ]}
   try:
     providers.sync_app_model_providers(data_dir, force=True)
-    token = {"x-api-key": providers.model_relay_token(provider_id)}
+    token = {"x-api-key": providers.PROVIDERS[provider_id].relay_token()}
 
     assert client.post(path, json=body, headers={"x-api-key": "wrong"}).status_code == 401
     missing_key = client.post(path, json=body, headers=token)
@@ -473,10 +577,10 @@ def test_relay_routes_each_protocol_only_to_its_own_providers(client, db, monkey
 
   monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
   monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
-  bearer = {"authorization": f"Bearer {providers.model_relay_token(provider_id)}"}
   body = {"model": "example/responses-only", "input": [{"type": "reasoning", "summary": [], "content": None}]}
   try:
     providers.sync_app_model_providers(data_dir, force=True)
+    bearer = {"authorization": f"Bearer {providers.PROVIDERS[provider_id].relay_token()}"}
 
     wrong_protocol = client.post(f"/api/model-relay/{provider_id}/v1/messages", json=body, headers=bearer)
     assert wrong_protocol.status_code == 404
@@ -975,9 +1079,14 @@ def test_responses_effort_protocol_preserves_its_complete_vocabulary(transport):
   validate_manifest_contract(manifest)
 
 
-@pytest.mark.parametrize("protocol", ["responses", "anthropic_messages"])
-@pytest.mark.parametrize("efforts", [[], ["high", "high"], "high", [42]])
-def test_effort_protocol_keeps_nonempty_unique_string_list_guard(protocol, efforts):
+@pytest.mark.parametrize("protocol,efforts", [
+  (protocol, efforts)
+  for protocol in ("responses", "anthropic_messages")
+  for efforts in ([], ["high", "high"], "high", [42])
+  # On Messages an empty list declares a model without effort.
+  if not (protocol == "anthropic_messages" and efforts == [])
+])
+def test_effort_protocol_keeps_unique_string_list_guard(protocol, efforts):
   manifest = _manifest(protocol=protocol, models=[{
     "id": "example/flash", "label": "Flash", "effort_levels": efforts,
   }])

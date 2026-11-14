@@ -65,12 +65,17 @@ def read_helper_conversation(
   helper = _recorded_helper(db, chat_id, task_id)
   if helper is None:
     return None
-  if helper.provider == "claude":
+  # By engine, in the provider's own home: app providers run on either engine.
+  from app.providers import PROVIDERS, provider_runtime_kind
+  kind = provider_runtime_kind(helper.provider)
+  provider = PROVIDERS.get(helper.provider)
+  home = provider.engine_home(get_settings().data_dir) if provider is not None else None
+  if kind == "claude_sdk" and home is not None:
     path = _claude_sidechain_path(
-      helper.provider_session_id, helper.provider_agent_id,
+      helper.provider_session_id, helper.provider_agent_id, home,
     )
-  elif helper.provider == "codex":
-    path = _codex_rollout_path(helper.provider_agent_id)
+  elif kind == "codex_sdk" and home is not None:
+    path = _codex_rollout_path(helper.provider_agent_id, home)
   else:
     path = None
   if path is None:
@@ -79,7 +84,7 @@ def read_helper_conversation(
     records, skipped = _tail_records(path)
   except OSError:
     return None
-  if helper.provider == "claude":
+  if kind == "claude_sdk":
     blocks = _claude_blocks(records)
   else:
     blocks = _codex_blocks(records, from_start=not skipped)
@@ -185,20 +190,22 @@ def _provider_home(name: str) -> Path:
   return Path(get_settings().data_dir) / "cli-auth" / name
 
 
-def _claude_sidechain_path(session_id: str | None, agent_id: str) -> Path | None:
+def _claude_sidechain_path(
+  session_id: str | None, agent_id: str, home: Path | None = None,
+) -> Path | None:
   """Claude writes ``projects/<cwd>/<session>/subagents/agent-<id>.jsonl``."""
   if not session_id or not _SAFE_ID.match(session_id) or not _SAFE_ID.match(agent_id):
     return None
   matches = glob.glob(str(
-    _provider_home("claude") / "projects" / "*" / session_id / "subagents"
+    (home or _provider_home("claude")) / "projects" / "*" / session_id / "subagents"
     / f"agent-{agent_id}.jsonl"
   ))
   return Path(matches[0]) if matches else None
 
 
-def _codex_rollout_path(thread_id: str) -> Path | None:
+def _codex_rollout_path(thread_id: str, home: Path | None = None) -> Path | None:
   """The child thread's rollout, live or archived."""
-  matches = rollout_paths(_provider_home("codex"), thread_id, archived=True)
+  matches = rollout_paths(home or _provider_home("codex"), thread_id, archived=True)
   return matches[0] if matches else None
 
 

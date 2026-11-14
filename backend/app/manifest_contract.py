@@ -714,9 +714,10 @@ def validate_manifest_contract(manifest) -> None:
     # A declared effort must survive every launch path on the protocol's
     # engine: Responses-only values cannot be sent to Claude or dropped by
     # its helper/compaction dispatchers.
+    messages = model_provider.get("protocol") == "anthropic_messages"
     allowed_efforts = (
       {"low", "medium", "high", "max"}
-      if model_provider.get("protocol") == "anthropic_messages"
+      if messages
       else {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
     )
     entries = model_provider["models"]
@@ -733,7 +734,9 @@ def validate_manifest_contract(manifest) -> None:
       if not isinstance(entry["label"], str) or not 1 <= len(entry["label"].strip()) <= 100:
         _fail("Manifest model labels must be 1–100 characters.")
       efforts = entry.get("effort_levels")
-      if efforts is not None and (not isinstance(efforts, list) or not efforts or len(efforts) > 8
+      # On the Claude engine an empty list means the model takes no effort,
+      # so the owner's default effort is not sent (Responses has `none`).
+      if efforts is not None and (not isinstance(efforts, list) or (not efforts and not messages) or len(efforts) > 8
           or not all(isinstance(value, str) and value in allowed_efforts for value in efforts)
           or len(set(efforts)) != len(efforts)):
         _fail("Manifest model effort_levels contains unsupported or duplicate values.")

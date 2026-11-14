@@ -745,6 +745,10 @@ class BaseProvider:
   # Provider-wide switch boundary; model catalogs can advertise narrower scales.
   switch_efforts: frozenset[str] = frozenset()
 
+  def engine_home(self, data_dir: str) -> Path:
+    """The engine's own home (Claude config dir or CODEX_HOME) for this provider."""
+    return Path(data_dir) / "cli-auth" / self.auth_dir
+
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
     return None
@@ -1390,7 +1394,7 @@ async def mobius_runtime_snapshot(
     )
 
 
-def model_relay_token(provider_id: str, consent_scope: str | None = None) -> str:
+def model_relay_token(provider_id: str, consent_scope: str = "") -> str:
   """Local credential the agent presents to the model relay for one provider.
 
   Derived from the server secret, so it needs no storage and survives restarts,
@@ -1400,8 +1404,7 @@ def model_relay_token(provider_id: str, consent_scope: str | None = None) -> str
   from app.config import get_settings
   return hmac.new(
     get_settings().secret_key.encode(),
-    f"mobius-model-relay:v1:{provider_id}:{consent_scope}".encode()
-    if consent_scope is not None else f"mobius-model-relay:v1:{provider_id}".encode(),
+    f"mobius-model-relay:v1:{provider_id}:{consent_scope}".encode(),
     hashlib.sha256,
   ).hexdigest()
 
@@ -1409,6 +1412,33 @@ def model_relay_token(provider_id: str, consent_scope: str | None = None) -> str
 class RelayKeyRead(NamedTuple):
   key: str | None
   unavailable: str | None
+
+
+def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
+  """An app model provider's engine home (Codex threads, Claude config).
+
+  Platform-owned, like the owner's engine homes: never under the app's own
+  storage, where the app could read transcripts or plant engine config
+  (Codex config.toml, Claude settings.json hooks).
+  """
+  return Path(data_dir) / "cli-auth" / f"app-{app_id}"
+
+
+def remove_legacy_app_engine_homes(data_dir: str | Path) -> list[str]:
+  """Delete engine homes left in app storage by older versions.
+
+  Their transcripts stay readable by the app until removed. They are not
+  moved: the app could have written engine config there, so nothing in them
+  is trusted. Chats on those providers start a new thread, reseeded from the
+  chat. Returns the removed app ids.
+  """
+  from app.storage_io import rmtree_strict
+  removed = []
+  for old in sorted((Path(data_dir) / "apps").glob("*/model-runtime")):
+    if old.parent.name.isdigit() and (old.is_symlink() or old.is_dir()):
+      rmtree_strict(old)
+      removed.append(old.parent.name)
+  return removed
 
 
 class AppModelProvider(BaseProvider):
@@ -1420,7 +1450,7 @@ class AppModelProvider(BaseProvider):
   and repairs request shapes compatible providers reject.
   """
 
-  def __init__(self, app_id: int, declaration: dict[str, Any], consent_scope: str | None = None):
+  def __init__(self, app_id: int, declaration: dict[str, Any], consent_scope: str = ""):
     self.app_id = app_id
     self.declaration = declaration
     # Bound to the acceptance observed by the registry. A stale provider must
@@ -1486,10 +1516,11 @@ class AppModelProvider(BaseProvider):
     return loopback_listener_url(f"/api/model-relay/app-{self.app_id}")
 
   def _runtime_home(self, data_dir: str) -> Path:
-    # Platform-owned, like the owner's engine homes: never under the app's
-    # own storage, where the app could read transcripts or plant engine
-    # config (Codex config.toml, Claude settings.json hooks).
-    return Path(data_dir) / "cli-auth" / self.auth_dir
+    return app_engine_home(data_dir, self.app_id)
+
+  def engine_home(self, data_dir: str) -> Path:
+    home = self._runtime_home(data_dir)
+    return home / "claude" if self.protocol == "anthropic_messages" else home
 
   @property
   def _relay_token_env(self) -> str:
@@ -1554,7 +1585,7 @@ class AppModelProvider(BaseProvider):
     """Point the Claude engine at the loopback relay with a relay-only token."""
     # Own config dir: sessions and settings never mix with the owner's Claude
     # sign-in, which must not be used for another company's models.
-    home = self._runtime_home(data_dir) / "claude"
+    home = self.engine_home(data_dir)
     home.mkdir(parents=True, exist_ok=True)
     # The same Möbius defaults as the owner's Claude home: Claude's own
     # transcript retention and no Claude co-author trailer on commits.
@@ -1652,7 +1683,7 @@ async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> 
       _apply_app_model_declarations(declarations)
 
 
-def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str | None]]:
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
   """``(app_id, declaration, relay scope)`` for each app whose consent is active.
 
   Loads only the contract and consent columns, never app source or icon blobs:
@@ -1675,7 +1706,7 @@ def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[
   ]
 
 
-def _read_app_model_declarations() -> list[tuple[Any, dict, str | None]] | None:
+def _read_app_model_declarations() -> list[tuple[Any, dict, str]] | None:
   """Accepted app model declarations as plain data; safe in a worker."""
   try:
     from app.database import SessionLocal
@@ -1686,10 +1717,8 @@ def _read_app_model_declarations() -> list[tuple[Any, dict, str | None]] | None:
     return None
 
 
-def _app_model_relay_scope(app) -> str | None:
-  """Bind Store credentials to both the acceptance and reviewed endpoint."""
-  if app.manifest_url is None:
-    return None  # Local apps retain their existing provider-id-only token.
+def _app_model_relay_scope(app) -> str:
+  """Bind relay credentials to both the acceptance and reviewed endpoint."""
   accepted = app.accepted_consent
   accepted_id = accepted.get("id") if isinstance(accepted, dict) else None
   declaration = app.capability_contract.get("model_provider")
@@ -1698,7 +1727,7 @@ def _app_model_relay_scope(app) -> str | None:
 
 
 def _app_model_declaration_usable(
-  app_id: int, declaration: dict, consent_scope: str | None,
+  app_id: int, declaration: dict, consent_scope: str,
 ) -> bool:
   """Fail closed for stale provider objects, consent changes, and read errors.
 
@@ -1715,7 +1744,7 @@ def _app_model_declaration_usable(
 
 
 def _apply_app_model_declarations(
-  declarations: list[tuple[Any, dict, str | None]] | None,
+  declarations: list[tuple[Any, dict, str]] | None,
 ) -> None:
   """Apply one completed load; a failed read keeps the current registry."""
   global _app_provider_sync_at

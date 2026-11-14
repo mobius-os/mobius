@@ -250,12 +250,19 @@ async def relay_messages(provider_id: str, request: Request):
   return await _relay(provider_id, request, "anthropic_messages")
 
 
+@router.post("/{provider_id}/v1/messages/count_tokens")
+async def relay_count_tokens(provider_id: str, request: Request):
+  # Claude Code sizes context with this side endpoint; a provider without it
+  # answers for itself.
+  return await _relay(provider_id, request, "anthropic_messages", "/count_tokens")
+
+
 @router.post("/{provider_id}/v1/responses")
 async def relay_responses(provider_id: str, request: Request):
   return await _relay(provider_id, request, "responses")
 
 
-async def _relay(provider_id: str, request: Request, protocol_name: str):
+async def _relay(provider_id: str, request: Request, protocol_name: str, suffix: str = ""):
   from app.config import get_settings
   from app.providers import (
     AppModelProvider, PROVIDERS, refresh_app_model_providers,
@@ -269,7 +276,8 @@ async def _relay(provider_id: str, request: Request, protocol_name: str):
   provider = PROVIDERS.get(provider_id)
   if not isinstance(provider, AppModelProvider) or provider.protocol != protocol_name:
     return protocol.error(404, "not_found_error", "This model connection is not installed.")
-  if not hmac.compare_digest(_presented_token(request), provider.relay_token()):
+  # Bytes: a non-ASCII header is a wrong token, not a server error.
+  if not hmac.compare_digest(_presented_token(request).encode(), provider.relay_token().encode()):
     return protocol.error(401, "authentication_error", "Invalid model relay token.")
   credential = await anyio.to_thread.run_sync(provider.read_relay_key, data_dir)
   if credential.unavailable or credential.key is None:
@@ -287,7 +295,7 @@ async def _relay(provider_id: str, request: Request, protocol_name: str):
     body = repaired
     headers.pop("content-encoding", None)
   headers.update(protocol.key_headers(key))
-  url = f"{provider.declaration['base_url'].rstrip('/')}{protocol.upstream_path}"
+  url = f"{provider.declaration['base_url'].rstrip('/')}{protocol.upstream_path}{suffix}"
   if request.url.query:
     url = f"{url}?{request.url.query}"
   client = _client()

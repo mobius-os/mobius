@@ -29,7 +29,10 @@ An app-secret declaration names its wire protocol with optional `protocol`:
 Each provider's engine home (Codex threads, Claude config and transcripts)
 lives with the other engine homes under `cli-auth/app-<id>/`, outside the
 app's own storage, so the app cannot read its transcripts or plant engine
-configuration.
+configuration. Deleting the app deletes that home. Older versions kept it in
+the app's storage; startup deletes those copies rather than moving them,
+since the app could have written to them, so chats on those providers start
+a new engine thread reseeded from the chat.
 
 Both runtimes talk to the loopback model relay
 (`backend/app/routes/model_relay.py`), never to the provider. The agent
@@ -45,8 +48,8 @@ without proxy forwarding headers.
 The app owns its setup UI, connection instructions, and one encrypted app
 secret. The owner enters the key into the app's own browser UI (which writes
 `PUT /api/apps/{app_id}/secrets/{secret_name}`); it is not a manifest value and
-must not pass through a chat prompt. The core only checks whether the secret
-exists when displaying availability; only the relay decrypts it. The provider
+must not pass through a chat prompt. Availability checks only that the secret
+decrypts; only the relay uses the key, and it never leaves the server. The provider
 app's endpoint receives the conversation and tool requests, so installing and
 connecting one is a substantive trust and billing decision. No background
 provider is enabled automatically by adding an app. Runs record only the usage
