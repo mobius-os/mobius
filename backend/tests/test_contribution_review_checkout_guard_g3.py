@@ -245,26 +245,26 @@ def test_github_credentials_reach_only_network_git(tmp_path, monkeypatch):
     observed[argv[argv.index("-C") + 2]] = env
     return type("Result", (), {"returncode": 0, "stdout": ""})()
   monkeypatch.setattr(repairs, "_run_cmd", run)
-  monkeypatch.setattr(repairs, "_git_env", lambda _repo: {
-    "PATH": "/usr/bin", "GH_TOKEN": "server-secret", "GH_CONFIG_DIR": "/auth"})
+  token_bearing_git(tmp_path, monkeypatch)
   for command in ("status", "diff-tree", "fetch", "push"):
     repairs._git(tmp_path, command)
   for local in ("status", "diff-tree"):
     assert "GH_TOKEN" not in observed[local] and "GH_CONFIG_DIR" not in observed[local]
     assert observed[local]["GIT_CONFIG_KEY_0"] == "core.fsmonitor"
   for network in ("fetch", "push"):
-    assert observed[network]["GH_TOKEN"] == "server-secret"
-    assert observed[network]["GH_CONFIG_DIR"] == "/auth"
+    assert observed[network]["GH_TOKEN"] == "probe-token"
+    assert observed[network]["GH_CONFIG_DIR"] == str(tmp_path / "gh-auth")
   assert "GH_TOKEN" not in repairs._repair_git_env(tmp_path)
 
 
 def token_bearing_git(tmp_path, monkeypatch):
   """Server Git env with a probe token, never the instance's real credentials."""
+  from app import github_auth
   auth = tmp_path / "gh-auth"
-  auth.mkdir()
-  monkeypatch.setattr(repairs, "_git_env", lambda _repo: {
-    "PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "GH_TOKEN": "probe-token",
-    "GH_CONFIG_DIR": str(auth)})
+  auth.mkdir(exist_ok=True)
+  monkeypatch.setenv("HOME", str(tmp_path))
+  monkeypatch.setattr(github_auth, "get_token", lambda: "probe-token")
+  monkeypatch.setattr(github_auth, "GH_AUTH_DIR", auth)
 
 
 def test_push_never_runs_a_hook_planted_after_the_checkout_proof(owned, monkeypatch):
@@ -294,10 +294,11 @@ def test_network_git_never_consults_a_checkout_credential_helper(owned, monkeypa
   monkeypatch.setattr(repairs, "_run_cmd", capture)
   for command in ("fetch", "push"):
     repairs._git(checkout, command)
-    # Ask Git which helpers it consults under exactly this argv prefix and env.
+    # Ask Git which helpers it consults under exactly this argv and env.
     prefix = observed["argv"][:observed["argv"].index("-C") + 2]
     subprocess.run([*prefix, "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
                    env=observed["env"], text=True, capture_output=True, timeout=30)
     assert not marker.exists(), command
-  assert "credential.helper=" in prefix
-  assert prefix.index("credential.helper=") < prefix.index("credential.helper=!gh auth git-credential")
+  helpers = subprocess.run([*prefix, "config", "--get-all", "credential.helper"],
+                           env=observed["env"], text=True, capture_output=True).stdout
+  assert helpers.splitlines()[-2:] == ["", "!gh auth git-credential"]

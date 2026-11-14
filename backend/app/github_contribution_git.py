@@ -83,27 +83,64 @@ def _validate_branch(value: object) -> str:
   return branch
 
 
-def _git_env(repo: Path) -> dict:
-  env = dict(os.environ)
-  for var in (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
-  ):
-    env.pop(var, None)
-  env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
-  env["GIT_TERMINAL_PROMPT"] = "0"
-  # This environment carries the GitHub token. An askpass program, inherited
-  # or named by the checkout's own core.askPass, must never run with it.
-  env["GIT_ASKPASS"] = "/bin/false"
-  env["SSH_ASKPASS"] = "/bin/false"
-  env["GH_PROMPT_DISABLED"] = "1"
-  token = github_auth.get_token()
-  if token:
-    env["GH_TOKEN"] = token
-  if github_auth.GH_AUTH_DIR.exists():
-    env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
+# Inherited variables that would redirect Git to other objects, refs,
+# programs or identities than the checkout's own.
+_INHERITED_GIT_ENV = frozenset({
+  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE",
+  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
+  "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+  "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
+  "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE",
+})
+_GITHUB_AUTH_ENV = frozenset({
+  "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
+  "GH_CONFIG_DIR",
+})
+# Command-scope config, exactly like ``-c``: it outranks the checkout's own
+# config and reaches nested repositories, so no program the checkout names
+# (fsmonitor, hooks, ssh, credential helper) runs. The empty helper drops
+# every helper configured so far.
+_INERT_CONFIG = (
+  ("core.fsmonitor", "false"), ("submodule.recurse", "false"),
+  ("core.hooksPath", "/dev/null"), ("core.sshCommand", "false"),
+  ("credential.helper", ""),
+)
+# The one credential source, for commands that talk to GitHub.
+_GITHUB_CREDENTIAL_HELPER = ("credential.helper", "!gh auth git-credential")
+_NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
+
+
+def _git_env(repo: Path, *, network: bool = False) -> dict:
+  """The one environment for every contribution Git and gh command.
+
+  Global and system config are ignored, the checkout's config cannot start a
+  program, and nothing prompts. GitHub credentials are present only for
+  ``network`` commands (fetch, push, ls-remote and gh): a local command never
+  carries them, so a program it still runs (a filter, say) cannot see them.
+  """
+  env = {
+    key: value for key, value in os.environ.items()
+    if key not in _INHERITED_GIT_ENV and key not in _GITHUB_AUTH_ENV
+    and not key.startswith("GIT_CONFIG_")
+  }
+  config = _INERT_CONFIG + ((_GITHUB_CREDENTIAL_HELPER,) if network else ())
+  env.update(
+    GIT_CEILING_DIRECTORIES=str(repo.resolve().parent),
+    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+    GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never",
+    GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
+    GIT_PAGER="cat", GIT_EDITOR=":", GH_PROMPT_DISABLED="1",
+    GIT_CONFIG_COUNT=str(len(config)),
+  )
+  for index, (name, value) in enumerate(config):
+    env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
+  if network:
+    token = github_auth.get_token()
+    if token:
+      env["GH_TOKEN"] = token
+    if github_auth.GH_AUTH_DIR.exists():
+      env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
   return env
 
 
@@ -142,12 +179,14 @@ def _git(
     cwd=repo,
     check=check,
     timeout=timeout,
+    env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
   )
 
 
 def _gh(repo: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
-  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text)
+  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text,
+                  env=_git_env(repo, network=True))
 
 
 def _assert_clean_worktree(repo: Path) -> None:

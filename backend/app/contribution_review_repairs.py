@@ -30,53 +30,20 @@ from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.github_contribution_contract import COAUTHOR_TRAILER, coauthor_trailer_required
-from app.github_contribution_git import _git_env, _run_cmd, _validate_branch, _validate_repo_slug
-
-
-_GITHUB_AUTH_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
-                    "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR")
-# Command-scope config, exactly like ``-c``. Git passes it on to any nested
-# repository, so a submodule's own config cannot start an fsmonitor either.
-# No hook runs either, including a pre-push hook while the token is present.
-_INERT_CONFIG = (("core.fsmonitor", "false"), ("submodule.recurse", "false"),
-                 ("core.hooksPath", "/dev/null"))
+from app.github_contribution_git import (
+  _NETWORK_GIT, _git_env, _run_cmd, _validate_branch, _validate_repo_slug,
+)
 
 
 def _repair_git_env(repo: Path, *, network: bool = False) -> dict[str, str]:
-  """One sanitized environment for every server proof in a repair checkout.
-
-  GitHub credentials are present only for ``network`` commands (fetch and
-  push). Local reads never carry them, so a program a checkout manages to
-  start cannot see the token.
-  """
-  env = _git_env(repo)
-  auth = {key: env.pop(key) for key in _GITHUB_AUTH_ENV if key in env}
-  for key in tuple(env):
-    if key.startswith("GIT_CONFIG_") or key in {
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
-        "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
-        "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE"}:
-      env.pop(key, None)
-  env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
-             GIT_OPTIONAL_LOCKS="0",
-             GIT_CONFIG_COUNT=str(len(_INERT_CONFIG)))
-  for index, (name, value) in enumerate(_INERT_CONFIG):
-    env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
-  if network:
-    env.update(auth)
-  return env
+  """The contribution Git environment, without optional locks for proofs."""
+  return {**_git_env(repo, network=network), "GIT_OPTIONAL_LOCKS": "0"}
 
 
 def _git(repo: Path, *args: str, check: bool = True):
   """Run server Git without inherited config, object redirects or prompts."""
-  network = args[:1] in {("fetch",), ("push",)}
-  env = _repair_git_env(repo, network=network)
-  # Global config is ignored, including the owner's configured credential
-  # helper. Supply the one fixed GitHub helper for network operations only.
-  # The empty value first resets the helper list, so a helper in the
-  # checkout's local config is never consulted with the token present.
-  auth = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"] if network else []
-  return _run_cmd(["git", *auth, "-C", str(repo), *args], cwd=repo, check=check, env=env)
+  env = _repair_git_env(repo, network=args[:1] in _NETWORK_GIT)
+  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check, env=env)
 
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
