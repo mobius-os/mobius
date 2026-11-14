@@ -57,6 +57,31 @@ for (const touch of [false, true]) {
         { timeout: 7000 }).toBe('0')
     })
 
+    if (touch) test('mobile pills fit short labels and constrain long labels', async ({ page }) => {
+      const f = await mountReplyFooter(page, BASE, { sources: [
+        { url: 'https://example.com/docs', title: 'Docs' },
+        { url: 'https://example.org/guide', title: 'Guide' },
+        { url: 'https://example.net/long', title: 'A long reference title that must not stretch the phone layout' },
+      ] })
+      const reply = f.replies.last()
+      await reply.locator('.chat__text--assistant').first().click()
+      await reply.getByRole('button', { name: 'References 3' }).click()
+      const pills = reply.locator('.chat__source-chip')
+      await expect(pills).toHaveCount(3)
+      const boxes = await pills.evaluateAll(links => links.map(link => {
+        const rect = link.getBoundingClientRect()
+        return { width: rect.width, right: rect.right }
+      }))
+      expect(boxes[0].width).toBeLessThan(150)
+      expect(boxes[1].width).toBeLessThan(150)
+      const body = await reply.locator('.chat__sources-body').boundingBox()
+      expect(body.x + body.width).toBeLessThanOrEqual(320)
+      for (const box of boxes) {
+        expect(box.width).toBeLessThanOrEqual(220)
+        expect(box.right).toBeLessThanOrEqual(320)
+      }
+    })
+
     test('a historical answer keeps References in its own shared footer', async ({ page }) => {
       const f = await mountReplyFooter(page, BASE, { earlierSources: sources })
       const older = f.replies.first()

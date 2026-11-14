@@ -510,7 +510,8 @@
 }
 .chat__msg-meta--start > .chat__sources { display: contents; }
 .chat__msg-meta--start .chat__sources-toggle { margin-left: 6px; justify-self: start; }
-.chat__msg-meta--start .chat__sources-body { grid-column: 1 / -1; }
+/* Expanded link titles must not contribute to the action row's track sizing. */
+.chat__msg-meta--start .chat__sources-body { grid-column: 1 / -1; contain: inline-size; }
 .chat__msg-meta--start:has(> .chat__sources--open) {
   opacity: 1;
   visibility: inherit;
@@ -1868,8 +1869,11 @@
   grid-column: 1 / -1;
 }
 
-@media (max-width: 340px) {
-  .chat__sources-list { grid-template-columns: minmax(0, 1fr); }
+/* On phones, reference links fit their labels instead of filling a grid cell. */
+@media (max-width: 600px) {
+  .chat__sources-list { display: flex; flex-wrap: wrap; }
+  .chat__source-item--web { width: auto; max-width: min(100%, 220px); }
+  .chat__source-item--web .chat__source-chip { width: auto; max-width: 100%; }
 }
 
 @media (pointer: coarse) {
