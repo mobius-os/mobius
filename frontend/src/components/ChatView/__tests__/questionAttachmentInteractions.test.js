@@ -54,6 +54,35 @@ const questions = [
   { question: 'Second?', multiSelect: true, options: [{ label: 'B' }] },
 ]
 
+test('Stop keeps a live card\'s hint, paperclip, and Submit in place, inert', () => {
+  const props = { chatId: 'stop-chat', questionId: 'stop-card', questions, onAnswer: () => true }
+  const controls = tree => elements(tree)
+    .map(node => node.props?.className?.split?.(' ')[0])
+    .filter(name => ['qcard__hint', 'qcard__attach', 'qcard__submit'].includes(name))
+  const card = renderHook(QuestionCard, props)
+  try {
+    const live = controls(card.result.current)
+    assert.deepEqual(live, ['qcard__hint', 'qcard__attach', 'qcard__hint', 'qcard__attach', 'qcard__submit'])
+    // Stop retires answerability in place: the same rows stay laid out so the
+    // card, and a bottom-anchored transcript, does not move.
+    card.rerender({ ...props, onAnswer: undefined, disabled: true })
+    assert.deepEqual(controls(card.result.current), live)
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props.children, 'Submit')
+    assert.match(submit(card.result.current).props.className, /qcard__submit--incomplete/,
+      'an unanswered stopped card keeps its quiet outline instead of a dimmed primary')
+    for (const clip of elements(card.result.current).filter(node => node.props?.className === 'qcard__attach')) {
+      assert.equal(clip.props.disabled, true)
+    }
+  } finally { card.unmount() }
+
+  // A card that was never answerable in this mount is history: it stays compact.
+  const history = renderHook(QuestionCard, { ...props, questionId: 'history-card', onAnswer: undefined, disabled: true })
+  try {
+    assert.deepEqual(controls(history.result.current), [])
+  } finally { history.unmount() }
+})
+
 test('pasting into question two keeps the file with that answer, upload gates submit, and submission locks all attachment edits', async () => {
   const originalFetch = globalThis.fetch
   let finishUpload
