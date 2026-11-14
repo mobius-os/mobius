@@ -359,8 +359,12 @@ function MsgContentInner({
     )
     // A live turn keeps stream order; a settled reply folds its routine saves
     // into its earlier activity line (joinRoutineToActivity).
+    // Folding paged app receipts removes separators between compact runs.
+    // Merge only afterward so newly adjacent work shares one disclosure.
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
+      foldAppActivityOperations(
+        isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
+      ),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
     // checks below. msg.blocks.length would be wrong here: a skipped twin means
@@ -736,7 +740,7 @@ function MsgContentInner({
     // stretch, after the pages of one app operation become one row. Live items
     // arrive here after conversion to the same block shape, so the transcript
     // doesn't reshuffle on promote.
-    const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
+    const nodes = groupActivityRuns(finalEntries)
     // A picture follows the step that made it. If that step is not on screen
     // (an older or reduced transcript), it joins the files after the answer.
     const shownSteps = new Set(nodes.flatMap(node => (
