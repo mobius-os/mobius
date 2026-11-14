@@ -103,7 +103,11 @@ test.describe('reply footer', () => {
         const copy = reply.querySelector('.chat__msg-meta--start .chat__msg-copy').getBoundingClientRect()
         const time = reply.querySelector('.chat__msg-meta--start .chat__ts').getBoundingClientRect()
         const paragraph = reply.querySelector('.md-paragraph')
-        const textLeft = paragraph.getBoundingClientRect().left + parseFloat(getComputedStyle(paragraph).paddingLeft)
+        // Range geometry and the footer rect share viewport coordinates,
+        // including the shell's desktop zoom (computed padding does not).
+        const text = document.createRange()
+        text.selectNodeContents(paragraph)
+        const textLeft = text.getBoundingClientRect().left
         const prose = reply.querySelector('.chat__reply-rows').getBoundingClientRect()
         const parent = reply.getBoundingClientRect()
         const foot = reply.closest('[data-chat-surface]').querySelector('.chat__foot').getBoundingClientRect()
