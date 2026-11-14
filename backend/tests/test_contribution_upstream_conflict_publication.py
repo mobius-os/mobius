@@ -483,7 +483,7 @@ def test_send_opens_the_exact_reviewed_pr_over_an_upstream_overlap(client, owner
   # The reviewed diff was proven to be what GitHub shows, and published as-is.
   assert ("merge-base", "--all", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
   assert ("push", "--force-with-lease=refs/heads/fix/demo-polish:", "fork",
-          "HEAD:refs/heads/fix/demo-polish") in git_calls
+          f"{HEAD}:refs/heads/fix/demo-polish") in git_calls
   assert not any(call[:1] in {("rebase",), ("merge",), ("reset",)} for call in git_calls)
   create = next(call for call in gh_calls if call[:2] == ("pr", "create"))
   assert create[-2:] == ("--base", "main") and "--draft" not in create

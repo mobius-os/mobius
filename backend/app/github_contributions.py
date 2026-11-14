@@ -3629,20 +3629,20 @@ def _push_branch(
   repo: Path,
   remote: str,
   branch: str,
-  source: str = "HEAD",
+  commit: str,
   expected_remote_sha: str | None = None,
 ) -> str | None:
-  """Push once behind the exact remote tip observed before the intent.
+  """Push the exact reviewed commit behind the remote tip observed before the intent.
 
   A transport failure is ambiguous: retrying before an authoritative read can
   turn an accepted first request into a misleading lease rejection. The
-  caller probes GitHub and resumes from its signed intent instead.
+  caller probes GitHub and resumes from its signed intent instead. A refusing
+  pre-push gate raises ``PushGateRefused``: nothing left the instance.
   """
   if expected_remote_sha is not None:
     _git_ops._canonical_reviewed_oid(expected_remote_sha, "remote branch head")
-  lease = f"--force-with-lease=refs/heads/{branch}:{expected_remote_sha or ''}"
-  proc = _git_ops._git(
-    repo, "push", lease, remote, f"{source}:refs/heads/{branch}", check=False,
+  proc = _git_ops.push(
+    repo, remote, commit, f"refs/heads/{branch}", lease=expected_remote_sha or "",
   )
   if proc.returncode == 0:
     return None
@@ -3652,11 +3652,11 @@ def _push_branch(
 def _push_topic_branch(
   repo: Path,
   branch: str,
-  source: str = "HEAD",
+  commit: str,
   expected_remote_sha: str | None = None,
 ) -> str | None:
   """Push a reviewed topic to the owner's configured fork remote."""
-  return _push_branch(repo, "fork", branch, source, expected_remote_sha)
+  return _push_branch(repo, "fork", branch, commit, expected_remote_sha)
 
 
 def _github_remote_slug(remote_url: str) -> str | None:
@@ -4375,7 +4375,6 @@ def _submit_prepared_pr(
           record_patch=record_patch,
         )
 
-    push_source = "HEAD"
     push_source_sha = str(
       record_patch.get("head_sha") or expected_head
     ).strip().lower()
@@ -4492,6 +4491,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
+        gate_refused = False
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4511,8 +4511,10 @@ def _submit_prepared_pr(
             last_push_error = None
           else:
             last_push_error = _push_branch(
-              repo, push_remote, branch, push_source, remote_before_push,
+              repo, push_remote, branch, push_source_sha, remote_before_push,
             )
+        except _git_ops.PushGateRefused as exc:
+          last_push_error, gate_refused = exc.detail or exc.message, True
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4537,7 +4539,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or _is_transient_push_error(last_push_error)
+            or (not gate_refused and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4587,7 +4589,6 @@ def _submit_prepared_pr(
           record_patch=record_patch,
         )
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
-      push_source = "HEAD"
       if not public_branch_recovery:
         remote_before_push = expected_remote_tip(fork_slug)
         pending_patch = _git_ops._record_patch_with(record_patch, {
@@ -4605,6 +4606,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
+        gate_refused = False
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4624,8 +4626,10 @@ def _submit_prepared_pr(
             last_push_error = None
           else:
             last_push_error = _push_topic_branch(
-              repo, branch, push_source, remote_before_push,
+              repo, branch, push_source_sha, remote_before_push,
             )
+        except _git_ops.PushGateRefused as exc:
+          last_push_error, gate_refused = exc.detail or exc.message, True
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4650,7 +4654,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or _is_transient_push_error(last_push_error)
+            or (not gate_refused and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4698,8 +4702,6 @@ def _submit_prepared_pr(
       or push_source_sha
       or ""
     ).strip()
-    if not _GIT_SHA.match(pushed_sha):
-      pushed_sha = _git_ops._git(repo, "rev-parse", push_source).stdout.strip()
     if not _GIT_SHA.match(pushed_sha):
       raise ContributionSubmitError(
         "Could not verify the exact reviewed commit after pushing this branch.",
@@ -5122,13 +5124,9 @@ def _push_stack_tip_with_lease(
   saw_ambiguous_attempt = False
   for attempt in range(_PUSH_RETRIES):
     try:
-      proc = _git_ops._git(
-        repo,
-        "push",
-        f"--force-with-lease=refs/heads/{target_branch}:{expected_base}",
-        remote,
-        f"{landed_sha}:refs/heads/{target_branch}",
-        check=False,
+      proc = _git_ops.push(
+        repo, remote, landed_sha, f"refs/heads/{target_branch}",
+        lease=expected_base,
       )
     except (subprocess.TimeoutExpired, OSError) as exc:
       proc = None

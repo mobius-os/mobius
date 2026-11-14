@@ -31,7 +31,7 @@ from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.github_contribution_contract import COAUTHOR_TRAILER, coauthor_trailer_required
 from app.github_contribution_git import (
-  _NETWORK_GIT, _git_env, _run_cmd, _validate_branch, _validate_repo_slug,
+  _NETWORK_GIT, _git_env, _run_cmd, _scratch_home, _validate_branch, _validate_repo_slug,
 )
 
 
@@ -433,8 +433,8 @@ def validate_repair(gh, cwd: Path, row, target: dict, checkout: dict,
   path_diff = _git(path, "diff", "--name-only", "--no-renames", "-z",
                    f"{initial}..{head}", check=False)
   paths = {name for name in path_diff.stdout.split("\x00") if name} if path_diff.returncode == 0 else None
-  diff = app_git._canonical_diff(path, initial, head, read_only=True,
-                                 env=_repair_git_env(path))
+  with _scratch_home(_repair_git_env(path)) as env:
+    diff = app_git._canonical_diff(path, initial, head, read_only=True, env=env)
   if paths is None or diff is None or not diff:
     _fail("Git could not derive a nonempty repair diff.")
   base = _present_commit(path, base_sha) if base_sha is not None else None

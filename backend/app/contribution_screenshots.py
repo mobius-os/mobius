@@ -32,7 +32,7 @@ import httpx
 
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
-from app.github_contribution_git import _git, _git_env, _run_cmd
+from app.github_contribution_git import _git, _git_env, _run_cmd, push
 from app.manifest_identity import RAW_GITHUB_HOST
 from app.storage_io import atomic_write
 
@@ -386,10 +386,7 @@ def _publish(
     )
     if commit == tip:
       break
-    pushed = _git(
-      repo, "push", f"--force-with-lease=refs/heads/{ASSETS_BRANCH}:{tip or ''}",
-      remote, f"{commit}:refs/heads/{ASSETS_BRANCH}", check=False,
-    )
+    pushed = push(repo, remote, commit, f"refs/heads/{ASSETS_BRANCH}", lease=tip or "")
     if pushed.returncode == 0:
       break
     # Another Send moved the branch between our read and push: rebuild on it.

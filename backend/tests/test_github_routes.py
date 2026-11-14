@@ -6754,10 +6754,10 @@ def test_push_topic_branch_does_not_retry_deterministic_rejections(
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  error = _push_topic_branch(tmp_path, "fix/demo")
+  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
 
   assert "Protected branch" in error
-  assert len(calls) == 1
+  assert sum(call[:1] == ("push",) for call in calls) == 1
   assert sleeps == []
 
 
@@ -6778,10 +6778,10 @@ def test_rate_limited_transport_is_surfaced_instead_of_retried(
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  error = _push_topic_branch(tmp_path, "fix/demo")
+  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
 
   assert "429" in error
-  assert len(calls) == 1
+  assert sum(call[:1] == ("push",) for call in calls) == 1
   assert sleeps == []
 
 
@@ -6796,11 +6796,11 @@ def test_push_topic_branch_uses_the_exact_authoritative_remote_lease(
   old = "b" * 40
 
   assert github_contributions._push_topic_branch(
-    tmp_path, "fix/demo", "HEAD", old,
+    tmp_path, "fix/demo", "a" * 40, old,
   ) is None
-  assert calls == [(
+  assert [call for call in calls if call[:1] == ("push",)] == [(
     "push", f"--force-with-lease=refs/heads/fix/demo:{old}",
-    "fork", "HEAD:refs/heads/fix/demo",
+    "fork", f"{'a' * 40}:refs/heads/fix/demo",
   )]
 
 
@@ -6817,25 +6817,30 @@ def test_git_push_timeout_outlives_the_mandatory_pre_push_gate(
 
   def run(argv, **kwargs):
     calls.append((argv, kwargs))
-    if "--git-common-dir" in argv:
-      return _cp(f"{tmp_path}\n")
-    if "--verify" in argv:
-      return _cp("a" * 40 + "\n")
-    return _cp("")
+    return _cp(f"{tmp_path}\n" if "--git-common-dir" in argv else "")
+
+  waits = []
+  real_popen = subprocess.Popen
+
+  class Popen(real_popen):
+    def wait(self, timeout=None):
+      waits.append(timeout)
+      return super().wait(timeout)
 
   monkeypatch.setattr(contribution_git, "_run_cmd", run)
+  monkeypatch.setattr(contribution_git.subprocess, "Popen", Popen)
 
   contribution_git._git(tmp_path, "status", "--porcelain")
-  contribution_git._git(tmp_path, "push", "origin", "HEAD:refs/heads/demo")
+  contribution_git.push(tmp_path, "origin", "a" * 40, "refs/heads/demo")
 
   ordinary = calls[0][1]["timeout"]
-  gate = next(kwargs for argv, kwargs in calls if argv[0] == str(hook))
   push = calls[-1]
-  # The gate runs as its own local step, before and apart from the push.
-  assert push[0][3] == "push"
-  assert gate["timeout"] == contribution_git._PUSH_TIMEOUT > ordinary
-  assert gate["input_text"] == f"HEAD {'a' * 40} refs/heads/demo {'0' * 40}\n"
-  assert push[1]["timeout"] == ordinary == contribution_git._SUBMIT_TIMEOUT
+  # The gate runs as its own local step, before and apart from the push, and
+  # both keep the long deadline the gate needs.
+  assert push[0][3:] == ["push", "origin", f"{'a' * 40}:refs/heads/demo"]
+  assert waits[0] == contribution_git._PUSH_TIMEOUT > ordinary
+  assert push[1]["timeout"] == contribution_git._PUSH_TIMEOUT
+  assert ordinary == contribution_git._SUBMIT_TIMEOUT
 
 
 def test_push_topic_branch_surfaces_transient_result_for_authoritative_recovery(
@@ -6849,11 +6854,11 @@ def test_push_topic_branch_surfaces_transient_result_for_authoritative_recovery(
   sleeps = []
   monkeypatch.setattr(
     "app.github_contribution_git._git",
-    lambda _repo, *args, **kwargs: next(outcomes),
+    lambda _repo, *args, **kwargs: next(outcomes) if args[:1] == ("push",) else _cp(""),
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  assert "HTTP 503" in _push_topic_branch(tmp_path, "fix/demo")
+  assert "HTTP 503" in _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
   assert sleeps == []
 
 
@@ -7959,7 +7964,7 @@ def test_submit_contribution_keeps_accepted_ready_pr_on_label_transport_failure(
   assert create_call[-2:] == ("--base", "main")
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", "HEAD:refs/heads/fix/demo-polish",
+    "fork", f"{head}:refs/heads/fix/demo-polish",
   ) in git_calls
   assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
   # Exactly one pre-publication truth check (`--state all`), and no
@@ -8571,7 +8576,7 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
   assert body["record"]["plan"]["attribution_normalized_from"] == old_head
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", "HEAD:refs/heads/fix/demo-polish",
+    "fork", f"{new_head}:refs/heads/fix/demo-polish",
   ) in git_calls
   assert not github_routes.contribution_runtime.personal_attempt_path(
     app_id, record_id,
@@ -8907,7 +8912,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", "HEAD:refs/heads/fix/demo-polish",
+    "fork", f"{head}:refs/heads/fix/demo-polish",
   ) in git_calls
 
 
@@ -9600,7 +9605,7 @@ def test_direct_stack_layer_pushes_upstream_and_uses_reviewed_base(
   assert (
     "push", f"--force-with-lease=refs/heads/{branch}:",
     "https://github.com/mobius-os/app-demo.git",
-    f"HEAD:refs/heads/{branch}",
+    f"{head}:refs/heads/{branch}",
   ) in git_calls
   create = next(call for call in gh_calls if call[:2] == ("pr", "create"))
   assert create[create.index("-H") + 1] == branch
@@ -9730,7 +9735,7 @@ def test_push_permission_uses_same_repo_branch_without_fork(
   assert url.endswith("/pull/74")
   assert number == 74
   assert pushes == [
-    (f"https://github.com/{upstream_repo}.git", branch, "HEAD"),
+    (f"https://github.com/{upstream_repo}.git", branch, head),
   ]
   assert patch["head_repository"] == upstream_repo
   assert patch["last_submit_mode"] == "upstream-repo"
@@ -10009,7 +10014,7 @@ def test_existing_pr_update_uses_verified_fork_even_with_upstream_permission(
   assert url.endswith("/pull/58")
   assert number == 58
   assert fork_calls == [("mobius-os/app-demo", "octocat")]
-  assert pushes == [(branch, "HEAD")]
+  assert pushes == [(branch, head)]
   assert confirmations == [
     (
       "mobius-os/app-demo", 58, "octocat/app-demo", branch, head, "main",
@@ -10050,7 +10055,7 @@ def test_push_pending_receipt_recovers_accepted_push_after_crash(
 
   def push(_repo, pushed_branch, source, expected_remote_sha):
     assert pushed_branch == branch
-    assert source == "HEAD"
+    assert source == head
     assert expected_remote_sha is None
     pushes.append(head)
     remote["published"] = True
@@ -10407,7 +10412,7 @@ def test_definite_pr_create_rejection_keeps_branch_retryable(
 
   assert url.endswith("/pull/92")
   assert number == 92
-  assert pushes == [(branch, "HEAD")]
+  assert pushes == [(branch, head)]
   assert len(creates) == 2
   assert head == branch_patch["last_submit_push_sha"]
 
@@ -10455,6 +10460,60 @@ def test_definite_push_rejection_rearms_signed_attempt(
   assert events[0][1]["branch"] == branch
   assert events[0][2]["last_submit_push_sha"] == head
   assert events[1][1]["action"] == "push_rejected"
+  assert "last_submit_stage" not in events[1][2]
+
+
+def test_a_refusing_pre_push_gate_is_a_rejection_never_ambiguous(
+  tmp_path, monkeypatch,
+):
+  """The gate ran locally, so even transport words in its transcript prove nothing left."""
+  record, diff_path, branch, head = _existing_fork_submission(
+    tmp_path, monkeypatch,
+  )
+  record["plan"]["action"] = "pr"
+  events = []
+
+  def refuse(*_a, **_k):
+    raise github_contributions._git_ops.PushGateRefused(
+      "fatal: unable to access: HTTP 503\n"
+      "[pre-push] verdict=blocked cause=checks checks=frontend-unit\n"
+    )
+  monkeypatch.setattr(
+    github_contributions,
+    "_authoritative_public_reconciliation",
+    lambda *_a, **_k: None,
+  )
+  monkeypatch.setattr(
+    github_contributions, "_existing_branch_pr", lambda *_a, **_k: None,
+  )
+  monkeypatch.setattr(
+    github_contributions,
+    "_ensure_owner_fork_remote",
+    lambda *_a, **_k: "octocat/app-demo",
+  )
+  monkeypatch.setattr(
+    github_contributions,
+    "_push_topic_branch",
+    refuse,
+  )
+
+  with pytest.raises(ContributionSubmitError) as caught:
+    github_contributions._submit_prepared_pr(
+      record,
+      diff_path,
+      attempt_event=lambda phase, request, patch: events.append(
+        (phase, request, dict(patch or {}))
+      ),
+    )
+
+  assert [phase for phase, _request, _patch in events] == [
+    "push_pending", "armed",
+  ]
+  assert events[0][1]["branch"] == branch
+  assert events[0][2]["last_submit_push_sha"] == head
+  assert events[1][1]["action"] == "push_rejected"
+  assert caught.value.code != "push_ambiguous"
+  assert "frontend-unit" in caught.value.message
   assert "last_submit_stage" not in events[1][2]
 
 
@@ -10871,7 +10930,7 @@ def test_existing_pr_update_uses_its_verified_fork_destination(
   assert url.endswith("/pull/58")
   assert number == 58
   assert fork_calls == [("mobius-os/app-demo", "octocat")]
-  assert pushes == [(branch, "HEAD")]
+  assert pushes == [(branch, head)]
   assert confirmations == [
     (
       "mobius-os/app-demo", 58, "octocat/app-demo", branch, head, "release",
@@ -11508,7 +11567,7 @@ def test_stack_tip_push_uses_exact_base_lease(monkeypatch, tmp_path):
     expected_base="b" * 40,
     landed_sha="c" * 40,
   )
-  assert calls == [(
+  assert [call for call in calls if call[:1] == ("push",)] == [(
     "push",
     f"--force-with-lease=refs/heads/main:{'b' * 40}",
     "https://github.com/mobius-os/app-demo.git",
@@ -11541,7 +11600,7 @@ def test_stack_tip_push_reconciles_a_lost_success_response(monkeypatch, tmp_path
     landed_sha=landed_sha,
   )
 
-  assert len(git_calls) == 1
+  assert sum(call[:1] == ("push",) for call in git_calls) == 1
   assert gh_calls == [(
     "api", "repos/mobius-os/app-demo/git/ref/heads/main",
     "--jq", ".object.sha",

@@ -6,11 +6,15 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import quote
 
 from app import app_git, github_auth
@@ -109,15 +113,22 @@ _INERT_CONFIG = (
 # The one credential source, for commands that talk to GitHub.
 _GITHUB_CREDENTIAL_HELPER = ("credential.helper", "!gh auth git-credential")
 _NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
+# Contribution remotes are GitHub over https. Local paths, ssh and ext:: are
+# refused: their transports run programs the checkout's config can name.
+_ALLOWED_PROTOCOLS = "https"
 
 
 def _git_env(repo: Path, *, network: bool = False) -> dict:
   """The one environment for every contribution Git and gh command.
 
-  Global and system config are ignored, the checkout's config cannot start a
-  program, and nothing prompts. GitHub credentials are present only for
-  ``network`` commands (fetch, push, ls-remote and gh): a local command never
-  carries them, so a program it still runs (a filter, say) cannot see them.
+  Global and system config are ignored, nothing prompts, only https transport
+  is allowed, and the programs a checkout's config can name (fsmonitor, hooks,
+  credential helper, askpass, ssh, pager, editor) are inert. GitHub
+  credentials are present only for ``network`` commands (fetch, push,
+  ls-remote and gh); a local command never carries them. The checkout's
+  config still shapes https transport (proxy and TLS settings among them),
+  and a local command can still run a program it names, such as a filter,
+  without credentials. ``_run_cmd`` also gives every command an empty home.
   """
   env = {
     key: value for key, value in os.environ.items()
@@ -131,7 +142,7 @@ def _git_env(repo: Path, *, network: bool = False) -> dict:
     GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never",
     GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
     GIT_PAGER="cat", GIT_EDITOR=":", GH_PROMPT_DISABLED="1",
-    GIT_CONFIG_COUNT=str(len(config)),
+    GIT_ALLOW_PROTOCOL=_ALLOWED_PROTOCOLS, GIT_CONFIG_COUNT=str(len(config)),
   )
   for index, (name, value) in enumerate(config):
     env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
@@ -144,6 +155,20 @@ def _git_env(repo: Path, *, network: bool = False) -> dict:
   return env
 
 
+@contextmanager
+def _scratch_home(env: dict) -> Iterator[dict]:
+  """``env`` with a fresh, empty home, removed afterwards.
+
+  The service account's home links gh's token store, so a program a command
+  starts must not find it there.
+  """
+  home = tempfile.mkdtemp(prefix="mobius-git-home-")
+  try:
+    yield {**env, "HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+  finally:
+    shutil.rmtree(home, ignore_errors=True)
+
+
 def _run_cmd(
   argv: list[str], *,
   cwd: Path,
@@ -152,16 +177,17 @@ def _run_cmd(
   env: dict | None = None,
   input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
-  proc = subprocess.run(
-    argv,
-    cwd=str(cwd),
-    capture_output=True,
-    text=True,
-    input=input_text,
-    timeout=timeout,
-    check=False,
-    env=env or _git_env(cwd),
-  )
+  with _scratch_home(env or _git_env(cwd)) as run_env:
+    proc = subprocess.run(
+      argv,
+      cwd=str(cwd),
+      capture_output=True,
+      text=True,
+      input=input_text,
+      timeout=timeout,
+      check=False,
+      env=run_env,
+    )
   if check and proc.returncode != 0:
     detail = (proc.stderr or proc.stdout or "command failed").strip()
     raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
@@ -173,56 +199,91 @@ def _git(
   *args: str,
   check: bool = True,
 ) -> subprocess.CompletedProcess:
-  if args[:1] == ("push",):
-    gate = _pre_push_gate(repo, args[1:], check=check)
-    if gate is not None and gate.returncode != 0:
-      return gate
+  timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
-    timeout=_SUBMIT_TIMEOUT,
+    timeout=timeout,
     env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
   )
 
 
-def _pre_push_gate(
-  repo: Path, push_args: tuple[str, ...], *, check: bool,
-) -> subprocess.CompletedProcess | None:
-  """Run the repository's pre-push hook as its own step before a push.
+class PushGateRefused(ContributionSubmitError):
+  """The repository's pre-push gate refused or did not finish; nothing was pushed."""
 
-  Git would run it inside the push, where the token is present, and hooks are
-  inert there. The hook runs here instead, in the credential-free local
-  environment, with the arguments and stdin Git gives a pre-push hook. It is
-  the hook Git runs when the checkout does not redirect hooks elsewhere, which
-  is also where the platform installs its gate.
+  def __init__(self, detail: str):
+    super().__init__(
+      "The checks Möbius runs before publishing refused this push. "
+      "Nothing was published.",
+      code="push_gate_refused", detail=detail,
+    )
+
+
+def push(
+  repo: Path, remote: str, commit: str, ref: str, *, lease: str | None = None,
+) -> subprocess.CompletedProcess:
+  """Push one exact commit to ``ref``, behind the repository's pre-push gate.
+
+  Hooks are inert for the token-bearing push, so the gate runs first as its
+  own local step on the same commit id the push then sends: nothing the gate
+  (or anything else) commits meanwhile can change what is published.
+  ``lease`` is the expected remote tip ("" for absent); None pushes without
+  one. Raises ``PushGateRefused`` when the gate refuses or times out, and
+  otherwise returns the push's result unchecked.
+  """
+  if not _FULL_GIT_OID.match(commit):
+    raise ContributionSubmitError("Only an exact commit id can be pushed.")
+  _pre_push_gate(repo, remote, commit, ref, lease)
+  lease_args = () if lease is None else (f"--force-with-lease={ref}:{lease}",)
+  return _git(repo, "push", *lease_args, remote, f"{commit}:{ref}", check=False)
+
+
+def _pre_push_gate(
+  repo: Path, remote: str, commit: str, ref: str, lease: str | None,
+) -> None:
+  """Run the pre-push hook Git would run, as a pre-push hook, without credentials.
+
+  It is the hook in the repository's common hooks directory, where Git looks
+  when the checkout does not redirect hooks and where the platform installs
+  its gate. It runs in its own process group, which is killed when it ends,
+  so nothing it starts outlives it into the token-bearing push.
   """
   common = _git(
     repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
   ).stdout.strip()
   hook = Path(common) / "hooks" / "pre-push"
   if not (hook.is_file() and os.access(hook, os.X_OK)):
-    return None
-  leases: dict[str, str] = {}
-  positional: list[str] = []
-  for arg in push_args:
-    if arg.startswith("--force-with-lease="):
-      ref, _, sha = arg.partition("=")[2].partition(":")
-      leases[ref] = sha
-    elif not arg.startswith("-"):
-      positional.append(arg)
-  remote, *refspecs = positional
+    return
   named = _git(repo, "remote", "get-url", remote, check=False)
   url = named.stdout.strip() if named.returncode == 0 else remote
-  lines = []
-  for refspec in refspecs:
-    source, _, destination = refspec.partition(":")
-    local_sha = _git(repo, "rev-parse", "--verify", f"{source}^{{commit}}").stdout.strip()
-    lines.append(f"{source} {local_sha} {destination} {leases.get(destination) or '0' * 40}\n")
-  return _run_cmd(
-    [str(hook), remote, url], cwd=repo, check=check, timeout=_PUSH_TIMEOUT,
-    env=_git_env(repo), input_text="".join(lines),
-  )
+  line = f"{commit} {commit} {ref} {lease or '0' * 40}\n"
+  with _scratch_home(_git_env(repo)) as env, \
+      tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as output:
+    stdin.write(line)
+    stdin.seek(0)
+    proc = subprocess.Popen(
+      [str(hook), remote, url], cwd=str(repo), env=env, stdin=stdin,
+      stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+    )
+    try:
+      returncode = proc.wait(timeout=_PUSH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+      returncode = None
+    finally:
+      try:
+        os.killpg(proc.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      proc.wait()
+    output.seek(0)
+    transcript = output.read()
+  if returncode is None:
+    raise PushGateRefused(
+      f"{transcript}\nThe pre-push checks did not finish within {_PUSH_TIMEOUT} seconds."
+    )
+  if returncode != 0:
+    raise PushGateRefused(transcript)
 
 
 def _gh(repo: Path, *args: str, check: bool = True,
