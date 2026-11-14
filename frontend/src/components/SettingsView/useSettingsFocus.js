@@ -5,7 +5,8 @@ import { settingsSectionPage } from '../../lib/settingsSections.js'
 // section on it to focus (null when the request is the page itself). Chat
 // models live on each provider's page, so `models` opens the first connected
 // provider's, or the AI providers list while none is connected.
-function destination(section, modelsProvider) {
+export function settingsFocusDestination(section, modelsProvider) {
+  if (section?.startsWith('provider:')) return { page: section.slice(9), anchor: null }
   if (section === 'models') {
     return modelsProvider
       ? { page: modelsProvider, anchor: 'chat-models' }
@@ -36,7 +37,7 @@ export function useSettingsFocus({
 
   useEffect(() => {
     if (!section || waiting || taken.current?.request === focusTarget) return
-    taken.current = { request: focusTarget, ...destination(section, providerReady ? modelsProvider : null) }
+    taken.current = { request: focusTarget, ...settingsFocusDestination(section, providerReady ? modelsProvider : null) }
     setDetailPage(taken.current.page)
   }, [focusTarget, section, waiting, providerReady, modelsProvider, setDetailPage])
 

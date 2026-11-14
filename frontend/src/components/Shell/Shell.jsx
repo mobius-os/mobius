@@ -5490,6 +5490,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 loadTheme={loadTheme}
                 openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
+                onOpenProviderSettings={(providerId) => openSettingsSection(`provider:${providerId}`)}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
                 archived={archivedChatIds.has(String(chatId))}

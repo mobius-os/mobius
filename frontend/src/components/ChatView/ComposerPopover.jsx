@@ -57,7 +57,6 @@ import { chatAppArtifactQueries, chatQueries } from '../../hooks/queries.js'
 import { measurePopoverMaxHeight } from './composerPopoverHeight.js'
 import { focusComposerElement } from './composerFocusPolicy.js'
 import useModelSelectionPopover from './hooks/useModelSelectionPopover.js'
-import useScrollActivity from './hooks/useScrollActivity.js'
 import useComposerPopoverClose from './hooks/useComposerPopoverClose.js'
 import { resolvedChatSettings } from './modelSelectionPolicy.js'
 import { compactChangesSummary } from './chatChanges.js'
@@ -80,6 +79,7 @@ export default function ComposerPopover({
   chatReady = true,
   onAttachClick,
   onChangeChatInfo,
+  onOpenProviderSettings,
   // Live-derived in the parent: `chatInfo.has_assistant_turns` is
   // set once on mount and never refreshed when the running turn
   // finishes. Without the live override, cross-provider picks would
@@ -132,7 +132,6 @@ export default function ComposerPopover({
     modelSelectionRequest,
     composerInputRef,
   )
-  useScrollActivity(panelRef, open)
   const usageQuery = chatQueries.usage.useQuery(chatId, {
     enabled: Boolean(open && !embedded && chatReady && chatId && onOpenUsage),
   })
@@ -492,6 +491,7 @@ export default function ComposerPopover({
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
+                onOpenProviderSettings={onOpenProviderSettings}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 providerUsage={providerUsage}

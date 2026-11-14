@@ -134,6 +134,7 @@ export default function ChatSettingsPanel({
   autoResumeError = '',
   onAutoResumeChange,
   onChange,
+  onOpenProviderSettings,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
   // Per-chat external state survives the popover and ChatView itself. This is
@@ -646,33 +647,42 @@ export default function ChatSettingsPanel({
           const isSelected = selectedCatalogModel(registry, pid, selectedModel) === m.id && selectedProvider === pid
           return (
             <div key={`${pid}-${m.id}`}>
-              <button
-                type="button"
-                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
-                onClick={() => {
-                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
-                }}
-                disabled={switchBusy || appCrossProvider || !providerConfigured}
-                aria-pressed={isSelected}
-                title={appCrossProvider
-                  ? 'App chats keep their original provider. Create a new app chat to use this provider.'
-                  : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
-              >
-                <span className="csp-row__icon"><info.Logo /></span>
-                <span className="csp-row__main">
-                  <span className="csp-row__title">
-                    <span>{m.label}</span>
+              <div className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}>
+                <button
+                  type="button"
+                  className="csp-row__icon-button"
+                  onClick={() => onOpenProviderSettings?.(pid)}
+                  disabled={!onOpenProviderSettings}
+                  aria-label={`Open ${info.label} setup in Settings`}
+                  title={`Open ${info.label} setup in Settings`}
+                >
+                  <span className="csp-row__icon"><info.Logo /></span>
+                </button>
+                <button
+                  type="button"
+                  className="csp-row__model-button"
+                  onClick={() => {
+                    if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
+                  }}
+                  disabled={switchBusy || appCrossProvider || !providerConfigured}
+                  aria-pressed={isSelected}
+                  title={appCrossProvider
+                    ? 'App chats keep their original provider. Create a new app chat to use this provider.'
+                    : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
+                >
+                  <span className="csp-row__main">
+                    <span className="csp-row__title"><span>{m.label}</span></span>
+                    <span className="csp-row__sub">
+                      {!providerConfigured
+                        ? `${info.label} · Not connected`
+                        : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
+                          ? `${info.label} · No credit`
+                          : info.label}
+                    </span>
                   </span>
-                  <span className="csp-row__sub">
-                    {!providerConfigured
-                      ? `${info.label} · Not connected`
-                      : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
-                        ? `${info.label} · No credit`
-                        : info.label}
-                  </span>
-                </span>
-                <span className="csp-row__dot" />
-              </button>
+                  <span className="csp-row__dot" />
+                </button>
+              </div>
               {isSelected && !isPendingRow && (
                 // Indent aligns the stepper under the row title (icon 30 +
                 // gap 12 + row pad 10 = 52).
