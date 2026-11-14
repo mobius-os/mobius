@@ -7,8 +7,6 @@ import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
 import { composerMarkdown } from './composerMarkdown.js'
 import { syncComposerTallState } from './composerTextareaSizing.js'
 import './MarkdownComposer.css'
-import { composerWrapping } from './composerWrapping.js'
-import './ComposerWrapping.css'
 
 export default function MarkdownComposer({ inputRef, value, onChange, onInputIntent, onKeyDown, onKeyUp,
   onPaste, onFocus, onBlur, spellCheck, ...attributes }) {
@@ -36,7 +34,7 @@ export default function MarkdownComposer({ inputRef, value, onChange, onInputInt
     const extensions = [
       markdown({ base: markdownLanguage, addKeymap: false }),
       history(), keymap.of([...historyKeymap, ...defaultKeymap]),
-      EditorView.lineWrapping, placeholder('Message Möbius…'), composerMarkdown, composerWrapping,
+      EditorView.lineWrapping, placeholder('Message Möbius…'), composerMarkdown,
       Prec.highest(EditorView.domEventHandlers(handlers)),
       attributesRef.current.of(EditorView.contentAttributes.of(JSON.parse(contentAttributes))),
     ]

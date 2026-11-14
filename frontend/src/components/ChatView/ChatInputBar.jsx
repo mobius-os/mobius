@@ -916,25 +916,23 @@ export default function ChatInputBar({
             {historyKeyHint && (
               <span id={historyKeyHintId} className="chat__sr-only">{historyKeyHint}</span>
             )}
-            <div className="chat__input-actions">
-              {rightButtons}
-              <PrimaryAction
-                sending={sending}
-                listening={listening}
-                hasInput={hasInput}
-                hasUploading={hasUploading}
-                showSteer={showSteer}
-                steerReady={steerReady}
-                submissionBlocked={submissionBlocked}
-                questionBlocked={questionBlocked}
-                savesQueued={composerHistory.position?.kind === 'queued'}
-                resendsHistory={composerHistory.browsing}
-                onSubmit={handleSubmit}
-                onStop={onStop}
-                onSteer={onSteer}
-                onToggleVoice={onToggleVoice}
-              />
-            </div>
+            {rightButtons}
+            <PrimaryAction
+              sending={sending}
+              listening={listening}
+              hasInput={hasInput}
+              hasUploading={hasUploading}
+              showSteer={showSteer}
+              steerReady={steerReady}
+              submissionBlocked={submissionBlocked}
+              questionBlocked={questionBlocked}
+              savesQueued={composerHistory.position?.kind === 'queued'}
+              resendsHistory={composerHistory.browsing}
+              onSubmit={handleSubmit}
+              onStop={onStop}
+              onSteer={onSteer}
+              onToggleVoice={onToggleVoice}
+            />
           </div>
         </div>
       </div>

@@ -38,7 +38,7 @@ async function open(page, { touch = false } = {}) {
     if (path === '/fixture.css') return route.fulfill({ contentType: 'text/css', body: assets.css })
     if (path !== '/') return route.abort()
     return route.fulfill({ contentType: 'text/html', body: `<!doctype html><html><head><style>
-      :root { --text:#eee; --bg:#161616; --surface:#222; --muted:#aaa; --accent:#9274f5; --border:#444; --mono:monospace; --font:Arial; }
+      :root { --text:#eee; --bg:#161616; --surface:#222; --muted:#aaa; --accent:#9274f5; --border:#444; --border-light:#444; --mono:monospace; --font:Arial; }
       body { margin:0; padding:16px; background:var(--bg); color:var(--text); font-family:var(--font); }
       * { box-sizing:border-box; }
       </style><link rel="stylesheet" href="/fixture.css"></head><body><div id="root"></div><script type="module" src="/${assets.entry}"></script></body></html>` })
@@ -226,4 +226,70 @@ test('foreground reconciliation collapses stale empty-editor geometry', async ({
     collapsed: element.getBoundingClientRect().height < 60,
     tall: element.closest('.chat__pill').hasAttribute('data-composer-tall'),
   }))).toEqual({ collapsed: true, tall: false })
+})
+
+// Controls retain their own column; text rows never wrap around the action button.
+for (const width of [390, 900]) {
+  test(`original single-row composer keeps controls beside the text at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 844 })
+    const editor = await open(page)
+    const pill = page.locator('.chat__pill')
+    await expect(editor).toHaveCSS('font-size', '16px')
+    await expect(pill).toHaveCSS('height', '50px')
+    await expect(pill).toHaveCSS('padding-top', '4px')
+    await expect(pill).toHaveCSS('padding-bottom', '4px')
+    await expect(page.locator('.chat__action')).toHaveCSS('width', '40px')
+    await expect(page.locator('.chat__brain-usage')).toHaveCSS('width', '48px')
+    await expect(page.locator('.chat__brain-usage > svg')).toHaveCSS('width', '38px')
+    await page.keyboard.insertText('A longer draft that wraps beside the action button. '.repeat(8))
+    const layout = await editor.evaluate(element => {
+      const action = element.closest('.chat__input-line').querySelector('.chat__action').getBoundingClientRect()
+      const bounds = element.getBoundingClientRect()
+      const tops = new Set()
+      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+      let right = bounds.left
+      for (let node; (node = walker.nextNode());) {
+        for (let i = 0; i < node.length; i++) {
+          const range = document.createRange()
+          range.setStart(node, i); range.setEnd(node, i + 1)
+          const rect = range.getBoundingClientRect()
+          if (rect.width) { tops.add(rect.top); right = Math.max(right, rect.right) }
+        }
+      }
+      return { right, editorRight: bounds.right, actionLeft: action.left, tops: [...tops].sort((a,b) => a-b) }
+    })
+    expect(layout.tops.length).toBeGreaterThan(2)
+    expect(layout.editorRight).toBeLessThan(layout.actionLeft)
+    expect(layout.right).toBeLessThan(layout.actionLeft)
+    for (let i = 1; i < layout.tops.length; i++) expect(layout.tops[i] - layout.tops[i-1]).toBeCloseTo(23.2, 1)
+    await page.evaluate(() => window.composerFixture.replace(''))
+    await expect(pill).toHaveCSS('height', '50px')
+  })
+}
+
+
+test('attachments preserve the text column and height budget in a short viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 360 })
+  const editor = await open(page)
+  await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '360px'))
+  for (const source of ['', 'A short draft', 'A longer draft with wrapped text. '.repeat(100)]) {
+    await page.evaluate(value => window.composerFixture.replace(value), source)
+    const width = await editor.evaluate(element => element.getBoundingClientRect().width)
+    await page.evaluate(() => window.composerFixture.attachments([{ id: 'sample', name: 'sample.txt', status: 'ready', mime_type: 'text/plain' }]))
+    await expect(page.getByRole('button', { name: 'Remove sample.txt' })).toBeVisible()
+    await expect.poll(() => editor.evaluate(element => element.getBoundingClientRect().width)).toBe(width)
+    const layout = await page.locator('.chat__pill').evaluate(pill => {
+      const box = selector => pill.querySelector(selector).getBoundingClientRect()
+      return { height: pill.getBoundingClientRect().height, textRight: box('.chat__markdown-input').right,
+        actionLeft: box('.chat__action').left, trayBottom: box('.chat__attach-tray').bottom,
+        textTop: box('.chat__input-line').top }
+    })
+    expect(layout.height).toBeLessThanOrEqual(181)
+    expect(layout.textRight).toBeLessThan(layout.actionLeft)
+    expect(layout.trayBottom).toBeLessThanOrEqual(layout.textTop)
+    expect(await text(page)).toBe(source)
+    await page.getByRole('button', { name: 'Remove sample.txt' }).click()
+    await expect(page.locator('.chat__attach-tray')).toHaveCount(0)
+    expect(await text(page)).toBe(source)
+  }
 })
