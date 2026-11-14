@@ -14,8 +14,8 @@ from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
   Principal, get_current_owner, get_current_owner_for_owner_input,
-  get_owner_principal, get_principal, is_installation_owner_control,
-  reject_cross_site, require_installation_owner_control,
+  get_owner_principal, get_principal, is_installation_owner,
+  reject_cross_site, require_installation_owner,
 )
 
 log = logging.getLogger(__name__)
@@ -76,7 +76,7 @@ async def accept_consent(
   Agent runs, delegated helpers, shared-browser guests and apps are refused by
   the owner-input dependency, so an agent can declare access but never approve.
   """
-  require_installation_owner_control(principal)
+  require_installation_owner(principal)
   app = _live_app(db, app_id)
   if not app_consent.gated(app):
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")
@@ -106,7 +106,7 @@ async def revoke_consent(
   db: Session = Depends(get_db),
 ):
   """Take back an app's acceptance: it is dormant again until accepted anew."""
-  require_installation_owner_control(principal)
+  require_installation_owner(principal)
   app = _live_app(db, app_id)
   if not app_consent.gated(app):
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")
@@ -135,12 +135,12 @@ def read_waiting_payments(
 
   These are the owner's private pending payments: the owner and the owner's own
   top-level agent see the list. A shared-browser guest or a delegated helper
-  (the callers ``require_installation_owner_control`` refuses) authenticates but
+  (the callers ``require_installation_owner`` refuses) authenticates but
   sees an empty list, never the payments and never an error, since the shell
   reads this for every app it opens and such a caller has nothing to answer.
   """
   app = _live_app(db, app_id)
-  if not is_installation_owner_control(principal):
+  if not is_installation_owner(principal):
     return {"payments": []}
   return {"payments": credits_confirmations.waiting(app.id)}
 
@@ -155,7 +155,7 @@ def answer_payment(
   db: Session = Depends(get_db),
 ):
   """Pay or Cancel one waiting charge. Only a human owner can answer."""
-  require_installation_owner_control(principal)
+  require_installation_owner(principal)
   app = _live_app(db, app_id)
   outcome = credits_confirmations.answer(app.id, payment_id, body.pay)
   if outcome in (credits_confirmations.CONFIRMED, credits_confirmations.DECLINED):

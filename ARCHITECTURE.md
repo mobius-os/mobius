@@ -2140,6 +2140,17 @@ through the owner's connection, as part of the shared workspace, and resolve
 handles in the public directory. This is an API boundary, not a sandbox
 around what a guest-started agent or a guest-edited app can later do.
 
+The owner may turn on **Full access** for one grant (`full_access`, off by
+default), matching the Full access a connected Möbius can hold:
+`require_installation_owner_control` then admits that grant's lineage while
+`browser_access.has_full_access` holds. It is read on every check, so turning
+it off or revoking applies to the next request, including work the guest
+already started. The owner's own decisions (`require_installation_owner`, such
+as app consent and credit payments), the owner's own accounts
+(`require_account_owner`), credential minting (install passes and job tokens,
+which would carry no grant lineage), shared folders and screen control refuse
+every guest.
+
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input
 keeps its content and identity. A remote stop is not claimed until confirmed:
@@ -2168,6 +2179,16 @@ transaction consumes the browser-bound proof,
 rechecks local permission, and retires the previous browser session. Failed proof
 validation leaves that prior session unchanged. Verified proof admission expires
 within 60 seconds; old pending rows are pruned on subsequent starts.
+
+A recipient can leave without waiting for the owner. Shared with me carries a
+`leave_url` to `/session/account/leave/start` on the sharing instance, which runs
+the same proof flow under a separate pending cookie: the cookie that matches the
+callback state decides its purpose, so a sign-in proof can never leave and a
+leave proof can never sign in. The callback sends a leave proof to a
+confirmation in the shared shell, so a cross-site link alone ends nothing; its
+same-origin POST consumes the proof and runs the owner's revoke and
+`end_grant`, including directory removal. Declining an invitation is the same
+action.
 
 Local validation pins the issuer, runtime origin and grantor credential generation
 (or managed instance ID and owner subject). Changing those bindings invalidates

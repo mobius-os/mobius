@@ -7295,6 +7295,20 @@ def _add_autopilot_push_mode(eng) -> None:
       ))
 
 
+def _add_browser_grant_full_access(eng) -> None:
+  """Per-recipient Full access for shared browser grants; existing grants stay off."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "browser_access_grants" not in inspector.get_table_names():
+    return
+  if "full_access" not in {c["name"] for c in inspector.get_columns("browser_access_grants")}:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE browser_access_grants ADD COLUMN full_access BOOLEAN NOT NULL DEFAULT 0"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7422,6 +7436,7 @@ _SCHEMA_MIGRATIONS = (
   ("0103_shared_peer_note_bodies", _add_shared_peer_note_bodies),
   ("0104_claude_session_costs", _repair_claude_session_costs),
   ("0105_autopilot_push_mode", _add_autopilot_push_mode),
+  ("0099_browser_grant_full_access", _add_browser_grant_full_access),
 )
 
 

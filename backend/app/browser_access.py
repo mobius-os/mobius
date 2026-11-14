@@ -21,7 +21,7 @@ from datetime import timedelta
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, case, update
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, case, false, update
 from sqlalchemy.orm import Session
 
 from app.database import Base
@@ -51,6 +51,9 @@ class BrowserAccessGrant(Base):
   origin = Column(String(255), nullable=True)
   remote_status = Column(String(24), nullable=True)
   grantor_binding = Column(String(128), nullable=True)
+  # The owner's per-recipient choice to also grant installation controls, as
+  # Full access does for a connected Möbius. Read live on every check.
+  full_access = Column(Boolean, nullable=False, default=False, server_default=false())
 
 
 class BrowserAccessInvite(Base):
@@ -187,6 +190,17 @@ def is_live(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
     and session.idle_expires_at > now_naive_utc()
     and session.owner_token_epoch == owner.token_epoch
   )
+
+
+def has_full_access(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
+  """Whether this live guest lineage also holds installation controls.
+
+  Read fresh on every check, so turning Full access off or revoking ends it
+  at once, including for work the guest already started."""
+  if lineage is None or not is_live(db, lineage, owner_id):
+    return False
+  grant = _fresh(db, BrowserAccessGrant, lineage.grant_id)
+  return grant is not None and grant.full_access is True
 
 
 def require_live(db: Session, lineage: BrowserLineage | None, owner_id: int) -> None:

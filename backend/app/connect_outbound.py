@@ -560,35 +560,48 @@ def _disconnect_remote(config: dict) -> None:
     ) from exc
 
 
-def _revoke_profile(profile_id: str) -> None:
-  meta = _read_json(_meta_path(profile_id))
-  if meta is None:
-    raise LookupError(profile_id)
-  config_path = _runner_config_path(profile_id)
-  config = _read_json(config_path)
-  if config is None:
-    if meta.get("status") != "revoked" or config_path.exists():
-      raise OutboundConnectError(
-        "The saved Connect details are unreadable, so remote revocation "
-        "cannot be confirmed. Access was kept.",
-      )
-  else:
-    # The runner now saves its credentials in a connections list. An outbound
-    # profile owns exactly one remote connection, so ambiguous credentials must
-    # fail closed rather than revoking an arbitrary instance.
-    connections = connect_runner._connections(config)
-    if len(connections) != 1:
-      raise OutboundConnectError(
-        "The saved Connect details are unreadable, so remote revocation "
-        "cannot be confirmed. Access was kept.",
-      )
+def _notify_remote(profile_id: str) -> bool:
+  """Tell the other Möbius its host is gone; whether it confirmed."""
+  config = _read_json(_runner_config_path(profile_id))
+  # An outbound profile owns exactly one remote connection. Ambiguous or
+  # unreadable credentials are never sent to an arbitrary instance.
+  connections = connect_runner._connections(config) if config else []
+  if len(connections) != 1:
+    return False
+  try:
     _disconnect_remote(connections[0])
+  except OutboundConnectError as exc:
+    log.warning("outbound Connect %s: %s", profile_id, exc)
+    return False
+  return True
+
+
+def _revoke_profile(profile_id: str) -> bool:
+  """End this access here, then tell the other Möbius when it can be reached.
+
+  Access is this Möbius's own runner, so stopping it and deleting its
+  credentials is the revocation; it never waits on the other instance. The
+  runner is stopped before the remote notice so nothing new can start while
+  the notice is in flight. Returns whether the other Möbius confirmed.
+  """
+  with _lock:
+    meta = _read_json(_meta_path(profile_id))
+    if meta is None:
+      raise LookupError(profile_id)
+    already_revoked = meta.get("status") == "revoked"
+    _stop_process_tree(profile_id)
+    _owned_processes.pop(profile_id, None)
+    # Supervision relaunches only "active" profiles; this keeps it from
+    # restarting the runner while the remote notice is in flight.
+    _atomic_json(_meta_path(profile_id), {**meta, "status": "revoking"})
+  notified = already_revoked or _notify_remote(profile_id)
   with _lock:
     _discard(profile_id)
+  return notified
 
 
-async def revoke_profile(profile_id: str) -> None:
-  await asyncio.to_thread(_revoke_profile, profile_id)
+async def revoke_profile(profile_id: str) -> bool:
+  return await asyncio.to_thread(_revoke_profile, profile_id)
 
 
 def _reconcile_once() -> None:

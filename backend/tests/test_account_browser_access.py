@@ -406,6 +406,7 @@ def test_shared_directory_rebuilds_link_and_rejects_unsafe_origin(client, auth, 
   instance = response.json()["instances"][0]
   assert instance["name"] == "<b>not HTML</b>"
   assert instance["open_url"] == "https://other.example/api/connect/browser-access/session/account/start?grant_id=" + "g" * 32
+  assert instance["leave_url"] == "https://other.example/api/connect/browser-access/session/account/leave/start?grant_id=" + "g" * 32
   # One unsafe or malformed row is skipped; it never hides the valid ones.
   unsafe = {**row, "origin": "https://other.example@evil.example", "grant_id": "u" * 32}
   short_id = {**row, "grant_id": "abcdefgh"}
@@ -729,3 +730,74 @@ def test_shared_inbox_rejects_mismatched_issuer_receipt(client, auth, monkeypatc
   response = client.post("/api/connect/browser-access/shared/respond", headers={**auth, "Origin": "https://shared.example"},
     json={"origin": "https://other.example", "grant_id": "g" * 32, "action": "accept"})
   assert response.status_code == 502, response.text
+
+
+def _leave_callback(client, db, monkeypatch, grant, cookie_name):
+  async def verified(pending, found, code):
+    return datetime.now(timezone.utc) + timedelta(seconds=30)
+  monkeypatch.setattr(account, "exchange_code", verified)
+  cookie, url = account.start(db, grant.id)
+  state = parse_qs(urlsplit(url).query)["state"][0]
+  client.cookies.set(cookie_name, cookie, path="/api/connect/browser-access/session/account")
+  response = client.get("/api/connect/browser-access/session/account/callback", params={
+    "code": "c" * 32, "state": state,
+  }, follow_redirects=False)
+  assert response.status_code == 303, response.text
+  return response.headers["location"]
+
+
+def test_recipient_leave_start_sets_only_the_leave_proof_cookie(client, db, monkeypatch):
+  _owner, grant = _grant(db, monkeypatch)
+  client.base_url = "https://shared.example"
+  response = client.get("/api/connect/browser-access/session/account/leave/start",
+    params={"grant_id": grant.id}, follow_redirects=False)
+  assert response.status_code == 303
+  assert response.headers["location"].startswith(access.issuer_origin() + "/shared-access/authorize?")
+  cookies = response.headers.get_list("set-cookie")
+  assert any(value.startswith("mobius_shared_account_leave=") for value in cookies)
+  assert not any(value.startswith("mobius_shared_account_pending=") for value in cookies)
+
+
+def test_verified_recipient_leaves_with_the_owners_full_revoke(client, db, monkeypatch):
+  owner, grant = _grant(db, monkeypatch)
+  client.base_url = "https://shared.example"
+  unregistered = []
+  async def unregister(_db, found):
+    unregistered.append(found.id)
+    return "revoked"
+  monkeypatch.setattr(account, "unregister", unregister)
+  location = _leave_callback(client, db, monkeypatch, grant, "mobius_shared_account_leave")
+  # Leaving is confirmed on this origin; the callback alone changes nothing.
+  assert location.startswith("/shell/shared#account-leave=")
+  db.refresh(grant)
+  assert grant.revoked_at is None
+  pending_id = location.split("=", 1)[1]
+  # A leave proof is never a sign-in.
+  assert client.post("/api/connect/browser-access/session/account/finalize", json={
+    "pending_id": pending_id}, headers={"Origin": "https://shared.example"}).status_code == 401
+  assert client.post("/api/connect/browser-access/session/account/leave", json={
+    "pending_id": pending_id}, headers={"Origin": "https://evil.example"}).status_code == 403
+  left = client.post("/api/connect/browser-access/session/account/leave", json={
+    "pending_id": pending_id}, headers={"Origin": "https://shared.example"})
+  assert left.status_code == 200, left.text
+  assert left.json() == {"left": True, "name": "Owner's instance"}
+  db.refresh(grant)
+  assert grant.revoked_at is not None
+  assert grant.remote_status == "revoked"
+  assert unregistered == [grant.id]
+  # The proof is one-use.
+  assert client.post("/api/connect/browser-access/session/account/leave", json={
+    "pending_id": pending_id}, headers={"Origin": "https://shared.example"}).status_code == 401
+
+
+def test_sign_in_proof_cannot_leave(client, db, monkeypatch):
+  _owner, grant = _grant(db, monkeypatch)
+  client.base_url = "https://shared.example"
+  location = _leave_callback(client, db, monkeypatch, grant, "mobius_shared_account_pending")
+  assert location.startswith("/shell/shared#account-finalize=")
+  pending_id = location.split("=", 1)[1]
+  denied = client.post("/api/connect/browser-access/session/account/leave", json={
+    "pending_id": pending_id}, headers={"Origin": "https://shared.example"})
+  assert denied.status_code == 401
+  db.refresh(grant)
+  assert grant.revoked_at is None

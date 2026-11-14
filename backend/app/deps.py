@@ -841,17 +841,62 @@ def acts_for_guest(principal: Principal) -> bool:
   return principal.browser is not None
 
 
-def is_installation_owner_control(principal: Principal) -> bool:
-  """Whether this bearer may use installation-owner controls: the owner or the
+def browser_guest_without_full_access(principal: Principal) -> bool:
+  """A shared-browser guest, or their work, that the owner has not given Full
+  access. Full access lifts installation-owner controls only; the owner's own
+  device (shared folders, screen), the owner's own accounts
+  (``require_account_owner``), owner decisions such as app consent, and
+  credential minting keep their gates."""
+  if principal.browser is None:
+    return False
+  with SessionLocal() as db:
+    return not browser_access.has_full_access(db, principal.browser, principal.owner.id)
+
+
+def is_installation_owner(principal: Principal) -> bool:
+  """Whether this bearer is the installation owner themself: the owner or the
   owner's own top-level agent, never a delegated helper or a shared-browser
-  guest (or work one started). The non-raising form of
-  ``require_installation_owner_control``, for reads that stay private by
-  returning nothing rather than refusing."""
+  guest (or work one started), even with Full access. For the owner's own
+  decisions and private reads."""
   return principal.delegation_id is None and not acts_for_guest(principal)
 
 
+def require_installation_owner(principal: Principal) -> None:
+  """The installation owner's own decision: never a guest, even with Full
+  access, since a connected Möbius with Full access cannot make it either."""
+  if is_installation_owner(principal):
+    return
+  require_nondelegated_owner_control(principal)
+  raise HTTPException(403, "Only the installation owner can decide this.")
+
+
+def get_installation_owner_for_credential_minting(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """Resolve the installation owner for routes that mint a new credential.
+
+  Full access lifts lifecycle controls for one grant, but a minted credential
+  carries no browser lineage, so it would outlive that grant's revocation and
+  clear the owner-only gates. Minting stays with the installation owner."""
+  owner = _owner_principal_or_403(principal)
+  require_installation_owner(principal)
+  return owner
+
+
+def is_installation_owner_control(principal: Principal) -> bool:
+  """Whether this bearer may use installation-owner controls: the owner, the
+  owner's own top-level agent, or a shared-browser guest the owner gave Full
+  access; never a delegated helper or a guest without Full access (or work
+  either started). The non-raising form of
+  ``require_installation_owner_control``."""
+  if principal.delegation_id is not None:
+    return False
+  return not browser_guest_without_full_access(principal)
+
+
 def require_installation_owner_control(principal: Principal) -> None:
-  """Shared collaborators may use the workspace, not mint installation authority."""
+  """Shared collaborators may use the workspace, not mint installation
+  authority, unless the owner gave that person Full access."""
   if is_installation_owner_control(principal):
     return
   # A delegated helper and a shared-browser guest are refused separately so each
@@ -1466,9 +1511,10 @@ def get_credits_controller(
   """Who may move the owner's credits: pair, buy, fund, publish, withdraw.
 
   As ``get_credits_reader``, and never a delegated helper either: these are
-  installation-owner controls (``require_installation_owner_control``).
+  the owner's own account (``require_account_owner_control``), which Full
+  access does not lift.
   """
-  require_installation_owner_control(principal)
+  require_account_owner_control(principal)
   return _require_credits_manage(principal, db)
 
 

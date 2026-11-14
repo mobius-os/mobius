@@ -1890,6 +1890,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0103_shared_peer_note_bodies",
     "0104_claude_session_costs",
     "0105_autopilot_push_mode",
+    "0099_browser_grant_full_access",
   ]
   assert second == first
 
