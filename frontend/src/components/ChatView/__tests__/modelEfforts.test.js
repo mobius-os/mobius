@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { modelEfforts, validEffort } from '../../ui/modelEfforts.js'
+import { modelEfforts, modelSelectionSettings, rememberEffort, validEffort } from '../../ui/modelEfforts.js'
 
 const providerEfforts = [
   { value: 'low', label: 'Low' },
@@ -29,7 +29,11 @@ test('modelEfforts honors model-specific levels and future values', () => {
 test('modelEfforts hides effort for a model that takes no effort setting', () => {
   const efforts = modelEfforts(providerEfforts, { id: 'haiku', effort_levels: [] })
   assert.deepEqual(efforts, [])
-  assert.equal(validEffort(efforts, 'high'), '')
+  assert.equal(validEffort(efforts, 'high'), null)
+  assert.deepEqual(rememberEffort({ claude: 'high', mobius: 'medium' }, 'mobius', null), { claude: 'high' })
+  assert.deepEqual(modelSelectionSettings('no-effort', null, { claude: 'high' }), {
+    model: 'no-effort', effort: null, effort_by_provider: { claude: 'high' },
+  })
 })
 
 test('validEffort replaces a level unsupported by the selected model', () => {

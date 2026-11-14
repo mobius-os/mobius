@@ -1,23 +1,36 @@
 from __future__ import annotations
 
 import json
+import copy
 import threading
 import tomllib
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from app import providers
+from app import models, providers
 from app.schemas import AgentSettingsOverride, ChatProviderSwitch
 
 
+def _no_effort_catalogue(monkeypatch):
+  declaration = copy.deepcopy(_catalogue())
+  declaration["models"].append({
+    "id": "no-effort", "label": "No effort", "effort_levels": [],
+  })
+  monkeypatch.setattr(providers.PROVIDERS["mobius"], "declaration", declaration)
+  monkeypatch.setattr(providers.MobiusProvider, "check_auth", lambda _self, _dir: None)
+
+
 def _provider():
-  return providers.MobiusProvider()
+  provider = providers.MobiusProvider()
+  provider._publish_catalogue(_catalogue())
+  return provider
 
 
 def _catalogue():
-  return json.loads(
-    (Path(providers.__file__).with_name("mobius_models.json")).read_text()
-  )
+  from app.mobius_catalogue import parse_catalogue
+  return parse_catalogue(json.loads(
+    (Path(__file__).parent / "fixtures" / "mobius_catalogue.json").read_text()
+  ))
 
 
 def test_account_change_while_copying_broker_result_cannot_rehold_old_identity(
@@ -127,7 +140,7 @@ def test_subscription_search_uses_codex_native_provider_endpoint():
   assert 'web_search="disabled"' not in overrides
 
 
-def test_subscription_catalog_comes_from_platform_catalogue(tmp_path, monkeypatch):
+def test_subscription_catalog_comes_from_discovered_snapshot(tmp_path, monkeypatch):
   provider = _provider()
   monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
   catalogue = _catalogue()
@@ -145,16 +158,7 @@ def test_subscription_catalog_comes_from_platform_catalogue(tmp_path, monkeypatc
   assert env["CODEX_HOME"] == str(tmp_path / "cli-auth" / "mobius")
 
 
-def test_platform_catalogue_satisfies_the_published_model_provider_contract():
-  """The catalogue keeps the manifest block's shape so one writer serves both."""
-  from app.manifest_contract import validate_manifest_contract
-
-  validate_manifest_contract({
-    "id": "identity", "name": "Möbius · You", "description": "Catalogue shape",
-    "version": "1.0.0", "entry": "index.jsx",
-    "permissions": {"identity_manage": True},
-    "model_provider": _catalogue(),
-  })
+def test_discovered_catalogue_updates_both_runtime_defaults():
   assert providers.DEFAULT_MODELS["mobius"] == _catalogue()["default_model"]
   assert providers.DEFAULT_BACKGROUND_MODELS["mobius"] == _catalogue()["default_model"]
 
@@ -172,6 +176,59 @@ def test_saved_evolve_selection_keeps_inkling_id_for_atomic_provider_handoff():
     switch_id="switch-to-evolve",
   )
   assert switch.provider == "mobius"
+
+
+def test_no_effort_model_patch_clears_old_effort_and_rejects_new_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  _no_effort_catalogue(monkeypatch)
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "spark", "effort": "high"}
+  db.commit()
+  invalid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": "none"},
+  })
+  assert invalid.status_code == 422, invalid.text
+  db.expire_all()
+  assert db.get(models.Chat, chat.id).agent_settings_json["model"] == "spark"
+  valid = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": "no-effort", "effort": None},
+  })
+  assert valid.status_code == 200, valid.text
+  assert valid.json()["effective"]["effort"] is None
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.agent_settings_json["model"] == "no-effort"
+  assert "effort" not in row.agent_settings_json
+
+
+def test_no_effort_model_provider_switch_omits_effort(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import compaction
+  _no_effort_catalogue(monkeypatch)
+  chat.agent_settings_json = {"model": "claude-opus-4-8", "effort": "high"}
+  db.commit()
+  async def summary(_messages, **kwargs):
+    assert kwargs["effort"] is None
+    return "Handoff"
+  monkeypatch.setattr(compaction, "summarize_chat", summary)
+  rejected = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "bad-effort",
+    "agent_settings_json": {"model": "no-effort", "effort": "medium"},
+  })
+  assert rejected.status_code == 422, rejected.text
+  accepted = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
+    "provider": "mobius", "switch_id": "no-effort-switch",
+    "agent_settings_json": {"model": "no-effort", "effort": None,
+                            "effort_by_provider": {"claude": "high"}},
+  })
+  assert accepted.status_code == 200, accepted.text
+  db.expire_all()
+  row = db.get(models.Chat, chat.id)
+  assert row.provider == "mobius"
+  assert "effort" not in row.agent_settings_json
+  assert row.agent_settings_json["effort_by_provider"] == {"claude": "high"}
 
 
 def test_subscription_never_becomes_an_implicit_connected_default(monkeypatch):

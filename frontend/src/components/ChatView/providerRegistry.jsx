@@ -125,9 +125,10 @@ export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
 
 /** Built-ins keep their familiar order; accepted app providers follow it. */
 export function providerOrderFor(registry) {
+  const providers = registry?.providers || registry
   return [
     ...PROVIDER_ORDER,
-    ...Object.keys(registry || {}).filter(id => !PROVIDER_ORDER.includes(id)),
+    ...Object.keys(providers || {}).filter(id => !PROVIDER_ORDER.includes(id)),
   ]
 }
 

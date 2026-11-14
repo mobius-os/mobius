@@ -14,8 +14,8 @@ used by chat turns, model pickers, and background agents:
     runner) reuses one helper from `codex_appserver.py`
     (`_extract_bash_command`); the provider itself shapes credentials + env.
 
-`MobiusProvider` serves the platform-owned Möbius subscription catalogue
-(`mobius_models.json`) through the local identity broker; it needs no app.
+`MobiusProvider` discovers the service-owned subscription catalogue through
+the local identity broker; it needs no app or model-specific client release.
 
 `AppModelProvider` binds one installed app's reviewed Responses endpoint and
 model list. New Responses-compatible services need a manifest declaration and
@@ -25,17 +25,22 @@ an app-owned setup UI, not another platform runner or picker branch.
 import asyncio
 import base64
 import copy
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+import hashlib
 import json
 import logging
 import math
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -338,7 +343,8 @@ def known_model_ids(provider_id: str) -> list[str]:
   """Built-in fallback IDs, the Möbius catalogue, or an app's accepted IDs."""
   provider = PROVIDERS.get(provider_id)
   if isinstance(provider, (MobiusProvider, AppModelProvider)):
-    return [model["id"] for model in provider.declaration["models"]]
+    return ([model["id"] for model in provider.declaration["models"]]
+            + list(provider.declaration.get("replacements", {})))
   return KNOWN_MODELS.get(provider_id, [])
 
 
@@ -460,6 +466,10 @@ def effective_agent_settings(
       if v is None:
         continue
       merged[k] = v
+  if prov == "mobius":
+    merged["model"], merged["effort"] = PROVIDERS["mobius"].resolve_selection(
+      merged["model"], merged["effort"],
+    )
   return merged
 
 
@@ -500,6 +510,8 @@ def snapshot_chat_agent_settings(
   effective = effective_agent_settings(
     data_dir, overrides or None, provider=provider,
   )
+  if provider == "mobius" and chosen_model and not effective.get("model"):
+    return None
   chosen_model = effective.get("model") or fallback_model
   if not isinstance(chosen_model, str) or not chosen_model.strip():
     return None
@@ -1000,21 +1012,17 @@ def _write_responses_catalog(
       "supported_reasoning_levels": [
         {"effort": effort, "description": effort.title()} for effort in efforts
       ],
-      "default_reasoning_level": "medium" if "medium" in efforts else efforts[0],
+      "default_reasoning_level": model.get("default_effort") or (
+        "medium" if "medium" in efforts else efforts[0] if efforts else "none"
+      ),
     })
+    if broker:
+      for field in ("supports_parallel_tool_calls", "supports_search_tool",
+                    "supports_image_detail_original", "supports_reasoning_summaries"):
+        row[field] = model.get(field, False)
+      row["supports_reasoning_summary_parameter"] = row["supports_reasoning_summaries"]
     catalog.append(row)
   atomic_write(path, json.dumps({"models": catalog}))
-
-
-def _load_mobius_model_catalogue() -> dict[str, Any]:
-  """The platform-owned Möbius subscription catalogue (mobius_models.json).
-
-  It has the same shape as an app manifest's ``model_provider`` block so the
-  Codex catalog writer and model registry treat both alike. The platform owns
-  it because the subscription and account are platform features: the
-  provider must exist whether or not any app is installed.
-  """
-  return json.loads(Path(__file__).with_name("mobius_models.json").read_text())
 
 
 class MobiusProvider(BaseProvider):
@@ -1034,26 +1042,147 @@ class MobiusProvider(BaseProvider):
 
   def __init__(self):
     # Named like AppModelProvider.declaration because it has the same shape.
-    self.declaration: dict[str, Any] = _load_mobius_model_catalogue()
+    self.declaration: dict[str, Any] = {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": None,
+      "models": [], "replacements": {},
+    }
+    self._catalogue_scope = None
     self.name = self.declaration["name"]
-    self.switch_efforts = frozenset(
-      effort for model in self.declaration["models"]
-      for effort in model.get("effort_levels", [])
-    ) or frozenset({"low", "medium", "high"})
+    self.switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
     self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
     self._held_generation = 0
     self._held_lock = threading.Lock()
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
-    # The catalogue is authoritative, as app declarations are for every
-    # Responses connection. A broker's live list may use a different product
-    # alias from a stable saved-chat model ID; filtering it would hide that.
-    return self.declaration["models"]
+    # Registry owns refresh cadence and coalescing. Keep the complete snapshot
+    # here so execution and the picker use identical capabilities/defaults.
+    return await asyncio.to_thread(self._refresh_catalogue, data_dir)
+
+  def _refresh_catalogue(self, data_dir: str) -> list[Any]:
+    from app.runtime_identity import broker_client
+    with self._held_lock:
+      generation = self._held_generation
+    identity = self._identity()
+    if identity.get("linked") is not True:
+      with self._held_lock:
+        if generation == self._held_generation:
+          self._clear_catalogue()
+      raise ValueError("Möbius account is not linked")
+    scope = hashlib.sha256(json.dumps([
+      identity.get(k) for k in ("issuer", "subject", "instance_id", "key_generation")
+    ]).encode()).hexdigest()
+    cache_path = Path(data_dir) / "cache" / "mobius-models.json"
+    # A restart may reuse public metadata only for the same broker identity.
+    # No API key, private route, or model transcript is stored in this cache.
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      if self._catalogue_scope != scope:
+        self._clear_catalogue()
+        self._catalogue_scope = scope
+        try:
+          saved = json.loads(cache_path.read_text())
+          if saved.get("scope") == scope:
+            self._publish_catalogue(self._validate_catalogue(saved["catalogue"]))
+        except (OSError, ValueError, KeyError, TypeError):
+          pass
+    with broker_client(timeout=5.0) as client:
+      response = client.get("/v1/models")
+      response.raise_for_status()
+      payload = response.json()
+    declaration = self._validate_catalogue(payload)
+    public_payload = {
+      "contract_version": 1, "default_model": declaration["default_model"],
+      "replacements": declaration["replacements"],
+      "data": [{**row, "name": row["label"], "owned_by": "mobius"}
+               for row in declaration["models"]],
+    }
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      try:
+        atomic_write(cache_path, json.dumps({"scope": scope, "catalogue": public_payload}), mode=0o600)
+      except OSError:
+        log.warning("Could not save Möbius model metadata cache")
+      self._publish_catalogue(declaration)
+      return copy.deepcopy(declaration["models"])
+
+  @staticmethod
+  def _validate_catalogue(payload: Any) -> dict[str, Any]:
+    from app.mobius_catalogue import parse_catalogue
+    declaration = parse_catalogue(payload)
+    ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
+    if any(_model_belongs_to_other_provider(mid, "mobius") for mid in ids):
+      raise ValueError("Möbius catalogue collides with another provider")
+    return declaration
+
+  def _publish_catalogue(self, declaration: dict[str, Any]) -> None:
+    self.declaration = declaration
+    self.switch_efforts = frozenset(
+      effort for model in declaration["models"] for effort in model["effort_levels"]
+    )
+    DEFAULT_MODELS["mobius"] = declaration["default_model"]
+    DEFAULT_BACKGROUND_MODELS["mobius"] = declaration["default_model"]
+
+  def _clear_catalogue(self) -> None:
+    _model_registry_cache.pop("mobius", None)
+    self._publish_catalogue({**self.declaration, "models": [],
+                             "default_model": None, "replacements": {}})
+
+  def registry_snapshot(self) -> dict[str, Any]:
+    """Read rows and selection metadata from one immutable published version."""
+    declaration = self.declaration
+    return {
+      "models": _live_model_entries("mobius", declaration["models"]),
+      "default": declaration["default_model"],
+      "replacements": dict(declaration["replacements"]),
+    }
+
+  def resolve_model(self, model: str | None) -> str | None:
+    """Resolve only service-declared retirement edges; never guess a successor."""
+    if not model or not self.declaration["models"]:
+      return model
+    if model in self.declaration.get("replacements", {}):
+      return self.declaration["replacements"][model]
+    return model if model in {m["id"] for m in self.declaration["models"]} else None
+
+  def model_effort_levels(self, model: str | None) -> list[str] | None:
+    """None means unknown; [] means this selected model rejects effort."""
+    for row in self.declaration["models"]:
+      if row["id"] == model:
+        return row.get("effort_levels")
+    return None
+
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """Apply declared retirement and effort policy without changing saved state.
+
+    A formerly valid effort may not exist on the successor's scale. Use that
+    model's declared default, not a provider-wide guess; an empty scale sends
+    no override at all.
+    """
+    resolved = self.resolve_model(model)
+    for row in self.declaration["models"]:
+      if row["id"] == resolved:
+        levels = row["effort_levels"]
+        if not levels:
+          return resolved, None
+        if effort is not None and effort not in levels:
+          return resolved, row["default_effort"]
+        break
+    return resolved, effort
+
+  def validate_model_effort(self, model: str | None, effort: str | None) -> bool:
+    levels = self.model_effort_levels(model)
+    if levels is None:
+      return effort is None or effort in self.switch_efforts
+    return effort is None or effort in levels
 
   @staticmethod
   def _catalog_path() -> Path:
-    # Möbius intentionally owns the public product catalog instead of exposing
-    # implementation model names. The context cap also bounds trial exposure.
+    # Runtime wire defaults, independent of the service-owned model list.
     return Path(__file__).with_name("responses_codex_template.json").resolve()
 
   def forget_account_reads(self) -> None:
@@ -1061,6 +1190,8 @@ class MobiusProvider(BaseProvider):
     with self._held_lock:
       self._held_generation += 1
       self._held_reads.clear()
+      self._clear_catalogue()
+      self._catalogue_scope = None
 
   def _held_broker_read(
     self, route: str, *, hold_seconds: float, timeout: float,
@@ -1111,7 +1242,8 @@ class MobiusProvider(BaseProvider):
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"])}',
+      *([f'model={quote(self.declaration["default_model"])}']
+        if self.declaration["default_model"] else []),
       'model_provider="mobius_trial"',
       f"model_catalog_json={quote(str(catalog_path))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
@@ -1175,6 +1307,40 @@ class MobiusProvider(BaseProvider):
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
+
+
+@dataclass(frozen=True)
+class MobiusRuntimeSnapshot:
+  model: str | None
+  effort: str | None
+  declaration: dict[str, Any]
+  config_overrides: list[str]
+
+
+@asynccontextmanager
+async def mobius_runtime_snapshot(
+  data_dir: str, model: str | None, effort: str | None,
+) -> AsyncIterator[MobiusRuntimeSnapshot]:
+  """Freeze one discovered service catalogue for the entire CLI/SDK lifetime.
+
+  The provider owns discovery, selection and the temporary catalogue. Callers
+  retain this context until their Codex process has stopped, not merely until
+  startup, so a concurrent registry refresh cannot alter the running model.
+  """
+  await _fetch_model_entries(data_dir, "mobius")
+  provider = copy.copy(PROVIDERS["mobius"])
+  provider.declaration = copy.deepcopy(provider.declaration)
+  resolved_model, resolved_effort = provider.resolve_selection(model, effort)
+  if not resolved_model or not provider.declaration["models"]:
+    yield MobiusRuntimeSnapshot(None, None, provider.declaration, [])
+    return
+  with tempfile.TemporaryDirectory(prefix="mobius-models-") as directory:
+    catalog_path = Path(directory) / "catalog.json"
+    _write_responses_catalog(catalog_path, provider.declaration, broker=True)
+    yield MobiusRuntimeSnapshot(
+      resolved_model, resolved_effort, provider.declaration,
+      provider.codex_config_overrides(catalog_path),
+    )
 
 
 class AppModelProvider(BaseProvider):
@@ -1685,7 +1851,7 @@ def _live_model_entries(
       and not isinstance(context_window, bool)
       and context_window > 0
     ):
-      entry["context_window"] = round(context_window)
+      entry["context_window"] = _catalog_context_window(metadata) or round(context_window)
     elif model_id in MODEL_CONTEXT_WINDOWS:
       entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
@@ -2413,13 +2579,14 @@ async def _fetch_model_entries(
         "model registry fetch failed for %s: %s; %s", provider_id, exc,
         "keeping the last live catalog" if keep_live else "using KNOWN_MODELS",
       )
-      if keep_live:
+      if keep_live or provider_id == "mobius":
+        entries = prior[1] if keep_live else entries
         # Stamp it so it expires after the retry interval, not a full TTL.
         _model_registry_cache[provider_id] = (
           time.monotonic() - _MODEL_CACHE_TTL_SECONDS + _MODEL_REFRESH_RETRY_SECONDS,
-          prior[1],
+          entries,
         )
-        return provider_id, prior[1]
+        return provider_id, entries
     _model_registry_cache[provider_id] = (time.monotonic(), entries)
     return provider_id, entries
 
