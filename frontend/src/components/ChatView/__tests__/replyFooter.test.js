@@ -17,7 +17,7 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { agentStretches, footerCopyParts, replyFooter, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
+const { agentStretches, footerCopyParts, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
@@ -316,9 +316,10 @@ const cardAnswer = { role: 'user', content: 'Answer', hidden: true, kind: 'conti
 function footerOf(messages, options = {}) {
   const replyGroups = assistantReplyGroups(messages)
   const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
-  return replyFooter({
+  const { liveIndex = -1 } = options
+  return replyFooters({
     messages, replyGroups, stretches: agentStretches(messages, replyGroups), lastVisibleIndex, ...options,
-  })
+  }).get(replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)) || null
 }
 const firstIds = (messages, footer) => footer.groups.map(group => messages[group.start].id)
 
@@ -421,10 +422,11 @@ test('a stretch whose start was read copies as the same stretch wholly loaded, p
   const note = [{ id: 'note', type: 'peer_message' }]
   const partsOf = (messages, { slots = new Map(), offset = 0, startRows } = {}) => {
     const replyGroups = assistantReplyGroups(messages, { slots, offset })
-    const footer = replyFooter({
+    const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
+    const footer = replyFooters({
       messages, replyGroups, stretches: agentStretches(messages, replyGroups),
-      lastVisibleIndex: messages.findLastIndex(message => !message.hidden), offset,
-    })
+      lastVisibleIndex, offset,
+    }).get(replyGroups.get(lastVisibleIndex))
     return footerCopyParts(footer, { startRows, messages, offset, slots })
   }
   const loaded = [ownerRow, sealed, steer, continuation]

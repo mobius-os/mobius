@@ -45,13 +45,6 @@ export function replyFooters({
   return footers
 }
 
-/** Compatibility selector for the current reply; the owner view uses all
- *  entries from replyFooters so historical complete answers keep their rows. */
-export function replyFooter(options) {
-  const { replyGroups, liveIndex = -1, lastVisibleIndex } = options
-  return replyFooters(options).get(replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)) || null
-}
-
 /** What the stretch's replies say, in order, as each settled reply renders:
  *  every group projected as AssistantReply projects it (`positions` are the
  *  peer timeline's), then read by `replyProse`. A prose part names the

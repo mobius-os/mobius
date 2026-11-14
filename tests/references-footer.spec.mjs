@@ -63,6 +63,8 @@ for (const touch of [false, true]) {
       const footer = older.locator('.chat__msg-meta--start')
       await expect(footer.getByRole('button', { name: 'Copy message' })).toHaveCount(1)
       const toggle = footer.getByRole('button', { name: 'References 2' })
+      await older.locator('.chat__text--assistant').first().click()
+      await expect.poll(() => footer.evaluate(el => getComputedStyle(el).opacity)).toBe('1')
       await toggle.click()
       await expect(toggle).toHaveAttribute('aria-expanded', 'true')
       await expect(footer.getByRole('link')).toHaveCount(2)
