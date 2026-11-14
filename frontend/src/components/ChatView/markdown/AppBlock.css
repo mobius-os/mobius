@@ -196,3 +196,15 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__jump:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__jump:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .md-app-block--folded .md-app-block__jump { margin-left:auto; }
+
+/* Opt-in status belongs beside the action, not in a second header lane.
+   Keep controls at their natural size; wrap the footer on narrow cards. */
+.md-app-block--footer-status:not(.md-app-block--folded) { padding-top:12px; }
+.md-app-block--footer-status > footer { flex-wrap:wrap; }
+.md-app-block__footer-status { display:flex; flex:1 1 100px; align-items:center; gap:6px; min-width:0; margin-right:auto; }
+.md-app-block__footer-status strong { min-width:0; font-size:13px; font-weight:500; overflow-wrap:anywhere; }
+.md-app-block--footer-status > footer > .md-app-block__session,
+.md-app-block--footer-status > footer .md-app-block__session-row,
+.md-app-block--footer-status > footer .md-app-block__controls { flex:0 1 auto; }
+.md-app-block--footer-status.md-app-block--folded > footer { padding:0 4px 0 8px; }
+.md-app-block--folded .md-app-block__footer-status { color:var(--muted); }

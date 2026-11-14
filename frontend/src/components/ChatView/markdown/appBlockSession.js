@@ -187,6 +187,7 @@ export function sessionState(message, sessionId, keys, intents = new Set(), app 
   }
   return {
     loading: message.loading === true,
+    statusPlacement: message.statusPlacement === 'footer' ? 'footer' : '',
     actions, notice: shortText(message.notice, SESSION_LIMITS.notice), summary: shortText(message.summary, SESSION_LIMITS.summary),
     title: shortText(message.title, SESSION_LIMITS.title), items: sessionItems(message.items, intents),
     titleTone: tone(message.titleTone), titleBusy: message.titleBusy === true, rows: sessionRows(message.rows, app),
@@ -256,14 +257,15 @@ export function sessionStateUpdate(previous, safe) {
  *  the saved snapshot is shown instead, exactly as without rows. */
 export function sessionSnapshot(block, state) {
   const confirming = state?.actions.find(action => action.confirming)
+  const statusPlacement = state?.statusPlacement || block.statusPlacement
   const live = key => state?.actions.find(action => action.key === key)?.badges
   if (confirming?.confirmation) {
     const target = [block.action, ...block.items.map(item => item.action)].find(action => action?.intent === confirming.key)
-    return { ...block, title: state.title || block.title, badges: live(confirming.key) ?? [], facts: [], action: target || null, confirmation: true,
+    return { ...block, statusPlacement, title: state.title || block.title, badges: live(confirming.key) ?? [], facts: [], action: target || null, confirmation: true,
       items: confirming.confirmation.map(item => ({ title: item.title, facts: item.facts, badges: [], action: null, confirmation: true })) }
   }
   const badges = (saved, key) => live(key) ?? (confirming ? [] : saved)
-  const heading = { title: state?.title || block.title, liveTitle: Boolean(state?.title),
+  const heading = { statusPlacement, title: state?.title || block.title, liveTitle: Boolean(state?.title),
     titleTone: state?.title ? state.titleTone || 'neutral' : 'neutral', titleBusy: Boolean(state?.title && state.titleBusy) }
   if (state?.rows && !confirming) {
     return { ...block, ...heading, appRows: true, facts: [], badges: badges(block.badges, block.action?.intent),

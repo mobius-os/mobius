@@ -643,3 +643,47 @@ test('a linked change-size fact keeps its source link around the coloured counts
   assert.match(unsafe, /<dd><span class="md-app-block__lines">/)
 })
 
+test('footer status removes the redundant header without dropping details or lifecycle controls', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    title: '1 contribution', interaction: 'inline', expand: false, status_placement: 'footer',
+    action: { label: 'Send', intent: 'send:one' }, items: [{ title: 'Exact change', intent: 'open:one' }] }) })
+  const show = fields => {
+    const state = fields && sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+      title: '1 contribution', rows: [{ title: 'Exact change', meta: 'owner/repo', intent: 'open:one' }],
+      actions: [{ key: 'send:one', label: 'Send' }], ...fields }, 's', new Set(['send:one']), new Set(), 'example')
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+      locked: false, confirmArmed: true, onEvent() {}, onJump() {} }))
+  }
+  for (const fields of [null, {}, { title: 'Sending 1', titleBusy: true,
+    actions: [{ key: 'send:one', hidden: true, busy: true }] },
+  { title: 'Confirm 1', actions: [{ key: 'send:one', confirming: true,
+    confirmation: [{ title: 'Exact change', facts: [{ label: 'Project', value: 'owner/repo' }] }] }] }]) {
+    const html = show(fields)
+    assert.doesNotMatch(html, /<header>|md-app-block__open/)
+    assert.match(html, /Exact change/)
+    assert.match(html, /<footer><div class="md-app-block__footer-status">/)
+  }
+  assert.match(show({}), /intent=open%3Aone/, 'row details still open the app')
+  const confirmation = show({ actions: [{ key: 'send:one', confirming: true,
+    confirmation: [{ title: 'Exact change', facts: [] }] }] })
+  assert.match(confirmation, />Not now<\/button>/)
+  assert.match(confirmation, />Confirm<\/button>/)
+  const published = show({ title: '1 pull request', titleTone: 'success',
+    actions: [{ key: 'send:one', hidden: true }],
+    rows: [{ title: 'Exact change', links: [{ label: '#42', url: 'https://example.com/pull/42' }] }] })
+  assert.match(published, /<footer>[^]*<strong>1 pull request<\/strong>[^]*md-app-block__results/)
+  assert.match(published, /aria-label="#42, Exact change, opens in a new tab"/)
+  assert.doesNotMatch(published, /<button/)
+  const folded = show({ title: 'Continued below', rows: [], actions: [{ key: 'send:one', hidden: true }] })
+  assert.match(folded, /md-app-block--folded/)
+  assert.match(folded, /Jump to latest/)
+  assert.doesNotMatch(folded, /<header>|md-app-block__open|md-app-block__items/)
+})
+
+test('a live footer-status report compacts existing cards while other apps retain their header', () => {
+  const html = appRowsView({ statusPlacement: 'footer', title: '1 pull request',
+    rows: [{ title: 'Exact change', meta: 'owner/repo' }] })
+  assert.doesNotMatch(html, /<header>|md-app-block__open/)
+  assert.match(html, /md-app-block__footer-status/)
+  assert.match(appRowsView({ statusPlacement: 'unknown', title: 'Example', rows: [] }), /<header>/)
+})

@@ -163,18 +163,22 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   const actionLane = !folded && block.session && !block.expand && Boolean(block.action)
   const linksInFooter = actionLane && block.appRows
   const results = linksInFooter ? block.items.filter(item => item.live?.links.length) : []
-  return <section ref={sectionRef} className={`md-app-block${valueFacts}${folded ? ' md-app-block--folded' : ''}${actionLane ? ' md-app-block--action-lane' : ''}`} aria-label={block.title}>
-    <header>
+  const footerStatus = block.statusPlacement === 'footer'
+  const status = <>
       <TitleMark tone={block.titleTone} busy={block.titleBusy} />
       <strong>{block.title}</strong>
       <Badges badges={block.badges} />
-      {folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
-        Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null}
+    </>
+  const jump = folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
+    Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null
+  return <section ref={sectionRef} className={`md-app-block${valueFacts}${folded ? ' md-app-block--folded' : ''}${actionLane ? ' md-app-block--action-lane' : ''}${footerStatus ? ' md-app-block--footer-status' : ''}`} aria-label={block.title}>
+    {footerStatus ? null : <header>
+      {status}{jump}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
       {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
         {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
         <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
-    </header>
+    </header>}
     {/* While the rows are the app's confirmation or its own rows, nothing is
         added around them. A live title is the app's; saved rows are still the
         conversation's. */}
@@ -183,7 +187,9 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
     {summary ? <p className="md-app-block__summary" role="status">{summary}</p> : null}
     <Facts facts={block.facts} />
     <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} linksInFooter={linksInFooter} />
-    {actionLane || action || toggle ? <footer>
+    {footerStatus || actionLane || action || toggle ? <footer>
+      {footerStatus ? <div className="md-app-block__footer-status">{status}</div> : null}
+      {footerStatus ? jump : null}
       {results.length ? <div className="md-app-block__results">{results.map((item, i) =>
         <ExternalLinks key={i} links={item.live.links} context={item.title} />)}</div> : null}
       {toggle}{action}
