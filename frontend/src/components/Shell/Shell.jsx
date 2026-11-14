@@ -2959,6 +2959,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
     if (activeViewRef.current !== 'settings') navToRef.current('settings')
   }, [activeViewRef])
+  const openProviderSettings = useCallback((providerId) => {
+    openSettingsSection(`provider:${providerId}`)
+  }, [openSettingsSection])
 
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
@@ -5490,7 +5493,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 loadTheme={loadTheme}
                 openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
-                onOpenProviderSettings={(providerId) => openSettingsSection(`provider:${providerId}`)}
+                onOpenProviderSettings={openProviderSettings}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
                 archived={archivedChatIds.has(String(chatId))}
