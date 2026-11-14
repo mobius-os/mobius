@@ -171,8 +171,10 @@ test('question option explanations remain selectable without choosing them', () 
   assert.match(optionRule, /user-select:\s*text/)
   assert.match(optionRule, /-webkit-user-select:\s*text/)
   assert.match(optionRule, /-webkit-touch-callout:\s*default/)
-  assert.match(component, /const OptionSurface = inactive \? 'div' : 'button'/,
-    'answered or disabled options should become static selectable content')
+  assert.match(component, /tabIndex=\{inactive \? undefined : 0\}/,
+    'answered or disabled options stay selectable but leave the tab order')
+  assert.match(component, /onClick=\{inactive \? undefined/,
+    'answered or disabled options cannot change the answer')
   assert.match(
     component,
     /event\.detail !== 0[\s\S]*pointerSelectionChangedWithin\([\s\S]*event\.currentTarget[\s\S]*\) return[\s\S]*selectOption/,
