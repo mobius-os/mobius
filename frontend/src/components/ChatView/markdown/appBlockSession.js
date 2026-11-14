@@ -159,7 +159,11 @@ export function askMessage(app, ask) {
     ...ask.refs.map(ref => `\`${app} · ${ref.id} · ${ref.code}\``)].join('\n')
 }
 
-/** Parse one app-block-state message for this session, its known action keys
+/** `loading` marks an incomplete read, not an empty result. The host keeps
+ *  the last complete read-only presentation while it is true; a settled
+ *  failure must report false so the failure becomes visible.
+ *
+ *  Parse one app-block-state message for this session, its known action keys
  *  and (optionally) the block's item intents. `ask` says whether this app may
  *  report an ask at all; it is dropped while any action confirms or is busy. */
 export function sessionState(message, sessionId, keys, intents = new Set(), app = '', { ask = false } = {}) {
@@ -182,6 +186,7 @@ export function sessionState(message, sessionId, keys, intents = new Set(), app 
     }
   }
   return {
+    loading: message.loading === true,
     actions, notice: shortText(message.notice, SESSION_LIMITS.notice), summary: shortText(message.summary, SESSION_LIMITS.summary),
     title: shortText(message.title, SESSION_LIMITS.title), items: sessionItems(message.items, intents),
     titleTone: tone(message.titleTone), titleBusy: message.titleBusy === true, rows: sessionRows(message.rows, app),

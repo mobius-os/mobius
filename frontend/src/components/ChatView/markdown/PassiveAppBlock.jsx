@@ -43,7 +43,7 @@ export function useOnScreen(showing) {
 /** No new owner event while one awaits acknowledgement, an action is busy,
  *  or admission was withdrawn under an unresolved session. */
 export function sessionLocked(session, admitted) {
-  return !admitted || !session.state || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
+  return !admitted || (!session.authoritative && !session.canWake) || session.state?.loading || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
 }
 
 
@@ -158,7 +158,7 @@ function SessionHost({ app, session }) {
       <AppCanvas appId={app.id} appName={app.name} appSlug={app.slug} version={appFrameVersion(app)}
         storageGeneration={app.storage_generation} offlineCapable={app.offline_capable === true}
         capabilityContract={app.capability_contract || null} active={false} visible={false} interactive={false}
-        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event} blockRefresh={session.blockRefresh}
+        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event}
         onBlockState={session.onBlockState} onBlockCapability={session.onBlockCapability} />
     </Suspense>
   </div>
@@ -195,28 +195,29 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   const [listEndRef, listEndView] = useOnScreen(showing)
   const listEdgeRefs = { start: listStartRef, end: listEndRef }
   const [retained, setRetained] = useState(false)
+  const [wantsFrame, setWantsFrame] = useState(true)
   const [staticOpen, setStaticOpen] = useState(false)
   // Without admission no new frame starts; a retained one keeps its own.
-  const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
+  const granted = usePassiveSlot(app.id, { wanted: admitted && near && wantsFrame && !staticOpen, retained, distance })
   const askAllowed = passiveAskAllowed(app)
-  const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
+  const session = useAppBlockSession({ block, near: admitted && near && !staticOpen, granted,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
     confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh, ask: askAllowed })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
-  const ask = blockAsk({ state: session.state, admitted, allowed: askAllowed, context: chat.context })
-  const message = ask ? askMessage(block.app, ask) : ''
+  useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
+  const ask = blockAsk({ state: session.displayState, admitted, allowed: askAllowed, context: chat.context })
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
   }
   return <PassiveBlockView block={block} app={app} state={session.displayState} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
-    onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
+    onEvent={session.requestEvent} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
     ask={ask ? <AskControl status={chat.askState({ fingerprint: blockFingerprint(block), refs: ask.refs })} locked={sessionLocked(session, admitted)}
-      onAsk={() => { void chat.ask({ message, fingerprint: blockFingerprint(block), refs: ask.refs }) }} /> : null}
+      onAsk={() => session.requestAsk(current => { void chat.ask({ message: askMessage(block.app, current), fingerprint: blockFingerprint(block), refs: current.refs }) })} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
-    {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
+    {session.frameMounted ? <SessionHost key={session.documentScope} app={app} session={session} /> : null}
   </PassiveBlockView>
 }
