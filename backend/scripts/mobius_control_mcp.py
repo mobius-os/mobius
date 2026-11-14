@@ -105,10 +105,14 @@ UPDATE_GOAL_DESCRIPTION = (
   "next_action records the exact next step. complete records only the verified "
   "original outcome. If unreachable, first ask the owner an actionable question; "
   "a temporary owner action or approval keeps the Goal open with its saved card. "
-  "If the owner defers a step, continue other authorized work. When none can "
-  "proceed, use defer with the reason and end normally: no repeat question, "
-  "automatic retry, or failed outcome. This holds the original Goal and releases "
-  "its claims; resolve existing helpers, cards and Waits first. "
+  "defer means a deliberate manual hold: no automatic continuation until a "
+  "later owner request. Waiting for an event is not a hold: keep the Goal open "
+  "and register its exact handoff (request_restart for this chat's activation, "
+  "a saved owner card, a peer dependency, declare_wait, or a helper result). "
+  "Another chat's Restart card does not register this chat. Finish independent "
+  "authorized work first. Use defer only when the owner chose to pause the "
+  "remaining work; resolve existing helpers, cards and Waits first. It preserves "
+  "the original Goal and releases its claims without claiming success or failure. "
   "Only a genuinely unreachable outcome uses cannot_complete with reason, "
   "efforts/partial results, and unmet_outcome; cancel means the owner called it "
   "off. Settle every task honestly and wait for helpers before any outcome. "
@@ -1946,7 +1950,7 @@ _TOOL_DEFINITIONS = {
         "cancel": {"type": "string", "minLength": 1,
                    "description": "Owner-called-off reason, not an unreachable-work shortcut."},
         "defer": {"type": "string", "minLength": 1,
-                  "description": "Why remaining work is deferred, after other authorized work is done. Quietly holds this Goal, not an outcome or a new question; tasks may share this atomic call. Do not combine with next_action or outcomes."},
+                  "description": "Reason the owner chose a manual hold after independent authorized work is done. Disables automatic continuation until a later owner request; not for waiting on a restart, decision, dependency or helper. Register that exact handoff instead. Tasks may share this atomic call; do not combine with next_action or outcomes."},
         "finished_claims": {
           "type": "array", "items": {"type": "string"},
           "description": (
