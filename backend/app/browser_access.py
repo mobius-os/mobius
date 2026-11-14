@@ -15,17 +15,20 @@ Functions commit their own transitions; a failed transition rolls back.
 """
 
 import hashlib
+import logging
 import secrets
 from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import urlsplit
 
 from fastapi import HTTPException
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, case, update
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, String, case, false, update
 from sqlalchemy.orm import Session
 
 from app.database import Base
 from app.timeutil import now_naive_utc
+
+log = logging.getLogger(__name__)
 
 
 SESSION_IDLE_TTL = timedelta(days=30)
@@ -51,6 +54,9 @@ class BrowserAccessGrant(Base):
   origin = Column(String(255), nullable=True)
   remote_status = Column(String(24), nullable=True)
   grantor_binding = Column(String(128), nullable=True)
+  # The owner's per-recipient Full access: it lifts only
+  # ``deps.require_owner_or_full_access_control``. Read live on every check.
+  full_access = Column(Boolean, nullable=False, default=False, server_default=false())
 
 
 class BrowserAccessInvite(Base):
@@ -187,6 +193,19 @@ def is_live(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
     and session.idle_expires_at > now_naive_utc()
     and session.owner_token_epoch == owner.token_epoch
   )
+
+
+def has_full_access(db: Session, lineage: BrowserLineage | None, owner_id: int) -> bool:
+  """Whether this live guest lineage holds Full access.
+
+  Read fresh on every check, so turning Full access off or revoking ends it
+  at once, including for work the guest already started."""
+  if lineage is None or not is_live(db, lineage, owner_id):
+    return False
+  grant = _fresh(db, BrowserAccessGrant, lineage.grant_id)
+  # Only an account grant proves who the person is; a one-time link is a
+  # bare cookie, so it never carries Full access.
+  return grant is not None and grant.kind == "account" and grant.full_access is True
 
 
 def require_live(db: Session, lineage: BrowserLineage | None, owner_id: int) -> None:
@@ -542,3 +561,15 @@ async def end_grant(db: Session, grant: BrowserAccessGrant, *, contact_directory
     result.directory_cleanup_pending = outcome != "revoked"
     result.directory_credential_rejected = outcome == "credential_rejected"
   return result
+
+
+async def revoke_and_end(db: Session, grant_id: str, owner_id: int) -> tuple[BrowserAccessGrant, GrantEnd]:
+  """Revoke one grant, then end everything it started.
+
+  The revocation commits first, so a failed stop step is logged and left as
+  unfinished, retryable stopping (``stop_error``), never as access kept."""
+  grant = revoke_grant(db, grant_id, owner_id)
+  ended = await end_grant(db, grant)
+  if ended.stop_error is not None:
+    log.warning("browser grant %s revoked; stopping its work failed: %r", grant.id, ended.stop_error)
+  return grant, ended
