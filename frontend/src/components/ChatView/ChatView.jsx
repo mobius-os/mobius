@@ -107,7 +107,7 @@ import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
-import AssistantReply, { endsAgentStretch } from './AssistantReply.jsx'
+import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
@@ -179,12 +179,13 @@ import { steerPendingHint } from './queuedHint.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
-  sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { sendFailureNotice } from './HelperChatSendNotice.jsx'
 import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
@@ -199,6 +200,9 @@ import {
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
+import { stretchClipboard } from './messageCopy.js'
+import { agentStretches, footerCopyParts, replyFooter } from './replyFooter.js'
+import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
@@ -1878,7 +1882,7 @@ export default function ChatView({
       // onNeedsRefresh below is the authority for whether the run truly ended.
       promoteStreamToMessages({ keepTurnOpen: true })
     },
-    onStreamEnd: ({ continues, promotedMessage } = {}) => {
+    onStreamEnd: ({ continues, promotedMessage, runEndedTs } = {}) => {
       dispatchQuestionFollowHandoff({ type: 'stream_ended' })
       if (embedded && continues === false) setEmbeddedRunActive(false)
       const continuation = continues ? queuedContinuationRef.current : null
@@ -1901,6 +1905,7 @@ export default function ChatView({
       promoteStreamToMessages({
         followingMessages: promotedRows,
         authoritativeCut: true,
+        runEndedTs,
       })
       if (continues) {
         // The next physical run has been created but its assistant identity is
@@ -2357,6 +2362,7 @@ export default function ChatView({
     items: explicitItems = null,
     assistantMessageId: explicitAssistantMessageId = undefined,
     authoritativeCut = false,
+    runEndedTs = null,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
@@ -2428,6 +2434,7 @@ export default function ChatView({
       promotedItems: items,
       assistantMessageId,
       bridgeTs,
+      runEndedTs,
       followingMessages: following,
       commitMessages,
     })
@@ -3346,9 +3353,14 @@ export default function ChatView({
     }
     // A failed send's recovery belongs to the composer's draft; a send from
     // elsewhere only re-reads the transcript, which shows it if it arrived.
-    function keepFailedDraft(failedAttempt) {
+    function keepFailedDraft(failedAttempt, error) {
       if (!fromComposer) return
-      rememberFailedAttempt(failedAttempt)
+      // A helper's chat refuses every owner send, so nothing landed and there
+      // is no delivery to reconcile. Any attempt still remembered (an earlier
+      // lost send of this draft) is settled too, or a later transcript read
+      // would replace the refusal with "send it again".
+      if (isHelperChatSendFailure(error)) clearFailedAttempt()
+      else rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
     }
     function settleAmbiguousFailure(failedAttempt) {
@@ -3602,9 +3614,11 @@ export default function ChatView({
             transportContent: text,
             attachments: composerFileSnapshot,
           }
-          keepFailedDraft(failedAttempt)
+          keepFailedDraft(failedAttempt, err)
         }
-        const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+        const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+          online: getOnlineSnapshot(), onInternalNav: internalNav,
+        })
         setSendFailure(banner)
         if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
         if (modelSelectionBlocked) {
@@ -3817,7 +3831,7 @@ export default function ChatView({
           transportContent: sendText,
           attachments: composerFileSnapshot,
         }
-        keepFailedDraft(failedAttempt)
+        keepFailedDraft(failedAttempt, err)
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
         // same cid with the restored draft so a manual retry can only reconcile
@@ -3829,7 +3843,9 @@ export default function ChatView({
           return next
         })
       }
-      const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+      const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+        online: getOnlineSnapshot(), onInternalNav: internalNav,
+      })
       setSendFailure(banner)
       if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
       if (modelSelectionBlocked) {
@@ -3870,6 +3886,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     acknowledgeFirstMessageAccepted,
+    internalNav,
   ])
 
   useEffect(() => {
@@ -5919,6 +5936,60 @@ export default function ChatView({
     }
   }
 
+  const stretches = useMemo(
+    () => agentStretches(peerTimeline.messages, replyGroups),
+    [peerTimeline.messages, replyGroups],
+  )
+  // Each stretch's earlier replies' rows, for the References its last reply
+  // lists; replies inside a stretch list none.
+  const stretchSourceRows = useMemo(() => new Map([...stretches].map(([end, groups]) => [
+    end, groups.slice(0, -1).flatMap(group => group.rows.map(row => row.message)),
+  ])), [stretches])
+  // Answering a card starts the turn the moment it is submitted, before the
+  // server acknowledges it; a failed answer clears this and the footer returns.
+  const turnStarting = turnActive || questionFollowHandoff != null
+  // The settled footer reply's end (see replyFooter). It is state set from a
+  // committed render's layout effect, so a discarded render cannot name a
+  // reply, and it updates before paint. Kept with its chat, so switching
+  // chats never carries one chat's settled reply into another.
+  const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
+  const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
+  // One footer for the whole chat, on the reply at its very end. Once the
+  // owner speaks or answers a card there is none until the next reply starts,
+  // so that reply's Thinking takes the footer's place instead of appearing
+  // below it.
+  const footerLiveIndex = showActiveAssistantSurface
+    ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
+  const footer = useMemo(() => replyFooter({
+    messages: peerTimeline.messages, replyGroups, stretches, liveIndex: footerLiveIndex,
+    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd,
+  }), [peerTimeline.messages, replyGroups, stretches, footerLiveIndex,
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd])
+  const footerGroup = footer?.group ?? null
+  const footerEnd = footer?.end ?? null
+  useLayoutEffect(() => {
+    if (!turnStarting) {
+      setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
+        ? prev : { chatId, end: footerEnd }))
+    }
+  }, [chatId, turnStarting, footerEnd])
+  // A stretch that began before the loaded page reads its start only when
+  // the footer is about to be used.
+  const [stretchStartRows, requestStretchStart] = useStretchPrefix(
+    chatId, footer?.truncated ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+  )
+  const footerParts = useMemo(() => footerCopyParts(footer, {
+    startRows: stretchStartRows, messages: peerTimeline.messages, offset,
+    slots: peerTimeline.slots, positions: peerTimeline.positions, displayKeys: assistantDisplayKeys,
+    liveQuestionId: answerableQuestionId,
+  }), [footer, stretchStartRows, peerTimeline.messages, peerTimeline.slots,
+    peerTimeline.positions, offset, assistantDisplayKeys, answerableQuestionId])
+  // Copy shows exactly when the stretch's parts are known and say something;
+  // pressing it builds the clipboard from those same parts.
+  const footerCopy = useMemo(() => (footerParts?.length
+    ? button => stretchClipboard(footerParts, button.closest('.chat__list'))
+    : undefined), [footerParts])
+
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
     setDepth: depth => { fileDragDepthRef.current = depth },
@@ -5977,11 +6048,16 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      endsStretch={endsAgentStretch(peerTimeline.messages, replyGroups, group)}
-      // Only an idle latest reply pins its actions. A live reply may not yet
-      // have a stored row; that must not leave the previous reply pinned too.
-      metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={showMessageMeta}
+      // The footer clears the moment a new turn starts (an answered card
+      // included) and fills again where the agent next stops.
+      footer={group === footerGroup ? footer.state : null}
+      copy={group === footerGroup ? footerCopy : undefined}
+      metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={group === footerGroup ? showMessageMeta : undefined}
+      onFooterIntent={group === footerGroup && footer.truncated ? requestStretchStart : undefined}
+      // References of the latest stretch leave with its footer while the
+      // agent works, and return, whole, where it next stops.
+      stretchSourceRows={group === footerGroup && turnStarting ? null : stretchSourceRows.get(group) || null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
@@ -6250,7 +6326,7 @@ export default function ChatView({
           {branchOriginAtEnd && branchOriginRow}
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
-            <li className="chat__msg chat__msg--assistant">
+            <li className="chat__msg chat__msg--assistant chat__msg--pending-reply">
               {/* The placeholder occupies the same wrapper and shared header as
                   the first real activity stretch, so event promotion cannot
                   change its alignment. The hook remains a presence probe only. */}
