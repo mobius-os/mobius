@@ -8,6 +8,8 @@ from datetime import timedelta
 import pytest
 
 from app import app_tools, auth as auth_mod, models, provider_availability as pa
+from app.agent_activity import is_routine_tool
+from app.agent_activity_provider import resolve_agent_activity_binding
 from app.app_capabilities import contract_from_app_state, contract_from_manifest
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.platform_tools import codex_turn_mcp_config
@@ -267,6 +269,7 @@ def test_call_tells_the_app_a_helper_called_and_whether_it_may_write(
   assert actors == [{
     "scope": "owner", "app_id": None, "app_slug": None,
     "delegated": True, "access": scope,
+    "delegation_id": "helper", "delegation_chat": "child",
   }]
 
 
@@ -376,6 +379,25 @@ def test_an_app_may_load_one_tool_up_front(db):
 
   assert listings["reflection_log_friction"]["_meta"] == {"anthropic/alwaysLoad": True}
   assert "_meta" not in listings["memory_search"]
+
+
+def test_an_app_may_declare_a_tool_routine(db):
+  validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": True}]))
+  with pytest.raises(ManifestContractError, match="routine"):
+    validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": "yes"}]))
+  routine = {**LOG_TOOL, "routine": True}
+  # The mark comes from the reviewed contract of a live app, never from a
+  # deleted app or plain declaration, and never claims a platform tool's name.
+  _app(db, "reflection", contract=_contract([routine]))
+  _app(db, "memory", contract=_contract([{**LOG_TOOL, "name": "search"}]))
+  _app(db, "journal", contract=_contract([routine]), deleted=True)
+  _app(db, "notify", contract=_contract([{**routine, "name": "owner"}]))
+
+  binding = resolve_agent_activity_binding(db)
+
+  assert binding.routine_app_tools == {"reflection_log_friction"}
+  assert is_routine_tool("mcp__mobius_control__reflection_log_friction", binding)
+  assert not is_routine_tool("mcp__mobius_control__notify_owner", binding)
 
 
 def test_retired_result_independent_declaration_stays_valid_without_effect(db):

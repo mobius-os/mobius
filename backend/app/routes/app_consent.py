@@ -7,13 +7,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import activity, app_consent, models
+from app import activity, app_consent, credits_confirmations, models
 from app.app_skills import deactivate_app_skills, restore_app_skills
 from app.app_jobs import launch_app_job
 from app.broadcast import get_system_broadcast
 from app.database import get_db
 from app.deps import (
-  Principal, get_current_owner, get_current_owner_for_owner_input, get_principal,
+  Principal, get_current_owner, get_current_owner_for_owner_input,
+  get_owner_principal, get_principal, is_installation_owner,
   reject_cross_site, require_installation_owner,
 )
 
@@ -115,3 +116,63 @@ async def revoke_consent(
   activity.log_event("app_consent", app_id=app.id, slug=app.slug, action="revoked")
   get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
   return {"status": app_consent.status(app), "app_id": app.id}
+
+
+# --- Every credits charge waits for the owner's Pay ---------------------------
+
+
+class PaymentAnswer(BaseModel):
+  pay: bool
+
+
+@router.get("/{app_id}/credits-charges")
+def read_waiting_payments(
+  app_id: int,
+  principal: Principal = Depends(get_owner_principal),
+  db: Session = Depends(get_db),
+):
+  """The app's charges waiting for the owner's Pay or Cancel.
+
+  These are the owner's private pending payments: the owner and the owner's own
+  top-level agent see the list. A shared-browser guest or a delegated helper
+  (the callers ``require_installation_owner`` refuses) authenticates but
+  sees an empty list, never the payments and never an error, since the shell
+  reads this for every app it opens and such a caller has nothing to answer.
+  """
+  app = _live_app(db, app_id)
+  if not is_installation_owner(principal):
+    return {"payments": []}
+  return {"payments": credits_confirmations.waiting(app.id)}
+
+
+@router.post("/{app_id}/credits-charges/{payment_id}", dependencies=[Depends(reject_cross_site)])
+def answer_payment(
+  app_id: int,
+  payment_id: str,
+  body: PaymentAnswer,
+  owner: models.Owner = Depends(get_current_owner_for_owner_input),
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+):
+  """Pay or Cancel one waiting charge. Only a human owner can answer."""
+  require_installation_owner(principal)
+  app = _live_app(db, app_id)
+  outcome = credits_confirmations.answer(app.id, payment_id, body.pay)
+  if outcome in (credits_confirmations.CONFIRMED, credits_confirmations.DECLINED):
+    # Answered already (a second press, or another device): that answer stands,
+    # so a paid payment is never reported as failed and bought again.
+    paid = outcome == credits_confirmations.CONFIRMED
+    raise HTTPException(status_code=409, detail={
+      "code": "payment_already_answered",
+      "state": outcome,
+      "message": ("You already paid for this. There is nothing more to do."
+                  if paid else "You already cancelled this payment."),
+    })
+  if outcome != credits_confirmations.ANSWERED:
+    raise HTTPException(status_code=409, detail={
+      "code": "payment_gone",
+      "message": "That payment is no longer waiting. Try it again in the app.",
+    })
+  activity.log_event("app_credits_payment", app_id=app.id, slug=app.slug,
+                     action=("paid" if body.pay else "cancelled"))
+  return {"app_id": app.id, "id": payment_id, "state": "confirmed" if body.pay else "declined"}

@@ -5,6 +5,7 @@ import {
   toolActivitySingular,
   toolActivityPastSingular,
   effectiveToolName,
+  isRoutineTool,
 } from './toolActivityLabel.js'
 export { groupActivityRuns } from './activityGrouping.js'
 
@@ -168,7 +169,7 @@ export function activityMemoSig(entries, { liveThinkingTail = false } = {}) {
     .map(e => {
       const it = e?.item
       if (it?.type === 'tool') {
-        return `t:${effectiveToolName(it) || ''}:${it.status || ''}`
+        return `t:${effectiveToolName(it) || ''}:${it.status || ''}:${isRoutineTool(it) ? 'r' : ''}`
       }
       if (it?.type === 'helper_result') return `h:${it.status || ''}`
       return 'k'
@@ -193,6 +194,17 @@ export function activitySummaryTools(entries) {
   })
 }
 
+// The tools that name a stretch's collapsed line. Settled routine calls
+// (isRoutineTool) stay inside the stretch but never name it beside other work
+// or reasoning; a running one still says what is happening now, and a stretch
+// of nothing else still says what it did.
+export function activityHeadlineTools(entries) {
+  const tools = activitySummaryTools(entries)
+  const work = tools.filter(tool => tool.status === 'running' || !isRoutineTool(tool))
+  const reasoned = entries.some(entry => entry?.item?.type === 'thinking')
+  return work.length || reasoned ? work : tools
+}
+
 // The single localization surface for the collapsed line's primary text. One
 // rule for the whole stretch, computed from its entries + the live hint:
 //   - live thinking tail (no tool running) → a bare "Thinking" (shimmer is the
@@ -207,7 +219,7 @@ export function activitySummaryTools(entries) {
 // Cheap on every call (Map lookups + a duration sum), so it runs each render
 // without a memo.
 export function activityCollapsedLabel(entries, { live = false } = {}) {
-  const tools = activitySummaryTools(entries)
+  const tools = activityHeadlineTools(entries)
   const lastItem = entries[entries.length - 1]?.item
   const liveThinkingTail = live && lastItem?.type === 'thinking'
   const toolRunning = tools.some(t => t?.status === 'running')

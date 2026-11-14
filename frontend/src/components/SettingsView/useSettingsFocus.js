@@ -1,36 +1,65 @@
 import { useEffect, useRef } from 'react'
+import { settingsSectionPage } from '../../lib/settingsSections.js'
 
-/** Navigate an explicit Settings request out of any open detail page. */
+// Where a request lands: the page to show (null for the overview) and the
+// section on it to focus (null when the request is the page itself). Chat
+// models live on each provider's page, so `models` opens the first connected
+// provider's, or the AI providers list while none is connected.
+function destination(section, modelsProvider) {
+  if (section === 'models') {
+    return modelsProvider
+      ? { page: modelsProvider, anchor: 'chat-models' }
+      : { page: null, anchor: 'ai-providers' }
+  }
+  const page = settingsSectionPage(section)
+  return page ? { page, anchor: null } : { page: null, anchor: section }
+}
+
+/**
+ * Navigate an explicit Settings request once: open its page, then focus its
+ * section there. The destination is fixed when the request is taken, so a
+ * later change (say, a fresh read reordering the providers before the focus
+ * frame) cannot leave the open page waiting for a section it no longer shows.
+ */
 export function useSettingsFocus({
-  focusTarget, providerReady, detailPage, setDetailPage,
-  setManageModelsProvider, setupFocusRefs, setAttentionSection,
+  focusTarget, providerReady, providersFailed = false, modelsProvider = null, detailPage, setDetailPage,
+  setupFocusRefs, setAttentionSection,
 }) {
+  // { request, page, anchor } for the request being navigated.
+  const taken = useRef(null)
   const handled = useRef(null)
-  useEffect(() => {
-    if (!focusTarget?.section) return
-    setDetailPage(null)
-    if (focusTarget.section === 'models') setManageModelsProvider('all')
-  }, [focusTarget, setDetailPage, setManageModelsProvider])
+  const section = focusTarget?.section
+  // `models` needs the provider list to pick its page. When it cannot be read
+  // (nothing cached and the read failed) the request lands on AI providers,
+  // where that failure and its Retry show, rather than waiting for ever.
+  const waiting = section === 'models' && !providerReady && !providersFailed
 
   useEffect(() => {
-    const requested = focusTarget?.section
-    if (!requested || detailPage || handled.current === focusTarget) return undefined
-    const section = requested === 'models' ? 'ai-providers' : requested
+    if (!section || waiting || taken.current?.request === focusTarget) return
+    taken.current = { request: focusTarget, ...destination(section, providerReady ? modelsProvider : null) }
+    setDetailPage(taken.current.page)
+  }, [focusTarget, section, waiting, providerReady, modelsProvider, setDetailPage])
+
+  useEffect(() => {
+    const target = taken.current
+    if (target?.request !== focusTarget || !target.anchor || detailPage !== target.page) return undefined
+    if (handled.current === focusTarget) return undefined
+    const { anchor } = target
     let clearTimer = null
     const raf = requestAnimationFrame(() => {
-      const node = setupFocusRefs.current[section]
+      const node = setupFocusRefs.current[anchor]
       if (!node) return
       handled.current = focusTarget
       node.scrollIntoView({ behavior: 'smooth', block: 'start' })
       node.focus({ preventScroll: true })
-      setAttentionSection(section)
+      setAttentionSection(anchor)
       clearTimer = setTimeout(() => {
-        setAttentionSection(current => current === section ? '' : current)
+        setAttentionSection(current => current === anchor ? '' : current)
       }, 1800)
     })
     return () => {
       cancelAnimationFrame(raf)
       if (clearTimer) clearTimeout(clearTimer)
     }
-  }, [focusTarget, providerReady, detailPage, setupFocusRefs, setAttentionSection])
+  }, [focusTarget, waiting, providerReady, detailPage, setupFocusRefs, setAttentionSection])
 }

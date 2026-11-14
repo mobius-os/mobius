@@ -42,6 +42,7 @@ from app.chat_logging import (
 )
 from app.config import get_settings
 from app.database import (
+  CHECKOUT_WARN_SECONDS,
   Base,
   IntegerOutOfRange,
   SessionLocal,
@@ -66,6 +67,7 @@ from app.runtime_provenance import (
 )
 from app.response_policy import (
   chat_embed_csp,
+  APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY,
   PLATFORM_CODE_SCOPE_KEY,
   PUBLISHED_SITE_CSP,
   absolute_csp_origin,
@@ -76,7 +78,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models, tracing
+from app import activity, models, stall_recorder, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -93,12 +95,13 @@ from app.routes import (
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
-  contribution_reviews_router,
+  contribution_reviews_router, owner_grants_router,
   chat_waits_router,
   debug_router, delegations_router, fs_router, goal_plans_router, github_router,
   github_access_router,
   reviewer_router,
   identity_router,
+  credits_router,
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
@@ -291,6 +294,13 @@ async def lifespan(app):
   # behind are ended; their helpers' durable turns recover like any other.
   from app import helper_hosts
   helper_hosts.end_orphaned_hosts()
+  # A data volume that is already full gets its recovery reserve back
+  # before database initialization writes anything (see storage_guard).
+  from app.storage_guard import release_reserve_at_boot
+  try:
+    release_reserve_at_boot(settings.data_dir)
+  except Exception:
+    _log.warning("startup recovery-reserve check failed", exc_info=True)
   from app.startup import (
     StartupContext,
     run_startup_plan,
@@ -611,15 +621,19 @@ def _chat_embed_csp_for_scope(scope) -> str:
 
 
 def _app_frame_csp_for_scope(scope) -> str:
-  """Let the loopback test harness exercise the real opaque app frame."""
+  """The opaque app frame's policy, widened only by that app's accepted
+  ``network.direct`` origins, which the frame route records in the scope.
+  Also lets the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
-  if delivery_origin is None:
+  direct_origins = tuple(scope.get(APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY) or ())
+  if delivery_origin is None and not direct_origins:
     return _APP_FRAME_CSP
   return app_frame_csp(
     settings.frontend_origin,
     _SERVICE_GATEWAY_ORIGIN,
     _BROWSER_API_ORIGIN,
-    delivery_origin,
+    delivery_origin or "",
+    direct_origins,
   )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -723,7 +737,9 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = _chat_embed_csp_for_scope(scope)
       elif app_frame:
-        csp = _app_frame_csp_for_scope(scope)
+        # Decided when the response starts: the frame route names the app's
+        # accepted direct origins in the scope while it handles the request.
+        csp = None
       elif artifact_output:
         csp = _ARTIFACT_OUTPUT_CSP
       elif _APP_SERVICE_PATH.match(path):
@@ -746,9 +762,11 @@ class _SecurityHeadersMiddleware:
         if not service_surface:
           # Outside the namespace lanes, the handler that answered decides:
           # platform code runs as the shell, everything else is inert.
-          policy = csp or (
-            _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
-            else _INERT_CONTENT_CSP
+          policy = (
+            _app_frame_csp_for_scope(scope) if app_frame else csp or (
+              _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
+              else _INERT_CONTENT_CSP
+            )
           )
           headers.append((_CONTENT_SECURITY_POLICY, policy.encode("ascii")))
         message["headers"] = headers
@@ -770,6 +788,34 @@ class _SecurityHeadersMiddleware:
       raise
 
 
+class _RequestLabel:
+  """``METHOD /route/{template}`` for database holds, resolved lazily because
+  routing has not run when the request arrives.
+
+  Tasks the request starts inherit this label and can outlive it, so the
+  label settles to a string when the request ends and drops the scope (and
+  with it the request's headers).
+  """
+
+  __slots__ = ("_scope", "_text")
+
+  def __init__(self, scope):
+    self._scope = scope
+    self._text: str | None = None
+
+  def __call__(self) -> str:
+    # A task's hold can end on a worker thread while the request settles on
+    # the loop: read the scope once, since ``settle`` sets the text first.
+    scope = self._scope
+    if scope is None:
+      return self._text
+    return f'{scope.get("method", "?")} {activity.route_template(scope)}'
+
+  def settle(self) -> None:
+    self._text = self()
+    self._scope = None
+
+
 class _DatabaseRequestContextMiddleware:
   """Attributes connection checkout time to the owning HTTP request."""
 
@@ -779,16 +825,13 @@ class _DatabaseRequestContextMiddleware:
   async def __call__(self, scope, receive, send):
     if scope["type"] != "http":
       return await self.app(scope, receive, send)
-    label = f'{scope.get("method", "?")} {scope.get("path", "/")}'
+    label = _RequestLabel(scope)
     token = set_database_request_label(label)
     try:
       return await self.app(scope, receive, send)
     finally:
       reset_database_request_label(token)
-
-
-def _matched_route(scope) -> str:
-  return getattr(scope.get("route"), "path", None) or "<unmatched>"
+      label.settle()
 
 
 class _RequestErrorTelemetryMiddleware:
@@ -797,8 +840,8 @@ class _RequestErrorTelemetryMiddleware:
   Successful requests do no logging or aggregation. For failures, the activity
   module keeps bounded in-memory minute counters and writes compact summaries,
   so a retry loop remains observable without amplifying its CPU or disk cost.
-  FastAPI leaves the matched route template and path params in the ASGI scope;
-  those templates contain no user paths or query values.
+  The route template (``activity.route_template``) carries no user paths or
+  query values.
 
   Unhandled exceptions also leave their traceback in the chat log (uvicorn's
   own report reaches only the container's stdout), once per route and
@@ -841,12 +884,12 @@ class _RequestErrorTelemetryMiddleware:
     except Exception as exc:
       status = status or 500
       self._log_traceback(
-        f"{scope.get('method', '?')} {_matched_route(scope)}", exc,
+        f"{scope.get('method', '?')} {activity.route_template(scope)}", exc,
       )
       raise
     finally:
       if status is not None and status >= 400:
-        route = _matched_route(scope)
+        route = activity.route_template(scope)
         raw_app_id = (scope.get("path_params") or {}).get("app_id")
         try:
           app_id = int(raw_app_id) if raw_app_id is not None else None
@@ -1032,6 +1075,10 @@ app.add_middleware(_DatabaseServiceabilityMiddleware)
 app.add_middleware(_SecurityHeadersMiddleware)
 app.add_middleware(_DatabaseRequestContextMiddleware)
 app.add_middleware(_RequestErrorTelemetryMiddleware)
+# Opt-in like tracing (tracing.json "stall_log"); outermost when on, so a
+# request's time to its response start includes every layer. A request is
+# late on the same measure as a long database hold.
+stall_recorder.install(app, request_seconds=CHECKOUT_WARN_SECONDS)
 
 # -- API routes --------------------------------------------------------
 app.include_router(auth_router)
@@ -1079,11 +1126,15 @@ app.include_router(uploads_router)
 app.include_router(generated_files_router)
 app.include_router(media_router)
 app.include_router(secrets_router)
+# Before github_router: its /contributions/{app_id}/{record_id}/<action> paths would take
+# an owner action at /contributions/{app_id}/pulls/<action> as a record named "pulls".
+app.include_router(contribution_reviews_router)
+app.include_router(owner_grants_router)
 app.include_router(github_router)
 app.include_router(github_access_router)
 app.include_router(reviewer_router)
-app.include_router(contribution_reviews_router)
 app.include_router(identity_router)
+app.include_router(credits_router)
 app.include_router(push_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
@@ -1232,8 +1283,9 @@ def ready_agent(response: Response):
 
   Basic `/api/ready` remains the container healthcheck so history can keep
   serving when agent work is resource-degraded. This public facet adds the
-  agent runtime's storage and memory prerequisites while returning stable codes
-  only; account state, exact capacity, paths, and writer details stay private.
+  agent runtime's storage, memory and process prerequisites while returning
+  stable codes only; account state, exact capacity, paths, and writer details
+  stay private.
   """
   response.headers["Cache-Control"] = "no-store"
   from app.agent_readiness import agent_readiness

@@ -31,6 +31,7 @@ import dataclasses
 import json
 import logging
 import shlex
+import tempfile
 import time
 import uuid
 from contextlib import ExitStack
@@ -40,6 +41,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.runtime_types import prompt_not_sent_result
 from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
@@ -1037,7 +1039,9 @@ def _host_options(
     _system_prompt_with_register,
   )
   from app.connectors import claude_mcp_config_handle
-  from app.platform_tools import claude_control_servers
+  from app.platform_tools import CONTROL_SERVER_NAME, claude_control_servers
+  from app import app_tools
+  from app.database import SessionLocal
 
   blocked = [
     # Supported AgentDefinition restriction: reports belong to Möbius, not
@@ -1099,7 +1103,15 @@ def _host_options(
       cli_path=_claude_cli_path(),
       stderr=capture_stderr,
       hooks={
-        "PreToolUse": [HookMatcher(matcher=None, hooks=[host.pre_tool_use])],
+        # PreToolUse owns dispatch identity, built-in-tool denial and each
+        # helper's env file, so a hook that raises or returns no valid
+        # decision must block the call, not run it unscoped (a timeout already
+        # blocks). Every no-opinion path returns {}, since None now blocks.
+        # The post-tool and lifecycle hooks below stay permissive on purpose:
+        # failing them closed would misreport a tool that already ran.
+        "PreToolUse": [HookMatcher(
+          matcher=None, hooks=[host.pre_tool_use], on_failure="block",
+        )],
         "PostToolUse": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PostToolUseFailure": [HookMatcher(matcher=None, hooks=[host.post_tool_use])],
         "PreCompact": [HookMatcher(matcher=None, hooks=[host.pre_compact])],
@@ -1113,9 +1125,22 @@ def _host_options(
     )
     if skills_enabled:
       options["skills"] = "all"
+    # tools/list precedes any child call, so it cannot use a child's bearer.
+    # Share reviewed metadata only, for this host's lifetime. Execution still
+    # fetches the live catalogue with the hook-stamped exact child identity.
+    catalogue_dir = stack.enter_context(tempfile.TemporaryDirectory(
+      prefix="mobius-helper-tools-",
+    ))
+    catalogue_file = Path(catalogue_dir) / "catalogue.json"
+    with SessionLocal() as db:
+      catalogue = {"tools": [tool.listing() for tool in app_tools.live_app_tools(db)]}
+    catalogue_file.write_text(json.dumps(catalogue), encoding="utf-8")
+    servers = claude_control_servers(enabled=True)
+    servers[CONTROL_SERVER_NAME]["env"] = {
+      "MOBIUS_APP_TOOL_CATALOGUE_FILE": str(catalogue_file),
+    }
     handle = stack.enter_context(claude_mcp_config_handle(
-      connector_plan,
-      extra_servers=claude_control_servers(enabled=True),
+      connector_plan, extra_servers=servers,
     ))
     if handle:
       options["mcp_servers"] = handle.path
@@ -1139,8 +1164,14 @@ async def run_claude_host_turn(
   helper_host_key: HostKey,
   data_dir: str,
   goal_brief_refresh=None,
+  run_generation: int | None = None,
 ) -> dict:
-  """Run one delegated Claude helper turn inside its parent's shared host."""
+  """Run one delegated Claude helper turn inside its parent's shared host.
+
+  ``run_generation`` is the chat run generation this turn was admitted for;
+  a Stop or delete while the host starts supersedes it, and the turn then ends
+  without dispatching work.
+  """
   from app.process_groups import RUN_MARKER_ENV, terminate_run_processes
   from app.runner_registry import registry, RunnerKind
 
@@ -1209,8 +1240,12 @@ async def run_claude_host_turn(
         helper_host_key, options_factory=factory, session_file=session_file,
       ),
     ) as host:
-      handle = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
-      registry.register(handle)
+      candidate = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
+      if not registry.register(candidate, run_generation=run_generation):
+        candidate.mark_finished()
+        log.info("Claude helper turn superseded before dispatch chat_id=%s", chat_id)
+        return prompt_not_sent_result(session_id)
+      handle = candidate
       started_at = time.monotonic()
 
       async def on_started(started: HelperTurn) -> None:

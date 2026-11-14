@@ -69,6 +69,29 @@ test('the file explorer owns filtering and creation while the workspace has no r
 })
 
 
+test('project chat rows stay plain rows whose actions open only on request', () => {
+  const markup = renderWorkspace({
+    project: {
+      id: 'project-chats',
+      name: 'Research notes',
+      chats: [
+        { id: 'used', title: 'Plan', has_messages: true },
+        { id: 'blank', title: '', has_messages: false },
+        { id: 'filed', title: 'Old', has_messages: true, archived_at: '2026-10-01T00:00:00Z' },
+        { id: 'live', title: '', has_messages: false },
+      ],
+    },
+    liveChatById: new Map([['live', { id: 'live', title: 'Draft outline', has_messages: true, running: true }]]),
+    pinnedChatIds: new Set(),
+    chatActions: { onPin() {}, onSetArchived() {}, onRename() {}, onDelete() {} },
+  })
+  assert.equal((markup.match(/class="project-chats__row"/g) || []).length, 4)
+  assert.match(markup, /<strong>New chat<\/strong><small>Empty<\/small>/)
+  assert.match(markup, /<strong>Old<\/strong><small>Archived<\/small>/)
+  assert.match(markup, /<strong>Draft outline<\/strong><small class="project-chats__status--working">Working…<\/small>/)
+  assert.doesNotMatch(markup, /role="menu"/)
+})
+
 test('the first build shows progress instead of requesting a nonexistent Creation', () => {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   client.setQueryData(projectQueries.keys.artifacts('building-project'), [{

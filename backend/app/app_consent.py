@@ -33,8 +33,9 @@ BASELINE = (
 # cannot mark itself harmless because it never supplies this.
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
-  "connect_manage", "identity_manage", "railway_manage", "agent_start",
-  "project_builders", "workspace.screen-control",
+  "connect_manage", "identity_manage", "credits_manage", "railway_manage",
+  "spend_credits",
+  "agent_start", "project_builders", "workspace.screen-control",
 })
 
 _CHAT_TEXT = {
@@ -77,6 +78,10 @@ _FLAGS = (
    "Can pair, unpair and manage computers that run work for you."),
   ("identity_manage", "identity_manage", "Manage your sign-in identity",
    "Can manage the mobius.you sign-in link and identity."),
+  ("credits_manage", "credits_manage", "Manage your credits and earnings",
+   "Can see your credits balance, earnings and history, connect this Möbius "
+   "to a credits service, buy credits, spend them on hosted models, set the "
+   "prices of your apps, and keep or withdraw your earnings."),
   ("railway_manage", "railway_manage", "Manage Railway deployments",
    "Can manage deployments on your Railway account."),
   ("location_history_read", "location_history_read", "See your location history",
@@ -92,7 +97,8 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read"} | {key for key, *_ in _FLAGS}
+   "job_secret_read", "spend_credits", "check_credits_charges"}
+  | {key for key, *_ in _FLAGS}
 )
 
 
@@ -155,6 +161,22 @@ def rows_from_contract(
       "Its background job can read the secrets it names: " + ", ".join(names) + ".",
       scope=[str(name) for name in names],
     ))
+  targets = data.get("spend_credits")
+  if isinstance(targets, list) and targets:
+    rows.append(_row(
+      "spend_credits", "Spend your credits on paid features",
+      "Its service can pay for priced calls from your Möbius credits, at the "
+      "price each creator sets, to: " + ", ".join(_payee(t) for t in targets) + ".",
+      scope=[str(target) for target in targets],
+    ))
+  checked_apps = data.get("check_credits_charges")
+  if isinstance(checked_apps, list) and checked_apps:
+    rows.append(_row(
+      "check_credits_charges", "Check payments for your apps",
+      "Its service can confirm that someone paid you for: " + ", ".join(checked_apps)
+      + ". It sees who paid, for what and how much, and cannot move credits.",
+      scope=[str(app) for app in checked_apps],
+    ))
   background = contract.get("background")
   if isinstance(background, dict):
     scheduled = background.get("mode") == "scheduled"
@@ -213,9 +235,12 @@ def rows_from_contract(
   for capability, declaration in sorted((contract.get("runtime") or {}).items()):
     if not isinstance(declaration, dict):
       continue
+    origins = declaration.get("origins")
     rows.append(_row(
       capability, str(declaration.get("title") or capability),
       _runtime_text(capability, declaration),
+      # The named sites are the grant: adding one is a new question.
+      scope=[str(origin) for origin in origins] if isinstance(origins, list) else None,
       limits={
         key: int(value) for key, value in (declaration.get("limits") or {}).items()
         if isinstance(value, (int, float)) and not isinstance(value, bool)
@@ -308,6 +333,11 @@ def _runtime_text(capability: str, declaration: dict[str, Any]) -> str:
   text = str(declaration.get("description") or capability)
   if isinstance(duration, (int, float)) and not isinstance(duration, bool):
     text = f"{text.rstrip('.')} for up to {round(duration / 1000, 1):g} seconds per request."
+  origins = declaration.get("origins")
+  if isinstance(origins, list) and origins:
+    text += " Sites: " + ", ".join(
+      str(origin).removeprefix("https://") for origin in origins
+    ) + "."
   if limits:
     ordered = [key for key in _LIMIT_WORDS if key in limits]
     ordered += sorted(key for key in limits if key not in _LIMIT_WORDS)
@@ -336,14 +366,34 @@ def rows_for_manifest(manifest: dict[str, Any], contract: dict[str, Any]) -> lis
   )
 
 
+def _payee(target: str) -> str:
+  """How the panel names one ``spend_credits`` entry."""
+  seller, _, priced_app = target.partition("/")
+  return f"any creator's {priced_app}" if seller == "*" else target
+
+
 def gated(app: models.App) -> bool:
   """Only Store-installed apps with a reviewed contract use first-open consent."""
-  return app.manifest_url is not None and isinstance(app.capability_contract, dict)
+  return (
+    getattr(app, "manifest_url", None) is not None
+    and isinstance(app.capability_contract, dict)
+  )
+
+
+def granted_direct_origins(app: Any) -> tuple[str, ...]:
+  """The outside sites the app's frame may reach: none until the owner
+  answered, so a waiting app's frame stays closed."""
+  from app.app_capabilities import direct_network_origins
+
+  if dormant(app):
+    return ()
+  return tuple(direct_network_origins(app.capability_contract))
 
 
 def current_rows(app: models.App) -> list[dict[str, Any]]:
   return rows_from_contract(
-    app.capability_contract, project_builders=bool(app.project_templates_json),
+    app.capability_contract,
+    project_builders=bool(getattr(app, "project_templates_json", None)),
   )
 
 
@@ -376,7 +426,7 @@ def _record(rows: list[dict[str, Any]], via: str) -> dict[str, Any]:
 def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
   """Row id to its accepted ``rank``, ``scope`` and ``limits``; None when never
   accepted."""
-  record = app.accepted_consent
+  record = getattr(app, "accepted_consent", None)
   if not isinstance(record, dict):
     return None
   stored = record.get("rows")

@@ -302,19 +302,17 @@ def test_mobius_model_switch_defaults_on_and_can_be_changed_without_account(
   from app.config import get_settings
   from app import providers
 
+  # The owner (Settings) and an app holding the identity grant (installed
+  # Möbius · You copies) share the switch; other apps may not touch it.
   granted = _app_auth(client, auth, granted=True)
   denied = _app_auth(client, auth, granted=False)
-  with SessionLocal() as session:
-    row = next(app for app in session.query(models.App).all()
-               if (app.capability_contract or {}).get("data", {}).get("identity_manage") is True)
-    row.capability_contract = {**row.capability_contract, "model_provider": {
-      "name": "Möbius", "transport": "identity_broker",
-      "base_url": "http://127.0.0.1:8765/v1", "default_model": "inkling",
-      "models": [{"id": "inkling", "label": "Evolve"}],
-    }}
-    session.commit()
-  providers.sync_app_model_providers(get_settings().data_dir, force=True)
+  assert client.get("/api/auth/providers/mobius/enabled", headers=auth).json() == {
+    "enabled": True,
+  }
   assert client.get("/api/auth/providers/mobius/enabled", headers=denied).status_code == 403
+  assert client.patch(
+    "/api/auth/providers/mobius/enabled", headers=denied, json={"enabled": False},
+  ).status_code == 403
   assert client.get("/api/auth/providers/mobius/enabled", headers=granted).json() == {
     "enabled": True,
   }

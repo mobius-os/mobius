@@ -1016,6 +1016,36 @@ def test_every_hosted_helper_gets_the_claude_register_and_text_stream(tmp_path, 
       assert "# Interruptions in Möbius" in agent.prompt
 
 
+def test_helper_pre_tool_use_fails_closed_and_post_tool_hooks_stay_permissive(tmp_path):
+  """A raising or invalid identity/env hook must block, not run unscoped."""
+  from contextlib import ExitStack
+  from types import SimpleNamespace
+
+  factory = claude_host._host_options(
+    key=SimpleNamespace(cwd=str(tmp_path)), host_env={},
+    skill_text="C", connector_plan=None, skills_enabled=False,
+    model=None, supports_effort=True,
+  )
+  host = SimpleNamespace(stderr_tail=[], pre_tool_use=None, post_tool_use=None,
+                         pre_compact=None, subagent_stop=None)
+  with ExitStack() as stack:
+    options = factory(host, None, stack)
+  assert [m.on_failure for m in options.hooks["PreToolUse"]] == ["block"]
+  for event in ("PostToolUse", "PostToolUseFailure", "PreCompact", "SubagentStop"):
+    assert all(m.on_failure is None for m in options.hooks[event]), event
+
+
+@pytest.mark.asyncio
+async def test_helper_pre_tool_use_denies_once_identity_is_closed(tmp_path):
+  """Under on_failure="block" a None return blocks; a closed host must say deny."""
+  host = _claude_host(tmp_path)
+  host._cancel_pending_identity()
+  result = await host.pre_tool_use(
+    {"tool_name": "Read", "tool_input": {}, "agent_id": "unknown-agent"}, "t1", {},
+  )
+  assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,expected_agent", [
   ("claude-haiku-4-5-20251001", "mobius-helper"),
@@ -1125,6 +1155,62 @@ async def test_reused_claude_host_keeps_dispatch_names_across_capability_changes
     assert result["error"] is None
 
   assert seen == (["high", None] if initial_support else [None, None])
+
+
+@pytest.mark.asyncio
+async def test_stop_while_claude_helper_host_starts_never_dispatches_the_turn(
+  tmp_path, monkeypatch,
+):
+  """A Stop during host start found no handle; the stale turn must not run unseen."""
+  from contextlib import asynccontextmanager
+  from app import process_groups, providers
+  from app.runner_registry import RunnerKind, registry
+
+  chat_id = "stop-during-helper-host-start"
+  dispatched = []
+  reaped = []
+
+  class Host:
+    session_id = "host-session"
+
+    async def run_turn(self, turn, on_started):
+      dispatched.append(turn.spec)
+      turn.finish("completed")
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    # What Stop does while the host starts and no handle is registered yet.
+    registry.bump_generation(chat_id)
+    yield Host()
+
+  async def supports_effort(data_dir, model):
+    return True
+
+  monkeypatch.setattr(providers, "model_supports_effort", supports_effort)
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr(
+    process_groups, "terminate_run_processes",
+    lambda marker, **_kw: reaped.append(marker),
+  )
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    result = await claude_host.run_claude_host_turn(
+      user_message="inspect", session_id=None,
+      base_env={"TMPDIR": str(tmp_path), "MOBIUS_RUN_MARKER": "m-stale"},
+      chat_id=chat_id, skill_text="", bc=None, agent_settings=None,
+      skills_enabled=False, run_policy=None, connector_plan=None,
+      helper_host_key=helper_hosts.HostKey("parent", "claude", str(tmp_path), "setup"),
+      data_dir=str(tmp_path), run_generation=run_gen,
+    )
+
+    assert result["prompt_sent"] is False
+    assert result["error"] is None
+    assert dispatched == []
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+    assert not list(tmp_path.glob(".helper-turn-*.env"))
+    assert reaped == ["m-stale"]
+  finally:
+    registry.forget(chat_id)
 
 
 def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypatch):

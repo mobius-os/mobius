@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, memo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, memo } from 'react'
 import DOMPurify from 'dompurify'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
@@ -8,6 +8,7 @@ import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 import AppBlock from './AppBlock.jsx'
 import { appBlockFromToken } from './appBlock.js'
+import { followTableScrollbarPointer, tableScrollbarThumb } from './tableScrollbar.js'
 
 /**
  * Block-level markdown components.
@@ -104,39 +105,99 @@ export function CodeBlock({ token }) {
   )
 }
 
+/** A table that cannot fit even with wrapped cells scrolls sideways behind a
+ * drawn bar. Native scrollbars cannot carry it: the shell hides them, and
+ * iOS WebKit never paints styled ones in a page (WebKit bug 198858). */
+function useTableScrollbar() {
+  const scrollRef = useRef(null)
+  const thumbRef = useRef(null)
+  const dragRef = useRef(null)
+  const [overflowing, setOverflowing] = useState(false)
+
+  const sync = () => {
+    const scroller = scrollRef.current
+    const thumb = thumbRef.current
+    if (!scroller || !thumb) return
+    const { widthPercent, offsetPercent } = tableScrollbarThumb(scroller)
+    thumb.style.width = `${widthPercent}%`
+    thumb.style.transform = `translateX(${offsetPercent}%)`
+  }
+
+  useEffect(() => {
+    const scroller = scrollRef.current
+    if (!scroller || typeof ResizeObserver === 'undefined') return undefined
+    const measure = () => {
+      setOverflowing(scroller.scrollWidth > scroller.clientWidth + 1)
+      sync()
+    }
+    const observer = new ResizeObserver(measure)
+    observer.observe(scroller)
+    if (scroller.firstElementChild) observer.observe(scroller.firstElementChild)
+    measure()
+    return () => observer.disconnect()
+  }, [])
+
+  // Before paint, so a newly shown bar never flashes a full-width thumb.
+  useLayoutEffect(sync, [overflowing])
+  useEffect(() => () => dragRef.current?.abort(), [])
+
+  const onPointerDown = (event) => {
+    const scroller = scrollRef.current
+    const thumb = thumbRef.current
+    if (!scroller || !thumb || event.button !== 0) return
+    event.preventDefault()
+    dragRef.current?.abort()
+    dragRef.current = followTableScrollbarPointer(event, scroller, thumb)
+  }
+
+  return { scrollRef, thumbRef, overflowing, sync, onPointerDown }
+}
+
 export function Table({ token, onInternalNav, mediaDimensions }) {
+  const bar = useTableScrollbar()
   return (
-    <div className="md-table-wrap">
-      <table className="md-table">
-        <thead>
-          <tr>
-            {token.header.map((cell, i) => (
-              <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
-                <InlineContent
-                  tokens={cell.tokens}
-                  onInternalNav={onInternalNav}
-                  mediaDimensions={mediaDimensions}
-                />
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {token.rows.map((row, i) => (
-            <tr key={i}>
-              {row.map((cell, j) => (
-                <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
-                  <InlineContent
-                    tokens={cell.tokens}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={mediaDimensions}
-                  />
-                </td>
+    <div className="md-table-frame">
+      <div className="md-table-wrap" ref={bar.scrollRef} onScroll={bar.sync}>
+        <table className="md-table">
+          <thead>
+            <tr>
+              {token.header.map((cell, i) => (
+                <th key={i} style={token.align?.[i] ? { textAlign: token.align[i] } : undefined}>
+                  <div className="md-table-cell">
+                    <InlineContent
+                      tokens={cell.tokens}
+                      onInternalNav={onInternalNav}
+                      mediaDimensions={mediaDimensions}
+                    />
+                  </div>
+                </th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {token.rows.map((row, i) => (
+              <tr key={i}>
+                {row.map((cell, j) => (
+                  <td key={j} style={token.align?.[j] ? { textAlign: token.align[j] } : undefined}>
+                    <div className="md-table-cell">
+                      <InlineContent
+                        tokens={cell.tokens}
+                        onInternalNav={onInternalNav}
+                        mediaDimensions={mediaDimensions}
+                      />
+                    </div>
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {bar.overflowing && (
+        <div className="md-table-scrollbar" aria-hidden="true" onPointerDown={bar.onPointerDown}>
+          <div className="md-table-scrollbar__thumb" ref={bar.thumbRef} />
+        </div>
+      )}
     </div>
   )
 }

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 from app import transcript_rows
 from app import models
 from app.timeutil import now_naive_utc
+from app.prompt_blocks import json_block_data
 
 
 ACTIVATION_WAIT_KIND = "platform_activation"
@@ -89,7 +90,7 @@ def uncommitted_restart_paths() -> list[str]:
   never blocks a restart, and any error yields an empty list.
   """
   try:
-    from app import platform_update
+    from app import platform_activation, platform_update
 
     repo = platform_update.PLATFORM_REPO
     paths: set[str] = set()
@@ -101,7 +102,13 @@ def uncommitted_restart_paths() -> list[str]:
       if proc.returncode != 0:
         return []
       paths.update(line.strip() for line in proc.stdout.splitlines())
-    return _restart_loaded(path for path in paths if path)
+    paths.discard("")
+    # The server imports dual-use boot modules from the served checkout even
+    # while their baked copy is image work, so their edits go live too.
+    served_boot = paths.intersection(
+      platform_activation.IMAGE_PLATFORM_BOOT_MODULES,
+    )
+    return sorted({*_restart_loaded(paths), *served_boot})
   except Exception:
     return []
 
@@ -285,14 +292,14 @@ def restart_action_block(chat, question_id: str | None) -> dict | None:
 
 def activation_notice(row: models.ChatWait, outcome: str) -> str:
   requirement = row.condition_json if isinstance(row.condition_json, dict) else {}
-  body = json.dumps({
+  body = json_block_data({
     "wait_id": row.id,
     "outcome": outcome,
     "required_paths": sorted(requirement.get("paths") or []),
     "declaring_run_id": row.created_by_run_id,
     "root_run_id": row.root_run_id,
     "goal_id": row.goal_id,
-  }, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+  }, sort_keys=True, ensure_ascii=True)
   if outcome == "met":
     lead = (
       "Möbius restarted and reached a ready server. Continue the interrupted "

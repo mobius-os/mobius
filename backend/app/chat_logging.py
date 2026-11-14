@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 
 
+# Per-file bound for the platform's rotating logs.
+LOG_FILE_MAX_BYTES = 50 * 1024 * 1024
+
 _chat_log_handler: RotatingFileHandler | None = None
 
 
@@ -27,7 +30,7 @@ def get_chat_log_handler() -> RotatingFileHandler:
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
       log_dir / "chat.log",
-      maxBytes=50 * 1024 * 1024,
+      maxBytes=LOG_FILE_MAX_BYTES,
       backupCount=3,
       encoding="utf-8",
     )

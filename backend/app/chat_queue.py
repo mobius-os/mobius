@@ -7,7 +7,7 @@ append (POST /messages), cancel (DELETE /pending), and promote
 DB serialization authority is the single-writer actor (C2), NOT this
 lock. Every JSON-blob read-modify-write now runs as a writer-actor
 command (`AppendPending` / `CancelPending` / `PromotePending` /
-`ClearPending`) on the actor's one thread, so the lost-update race the
+`HoldPending`) on the actor's one thread, so the lost-update race the
 lock used to guard is closed at the source — the actor is the sole
 runtime mutator of the blob.
 
@@ -171,6 +171,10 @@ class _CrossLoopTransitionLock:
       await asyncio.sleep(0.01)
     return True
 
+  def try_acquire(self) -> bool:
+    """Take the lock only if it is free right now; never wait."""
+    return self._lock.acquire(blocking=False)
+
   def release(self) -> None:
     self._lock.release()
 
@@ -226,6 +230,8 @@ async def promote_pending_messages_locked(
   run_token: str,
   ending_status: str = "completed",
   ending_run_token: str = "",
+  owner_send: bool = False,
+  restore_archived: bool = False,
 ) -> tuple[list[schemas.ChatMessage], dict | None, str | None]:
   """Inner promote logic. PRECONDITION: caller holds the per-chat
   queue lock.
@@ -269,6 +275,8 @@ async def promote_pending_messages_locked(
       run_token=run_token,
       ending_status=ending_status,
       ending_run_token=ending_run_token,
+      owner_send=owner_send,
+      restore_archived=restore_archived,
     )
   )
   result = await await_ack(ack)

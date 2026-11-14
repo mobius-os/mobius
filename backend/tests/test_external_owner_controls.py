@@ -370,11 +370,14 @@ def test_owner_top_level_and_scoped_app_keep_review_control_boundaries(
     lambda _repo_path, *args, **_kwargs: calls.append(args) or "{}",
   )
 
+  # Pause reaches the route for all three. Switching following on where no
+  # grant exists is the owner's own confirmation, so it is covered separately
+  # (test_contribution_follow.py).
   for actor in ("owner", "top_level", "app"):
     toggled = client.post(
       f"/api/github/contributions/{app_id}/missing-record/autopilot",
       headers=auths[actor],
-      json={"enabled": True},
+      json={"enabled": False},
     )
     assert toggled.status_code == 404, (actor, toggled.text)
 

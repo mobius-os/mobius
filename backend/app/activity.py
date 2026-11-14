@@ -29,9 +29,17 @@ read both):
                            "chat_id"?, "duration_ms"?, "failure"?}
                            # outcome: started|reused|cancelled|failed,
                            # or cancel_<cancelled|started> (no duration)
+  {"ev":"contribution_publication_outcome", "ts", "app_id", "attempt_id",
+                           "action", "phase", "code", "status",
+                           "certainty":"effect|none|unknown"}
+                           # best effort, normally one per Send/update/observed
+                           # attempt outcome, never per poll; no public text,
+                           # patch, path or Git output
   {"ev":"provider_switch","ts", "chat_id", "provider", "from_provider"}
   {"ev":"chat_log_read",  "ts", "app_id", "scope", "count"}  # app read redacted logs
   {"ev":"slug_collision", "ts", "requested_slug", "assigned_slug", "source"}
+  {"ev":"owner_grant",   "ts", "app_id", "action", "outcome":"minted|consumed|refused", "by"?}
+                           # the owner's confirmation of one action (owner_grants.py); never the request itself
 
 `app_id` may be 0 / null for platform-level events (the bootstrap store
 install has no numeric id when it fires; an `app_error` with NO `app_id`
@@ -372,6 +380,17 @@ def _request_error_event(
   if app_id is not None:
     fields["app_id"] = app_id
   return "request_error", fields
+
+
+def route_template(scope) -> str:
+  """The matched route template of an HTTP request, never its concrete path.
+
+  FastAPI leaves the matched route in the ASGI scope once routing ran; the
+  template carries no ids, file names or query values. ``<unmatched>`` covers
+  both a path no API route matched (static files, 404s) and work done before
+  routing ran, such as middleware.
+  """
+  return getattr(scope.get("route"), "path", None) or "<unmatched>"
 
 
 def record_request_error(

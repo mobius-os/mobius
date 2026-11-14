@@ -4,14 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+import hashlib
 import re
 import uuid
 
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+from app.context_budget import CLAIM_SUMMARY_CHARS, CLAIM_TEXT_CHARS, excerpt
 from app.decision_cards import fence_owner
 from app.goal_dependencies import pending_follow_predicate
 from app.timeutil import now_naive_utc
@@ -44,6 +46,72 @@ def _goal_id(db: Session, chat_id: str, run_id: str) -> str | None:
   ).scalar()
 
 
+# A claim's texts are stored whole. Where Möbius repeats them (claim tool
+# results, transfer and dependency notices) a longer text is a marked excerpt
+# naming read_work_claim with the digest of that exact text. A claim's texts
+# change as it is refreshed, transferred, released and re-acquired, so the
+# read returns the text with that digest or refuses; it never substitutes
+# another holder's text.
+CLAIM_TEXT_FIELDS = ("summary", "takeover_reason", "outcome")
+
+
+def claim_text_digest(value: str) -> str:
+  return hashlib.sha256(value.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+
+
+def claim_text(value: str | None, work_key: str | None, field: str) -> str | None:
+  if not isinstance(value, str):
+    return value
+  limit = CLAIM_SUMMARY_CHARS if field == "summary" else CLAIM_TEXT_CHARS
+  read_full = (
+    f"read_work_claim(work_key={work_key}, field={field}, "
+    f"digest={claim_text_digest(value)}) pages the full text"
+    if work_key else "the work claim keeps the full text"
+  )
+  return excerpt(value, limit, read_full)
+
+
+def read_claim_text(
+  db: Session, *, owner_id: int, chat_id: str, work_key: str, field: str,
+  digest: str | None = None,
+) -> str:
+  """One claim text whole: the exact text a marker's digest names.
+
+  The claim's current text is one source. A follower's dependency keeps the
+  summary and outcome stamped for its exact acquisition, so a dependency
+  notice's text stays readable after the claim moves on. Without a digest the
+  claim's current text is returned.
+  """
+  if field not in CLAIM_TEXT_FIELDS:
+    raise ValueError(f"field must be one of: {', '.join(CLAIM_TEXT_FIELDS)}")
+  key = clean_work_key(work_key)
+  row = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_id == owner_id,
+    models.AgentWorkClaim.work_key == key,
+  ).first()
+  current = getattr(row, field) if row is not None else None
+  if digest is None:
+    if not current:
+      raise LookupError(f"This work claim has no {field}.")
+    return current
+  if current and claim_text_digest(current) == digest:
+    return current
+  if field != "takeover_reason" and row is not None:
+    for (outcome,) in db.query(models.GoalDependency.outcome_json).filter(
+      models.GoalDependency.waiting_chat_id == chat_id,
+      models.GoalDependency.target_kind == "claim_acquisition",
+      models.GoalDependency.target_claim_id == row.id,
+    ).all():
+      text = outcome.get(field) if isinstance(outcome, dict) else None
+      if (isinstance(text, str) and outcome.get("work_key") == key
+          and claim_text_digest(text) == digest):
+        return text
+  raise LookupError(
+    f"The {field} that excerpt named is no longer stored: the claim was "
+    "updated, transferred or re-acquired since. The excerpt is what remains."
+  )
+
+
 def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   title = db.query(models.Chat.title).filter(
     models.Chat.id == row.owner_chat_id,
@@ -51,22 +119,18 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
   result = {
     "id": row.id,
     "work_key": row.work_key,
-    "summary": row.summary,
+    "summary": claim_text(row.summary, row.work_key, "summary"),
     "state": state,
     "owner_chat_id": row.owner_chat_id,
     "owner_name": title or row.owner_chat_id or "Deleted chat",
     "owner_goal_id": row.owner_goal_id,
     "revision": row.revision,
     "acquisition_id": row.acquisition_id,
-    "notification_pending": (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    ),
+    "notification_pending": pending_transfer_notices(db, claim_id=row.id).first() is not None,
     "transfer_notice_revision": row.transfer_notice_revision,
-    "takeover_reason": row.takeover_reason,
+    "takeover_reason": claim_text(row.takeover_reason, row.work_key, "takeover_reason"),
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-    "outcome": row.outcome,
+    "outcome": claim_text(row.outcome, row.work_key, "outcome"),
   }
   if state == "held_by_peer":
     result["next_action"] = (
@@ -129,6 +193,39 @@ def _stage_goal_owner_change(db: Session, row: models.AgentWorkClaim, *,
   return previous_follow_status
 
 
+def stage_adopt_pre_goal_claims(db: Session, run: models.ChatRun) -> None:
+  """Bind only this promoting attempt's exact open acquisitions to its Goal.
+
+  The writer holds the owner graph fence and commits adoption with promotion.
+  Sharing a chat or even a causal root with an earlier attempt is insufficient;
+  that work needs an explicit claim refresh instead.
+  """
+  for row in db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == run.chat_id,
+    models.AgentWorkClaim.owner_run_id == run.id,
+    models.AgentWorkClaim.owner_goal_id.is_(None),
+    models.AgentWorkClaim.acquisition_id.is_not(None),
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).populate_existing().all():
+    changed = db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.id == row.id,
+      models.AgentWorkClaim.acquisition_id == row.acquisition_id,
+      models.AgentWorkClaim.revision == row.revision,
+      models.AgentWorkClaim.owner_chat_id == run.chat_id,
+      models.AgentWorkClaim.owner_run_id == run.id,
+      models.AgentWorkClaim.owner_goal_id.is_(None),
+      models.AgentWorkClaim.completed_at.is_(None),
+      models.AgentWorkClaim.released_at.is_(None),
+    ).update({models.AgentWorkClaim.owner_goal_id: run.goal_id,
+              models.AgentWorkClaim.updated_at: now_naive_utc()}, synchronize_session=False)
+    if changed != 1:
+      raise ValueError("The claim changed during Goal adoption.")
+    db.refresh(row)
+    _stage_goal_owner_change(db, row, previous=run.chat_id,
+      previous_run_id=run.id, previous_goal_id=None)
+
+
 def claim_work(
   db: Session,
   *,
@@ -143,18 +240,21 @@ def claim_work(
   """Acquire first claim, observe its owner, or deliberately transfer it."""
   key = clean_work_key(work_key)
   clean_summary = summary.strip()
-  if not clean_summary or len(clean_summary) > 500:
-    raise ValueError("summary must be 1-500 characters")
+  if not clean_summary:
+    raise ValueError("summary must not be blank")
   reason = takeover_reason.strip() if takeover_reason else None
-  if reason is not None and not 10 <= len(reason) <= 1000:
-    raise ValueError("takeover_reason must be 10-1000 characters")
-  goal_id = _goal_id(db, chat_id, run_id)
-
+  # A takeover must explain itself; ten characters rules out "x" or "ok".
+  if reason is not None and len(reason) < 10:
+    raise ValueError("takeover_reason must be at least 10 characters")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
   ).first()
   if row is None:
+    # Promotion shares this fence: either it adopts the committed acquisition
+    # or this write snapshots the Goal it has already attached to the run.
+    fence_owner(db, owner_id)
+    goal_id = _goal_id(db, chat_id, run_id)
     row = models.AgentWorkClaim(
       id=str(uuid.uuid4()), owner_id=owner_id, work_key=key,
       summary=clean_summary, owner_chat_id=chat_id, owner_run_id=run_id,
@@ -176,6 +276,8 @@ def claim_work(
   if row.completed_at is not None:
     return _serialize(db, row, "completed")
   if row.released_at is not None:
+    fence_owner(db, owner_id)
+    goal_id = _goal_id(db, chat_id, run_id)
     previous_revision = row.revision
     next_revision = previous_revision + 1
     now = now_naive_utc()
@@ -203,6 +305,9 @@ def claim_work(
     if changed != 1:
       db.rollback()
       raise ValueError("The released claim changed; inspect it before retrying.")
+    # A former owner taking a new acquisition must not receive an old stop
+    # notice for the action it now owns. Preserve other recipients' duties.
+    stage_retire_obsolete_transfer_notices(db, claim_id=row.id)
     db.commit()
     row = db.get(models.AgentWorkClaim, row.id)
     db.refresh(row)
@@ -210,17 +315,20 @@ def claim_work(
   if row.owner_chat_id == chat_id:
     # Refreshing ownership from a different Goal in the same chat also changes
     # graph edges. Serialize it with follows/transfers and reject reverse edges.
+    expected_acquisition = row.acquisition_id
     fence_owner(db, owner_id)
     db.refresh(row)
-    if row.owner_chat_id != chat_id:
+    if row.owner_chat_id != chat_id or row.acquisition_id != expected_acquisition:
       db.rollback()
       raise ValueError("The claim changed while refreshing; inspect it before retrying.")
+    goal_id = _goal_id(db, chat_id, run_id)
     previous_revision = row.revision
     previous_goal_id, previous_run_id = row.owner_goal_id, row.owner_run_id
     changed = db.query(models.AgentWorkClaim).filter(
       models.AgentWorkClaim.id == row.id,
       models.AgentWorkClaim.owner_chat_id == chat_id,
       models.AgentWorkClaim.owner_goal_id == row.owner_goal_id,
+      models.AgentWorkClaim.acquisition_id == expected_acquisition,
       models.AgentWorkClaim.revision == previous_revision,
       models.AgentWorkClaim.completed_at.is_(None),
       models.AgentWorkClaim.released_at.is_(None),
@@ -240,11 +348,9 @@ def claim_work(
         previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
     db.commit()
     db.refresh(row)
-    pending_transfer = (
-      row.previous_owner_chat_id is not None
-      and row.transfer_notice_revision is not None
-      and row.notification_revision < row.transfer_notice_revision
-    )
+    pending_transfer = pending_transfer_notices(db, claim_id=row.id).filter(
+      models.AgentWorkClaimRevocation.revision == row.transfer_notice_revision,
+    ).first() is not None
     result = _serialize(db, row, "transferred" if pending_transfer else "owned")
     if pending_transfer:
       result["previous_owner_chat_id"] = row.previous_owner_chat_id
@@ -280,6 +386,7 @@ def claim_work(
   if row.owner_chat_id != expected_owner_chat_id:
     db.rollback()
     raise ValueError("The expected owner changed; inspect the current claim before transfer.")
+  goal_id = _goal_id(db, chat_id, run_id)
   previous = row.owner_chat_id
   previous_run_id = row.owner_run_id
   previous_goal_id = row.owner_goal_id
@@ -311,7 +418,21 @@ def claim_work(
   db.refresh(row)
   previous_follow_status = _stage_goal_owner_change(db, row, previous=previous,
     previous_run_id=previous_run_id, previous_goal_id=previous_goal_id)
-  db.commit()
+  stage_retire_obsolete_transfer_notices(db, claim_id=row.id)
+  db.add(models.AgentWorkClaimRevocation(
+    claim_id=row.id, revision=previous_revision + 1,
+    acquisition_id=row.acquisition_id, owner_id=owner_id,
+    sender_chat_id=chat_id, recipient_chat_id=previous,
+    body=(f"Work claim {key} transferred to {chat_id}: {claim_text(reason, key, 'takeover_reason')} "
+          f"(acquisition {row.acquisition_id}, transfer revision {previous_revision + 1})"),
+  ))
+  # No peer-message helper may commit here. The ownership change and its
+  # revocation obligation either both persist or both roll back.
+  try:
+    db.commit()
+  except Exception:
+    db.rollback()
+    raise
   db.refresh(row)
   result = _serialize(db, row, "transferred")
   # Settlement may have committed between transfer and refresh. The event's
@@ -321,6 +442,8 @@ def claim_work(
   result["notification_pending"] = True
   result["previous_owner_chat_id"] = previous
   result["previous_follow_status"] = previous_follow_status
+  # Only this request's newly-created obligation may be delivered inline.
+  result["_created_transfer_notice_revision"] = previous_revision + 1
   return result
 
 
@@ -357,7 +480,7 @@ def _stage_settle(
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).update({
-    models.AgentWorkClaim.outcome: outcome[:1000],
+    models.AgentWorkClaim.outcome: outcome,
     models.AgentWorkClaim.updated_at: now,
     models.AgentWorkClaim.revision: previous_revision + 1,
     (
@@ -370,7 +493,7 @@ def _stage_settle(
   stage_stamp_claim_outcome(
     db, row, ("completed" if complete else
               "owner_deleted" if outcome == _DELETED_OWNER_OUTCOME else "released"),
-    outcome[:1000],
+    outcome,
   )
   db.expire(row)
   return ReleasedClaim(
@@ -378,7 +501,7 @@ def _stage_settle(
     work_key=work_key,
     revision=previous_revision + 1,
     state="completed" if complete else "released",
-    outcome=outcome[:1000],
+    outcome=outcome,
   )
 
 
@@ -401,6 +524,11 @@ def stage_release_claims_for_chat(
   The caller commits the release atomically with the chat tombstone and then
   nudges exact-Goal dependency delivery.
   """
+  _unresolved_transfer_notices(db).filter(
+    models.AgentWorkClaimRevocation.recipient_chat_id == chat_id,
+  ).update({models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+            models.AgentWorkClaimRevocation.closed_at: now_naive_utc()},
+           synchronize_session=False)
   released = [
     settled for row in _open_claims_for_chat(db, chat_id)
     if (settled := _stage_settle(
@@ -452,9 +580,8 @@ def stage_settle_goal_claims(
     return []
   finished = set(finished_keys)
   settled = []
-  # A claim the chat took before this Goal existed (an approval answered
-  # before promote_goal) stays Goal-less; completion finishes it only when
-  # the Goal names it, and never releases it otherwise.
+  # Earlier attempts' unadopted claims stay Goal-less; completion finishes
+  # them only when the Goal names them, and never releases them otherwise.
   owned_by_goal = models.AgentWorkClaim.owner_goal_id == goal_id
   named_chat_claim = and_(
     models.AgentWorkClaim.owner_goal_id.is_(None),
@@ -571,8 +698,8 @@ def finish_work(
 ) -> dict:
   key = clean_work_key(work_key)
   clean_outcome = outcome.strip()
-  if not clean_outcome or len(clean_outcome) > 1000:
-    raise ValueError("outcome must be 1-1000 characters")
+  if not clean_outcome:
+    raise ValueError("outcome must not be blank")
   row = db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_id == owner_id,
     models.AgentWorkClaim.work_key == key,
@@ -598,12 +725,74 @@ def finish_work(
   return _serialize(db, row, state)
 
 
+def _unresolved_transfer_notices(db: Session):
+  return db.query(models.AgentWorkClaimRevocation).filter(
+    models.AgentWorkClaimRevocation.outcome.is_(None),
+  )
+
+
+def _deleted_revocation_recipient():
+  return ~select(models.Chat.id).where(
+    models.Chat.id == models.AgentWorkClaimRevocation.recipient_chat_id,
+    models.Chat.deleted_at.is_(None),
+  ).exists()
+
+
+def _superseded_revocation():
+  return select(models.AgentWorkClaim.id).where(
+    models.AgentWorkClaim.id == models.AgentWorkClaimRevocation.claim_id,
+    models.AgentWorkClaim.owner_chat_id == models.AgentWorkClaimRevocation.recipient_chat_id,
+    models.AgentWorkClaim.revision > models.AgentWorkClaimRevocation.revision,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).exists()
+
+
+def stage_retire_obsolete_transfer_notices(db: Session, *, claim_id: str | None = None):
+  """Keep obsolete obligations as history, without pretending delivery occurred."""
+  query = _unresolved_transfer_notices(db)
+  if claim_id is not None:
+    query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
+  query.filter(_deleted_revocation_recipient()).update(
+    {models.AgentWorkClaimRevocation.outcome: "recipient_deleted",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
+  )
+  query.filter(_superseded_revocation()).update(
+    {models.AgentWorkClaimRevocation.outcome: "superseded",
+     models.AgentWorkClaimRevocation.closed_at: now_naive_utc()}, synchronize_session=False,
+  )
+
+
+def pending_transfer_notices(db: Session, *, claim_id: str | None = None):
+  # Projection stays truthful before the sweep repairs older lifecycle paths.
+  query = _unresolved_transfer_notices(db).filter(
+    ~_deleted_revocation_recipient(), ~_superseded_revocation(),
+  )
+  if claim_id is not None:
+    query = query.filter(models.AgentWorkClaimRevocation.claim_id == claim_id)
+  return query.order_by(models.AgentWorkClaimRevocation.created_at,
+                        models.AgentWorkClaimRevocation.revision)
+
+
 def acknowledge_transfer_notice(
   db: Session, *, claim_id: str, revision: int,
 ) -> None:
-  row = db.get(models.AgentWorkClaim, claim_id)
-  if row is None or row.transfer_notice_revision != revision:
-    return
-  if row.notification_revision < revision:
-    row.notification_revision = revision
+  """Acknowledge only this obligation, never a later transfer's notice.
+
+  This is a delivery-path receipt, not evidence the former executor stopped.
+  """
+  changed = db.query(models.AgentWorkClaimRevocation).filter_by(
+    claim_id=claim_id, revision=revision, outcome=None,
+  ).update({models.AgentWorkClaimRevocation.closed_at: now_naive_utc(),
+            models.AgentWorkClaimRevocation.outcome: "delivered"},
+           synchronize_session=False)
+  # Retain the last-transfer projection for existing claim readers. Recovery
+  # and notification_pending use per-transfer obligations, never this latch.
+  if changed:
+    db.query(models.AgentWorkClaim).filter(
+      models.AgentWorkClaim.id == claim_id,
+      models.AgentWorkClaim.transfer_notice_revision == revision,
+      models.AgentWorkClaim.notification_revision < revision,
+    ).update({models.AgentWorkClaim.notification_revision: revision},
+             synchronize_session=False)
   db.commit()
