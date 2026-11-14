@@ -174,14 +174,37 @@ def test_an_exited_member_is_skipped_not_reported(caplog):
     leader.wait()
 
 
+def _await_exec(pid, marker, timeout=5.0):
+  """Wait until ``pid``'s environment shows ``marker`` to a /proc scan.
+
+  ``Popen`` returns as soon as the child's exec closes its descriptors, before
+  the kernel has set up the new image's environment. Until then
+  /proc/<pid>/environ reads empty, so a run-marker scan cannot see the process.
+  """
+  import time
+  needle = f"{process_groups.RUN_MARKER_ENV}={marker}".encode()
+  deadline = time.monotonic() + timeout
+  while True:
+    try:
+      with open(f"/proc/{pid}/environ", "rb") as handle:
+        if needle in handle.read().split(b"\0"):
+          return
+    except OSError:
+      pass
+    assert time.monotonic() < deadline, f"process {pid} never showed its run marker"
+    time.sleep(0.005)
+
+
 def _command_in_own_session(run_token):
   """A tool command as providers start it: its own session, the run's env."""
   import os
   import subprocess
   env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: run_token})
-  return subprocess.Popen(
+  command = subprocess.Popen(
     ["sleep", "60"], env=env, start_new_session=True,
   )
+  _await_exec(command.pid, run_token)
+  return command
 
 
 def _gone(proc, timeout=2.0):
@@ -264,6 +287,7 @@ def test_the_chats_browser_is_left_to_its_own_graceful_owner(tmp_path):
     [str(chrome), "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
   )
   try:
+    _await_exec(browser.pid, marker)
     assert process_groups.terminate_run_processes(
       marker, logger=logging.getLogger(__name__), label="test",
     ) == 0
@@ -339,6 +363,8 @@ class _Turn:
       stdout=subprocess.PIPE, text=True,
     )
     self.mcp, self.command = map(int, self.runtime.stdout.readline().split())
+    for pid in self.pids:
+      _await_exec(pid, marker)
 
   @property
   def pids(self):
