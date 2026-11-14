@@ -181,9 +181,8 @@ test('applyThemeToDom converts safe @import urls into <link> tags', () => {
 })
 
 test('applyThemeToDom rejects javascript:/data: @import URLs', () => {
-  // Mirrors the server-side allowlist (theme.py:_is_safe_import_url)
-  // so a `javascript:` URL slipped into theme.css can't become a
-  // stylesheet link on the client path either.
+  // Theme imports must not create stylesheet links for executable or
+  // inline-data URLs.
   const css = `@import url('javascript:alert(1)');@import url('data:text/css;base64,x');:root {}`
   themeService.applyThemeToDom(css, '#000000')
   assert.equal(dom.fontLinks.length, 0)
