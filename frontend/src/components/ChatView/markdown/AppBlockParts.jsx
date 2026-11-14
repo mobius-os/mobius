@@ -38,19 +38,35 @@ export function Badges({ badges }) {
     <span key={i} className={`md-app-block__badge is-${badge.tone}`}>{badge.label}</span>)}</span>
 }
 
+/** A change size: "+a −r" in the theme's addition and deletion colours. The
+ *  signs stay, so colour is never the only cue, and assistive technology
+ *  hears "64 lines added, 12 removed". */
+export function LineCounts({ lines }) {
+  return <span className="md-app-block__lines">
+    <span className="md-app-block__sr-only">{`${lines.added} ${lines.added === 1 ? 'line' : 'lines'} added, ${lines.removed} removed`}</span>
+    <span aria-hidden="true"><span className="is-added">+{lines.added}</span>{'\u00a0'}<span className="is-removed">−{lines.removed}</span></span>
+  </span>
+}
+
 export function Facts({ facts }) {
   if (!facts.length) return null
-  return <dl className="md-app-block__facts">{facts.map((fact, i) => <div key={i}>
-    <dt>{fact.label}</dt>
-    <dd>{fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{fact.value}</a> : fact.value}</dd>
-  </div>)}</dl>
+  return <dl className="md-app-block__facts">{facts.map((fact, i) => {
+    // The value (plain, or a coloured change size), then its source link.
+    const value = fact.lines ? <LineCounts lines={fact.lines} /> : fact.value
+    return <div key={i}>
+      <dt>{fact.label}</dt>
+      <dd>{fact.href ? <a href={fact.href} target="_blank" rel="noopener noreferrer">{value}</a> : value}</dd>
+    </div>
+  })}</dl>
 }
 
 /** App-reported links open outside Möbius, marked by an arrow. */
-export function ExternalLinks({ links }) {
+export function ExternalLinks({ links, context = '' }) {
   if (!links.length) return null
+  // A short label such as "#42" names its row for assistive technology.
   return <span className="md-app-block__links">{links.map(link =>
-    <a key={link.url} className="md-app-block__link" href={link.url} target="_blank" rel="noopener noreferrer">
+    <a key={link.url} className="md-app-block__link" href={link.url} target="_blank" rel="noopener noreferrer"
+      aria-label={`${link.label}${context ? `, ${context}` : ''}, opens in a new tab`}>
       {link.label}<ArrowUpRight width={14} height={14} aria-hidden="true" /></a>)}</span>
 }
 
@@ -63,10 +79,10 @@ export function StatusPill({ status, tone = 'neutral', busy = false }) {
 }
 
 /** A row's live state from a passive session (appBlockSession.js sessionItems). */
-function ItemState({ live }) {
+function ItemState({ live, title = '' }) {
   if (!live) return null
   return <span className="md-app-block__item-state">
-    <ExternalLinks links={live.links} />
+    <ExternalLinks links={live.links} context={title} />
     <StatusPill status={live.status} tone={live.statusTone} busy={live.busy} />
   </span>
 }
@@ -86,7 +102,7 @@ export function TitleMark({ tone = 'neutral', busy = false }) {
 /** Every shape says why it offers no app view when its app is missing. */
 export function UnavailableNotice({ slug, loading }) {
   return <p className="md-app-block__notice" role="status">
-    {loading ? 'Checking installed apps…' : `${slug} is not installed. The saved snapshot remains here.`}</p>
+    {loading ? 'Checking installed apps…' : `The ${slug} app is not installed. The saved snapshot remains here.`}</p>
 }
 
 /** The block's rows. A passive session's confirmation rows (sessionSnapshot)
@@ -104,10 +120,11 @@ export function BlockItems({ items, onInternalNav, actionFor, listEdgeRefs = nul
         : <AppLink className="md-app-block__item-title" href={item.href} onInternalNav={onInternalNav}>{item.title}</AppLink>}
       <Badges badges={item.badges} />
       <Facts facts={item.facts} />
-      {item.appRow && item.meta ? <p className="md-app-block__item-meta">{item.meta}</p> : null}
+      {item.appRow && (item.meta || item.lines) ? <p className="md-app-block__item-meta">
+        {item.meta}{item.meta && item.lines ? ' · ' : null}{item.lines ? <LineCounts lines={item.lines} /> : null}</p> : null}
       {item.live?.note ? <p className="md-app-block__item-note">{item.live.note}</p> : null}
     </div>
-    <ItemState live={item.live} />
+    <ItemState live={item.live} title={item.title} />
     {actionFor(item.action)}
     {i === last ? <span ref={listEdgeRefs?.end} className="md-app-block__list-edge is-end" aria-hidden="true" /> : null}
   </li>)}</ul>
@@ -136,7 +153,8 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   // A host-drawn ask (PassiveAppBlock.jsx) takes the place of the block's own
   // action, so the block still offers one action.
   const action = ask || actionFor(block.action)
-  const valueFacts = block.itemFacts === 'values' ? ' md-app-block--value-facts' : ''
+  const valueFacts = (block.itemFacts === 'values' ? ' md-app-block--value-facts' : '')
+    + (block.confirmFacts === 'values' ? ' md-app-block--confirm-values' : '')
   // An app that reports no rows and shows no control folds its block to one
   // quiet line (for example "Continued below" on an earlier card).
   const folded = block.appRows && !block.items.length && !action && !toggle && !summary
@@ -149,7 +167,8 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
         Jump to latest<ArrowDown width={14} height={14} aria-hidden="true" /></button> : null}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
       {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
-        Open{app ? ` in ${app.name}` : ''}<ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
+        {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
+        <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
     </header>
     {/* While the rows are the app's confirmation or its own rows, nothing is
         added around them. A live title is the app's; saved rows are still the

@@ -1,14 +1,17 @@
 /* Generic app block chrome. Apps own any detailed presentation in their view. */
-.md-app-block { border:1px solid var(--border); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
+.md-app-block { width:min(100%, 640px); border:1px solid var(--border-light, var(--border)); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
+.md-blocks > .md-app-block { margin:4px 0 8px; }
 /* Assistant replies shrink to their prose (.chat__msg--assistant aligns
    flex-start). A reply with a block takes the column's width instead, so the
    block never resizes to what it currently shows: the app's confirmation
    rows cannot widen it and move Confirm out of the action's place. */
 .chat__text--assistant:has(.md-app-block) { align-self:stretch; width:100%; }
 /* The title wraps beside the app link, so a phone keeps both on one line. */
-.md-app-block > header { display:flex; align-items:center; gap:4px 12px; padding:8px 8px 4px 16px; }
+.md-app-block > header { display:flex; align-items:center; gap:4px 12px; padding:8px 4px 0 16px; }
 .md-app-block > header strong { flex:1 1 auto; min-width:0; overflow-wrap:anywhere; font-size:15px; font-weight:600; }
-.md-app-block__open { display:inline-flex; flex-shrink:0; align-items:center; gap:2px; min-height:44px; padding:0 8px; margin-left:auto; border-radius:8px;
+/* The app link names the app ("Contribute ›"; "Open in Contribute" for
+   assistive technology): it opens the app inside Möbius. */
+.md-app-block__open { display:inline-flex; flex-shrink:0; align-items:center; justify-content:center; gap:2px; min-width:44px; min-height:44px; padding:0 6px 0 8px; margin-left:auto; border-radius:8px;
   color:var(--muted); font-size:13px; text-decoration:none; white-space:nowrap; }
 .md-app-block__open:hover { color:var(--text); background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__open:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
@@ -30,55 +33,84 @@
 .md-app-block__badge.is-attention { background:color-mix(in srgb, var(--warning, var(--accent)) 20%, transparent); color:color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text)); }
 .md-app-block__badge.is-danger { background:color-mix(in srgb, var(--danger) 18%, transparent); color:color-mix(in srgb, var(--danger) 65%, var(--text)); }
 .md-app-block__badge.is-accent { background:color-mix(in srgb, var(--accent) 18%, transparent); color:color-mix(in srgb, var(--accent) 65%, var(--text)); }
-.md-app-block__items { list-style:none; margin:0; padding:0; border-top:1px solid var(--border); }
-/* A row: its title, one quiet metadata line, then any live state beside it.
-   The state moves under the text when a narrow row cannot hold both. */
-.md-app-block__items > li { position:relative; display:flex; flex-wrap:wrap; align-items:center; gap:0 12px; padding:2px 16px 8px; }
-.md-app-block__items > li + li { border-top:1px solid color-mix(in srgb, var(--border) 70%, transparent); }
-.md-app-block__item-main { display:flex; flex-wrap:wrap; align-items:center; gap:0 8px; flex:1 1 15rem; min-width:0; }
-/* A row title and a row link are full 44px targets (border-box). */
-.md-app-block__item-title { display:inline-flex; align-items:center; min-height:44px; color:var(--text); font-weight:600; overflow-wrap:anywhere; text-decoration:none; }
+.md-app-block__items { list-style:none; margin:0; padding:0 0 4px; }
+/* A row is its title on its own line, then one line of metadata with any
+   live state (words in their tone, PR links) at its end. Rows are separated
+   by space, not hairlines. */
+.md-app-block__items > li { position:relative; display:flex; flex-wrap:wrap; align-items:baseline; align-content:center; gap:2px 10px; padding:7px 16px; }
+/* A row that opens its app entry is at least a 44px target (border-box),
+   whatever it shows besides its title. */
+.md-app-block__items > li:has(> .md-app-block__item-main > a.md-app-block__item-title) { box-sizing:border-box; min-height:44px; }
+.md-app-block__item-main { display:contents; }
+.md-app-block__item-title { display:inline-flex; flex-basis:100%; align-items:center; min-height:22px; color:var(--text); font-weight:600; overflow-wrap:anywhere; text-decoration:none; }
+/* The row title's hit area is the whole row (a 44px target without a taller
+   row). The row's own controls, fact links and live state sit above it, so
+   they keep their own destinations (a PR link opens GitHub). */
+.md-app-block a.md-app-block__item-title::after { content:''; position:absolute; inset:0; }
+.md-app-block__items > li > :not(.md-app-block__item-main, .md-app-block__list-edge),
+.md-app-block__items .md-app-block__facts a { position:relative; z-index:1; }
 a.md-app-block__item-title:hover { text-decoration:underline; text-underline-offset:2px; }
 a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px; }
 /* Row facts read as one quiet metadata line, joined by a dot. Labels stay
    visible unless the block opts in to value-only facts
-   (`item_facts: "values"`), and an app's confirmation rows always keep them. */
-.md-app-block__item-main .md-app-block__facts { flex-basis:100%; align-items:baseline; gap:0; margin-top:-6px; padding:0; color:var(--muted); font-size:13px; line-height:18px; }
+   (`item_facts: "values"`); an app's confirmation rows keep them unless it
+   opts in separately (`confirm_facts: "values"`). */
+.md-app-block__item-main .md-app-block__facts { flex:0 1 auto; align-items:baseline; gap:0; padding:0; color:var(--muted); font-size:13px; line-height:18px; }
 .md-app-block__item-main .md-app-block__facts > div { gap:4px; }
 .md-app-block__item-main .md-app-block__facts > div + div::before { content:'·'; margin:0 2px 0 6px; color:var(--muted); }
-.md-app-block__item-main .md-app-block__facts dt { font-size:13px; }
+.md-app-block__item-main .md-app-block__facts dt { max-width:none; font-size:13px; }
 .md-app-block__item-main .md-app-block__facts dd { color:var(--muted); font-size:13px; }
-.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div { gap:0; }
-.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div + div::before { margin:0 6px; }
-.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts dt {
+.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div,
+.md-app-block--confirm-values .md-app-block__items > li.is-confirmation .md-app-block__facts > div { gap:0; }
+.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts > div + div::before,
+.md-app-block--confirm-values .md-app-block__items > li.is-confirmation .md-app-block__facts > div + div::before { margin:0 6px; }
+.md-app-block--value-facts .md-app-block__items > li:not(.is-confirmation) .md-app-block__facts dt,
+.md-app-block--confirm-values .md-app-block__items > li.is-confirmation .md-app-block__facts dt {
   position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0, 0, 0, 0); white-space:nowrap; }
-.md-app-block__item-meta { flex-basis:100%; margin:-6px 0 0; color:var(--muted); font-size:13px; line-height:18px; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.md-app-block__item-meta { flex:0 1 auto; margin:0; color:var(--muted); font-size:13px; line-height:18px; overflow-wrap:anywhere; }
+/* A change size's signs keep their meaning without colour. */
+.md-app-block__lines { white-space:nowrap; }
+.md-app-block__lines .is-added { color:var(--green-text, var(--green)); }
+.md-app-block__lines .is-removed { color:var(--danger-text, var(--danger)); }
 .md-app-block__item-note { flex-basis:100%; margin:0 0 4px; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
-.md-app-block__item-state { display:inline-flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:4px 10px; margin-left:auto; }
-.md-app-block > footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px 12px; padding:10px 16px 12px; border-top:1px solid var(--border); }
+.md-app-block__item-state { display:inline-flex; flex-wrap:wrap; align-items:center; gap:0 10px; }
+/* A PR link keeps a 44px target (border-box) without growing its line: it
+   reaches 6px into the row's gap above and 20px into the row's bottom
+   padding, never over the row title (the app entry). */
+.md-app-block__items > li:has(.md-app-block__item-state .md-app-block__link) { row-gap:6px; padding-bottom:20px; }
+.md-app-block__item-state .md-app-block__link { box-sizing:border-box; min-height:44px; padding:6px 0 20px; margin:-6px 0 -20px; }
+/* Links that wrap onto further lines keep their 44px boxes apart: the gap
+   between their lines is the 26px their boxes reach beyond the line. */
+.md-app-block__item-state .md-app-block__links { row-gap:26px; }
+.md-app-block > footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px 12px; padding:8px 16px 16px; }
 .md-app-block__toggle { display:inline-flex; align-items:center; gap:8px; margin-right:auto; border:0; background:transparent; color:var(--text); font:inherit; font-size:14px; min-height:44px; padding:0 8px; border-radius:8px; cursor:pointer; }
 .md-app-block__toggle:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__toggle:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 /* A minimum width keeps an action's place stable when its label changes. */
-.md-app-block__action { display:inline-flex; align-items:center; justify-content:center; gap:8px; flex-shrink:0; min-width:132px; max-width:100%; min-height:44px; padding:0 16px; border:0; border-radius:10px;
+.md-app-block__action { display:inline-flex; align-items:center; justify-content:center; gap:8px; flex-shrink:0; min-width:120px; max-width:100%; min-height:44px; padding:0 16px; border:0; border-radius:10px;
   background:var(--accent-fill, color-mix(in srgb, var(--accent) 85%, #000)); color:var(--accent-fg, #fff); font:inherit; font-size:14px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:pointer; }
 .md-app-block a.md-app-block__action { text-decoration:none; }
 .md-app-block__action:hover { background:var(--accent-fill-hover, color-mix(in srgb, var(--accent) 80%, #000)); }
 .md-app-block__action[aria-pressed="true"] { background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent-text, var(--accent)); }
 .md-app-block__action:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
 .md-app-block__action:disabled { opacity:.55; cursor:not-allowed; }
-.md-app-block__action[aria-busy="true"]:disabled { opacity:.8; cursor:progress; }
+/* Work in progress is a quiet slot, not a faded primary button. */
+.md-app-block__action[aria-busy="true"]:disabled { opacity:1; cursor:progress; background:transparent; color:var(--muted); box-shadow:inset 0 0 0 1px var(--border); }
 /* An action that only opens the app is secondary: outlined, not filled. */
 .md-app-block a.md-app-block__action.is-secondary { border:1px solid var(--border); background:transparent; color:var(--text); }
 .md-app-block a.md-app-block__action.is-secondary:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 /* The host's ask is tonal: it sends a message to the chat, not an app effect. */
 .md-app-block__action.is-ask { background:color-mix(in srgb, var(--accent) 14%, transparent); color:var(--accent-text, var(--accent)); }
 .md-app-block__action.is-ask:hover:not(:disabled) { background:color-mix(in srgb, var(--accent) 22%, transparent); }
+/* A request already in the chat is settled, not a faded button. */
+.md-app-block__action.is-ask.is-settled { opacity:1; cursor:default; background:transparent; color:var(--muted); box-shadow:inset 0 0 0 1px var(--border); }
 .md-app-block__notice { margin:0; padding:4px 16px 12px; color:var(--muted); font-size:14px; overflow-wrap:anywhere; }
+/* Focus kept in the block (blockFocus.js, jumpTo) is drawn like a control's. */
+.md-app-block:focus, .md-app-block > footer:focus { outline:none; }
+.md-app-block:focus-visible, .md-app-block > footer:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .md-app-block__view { border-top:1px solid var(--border); }
 .md-app-block__view > p { padding:12px 16px; margin:0; color:var(--muted); }
 @media (max-width:480px) { .md-app-block__items > li > .md-app-block__action { margin-left:auto; }
-  .md-app-block__item-state { margin-left:0; justify-content:flex-start; }
   .md-app-block__facts > div { flex-wrap:wrap; } .md-app-block__facts dt { max-width:100%; }
   /* The block's own controls span the footer, with any note above them. */
   .md-app-block > footer > .md-app-block__session, .md-app-block > footer .md-app-block__session-row,
@@ -86,9 +118,20 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
   .md-app-block > footer .md-app-block__session-row > .md-app-block__action,
   .md-app-block > footer .md-app-block__controls > * { flex:1 1 0; } }
 
+/* A block sits inside a reply's markdown, whose prose-link rule (.md-blocks a,
+   accent + underline) outranks the single-class rules above. A block's links
+   are the block's own controls, so they restate their colours here. */
+.md-app-block a.md-app-block__item-title { color:var(--text); text-decoration:none; }
+.md-app-block a.md-app-block__item-title:hover { text-decoration:underline; }
+.md-app-block a.md-app-block__open { color:var(--muted); text-decoration:none; }
+.md-app-block a.md-app-block__open:hover { color:var(--text); }
+.md-app-block a.md-app-block__action { color:var(--accent-fg, #fff); text-decoration:none; }
+.md-app-block a.md-app-block__link { color:var(--accent-text, var(--accent)); text-decoration:none; }
+.md-app-block a.md-app-block__link:hover { text-decoration:underline; }
+
 /* Passive sessions: host-drawn controls in the action's fixed-size place. */
 .md-app-block__summary { margin:-6px 0 0; padding:0 16px 10px; color:var(--muted); font-size:13px; overflow-wrap:anywhere; }
-.md-app-block__pending { display:inline-flex; align-items:center; justify-content:center; width:132px; min-height:44px; color:var(--muted); font-size:13px; }
+.md-app-block__pending { display:inline-flex; align-items:center; justify-content:center; width:120px; min-height:44px; color:var(--muted); font-size:13px; }
 /* The session's note sits at the start of its row and the controls at the end;
    on a phone the note takes its own line above them. */
 .md-app-block__session { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px 12px; min-width:0; }
@@ -101,6 +144,9 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__pill.is-attention { background:color-mix(in srgb, var(--warning, var(--accent)) 16%, transparent); color:var(--warning-text, color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text))); }
 .md-app-block__pill.is-accent { background:color-mix(in srgb, var(--accent) 16%, transparent); color:var(--accent-text, color-mix(in srgb, var(--accent) 65%, var(--text))); }
 .md-app-block__pill.is-danger { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger-text, color-mix(in srgb, var(--danger) 65%, var(--text))); }
+/* A row's state is words in their tone, not a filled pill (after the tones,
+   which it must outrank); footer pills keep their fill. */
+.md-app-block__item-state .md-app-block__pill { min-height:0; padding:0; background:transparent; font-size:13px; }
 @keyframes md-app-block-spin { to { transform:rotate(360deg); } }
 .md-app-block__spinner { flex-shrink:0; width:12px; height:12px; border-radius:50%; border:1.75px solid color-mix(in srgb, currentColor 25%, transparent);
   border-top-color:currentColor; animation:md-app-block-spin .8s linear infinite; }
@@ -134,10 +180,10 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__title-mark.is-danger { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger-text, color-mix(in srgb, var(--danger) 65%, var(--text))); }
 .md-app-block__title-mark-alert { font-size:13px; font-weight:700; line-height:1; }
 .md-app-block__title-mark .md-app-block__spinner { width:14px; height:14px; }
-/* A folded block is one quiet line: no rows, no controls. */
-.md-app-block--folded { border-style:dashed; background:transparent; }
-.md-app-block--folded > header { flex-wrap:wrap; padding:4px 8px 4px 16px; }
-.md-app-block--folded > header strong { flex:1 0 auto; color:var(--muted); font-size:14px; font-weight:500; white-space:nowrap; }
+/* A folded block is one muted line, not a placeholder box: no rows, no controls. */
+.md-app-block--folded { border:0; background:transparent; }
+.md-app-block--folded > header { flex-wrap:wrap; padding:0 4px 0 8px; }
+.md-app-block--folded > header strong { flex:1 0 auto; color:var(--muted); font-size:13px; font-weight:500; white-space:nowrap; }
 .md-app-block__jump { display:inline-flex; flex-shrink:0; align-items:center; gap:4px; min-height:44px; padding:0 8px; border:0; border-radius:8px; background:transparent;
   color:var(--accent-text, var(--accent)); font:inherit; font-size:13px; font-weight:600; white-space:nowrap; cursor:pointer; }
 .md-app-block__jump:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }

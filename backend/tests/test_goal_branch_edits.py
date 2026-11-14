@@ -250,3 +250,23 @@ def test_unfiled_helper_cannot_file_a_child_under_another_branch(
 
   unfiled = _spawn(client, headers, scout.child_chat_id, "worker")
   assert unfiled.status_code == 201, unfiled.text
+
+
+def test_helper_edits_its_branch_of_a_large_plan_with_long_text(client, db, branch):
+  goal = db.get(models.ChatGoal, "release-goal")
+  tasks = [dict(task) for task in goal.plan_json["tasks"]]
+  backend = next(task for task in tasks if task["id"] == "backend")
+  backend["note"] = "N" * 2000
+  tasks += [{"id": f"extra{i}", "title": "Saved later", "status": "pending",
+             "depends_on": []} for i in range(70)]
+  goal.plan_json = {**goal.plan_json, "tasks": tasks}
+  db.commit()
+  response = patch(client, branch, [{"id": "backend-api", "note": "Progressing"}])
+  assert response.status_code == 200, response.text
+  added = patch(client, branch, [
+    {"id": "backend-new", "title": "New", "parent_id": "backend", "note": "M" * 2000},
+  ])
+  assert added.status_code == 200, added.text
+  db.expire_all()
+  saved = {task["id"]: task for task in db.get(models.ChatGoal, "release-goal").plan_json["tasks"]}
+  assert saved["backend"]["note"] == "N" * 2000 and saved["backend-new"]["note"] == "M" * 2000

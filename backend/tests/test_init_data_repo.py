@@ -74,6 +74,8 @@ def test_fresh_boot_tracks_owner_data_but_never_runtime_repositories(tmp_path):
     _nested_repo(repo)
   owner_repository = tmp_path / "shared" / "projects" / "owner-repository"
   _nested_repo(owner_repository)
+  (tmp_path / "credits-client").mkdir()
+  (tmp_path / "credits-client" / "credentials.json").write_text("{}", encoding="utf-8")
 
   init_data_repo.write_ignore(tmp_path)
   state, removed = init_data_repo.reconcile(tmp_path)
@@ -81,6 +83,7 @@ def test_fresh_boot_tracks_owner_data_but_never_runtime_repositories(tmp_path):
   assert (state, removed) == ("initialized", 0)
   tracked = set(_git(tmp_path, "ls-files").splitlines())
   assert {".gitignore", "owner.txt"}.issubset(tracked)
+  assert not any(path.startswith("credits-client/") for path in tracked)
   assert not any(
     path.startswith(("run/", "agent-scratch/", "worktrees/", "contrib/", "contributions/"))
     for path in tracked

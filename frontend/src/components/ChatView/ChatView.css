@@ -105,11 +105,11 @@
   --attach-card: 96px;
   --chat-status-font-size: 12px;
   /* The composer's gap above the bottom edge, shared by the foot, the
-     transcript clearance and the fade. The shell sets --chat-foot-bottom-inset
-     to 0 while fitted above a keyboard (chat-only for now); otherwise this is
-     the platform's share of the device bottom safe area. */
+     transcript clearance and the fade. The shell sets --shell-bottom-inset
+     to 0 while fitted above a keyboard (app frames share it); otherwise this
+     is the platform's share of the device bottom safe area. */
   --chat-foot-safe-bottom: var(
-    --chat-foot-bottom-inset,
+    --shell-bottom-inset,
     calc(env(safe-area-inset-bottom, 0px) * var(--chat-foot-inset-reserve, 1))
   );
   display: flex;
@@ -393,6 +393,22 @@
 .chat__msg:focus { outline: none; }
 
 .chat__msg--user { align-items: flex-end; }
+/* A mid-turn message waiting for the agent's next step boundary. The caption
+   holds at zero height and opacity briefly: a fast cut replaces this row with
+   an ordinary one, and must neither flash the caption nor grow and shrink the
+   row at the pinned bottom. The global reduced-motion rule shortens the fade
+   but keeps the delay. */
+.chat__steer-pending-note {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+  animation: chat-steer-note-in 0.2s ease-out 0.8s both;
+}
+@keyframes chat-steer-note-in {
+  from { max-height: 0; margin-top: 0; opacity: 0; }
+  to { max-height: 32px; margin-top: 4px; opacity: 1; }
+}
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
@@ -471,10 +487,12 @@
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
 /* Older replies reveal actions only on tap/click; hovering must not expose
    another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. */
+   reply's row visible. Reveal by inheriting, never forcing `visible`: a
+   hidden shell view keeps its ChatView mounted behind an app, and a forced
+   `visible` descendant would paint the row over that app. */
 .chat__msg-meta--visible {
   opacity: 1;
-  visibility: visible;
+  visibility: inherit;
   pointer-events: auto;
   transition-delay: 0s;
 }
@@ -3470,6 +3488,19 @@
   display: block;
 }
 
+/* Extreme-aspect images (see attachmentThumbFit.js), pending and sent alike:
+   a wide strip shows whole because its centre crop can be blank, and a very
+   tall capture crops from its top so its header shows. */
+.chat__attach-card-thumb[data-fit="contain"],
+.chat__attach-thumb[data-fit="contain"] {
+  object-fit: contain;
+}
+
+.chat__attach-card-thumb[data-fit="top"],
+.chat__attach-thumb[data-fit="top"] {
+  object-position: top;
+}
+
 .chat__attach-card-icon {
   width: 30px;
   height: 36px;
@@ -3629,8 +3660,9 @@
 
 .chat__attach-thumb {
   /* Match the composer's attachment card after send — same `--attach-card`
-     token, so the two can't drift. The thumbnail is a consistent square
-     crop; tapping it still opens the full source image. */
+     token, so the two can't drift. The thumbnail is a square centre crop,
+     except for extreme-aspect images (the `data-fit` rules above); tapping
+     it still opens the full source image. */
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -4304,6 +4336,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
+.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 

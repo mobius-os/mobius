@@ -495,6 +495,9 @@ class RecordRunMetrics(_Command):
   provider_session_id: str | None = None
   cost_usd: float | None = None
   usage: dict | None = None
+  cost_scope: str = "turn"
+  # How a session-scoped call started (runtime_types.SessionStart).
+  session_start: dict | None = None
 
 
 @dataclass
@@ -1421,6 +1424,14 @@ class PrepareAutoResume(_Command):
 
 
 @dataclass
+class WithdrawWait(_Command):
+  """Withdraw one ordinary Wait before its follow-up crosses provider entry."""
+  chat_id: str = ""
+  run_token: str = ""
+  wait_id: str = ""
+
+
+@dataclass
 class WithdrawGoalDependency(_Command):
   """Owner withdrawal of one exact pending/owed edge, not its Goal or source."""
   chat_id: str = ""
@@ -2168,6 +2179,8 @@ class ChatWriterActor:
       # graph edge or decision disposition, so need no owner-wide lock.
       from app.decision_cards import fence_decisions
       fence_decisions(db)
+    if isinstance(cmd, WithdrawWait):
+      return self._withdraw_wait(db, cmd)
     if isinstance(cmd, WithdrawGoalDependency):
       return self._withdraw_goal_dependency(db, cmd)
     if isinstance(cmd, ReconcileClaimSources):
@@ -2887,11 +2900,74 @@ class ChatWriterActor:
       raise _PersistFailed("PersistSessionId did not persist")
     return True
 
+  def _stage_remove_pending_result_notices(
+    self, db, chat, *, message_kind: str, result_id: str, resolve_result,
+  ) -> None:
+    """Remove only notices bound to this exact result's saved ownership."""
+    chat.pending_messages = [message for message in (chat.pending_messages or [])
+      if not (message.get("kind") == message_kind
+        and (target := resolve_result(db, chat.id, message)) is not None
+        and target.id == result_id)]
+
+  def _stage_interrupt_unadmitted_carriers(
+    self, db, chat, *, tokens: tuple[str, ...], goal_id: str | None, end_reason: str,
+  ) -> set[str]:
+    """Retire exact unentered carriers; release actor ownership only after commit."""
+    from app.timeutil import now_naive_utc
+    stopped_tokens = set()
+    for token in tokens:
+      carrier = db.get(models.ChatRun, token)
+      if (carrier is not None and carrier.chat_id == chat.id
+          and carrier.goal_id == goal_id and carrier.status == "running"
+          and carrier.provider_execution_admitted is False):
+        carrier.status = "interrupted"
+        carrier.end_reason = end_reason
+        carrier.ended_at = now_naive_utc()
+        stopped_tokens.add(token)
+        if (chat.live_assistant or {}).get("id") == token:
+          chat.live_assistant = None
+        if chat.active_assistant_message_id == token:
+          chat.active_assistant_message_id = None
+    return stopped_tokens
+
+  def _withdraw_wait(self, db, cmd: WithdrawWait) -> dict:
+    from app.continuations import WAIT_RESULT_MESSAGE_KIND
+    from app.run_state import _wait_result_row
+    from app.chat_waits import (
+      _WITHDRAWN_DISPOSITIONS, _broadcast_changed, _cancel_active_check,
+      serialize_wait, stage_withdraw_wait,
+    )
+    row = db.get(models.ChatWait, cmd.wait_id)
+    if row is None or row.chat_id != cmd.chat_id:
+      return {"id": cmd.wait_id, "disposition": "not_withdrawable",
+        "detail": "This Wait is no longer available."}
+    outcome = stage_withdraw_wait(db, row)
+    stopped_tokens = set()
+    if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
+      chat = db.get(models.Chat, cmd.chat_id)
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=WAIT_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=_wait_result_row)
+      stopped_tokens = self._stage_interrupt_unadmitted_carriers(
+        db, chat,
+        tokens=("wait-resume-" + row.id, "wait-resume-" + row.id + ".retry"),
+        goal_id=row.goal_id, end_reason="wait_withdrawn",
+      )
+    # Capture the response in this transaction, not a route-side read that
+    # could mix an earlier disposition with a later provider receipt.
+    result = {**serialize_wait(row, db=db, withdrawal_outcome=outcome), **outcome}
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("WithdrawWait did not persist")
+    if outcome["disposition"] in _WITHDRAWN_DISPOSITIONS:
+      if self._run_token_owner.get(cmd.chat_id) in stopped_tokens:
+        self._run_token_owner.pop(cmd.chat_id, None)
+      _cancel_active_check(cmd.wait_id)
+      _broadcast_changed(cmd.chat_id)
+    return result
+
   def _withdraw_goal_dependency(self, db, cmd: WithdrawGoalDependency) -> str:
     from app.decision_cards import fence_decisions
     from app.goal_dependencies import stage_withdraw_dependency, dependency_result_row
     from app.continuations import DEPENDENCY_RESULT_MESSAGE_KIND
-    from app.timeutil import now_naive_utc
     fence_decisions(db)
     result = stage_withdraw_dependency(db, cmd.chat_id, cmd.dependency_id)
     stopped_tokens = set()
@@ -2901,23 +2977,13 @@ class ChatWriterActor:
       # Queue/transcript ownership stays here, not in the dependency module.
       # Rechecking at enqueue, turn admission and provider admission closes
       # the read-before-withdraw windows without cancelling unrelated work.
-      chat.pending_messages = [message for message in (chat.pending_messages or [])
-        if not (message.get("kind") == DEPENDENCY_RESULT_MESSAGE_KIND
-          and (target := dependency_result_row(db, chat.id, message)) is not None
-          and target.id == row.id)]
-      for token in ("dependency-resume-" + row.id, "dependency-resume-" + row.id + ".retry"):
-        carrier = db.get(models.ChatRun, token)
-        if (carrier is not None and carrier.chat_id == chat.id
-            and carrier.goal_id == row.waiting_goal_id and carrier.status == "running"
-            and carrier.provider_execution_admitted is False):
-          carrier.status = "interrupted"
-          carrier.end_reason = "dependency_withdrawn"
-          carrier.ended_at = now_naive_utc()
-          stopped_tokens.add(token)
-          if (chat.live_assistant or {}).get("id") == token:
-            chat.live_assistant = None
-          if chat.active_assistant_message_id == token:
-            chat.active_assistant_message_id = None
+      self._stage_remove_pending_result_notices(db, chat,
+        message_kind=DEPENDENCY_RESULT_MESSAGE_KIND, result_id=row.id, resolve_result=dependency_result_row)
+      stopped_tokens = self._stage_interrupt_unadmitted_carriers(
+        db, chat,
+        tokens=("dependency-resume-" + row.id, "dependency-resume-" + row.id + ".retry"),
+        goal_id=row.waiting_goal_id, end_reason="dependency_withdrawn",
+      )
     if not _commit_or_rollback(db):
       raise _PersistFailed("WithdrawGoalDependency did not persist")
     if result == "withdrawn":
@@ -3236,10 +3302,37 @@ class ChatWriterActor:
       db, results, incorporated=True, filters=tuple(ownership_filters),
     )
 
-  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
+  def _session_cost_baseline_run(self, db, run, chat_id: str, start: dict):
+    """The latest earlier run whose session total this call's start restored.
+
+    A resume restores this chat's own session; a fork restores its source
+    session, recorded under the chat it was branched from. Excluding this exact
+    row keeps repeated metric acknowledgements idempotent, and a late result
+    must never subtract a successor's spend.
+    """
+    from sqlalchemy import and_, or_
+    from app.models import ChatRun
+
+    same_session = ChatRun.provider_session_id == start["session_id"]
+    if start["kind"] == "resumed":
+      # A run that died before reporting its session id may still have spent
+      # on this session, so it leaves the baseline unknown.
+      same_session = and_(ChatRun.chat_id == chat_id, or_(
+        same_session,
+        (ChatRun.provider_session_id.is_(None)
+         & ChatRun.provider_execution_admitted.is_not(False)),
+      ))
+    return db.query(ChatRun).filter(
+      same_session,
+      ChatRun.provider == run.provider,
+      ChatRun.id != run.id,
+      ChatRun.started_at < run.started_at,
+    ).order_by(ChatRun.started_at.desc(), ChatRun.id.desc()).first()
+
+  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> dict:
     """Attach provider usage/cost to the exact durable run row."""
     if not cmd.chat_id or not cmd.run_token:
-      return False
+      return {"cost_usd": None}
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(
@@ -3251,9 +3344,30 @@ class ChatWriterActor:
 
     if cmd.provider_session_id:
       run.provider_session_id = cmd.provider_session_id
-    if cmd.cost_usd is not None:
-      run.cost_usd = float(cmd.cost_usd)
     usage = copy.deepcopy(cmd.usage) if cmd.usage else None
+    if cmd.cost_scope == "session" and cmd.cost_usd is not None:
+      from app.claude_costs import (
+        counters_cover_turn, session_cost_snapshot, turn_cost,
+      )
+
+      usage = usage or copy.deepcopy(run.usage_json) or {}
+      start = cmd.session_start or {}
+      baseline = 0.0 if start.get("kind") == "fresh" else None
+      restored_baseline = baseline is not None
+      if start.get("kind") in ("resumed", "forked") and start.get("session_id"):
+        previous = self._session_cost_baseline_run(db, run, cmd.chat_id, start)
+        if previous is not None:
+          baseline = session_cost_snapshot(previous.usage_json, previous.cost_usd)
+          # The CLI saves totals only on a normal exit; an older restore would
+          # make total - baseline a silent under-count.
+          restored_baseline = counters_cover_turn(usage, previous.usage_json)
+      run.cost_usd = turn_cost(cmd.cost_usd, baseline) if restored_baseline else None
+      usage["provider_cost"] = {
+        "scope": "session", "total_usd": cmd.cost_usd,
+        "baseline_usd": baseline,
+      }
+    elif cmd.cost_usd is not None:
+      run.cost_usd = float(cmd.cost_usd)
     if usage is not None:
       run.usage_json = usage
       for field_name in (
@@ -3265,6 +3379,8 @@ class ChatWriterActor:
         "total_tokens",
         "model_context_window",
       ):
+        if cmd.usage is None:
+          continue  # A cost-only acknowledgement must not erase token metrics.
         value = usage.get(field_name)
         setattr(
           run,
@@ -3273,7 +3389,7 @@ class ChatWriterActor:
         )
     if not _commit_or_rollback(db):
       raise _PersistFailed("RecordRunMetrics did not persist")
-    return True
+    return {"cost_usd": run.cost_usd}
 
   def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:
     """Insert/upsert a large tool output's full text into `tool_outputs`.
@@ -3832,7 +3948,7 @@ class ChatWriterActor:
     # The resume_run_id check above already pinned prior to that exact run.
     if cmd.allow_low_storage and (
       not cmd.owner_input or cmd.resume_run_id is None
-      or prior.park_reason != "storage"
+      or prior.park_reason not in models.OWNER_OVERRIDABLE_RESOURCES
       or prior.status not in {"parked", "resume_pending", "interrupted"}
     ):
       db.rollback()
@@ -4564,6 +4680,10 @@ class ChatWriterActor:
     self, db, cmd: PromoteRunToGoal,
   ) -> dict | GoalPromotionRejected:
     """Atomically bind one exact live attempt to durable intent."""
+    # Promotion adopts exact acquisitions, changing subscriber graph edges.
+    # Serialize the identity read as well as adoption with follows/refreshes.
+    from app.decision_cards import fence_owner
+    fence_owner(db)
     run = db.query(models.ChatRun).filter(
       models.ChatRun.id == cmd.run_token,
       models.ChatRun.chat_id == cmd.chat_id,
@@ -4654,9 +4774,33 @@ class ChatWriterActor:
       run.goal_objective != cmd.objective
       or run.goal_id != goal_id
     )
+    was_goal_less = run.goal_id is None
     run.goal_objective = cmd.objective
     run.goal_id = goal_id
-    if goal_was_missing:
+    if was_goal_less:
+      # First attachment owns this attempt's claims whether the Goal is new
+      # or retained. Replacing a prior Goal still needs explicit claim refresh.
+      from app.agent_work_claims import stage_adopt_pre_goal_claims
+      try:
+        stage_adopt_pre_goal_claims(db, run)
+      except ValueError:
+        db.rollback()
+        return GoalPromotionRejected("claim_adoption_conflict")
+      # Bind the same attempt's live ordinary Waits too: native progress and
+      # later result admission must agree on one saved ownership snapshot.
+      # Card-owned activation and already-disposed history keep their identity.
+      from app.chat_waits import _FIRED_UNDELIVERED
+      db.query(models.ChatWait).filter(
+        models.ChatWait.chat_id == cmd.chat_id,
+        models.ChatWait.created_by_run_id == run.id,
+        models.ChatWait.root_run_id == root_id,
+        models.ChatWait.goal_id.is_(None),
+        models.ChatWait.kind != "platform_activation",
+        models.ChatWait.linked_question_id.is_(None),
+        models.ChatWait.result_disposition.is_(None),
+        models.ChatWait.resume_delivered_at.is_(None),
+        (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
+      ).update({models.ChatWait.goal_id: goal_id}, synchronize_session=False)
       # A helper spawned before promotion has no Goal snapshot yet. Adopt only
       # this physical attempt's helpers, never an earlier turn sharing its root.
       frontier = [cmd.chat_id]

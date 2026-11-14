@@ -857,6 +857,52 @@ def test_an_empty_send_waits_behind_a_future_limit_park_like_a_message(
   ]
 
 
+def test_an_embedded_owners_empty_send_waits_and_keeps_the_park_resuming(
+  db, monkeypatch,
+):
+  """An embedded chat's principal carries its app's id. Its empty Send only
+  releases the owner's own held rows, which carry no app stamp, so it waits
+  for the park and the park still resumes by itself afterwards."""
+  from app.chat import _future_auto_resuming_limit_park_for_chat
+  from app.deps import Principal
+  from app.routes import chats_stream
+  cid = "park-embedded-owner-empty"
+  _seed_chat(cid, auto_resume=True)
+  with SessionLocal() as setup_db:
+    chat = setup_db.get(models.Chat, cid)
+    chat.agent_settings_json = {"model": "claude-opus-4-8"}
+    chat.pending_messages = [{
+      "role": "user", "content": "held", "cid": "held-owner", "ts": 1, "held": True,
+      "_owner_input_at": "2026-11-06T10:00:00+00:00",
+    }]
+    setup_db.commit()
+  _seed_run(
+    cid, "rt-park-embedded-empty", status="parked",
+    parked_until=datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1),
+    park_reason="usage_limit",
+  )
+  scheduled = []
+  monkeypatch.setattr(
+    "app.routes.chats_stream._schedule_continuation",
+    lambda **kwargs: scheduled.append(kwargs),
+  )
+  owner = db.query(models.Owner).first()
+  embedded = Principal(
+    owner=owner, app_id=42, scope="chat_embed", chat_id=cid,
+    embed_instance_id="frame", operations=("chat:send",),
+  )
+
+  response = asyncio.run(chats_stream._send_queue(cid, db, embedded, False))
+
+  assert response.status_code == 202
+  assert scheduled == []
+  assert _run_row("rt-park-embedded-empty")["status"] == "parked"
+  db.expire_all()
+  assert _future_auto_resuming_limit_park_for_chat(db, cid) is not None, (
+    "the released rows must not switch off the park's automatic resume"
+  )
+
+
 def test_owner_message_also_waits_behind_a_transient_rate_limit(
   client, auth, db, monkeypatch,
 ):
@@ -2755,7 +2801,7 @@ def test_auto_resume_spawn_failure_reattaches_deterministic_successor_once(
     chat_mod.discard_starting(cid)
 
 
-@pytest.mark.parametrize("park_reason", ["storage", "memory"])
+@pytest.mark.parametrize("park_reason", ["storage", "memory", "processes"])
 def test_app_resource_spawn_failure_reattaches_with_original_attribution(
   owner_token, monkeypatch, park_reason,
 ):
@@ -3283,6 +3329,56 @@ def test_park_exit_uses_runner_correlated_oom_evidence_for_memory_recovery():
   }
 
 
+@pytest.mark.parametrize("runner_result, message", [
+  (None, "can't start new thread"),
+  ({"error": "spawn EAGAIN"}, "spawn EAGAIN"),
+])
+def test_turn_that_failed_while_the_task_cap_refused_forks_waits_for_processes(
+  monkeypatch, runner_result, message,
+):
+  """A turn the cap stopped mid-run resumes once processes free up."""
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: 7)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink, runner_result, message, process_cap_hits_before=5,
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] == "processes"
+  assert kwargs["parked_until"] - datetime.now(UTC).replace(tzinfo=None) <= (
+    chat_mod._PARK_MIN_DELAY
+  )
+  event = sink.events[-1]
+  assert event["pause"]["kind"] == "processes"
+  assert event["message"] == chat_mod.PROCESS_CAP_MESSAGE
+
+
+@pytest.mark.parametrize("before, after, result, message", [
+  (7, 7, None, "can't start new thread"),
+  (None, 7, None, "can't start new thread"),
+  (5, None, None, "can't start new thread"),
+  (5, 7, {}, None),
+])
+def test_process_cap_park_needs_a_failure_and_a_counter_rise_during_this_turn(
+  monkeypatch, before, after, result, message,
+):
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: after)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(sink, result, message, process_cap_hits_before=before)
+  assert kwargs == {"parked": False}
+  assert all("pause" not in event for event in sink.events)
+
+
+def test_provider_limit_keeps_its_own_park_while_the_task_cap_refused_forks(monkeypatch):
+  monkeypatch.setattr("app.memory_observability.cgroup_process_cap_hits", lambda: 9)
+  sink = _Sink()
+  kwargs = chat_mod._park_exit(
+    sink, {"api_error_status": 429}, "You've hit your usage limit",
+    process_cap_hits_before=1,
+  )
+  assert kwargs["parked"] is True
+  assert kwargs["park_reason"] != "processes"
+
+
 @pytest.mark.parametrize("message", [
   '{"error":"request body is too large"}',
   "Invalid authentication credentials",
@@ -3704,7 +3800,7 @@ async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
   _seed_chat(cid)
   _seed_run(cid, "rt-setup-failure")
 
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False
@@ -3733,7 +3829,7 @@ async def test_setup_failure_is_saved_as_a_resumable_error_in_the_transcript(
   assert error["resumable"] is True
 
 
-@pytest.mark.parametrize("park_reason", ["storage", "memory"])
+@pytest.mark.parametrize("park_reason", ["storage", "memory", "processes"])
 def test_still_short_resource_park_waits_without_a_new_turn_or_card(
   owner_token, monkeypatch, park_reason,
 ):

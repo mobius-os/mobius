@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import time
+from typing import NamedTuple
 
 BACKGROUND_PROCESS_NICE = 5
 # Kernel oom_score_adj (max 1000). The container's own value is inherited by
@@ -151,9 +152,11 @@ def terminate_process_group(
 # processes and never another chat's or a later run's.
 RUN_TOKEN_ENV = "MOBIUS_RUN_TOKEN"
 # The non-secret twin every agent run carries, delegated helpers included (they
-# never receive the run token). A shared helper host names each helper turn's
-# commands with it, and a provider may persist it in session history, so it
-# must reveal nothing: it is a one-way digest of the run token.
+# never receive the run token). Scheduled app jobs carry one of their own too,
+# so the storage guard can stop a job that is filling the volume. A shared
+# helper host names each helper turn's commands with it, and a provider may
+# persist it in session history, so it must reveal nothing: it is a one-way
+# digest of the run token.
 RUN_MARKER_ENV = "MOBIUS_RUN_MARKER"
 
 
@@ -210,6 +213,130 @@ def run_owned_processes(marker: str) -> list[tuple[int, int]]:
     except (OSError, ProcessLookupError, ValueError, IndexError):
       continue
   return owned
+
+
+class _MarkedProcess(NamedTuple):
+  marker: str
+  parent: int
+  session: int
+  start_ticks: int
+  name: str
+
+
+def _marked_processes() -> dict[int, _MarkedProcess]:
+  """Every readable process carrying any run marker, by pid.
+
+  ``name`` is the argv0 basename. Same readability rules as
+  :func:`run_owned_processes`.
+  """
+  prefix = f"{RUN_MARKER_ENV}=".encode()
+  own = os.getpid()
+  marked: dict[int, _MarkedProcess] = {}
+  try:
+    entries = os.listdir("/proc")
+  except OSError:
+    return marked
+  for entry in entries:
+    if not entry.isdigit() or int(entry) == own:
+      continue
+    pid = int(entry)
+    try:
+      with open(f"/proc/{pid}/environ", "rb") as handle:
+        marker = next(
+          (
+            item[len(prefix):].decode("ascii", "replace")
+            for item in handle.read().split(b"\0")
+            if item.startswith(prefix)
+          ),
+          "",
+        )
+      if not marker:
+        continue
+      with open(f"/proc/{pid}/stat", "rb") as handle:
+        fields = handle.read().rsplit(b") ", 1)[1].split()
+      if fields[0] == b"Z":
+        continue
+      with open(f"/proc/{pid}/cmdline", "rb") as handle:
+        argv0 = handle.read().split(b"\0", 1)[0].decode("utf-8", "replace")
+      marked[pid] = _MarkedProcess(
+        marker=marker,
+        parent=int(fields[1]),
+        session=int(fields[3]),
+        start_ticks=int(fields[19]),
+        name=os.path.basename(argv0),
+      )
+    except (OSError, ValueError, IndexError):
+      continue
+  return marked
+
+
+def _agent_runtime_processes(marked: dict[int, _MarkedProcess]) -> set[int]:
+  """The marked processes that are an agent runtime's own machinery.
+
+  A runtime root is a process this server launched itself (the Claude CLI,
+  the Codex app-server wrapper, whatever its executable is called). Everything
+  that stayed in its root's session belongs to the runtime: the native Codex
+  binary behind its ``node`` wrapper and the stdio MCP servers the runtime
+  started. A root launched with ``setsid`` leads that session, so only its
+  own processes can be in it. A root launched without it (a development host
+  without ``setsid``) shares the server's session, so there a process must
+  also descend from the root. An orphaned command re-parented away from its
+  runtime can never pass for one.
+
+  This rests on one provider behaviour, which the run marker relies on too
+  (see RUN_MARKER_ENV): each tool command starts in a new session, so it and
+  its descendants leave the runtime's session. The Claude CLI is observed to
+  do this; for Codex it is assumed, not observed. A provider that gave commands
+  only a new process group would have them spared here, and they would end
+  with the turn's pause instead, a few seconds later.
+  """
+  server = os.getpid()
+  roots = {pid for pid, proc in marked.items() if proc.parent == server}
+  runtime = set(roots)
+  for pid, proc in marked.items():
+    if proc.session in roots:
+      runtime.add(pid)
+      continue
+    ancestor, seen = proc.parent, {pid}
+    while ancestor in marked and ancestor not in roots and ancestor not in seen:
+      seen.add(ancestor)
+      ancestor = marked[ancestor].parent
+    if ancestor in roots and proc.session == marked[ancestor].session:
+      runtime.add(pid)
+  return runtime
+
+
+def stop_agent_commands(*, spare_markers: frozenset[str] = frozenset()) -> int:
+  """Freeze, then kill, every command agent runs or app jobs started.
+
+  For a volume about to fill: the writer is almost always a command an agent
+  started (an install, a download, a build) or a scheduled app job, and
+  waiting for an agent's turn to be interrupted gives it seconds more to
+  write. Every process carrying a run marker is stopped at once (SIGSTOP),
+  then killed (SIGKILL also ends a stopped process, so nothing is ever left
+  frozen), except runs whose marker is in ``spare_markers``, the agent
+  runtimes themselves with their MCP servers (identified by process position,
+  :func:`_agent_runtime_processes`, so the turn can still be paused cleanly
+  and keep its tools), and browsers, which keep their graceful owners.
+  Returns how many processes were killed.
+  """
+  from app.browser_processes import BROWSERS, DAEMONS
+  spared_names = BROWSERS | DAEMONS
+  marked = _marked_processes()
+  runtime = _agent_runtime_processes(marked)
+  victims = [
+    (pid, proc.start_ticks)
+    for pid, proc in marked.items()
+    if proc.marker not in spare_markers
+    and pid not in runtime
+    and proc.name not in spared_names
+  ]
+  for pid, ticks in victims:
+    _signal_same_process(pid, ticks, signal.SIGSTOP)
+  return sum(
+    1 for pid, ticks in victims
+    if _signal_same_process(pid, ticks, signal.SIGKILL)
+  )
 
 
 def _signal_same_process(pid: int, ticks: int, sig: signal.Signals) -> bool:

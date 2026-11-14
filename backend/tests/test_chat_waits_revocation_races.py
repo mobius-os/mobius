@@ -400,7 +400,7 @@ def test_completed_retry_with_failed_receipt_exposes_recovery_and_manual_resume_
   assert wait.result_disposition == "delivered" and wait.received_run_id == resumed.id
 
 
-@pytest.mark.parametrize("outcome", ["completed", "cancelled", "withdrawn"])
+@pytest.mark.parametrize("outcome", ["completed", "cancelled", "withdrawn", "withdrawn_after_attempt"])
 def test_non_receipt_history_stays_with_owning_answer_not_unrelated_next_answer(db, chat, outcome):
   from datetime import timedelta, UTC
   source = _run(db, chat, "declaring", "goal")
@@ -409,8 +409,8 @@ def test_non_receipt_history_stays_with_owning_answer_not_unrelated_next_answer(
   base = now_naive_utc()
   wait.created_at = base - timedelta(seconds=10)
   wait.met_at = base
-  if outcome == "withdrawn":
-    wait.result_disposition = "withdrawn"
+  if outcome in {"withdrawn", "withdrawn_after_attempt"}:
+    wait.result_disposition = outcome
     wait.result_disposed_at = base + timedelta(seconds=10)
   else:
     chat_waits.stage_retire_fired_goal_waits(db, chat.id, source.goal_id)

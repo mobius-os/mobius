@@ -36,6 +36,7 @@ import {
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
+import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyMarkdownSelection } from './markdownClipboard.js'
@@ -232,9 +233,9 @@ function MsgContentInner({
   // model picker, or compact into a fresh provider session. Stable references.
   onRefusalModelChoice,
   onRefusalFreshSession,
-  // Only the installation owner may bypass the storage floor; the server
-  // refuses Continue anyway from anyone else, who keeps the plain Resume.
-  canOverrideStorage = false,
+  // Only the installation owner may bypass the storage or process floor; the
+  // server refuses Continue anyway from anyone else, who keeps plain Resume.
+  canContinueAnyway = false,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -619,18 +620,19 @@ function MsgContentInner({
         const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
-        // Resource waits retain automatic retry. A warned storage-only action
-        // can admit one cleanup turn even while that measured pressure remains.
-        // Not while an update restores edits or awaits a restart: the server
-        // reports those for a storage wait as the handoff's reason.
-        const storageOverrideAvailable = recoveryOwner && canOverrideStorage
-          && block.pause?.kind === 'storage'
+        // Resource waits retain automatic retry. A warned storage or process
+        // action can admit one cleanup turn even while that measured pressure
+        // remains. Not while an update restores edits or awaits a restart: the
+        // server reports those for a resource wait as the handoff's reason.
+        const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
+        const continueAnywayAvailable = recoveryOwner && canContinueAnyway
+          && !!continueAnywayCopy
           && ['automatic', 'recovery'].includes(handoff?.kind)
           && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
-          && !storageOverrideAvailable
+          && !continueAnywayAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
         return (
           <ErrorCard
@@ -694,17 +696,14 @@ function MsgContentInner({
                 )}
               </div>
             )}
-            {storageOverrideAvailable && (
-              <span className="chat__recovery-copy">
-                Continue this turn despite low storage—for example, to free space.
-                If the disk fills completely, saving may fail.
-              </span>
+            {continueAnywayAvailable && (
+              <span className="chat__recovery-copy">{continueAnywayCopy}</span>
             )}
-            {(manualResumeAvailable || storageOverrideAvailable) && (
+            {(manualResumeAvailable || continueAnywayAvailable) && (
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={() => onResume({ allowLowStorage: storageOverrideAvailable })}
+                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -714,9 +713,9 @@ function MsgContentInner({
                   : undefined}
               >
                 {resumeState?.pending
-                  ? storageOverrideAvailable ? 'Continuing…' : 'Resuming…'
+                  ? continueAnywayAvailable ? 'Continuing…' : 'Resuming…'
                   : resumeState?.unavailable ? 'Reconnecting…'
-                  : storageOverrideAvailable ? 'Continue anyway'
+                  : continueAnywayAvailable ? 'Continue anyway'
                   : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
@@ -894,7 +893,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onResume === next.onResume
     && prev.onRefusalModelChoice === next.onRefusalModelChoice
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
-    && prev.canOverrideStorage === next.canOverrideStorage
+    && prev.canContinueAnyway === next.canContinueAnyway
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

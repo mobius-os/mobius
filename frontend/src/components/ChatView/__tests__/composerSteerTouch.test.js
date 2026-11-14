@@ -133,7 +133,9 @@ test('a held queue turns the idle primary action into one empty Send of the queu
     /const composerBusy = turnActive \|\| \(pendingQueue\.pendingMessages\.length > 0 && !queueHeld\)/,
     'a held queue no longer shows Stop when nothing runs',
   )
-  assert.match(chatView, /onSendQueue=\{queueHeld \? handleSendQueue : undefined\}/)
+  assert.match(chatView, /const sendHeldQueue = queueHeld && !sharedGuest \? handleSendQueue : undefined/,
+    'a held queue reads the same to a guest, but only the owner may send it')
+  assert.match(chatView, /onSendQueue=\{sendHeldQueue\}/)
   assert.match(
     chatView,
     /async function handleSendQueue\(\) \{[\s\S]*?sendAfterSettingsSaved\('', undefined, \{ continuation: 'queue' \}\)/,
@@ -151,7 +153,7 @@ test('a held queue turns the idle primary action into one empty Send of the queu
   )
   assert.match(
     chatView,
-    /if \(!stoppedCleanly\) return\s*\/\/[^\n]*\n\s*\/\/[^\n]*\n\s*if \(Array\.isArray\(heldQueue\)\) pendingQueue\.hydrate\(heldQueue\)/,
-    'an accepted Stop shows the held queue from the idle runtime read',
+    /if \(Array\.isArray\(serverQueue\)\) pendingQueue\.hydrate\(serverQueue\)[\s\S]*?if \(!stoppedCleanly\) return/,
+    'every Stop shows the queue the server settled, even when the interrupt failed',
   )
 })

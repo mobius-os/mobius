@@ -51,6 +51,9 @@ REQUIRED_DATABASE_SUPERVISORS = frozenset({
   "reset-park-sweep",
   "chat-wait-sweep",
   "writer-supervisor",
+  # Without it nothing stops a running turn from filling the data volume to
+  # the last byte, after which nothing can commit (see storage_guard).
+  "storage-guard",
 })
 
 
@@ -417,6 +420,13 @@ class RuntimeSupervisors:
             raise
           except Exception as exc:
             self.log.error("dependency delivery sweep failed: %s", exc, exc_info=True)
+          try:
+            from app.agent_coordination import recover_work_claim_revocations
+            await recover_work_claim_revocations()
+          except asyncio.CancelledError:
+            raise
+          except Exception as exc:
+            self.log.error("claim revocation sweep failed: %s", exc, exc_info=True)
       finally:
         system_broadcast.unsubscribe(events)
 
@@ -688,6 +698,8 @@ class RuntimeSupervisors:
     self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("provider-session-retention", provider_session_retention_loop())
     self._spawn("capacity-monitor", capacity_monitor_loop())
+    from app.storage_guard import start_guard
+    self._spawn("storage-guard", start_guard(self.settings.data_dir).run())
     self._spawn("repair-checkout-gc", self._repair_checkout_gc_loop())
     self._spawn("platform-update-watch", platform_update_watch_loop())
 

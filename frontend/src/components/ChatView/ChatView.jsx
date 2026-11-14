@@ -114,7 +114,7 @@ import BranchOrigin from './BranchOrigin.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime, isProviderLimitPause, pauseTiming } from './resetTime.js'
-import { isResourcePause } from './waitingPresentation.js'
+import { isResourcePause, resourcePausePresentation } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
@@ -173,6 +173,7 @@ import {
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { createQueuedEditOrder } from './queuedEditOrder.js'
+import { steerPendingHint } from './queuedHint.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
@@ -820,21 +821,17 @@ export default function ChatView({
     normalizeBackgroundHelpers(cached?.background_helpers)
   ))
   const handleCancelWait = useCallback(async (waitId) => {
+    const result = await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
+    // HTTP success may refuse withdrawal while an admitting turn is unresolved.
+    // Do not hide an owed follow-up until the durable disposition confirms it.
     setArmedWaits(prev => {
-      const next = prev.filter(wait => wait.id !== waitId)
-      // Keep the persisted cache in step so a remount doesn't resurrect the
-      // cancelled chip from stale cached waits.
-      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), {
-        waits: next,
-      })
+      const next = result.status === 'armed' || result.delivery_pending
+        ? prev.map(wait => wait.id === waitId ? result : wait)
+        : prev.filter(wait => wait.id !== waitId)
+      updateChatRuntimeCache(queryClient, chatMessagesQueryKey(chatId), { waits: next })
       return next
     })
-    try {
-      await apiFetch(`/chat-waits/${waitId}/cancel`, { method: 'POST' })
-    } catch {
-      // The durable row is authoritative; the next detail read restores it if
-      // the cancel didn't commit.
-    }
+    return result
   }, [chatId, queryClient])
   const setGoalPresentationLocalState = useCallback((goal) => {
     const normalized = normalizeGoalPresentation(goal)
@@ -4578,7 +4575,8 @@ export default function ChatView({
       forgetAllSendIntents()
 
       let stoppedCleanly = false
-      let heldQueue = null
+      // The server's queue as of the latest runtime read after a Stop request.
+      let serverQueue = null
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
           method: 'POST',
@@ -4622,15 +4620,13 @@ export default function ChatView({
           break
         }
         const confirmation = await confirmStopIdle()
+        if (Array.isArray(confirmation.pending)) serverQueue = confirmation.pending
         stoppedCleanly = stopConfirmedIdle({
           stopSucceeded: requestSucceeded,
           confirmRunning: confirmation.running,
           confirmFailed: confirmation.failed,
         })
-        if (stoppedCleanly) {
-          heldQueue = confirmation.pending
-          break
-        }
+        if (stoppedCleanly) break
         if (!shouldRetryStopAfterConfirm({
           requestSucceeded,
           confirmRunning: confirmation.running,
@@ -4640,14 +4636,18 @@ export default function ChatView({
         }
       }
 
+      // The server settles the queue (owner rows held, other rows dropped)
+      // before it interrupts the turn, so it has settled it even when the
+      // interrupt failed. Show its queue either way: an idle one lets the
+      // composer offer to send the held rows, and a turn still running must
+      // not keep promising rows that no longer send after it.
+      if (!serverQueue) serverQueue = (await confirmStopIdle()).pending
+      if (Array.isArray(serverQueue)) pendingQueue.hydrate(serverQueue)
       // The SDK interrupt timed out (handle.stop()'s 2s bound — see
       // claude_sdk_runner.stop): the runner is still alive and the backend
       // left the registry entry + broadcast intact for the runner's own
-      // teardown. Keep the stream attached; the queue is untouched.
+      // teardown. Keep the stream attached.
       if (!stoppedCleanly) return
-      // The idle runtime read after Stop carries the held queue, so the
-      // composer can offer to send it.
-      if (Array.isArray(heldQueue)) pendingQueue.hydrate(heldQueue)
       dispatchQuestionFollowHandoff({ type: 'cancelled' })
       disconnect({ clearStreaming: true })
       promoteStreamToMessages()
@@ -5048,10 +5048,13 @@ export default function ChatView({
   // Fast-forward is stricter: it appears only when the click can actually
   // steer a live turn with server-confirmed pending rows. Optimistic rows stay
   // visible in the tray but do not expose an inert fast-forward button.
+  // A held queue reads the same to everyone viewing the chat; only the owner
+  // may send it (the server refuses a shared-browser guest).
+  const sharedGuest = isSharedBrowserAuth()
   const queueHeld = queueAwaitsOwnerSend({
     turnActive, pendingMessages: pendingQueue.pendingMessages,
-    sharedGuest: isSharedBrowserAuth(),
   })
+  const sendHeldQueue = queueHeld && !sharedGuest ? handleSendQueue : undefined
   const composerBusy = turnActive || (pendingQueue.pendingMessages.length > 0 && !queueHeld)
   // A connection failure owns the action slot until Retry succeeds. Keep both
   // the visible fast-forward affordance and its keyboard shortcut inert while
@@ -5724,9 +5727,7 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (serverHandoff?.kind === 'recovery') return 'This chat needs recovery. Review the saved recovery card.'
     if (resourcePause) {
-      return resourcePause.pause?.kind === 'storage'
-        ? 'Waiting for storage headroom. This chat will resume automatically.'
-        : 'Waiting for memory to settle. This chat will resume automatically.'
+      return `${resourcePausePresentation(resourcePause).summary}. This chat will resume automatically.`
     }
     if (modelCapacityPause) {
       const label = formatResetTime(pendingLimitCheckAt)
@@ -5886,9 +5887,9 @@ export default function ChatView({
   useLayoutEffect(() => {
     committedReplyGroupsRef.current = { chatId, groups: replyGroups }
   }, [chatId, replyGroups])
-  // Activity projection is a transcript-source commit too: peer rows may
-  // arrive after the first reveal without changing message count. Keep all
-  // source handoffs in the controller's same pre-paint transaction.
+  // Source handoffs can change geometry without changing message count.
+  // Synchronize those commits here; the controller's ResizeObserver owns live
+  // reveal and intrinsic growth without a second layout pass per text frame.
   useLayoutEffect(() => {
     reapplyActiveMode()
   }, [catchUpCommitSeq, transcriptReconcileSeq, peerTimeline.activityEvents, reapplyActiveMode])
@@ -5946,7 +5947,7 @@ export default function ChatView({
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
-      canOverrideStorage={canStartFreshSession}
+      canContinueAnyway={canStartFreshSession}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6285,6 +6286,7 @@ export default function ChatView({
                   chatId={chatId}
                   messageKey={dataKey}
                 />
+                <span className="chat__steer-pending-note">{steerPendingHint()}</span>
                 <MessageMetaRow
                   timestamp={reservedSteerMessage.ts || null}
                   copy={copyText ? () => ({ plainText: copyText }) : null}
@@ -6422,7 +6424,8 @@ export default function ChatView({
             turnActive={turnActive}
             online={online}
             restarting={restartPending}
-            onSendHeld={queueHeld ? handleSendQueue : undefined}
+            sharedGuest={sharedGuest}
+            onSendHeld={sendHeldQueue}
           />
         <CompactionProgress
           progress={compactionProgress}
@@ -6461,7 +6464,7 @@ export default function ChatView({
           onManualVoiceEdit={acceptManualEdit}
           onToggleVoice={toggleVoice}
           onStop={stopComposerWork}
-          onSendQueue={queueHeld ? handleSendQueue : undefined}
+          onSendQueue={sendHeldQueue}
           onSteer={handleSteer}
           canSteer={canSteer}
           showSteer={showSteer}

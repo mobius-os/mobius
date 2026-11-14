@@ -577,6 +577,7 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
   for method, path in (
     ("GET", "/managed/api/instance/v1/agent"),
     ("POST", "/managed/api/instance/v1/agent/trial"),
+    ("POST", "/managed/api/instance/v1/credits/key"),
     ("GET", "/managed/api/instance/v1/railway?region_options=1&workspace_ids=1"),
   ):
     response = broker.proxy(
@@ -614,6 +615,9 @@ def test_managed_proxy_owns_credentials_and_rejects_other_targets(broker):
     ("POST", "/managed/api/instance/v1/agent"),
     ("GET", "/managed/api/instance/v1/agent/trial"),
     ("POST", "/managed/api/instance/v1/agent/trial/extra"),
+    ("GET", "/managed/api/instance/v1/credits/key"),
+    ("POST", "/managed/api/instance/v1/credits/key/extra"),
+    ("POST", "/managed/api/instance/v1/credits"),
   ):
     with pytest.raises(FileNotFoundError):
       broker.proxy(
@@ -1788,6 +1792,16 @@ def test_broker_forwards_only_the_display_cost_metrics_read_opt_in():
   path = "/api/instance/v1/railway/instances/mob_example/metrics?cost=1"
   assert broker_module._managed_upstream_path("GET", "/managed" + path) == path
   assert broker_module.BROKER_ROUTE_EPOCH >= 11
+
+
+def test_broker_forwards_the_credits_key_route_account_pairing_depends_on():
+  # A served broker older than this route would 404 every one-tap pairing, so
+  # the epoch must reject it in favour of the baked copy.
+  from app.credits_client import ACCOUNT_KEY_ROUTE
+
+  upstream = ACCOUNT_KEY_ROUTE.removeprefix("/managed")
+  assert broker_module._managed_upstream_path("POST", ACCOUNT_KEY_ROUTE) == upstream
+  assert broker_module.BROKER_ROUTE_EPOCH >= 12
 
 
 @pytest.mark.parametrize("suffix", [

@@ -128,7 +128,7 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   }), false, 'an earlier resumable block cannot own a second action')
   assert.match(
     msgContent,
-    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{\(\) => onResume\(\{ allowLowStorage: storageOverrideAvailable \}\)\}/,
+    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{\(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)\}/,
     'the Resume control delegates an action without manufacturing message text',
   )
 })

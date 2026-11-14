@@ -552,8 +552,25 @@
   background: transparent;
   text-align: left;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  /* A held row opens its actions menu, not the platform callout. */
+  -webkit-touch-callout: none;
+  user-select: none;
 }
 .project-chats__row:hover { background: var(--surface); }
+.project-chats__row--editing { cursor: default; }
+.project-chats__row--editing:hover { background: transparent; }
+.project-chats__rename {
+  min-width: 0;
+  flex: 1;
+  padding: 4px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  background: var(--surface);
+  font: 600 12px var(--font);
+  outline: none;
+}
 .project-chats__row > svg { flex: 0 0 auto; color: var(--muted); }
 .project-chats__row > span { min-width: 0; display: grid; gap: 1px; }
 .project-chats__row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 600; }
@@ -1209,6 +1226,14 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .artifact-preview__frame { flex: 1; width: 100%; min-height: 0; border: 0; background: white; }
 .artifact-preview--image { align-items: center; justify-content: center; overflow: auto; padding: 18px; }
 .artifact-preview--image img { display: block; max-width: 100%; max-height: 100%; object-fit: contain; }
+/* A preview frame reads 0 for env(), so the containers that run a frame to
+   the bottom of the screen keep it above the home indicator / navigation bar.
+   --shell-bottom-inset is 0 while the shell is fitted above a keyboard. */
+.project-preview:not(.project-preview--asset),
+.project-finder__live-preview,
+.artifact-viewer__website {
+  padding-bottom: var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
 
 @media (max-width: 700px) {
   .project-menu__scrim {

@@ -88,6 +88,28 @@ def test_startup_reconciles_stale_running_chats(db):
   assert "cleared" not in err_blocks[0]["message"]
 
 
+def test_the_restart_note_does_not_count_rows_a_stop_held(db):
+  """Held rows wait for the owner's send, so the note must not promise them
+  to the resumed turn."""
+  _make_chat(
+    db, "held",
+    running=True,
+    started_at=datetime.now(UTC),
+    messages=[{"role": "user", "content": "build me a thing"}],
+    pending_messages=[
+      {"role": "user", "content": "kept for the owner", "ts": 1, "held": True},
+      {"role": "user", "content": "and another", "ts": 2},
+    ],
+  )
+
+  chat_mod.reconcile_interrupted_chats(db)
+
+  db.expire_all()
+  row = db.query(models.Chat).filter(models.Chat.id == "held").first()
+  err_blocks = [b for b in list(transcript_rows.history(row))[-1]["blocks"] if b["type"] == "error"]
+  assert "1 queued message is still queued" in err_blocks[0]["message"]
+
+
 def test_reconcile_finalizes_running_tool_block(db):
   """A tool block left 'running' by the crash is forced to a terminal
   status server-side (not just masked client-side) and an error block

@@ -1524,12 +1524,11 @@ def test_helper_without_a_goal_is_unfiled_and_cannot_name_a_task(db):
     helper_plan_task(db, "plain-chat", "r2")
 
 
-def test_a_task_note_preserves_full_text_within_its_bound():
-  from app.goal_plans import GoalPlanError, normalize_tasks
+def test_a_task_note_preserves_full_text():
+  from app.goal_plans import normalize_tasks
 
-  assert normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1000}])[0]["note"] == "n" * 1000
-  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
-    normalize_tasks([{"id": "a", "title": "A", "note": "n" * 1001}])
+  note = "n" * 20_000
+  assert normalize_tasks([{"id": "a", "title": "A", "note": note}])[0]["note"] == note
 
 
 def test_runtime_goal_embeds_plan_and_idle_invalidation(client, owner_token, db, monkeypatch):
@@ -1684,34 +1683,28 @@ def test_shared_run_missing_position_message_does_not_use_legacy_receipt(
   assert cards[1][0]["completion_tool_use_id"] == "b-call"
 
 
-def test_plan_preserves_bounded_input_contract():
-  from app.goal_plans import GoalPlanError, normalize_tasks
-  import pytest
-  tasks = [{"id": f"t{i}", "title": "T" * 161, "status": "pending"}
-           for i in range(66)]
-  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
-  tasks[-1]["note"] = "N" * 1001
-  tasks[-1]["result"] = "R" * 1001
-  with pytest.raises(GoalPlanError, match="at most 64 tasks"):
-    normalize_tasks(tasks)
-  tasks = tasks[:64]
-  with pytest.raises(GoalPlanError, match="at most 160 characters"):
-    normalize_tasks(tasks)
-  tasks = [{**task, "title": "Task"} for task in tasks]
-  tasks[-1]["depends_on"] = [f"t{i}" for i in range(17)]
-  with pytest.raises(GoalPlanError, match="at most 16 dependencies"):
-    normalize_tasks(tasks)
-  tasks[-1]["depends_on"] = []
-  tasks[-1]["note"] = "N" * 1001
-  with pytest.raises(GoalPlanError, match="at most 1000 characters"):
-    normalize_tasks(tasks)
+def test_large_plans_keep_every_task_and_full_text():
+  from app.goal_plans import normalize_tasks
+  tasks = [{"id": f"t{i}", "title": "T" * 500, "status": "pending"}
+           for i in range(200)]
+  tasks[-1]["depends_on"] = [f"t{i}" for i in range(150)]
+  tasks[-1]["completion_condition"] = "C" * 5000
+  tasks[-1]["note"] = "N" * 5000
+  tasks[-1]["result"] = "R" * 5000
+  normalized = normalize_tasks(tasks)
+  assert len(normalized) == 200
+  assert normalized[-1]["title"] == "T" * 500
+  assert normalized[-1]["depends_on"] == [f"t{i}" for i in range(150)]
+  assert normalized[-1]["completion_condition"] == "C" * 5000
+  assert normalized[-1]["note"] == "N" * 5000
+  assert normalized[-1]["result"] == "R" * 5000
 
 
-def test_maximum_bounded_dependency_chain_is_valid():
+def test_a_long_dependency_chain_is_valid():
   from app.goal_plans import normalize_tasks
   tasks = [{"id": f"t{i}", "title": "Task", "status": "pending",
-            "depends_on": [f"t{i-1}"] if i else []} for i in range(64)]
-  assert len(normalize_tasks(tasks)) == 64
+            "depends_on": [f"t{i-1}"] if i else []} for i in range(500)]
+  assert len(normalize_tasks(tasks)) == 500
 
 
 def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
@@ -1750,3 +1743,110 @@ def test_nested_helper_invalidation_targets_parent_and_goal_owner_once(
   emitted.clear()
   publish_plan_for_delegation(db, direct)
   assert [event["chatId"] for event in emitted] == [owner]
+
+
+def test_dependency_checks_stay_linear_in_deeply_nested_plans(monkeypatch):
+  from app import goal_plans
+
+  class Counting(frozenset):
+    checks = 0
+
+    def __contains__(self, value):
+      Counting.checks += 1
+      return frozenset.__contains__(self, value)
+
+  monkeypatch.setattr(goal_plans, "SETTLED_TASK_STATUSES", Counting(goal_plans.SETTLED_TASK_STATUSES))
+  depth = 2000
+  tasks = [{"id": f"d{i}", "title": "Done", "status": "completed"} for i in range(depth)]
+  tasks += [{"id": f"g{i}", "title": "Group", "status": "pending",
+             "parent_id": f"g{i - 1}" if i else None, "depends_on": [f"d{i}"]}
+            for i in range(depth)]
+  tasks[-1]["status"] = "running"
+  for task in tasks:
+    if task.get("parent_id") is None:
+      task.pop("parent_id", None)
+  assert len(goal_plans.normalize_tasks(tasks)) == 2 * depth
+  # Each dependency and child is checked a constant number of times; an
+  # inherited-chain rescan per task would need about depth**2 / 2 checks.
+  assert Counting.checks < 10 * len(tasks)
+
+
+def test_a_five_thousand_task_plan_normalizes():
+  from app.goal_plans import normalize_tasks
+  tasks = [{"id": "root", "title": "Root", "status": "running"}]
+  tasks += [{"id": f"t{i}", "title": "Task", "status": "completed", "parent_id": "root",
+             "depends_on": [f"t{i - 1}"] if i else []} for i in range(5000)]
+  assert len(normalize_tasks(tasks)) == 5001
+
+
+def test_serialized_waiting_lists_stay_linear_in_deep_plans(monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  class Counting(frozenset):
+    checks = 0
+
+    def __contains__(self, value):
+      Counting.checks += 1
+      return frozenset.__contains__(self, value)
+
+  depth = 2000
+  tasks = [{"id": f"d{i}", "title": "Done", "status": "completed"} for i in range(depth)]
+  tasks += [{"id": f"g{i}", "title": "Group", "status": "pending",
+             **({"parent_id": f"g{i - 1}"} if i else {}), "depends_on": [f"d{i}"]}
+            for i in range(depth)]
+  monkeypatch.setattr(goal_plans, "_delegation_tree", lambda *args: [])
+  monkeypatch.setattr(goal_plans, "_active_helper_nodes", lambda nodes: [])
+  monkeypatch.setattr(goal_plans, "SETTLED_TASK_STATUSES", Counting(goal_plans.SETTLED_TASK_STATUSES))
+  root = SimpleNamespace(id="g", objective="O", revision=1, plan_json={"tasks": tasks})
+  physical = SimpleNamespace(id="r", root_run_id="r")
+  plan = goal_plans.serialize_plan(None, physical, root)
+  assert plan["summary"]["ready"] == [f"g{depth - 1}"]
+  assert all(task["waiting_on"] == [] for task in plan["tasks"])
+  assert Counting.checks < 20 * len(tasks)
+
+
+def test_a_refusal_names_a_few_unsettled_dependencies_and_counts_the_rest():
+  from app.goal_plans import GoalPlanError, normalize_tasks
+  tasks = [{"id": f"d{i:04d}", "title": "Dep"} for i in range(1200)]
+  tasks.append({"id": "run", "title": "Run", "status": "running",
+                "depends_on": [task["id"] for task in tasks]})
+  with pytest.raises(GoalPlanError) as refused:
+    normalize_tasks(tasks)
+  message = str(refused.value)
+  assert "d0000, " in message and "d0009 and 1190 more (1200 in all)" in message
+  assert "d0010" not in message
+
+
+def test_helper_edits_and_task_choice_stay_linear_on_deep_plans(monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  depth = 3000
+  tasks = [{"id": f"t{i}", "title": "Task", "status": "running",
+            **({"parent_id": f"t{i - 1}"} if i else {})} for i in range(depth)]
+  goal = SimpleNamespace(status="open", plan_json={"tasks": tasks})
+  assignment = SimpleNamespace(goal=goal, plan_task="t10", plan_task_missing=False)
+  calls = []
+  real = goal_plans._branch_members
+  monkeypatch.setattr(goal_plans, "_branch_members",
+                      lambda *args: calls.append(1) or real(*args))
+  document = goal_plans.stage_helper_task_edits(
+    assignment, [{"id": f"t{depth - 1}", "note": "deep edit"}])
+  assert document["tasks"][-1]["note"] == "deep edit"
+  # One branch walk per side, not one per task.
+  assert len(calls) == 2
+  with pytest.raises(goal_plans.GoalPlanError, match="Helpers may edit only"):
+    goal_plans.stage_helper_task_edits(assignment, [{"id": "t5", "note": "outside"}])
+
+
+def test_a_missing_plan_task_names_a_few_tasks_and_counts_the_rest(db, monkeypatch):
+  from types import SimpleNamespace
+  from app import goal_plans
+
+  tasks = [{"id": f"t{i:04d}", "title": "Task"} for i in range(500)]
+  goal = SimpleNamespace(plan_json={"tasks": tasks})
+  monkeypatch.setattr(goal_plans, "active_goal_rows", lambda db, chat_id: (None, goal))
+  with pytest.raises(goal_plans.GoalPlanError) as refused:
+    goal_plans.helper_plan_task(db, "chat", "missing")
+  assert "t0009 and 490 more (500 in all)" in str(refused.value)

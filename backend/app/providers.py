@@ -881,24 +881,18 @@ CODEX_NATIVE_HELPERS_OFF = (
 # Agent Coaching) pass CODEX_TOOLS_OFF last, so it wins over a provider's own
 # settings (the Möbius subscription turns web search on for chats).
 #
-# Traced on Codex 0.163.0 on 2026-11-04, through the real fork and compaction
-# paths pointed at a local fake Responses endpoint: the tools each request
-# sent, plus an `exec` call the endpoint scripts to print ALL_TOOLS (deferred
-# nested tools are missing from exec's description). 0.162.0 gives identical
-# results in the same harness. What stays reaches no file or network: `exec`,
-# which refuses to run with code_mode_host off, so its nested apply_patch,
-# clock and MCP resource readers are unreachable; `wait`, for exec cells only;
-# and request_user_input, for Plan mode only (models whose catalog lists it
-# also get request_user_input_async, which only asks the user). A model without
-# code mode gets a direct apply_patch instead, and the read-only sandbox
-# rejects its writes. `unified_exec` is not listed: Codex keeps it on whatever
-# the switch says, and shell_tool=false already removes its exec_command and
-# write_stdin tools.
+# Traced on Codex 0.167.2 on 2026-11-13 with the same native-helper and
+# tool-off overrides used by fork and compaction, against a local fake
+# Responses endpoint (no paid request). A known model, gpt-5.6-sol, sent
+# `tools: []`; an unknown fallback model offered only `request_user_input`.
+# `codex features list` also reported every switch below known and false.
+# The earlier 0.163.0 trace additionally exercised a local `exec` call to
+# inspect deferred tools; do that again if a future release exposes exec here.
 #
 # Re-trace the same way before changing CODEX_TOOLS_OFF_VERIFIED_FOR. A test
 # fails while it differs from the Dockerfile's CODEX_VERSION, and session
 # forks refuse to run unless Codex reports every feature below as known and off.
-CODEX_TOOLS_OFF_VERIFIED_FOR = "0.163.0"
+CODEX_TOOLS_OFF_VERIFIED_FOR = "0.167.2"
 CODEX_TOOL_FEATURES_OFF = (
   "shell_tool",
   "apps",

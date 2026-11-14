@@ -18,9 +18,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app import models
+from app.broadcast import publish_system_event
 from app.config import Settings, get_settings
 from app.deps import get_current_owner, reject_cross_site
-from app.routes.notify import publish_system_event
 from app.theme import (
   UnreadableThemeCss, reset_theme_override, set_theme_mode, theme_with_toggle,
 )

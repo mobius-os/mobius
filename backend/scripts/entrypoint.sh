@@ -25,6 +25,20 @@ trap cleanup TERM INT
 # root — the dirs from the Dockerfile are replaced by the empty mount.
 mkdir -p /data/db /data/apps /data/app-secrets /data/compiled /data/shared /data/logs /data/cron-logs /data/cli-auth /data/agent-browser-profiles /data/platform /data/run
 
+# Give a full volume its recovery reserve back before anything below
+# writes: there the boot transaction cannot commit and the container would
+# refuse to start. Any other volume keeps its reserve through the restart. The
+# check is the server's own (release_reserve_at_boot in
+# backend/app/storage_guard.py), run from the baked backend; if it cannot run,
+# the reserve is released, since a boot that can start beats one kept reserve.
+# A half-written reserve from an interrupted arm is never worth keeping.
+rm -f /data/run/recovery-reserve.partial
+if ! (cd /app/platform-baked/backend && PYTHONDONTWRITEBYTECODE=1 python3 -c \
+  'import sys; from app.storage_guard import release_reserve_at_boot; release_reserve_at_boot(sys.argv[1])' \
+  /data); then
+  rm -f /data/run/recovery-reserve
+fi
+
 # Per-boot fail-closed proof. FastAPI lifespan recreates this only after every
 # discovered managed schedule has been converged through the common runner.
 rm -f /data/run/app-cron-supervision-ready
@@ -167,6 +181,10 @@ fi
 
 _public_port=${PORT:-8000}
 _restart_poller_started=0
+# Set by /app/runtime/container_supervisor.py; only root-owned helpers use it,
+# so it is not passed on to the app.
+_supervisor_pid="${MOBIUS_SUPERVISOR_PID:-}"
+unset MOBIUS_SUPERVISOR_PID
 
 _start_platform_restart_poller() {
   [ "$_restart_poller_started" -eq 1 ] && return 0
@@ -176,8 +194,8 @@ _start_platform_restart_poller() {
     while true; do
       if [ -f /data/.platform-restart-requested ]; then
         # The baked helper authenticates the matching one-shot chat intent.
-        # Only this root-owned poller acknowledges the cause before terminating
-        # pid 1, so ordinary Settings restarts keep their continuation contract.
+        # Only this root-owned poller acknowledges the cause before ending the
+        # boot, so ordinary Settings restarts keep their continuation contract.
         if ! DATA_DIR=/data python3 -P /app/runtime/restart_ledger.py \
           accept "$MOBIUS_BOOT_ID"; then
           rm -f /data/.platform-restart-requested \
@@ -185,9 +203,19 @@ _start_platform_restart_poller() {
           echo "O1: rejected unauthenticated restart sentinel; container stays running." >&2
           continue
         fi
-        echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
-        kill -TERM 1 2>/dev/null || true
-        # pid1 is now draining + exiting; give it a moment, then stop polling.
+        # The image's container supervisor reruns the boot inside this
+        # container, so a planned restart never depends on the host's restart
+        # policy (Railway's default ON_FAILURE never revives a clean stop).
+        # Only a boot started without it (an overridden image entrypoint) falls
+        # back to stopping the container. That stop still exits cleanly through
+        # tini -e 143, so it relies on the host's ALWAYS/unless-stopped policy.
+        if [ -n "$_supervisor_pid" ] && kill -USR1 "$_supervisor_pid" 2>/dev/null; then
+          echo "O1: platform-restart sentinel seen — restarting inside this container." >&2
+        else
+          echo "O1: platform-restart sentinel seen — sending SIGTERM to pid 1 (container restart)." >&2
+          kill -TERM 1 2>/dev/null || true
+        fi
+        # The boot is now draining + exiting; give it a moment, then stop polling.
         sleep 5
         exit 0
       fi
@@ -1011,6 +1039,9 @@ umask 022
 mkdir -p /data/identity-broker
 chown root:root /data/identity-broker
 chmod 700 /data/identity-broker
+# /run survives an in-place restart, and a stopped broker leaves its socket
+# behind. Clear it so the readiness check below only sees this boot's broker.
+rm -f /run/mobius-identity-broker.sock
 if [ "$_use_platform" -eq 1 ]; then
   DATA_DIR=/data MOBIUS_PLATFORM_DIR=/data/platform \
     python3 -P /app/runtime/served_runtime_launcher.py identity_broker &
@@ -1039,8 +1070,8 @@ if [ "$_identity_broker_ready" -ne 1 ]; then
 fi
 
 # Root-owned half of the ordinary Settings restart handshake. The app publishes
-# a nonce-bound request; this poller accepts it and terminates pid 1 so Docker or
-# Railway recreates the service. It is part of the ordinary app lifecycle.
+# a nonce-bound request; this poller accepts it and asks the container supervisor
+# to rerun the boot in place. It is part of the ordinary app lifecycle.
 _start_platform_restart_poller
 
 # The probe polls the app's /api/health (127.0.0.1, never routed outside the
@@ -1094,13 +1125,16 @@ if [ -d "$_scripts_dir" ]; then
   done
 fi
 
-# --timeout-graceful-shutdown bounds uvicorn's SIGTERM drain. Without it,
-# uvicorn waits FOREVER for open connections to close on SIGTERM — and the chat
-# SSE stream never closes on its own — so an in-app restart (the Settings
-# Restart button SIGTERMs this worker) hangs the process in shutdown limbo: it
-# stops serving but never exits, tini never exits, and the container never
-# restarts ("pressed Restart, server never came back"). Bounding the drain makes
-# every SIGTERM-based restart reliably cycle the container.
+# --timeout-graceful-shutdown bounds uvicorn's own SIGTERM drain. Without it,
+# uvicorn waits FOREVER for open connections to close — and the chat SSE stream
+# never closes on its own — so a SIGTERM that reached uvicorn alone would leave
+# it in shutdown limbo: serving nothing, never exiting, the boot never ending
+# ("pressed Restart, server never came back").
+# The bound that actually applies to a boot's stop is shorter: the util-linux
+# `su` below forwards SIGTERM (the container supervisor's for an in-app
+# Restart, the host's for a stop) to uvicorn, waits 2 s, then SIGKILLs it, so
+# the boot ends about 2 s after the signal. The in-app restart drains live
+# turns before any signal is sent, so that cut loses nothing.
 _uvicorn_flags="--host 0.0.0.0 --port $_public_port --timeout-graceful-shutdown 10"
 # `$_env_scrub` is applied to the uvicorn exec so the served process runs with
 # the SAME scrubbed GIT_*/PYTHONPATH the import probe validated — a leaked
