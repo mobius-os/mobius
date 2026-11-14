@@ -1,4 +1,4 @@
-/* The start of the agent's latest stretch when it began before the loaded
+/* The start of the first loaded agent stretch when it began before the loaded
    history page. Copy normally reads the rendered transcript; a stretch whose
    start is not loaded reads it with its own requests instead (never paging
    the transcript, so the reader never moves). The read is lazy: it starts

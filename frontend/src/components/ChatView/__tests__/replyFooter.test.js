@@ -1,8 +1,4 @@
-/* The chat has one footer, on the reply at its very end: its time, Copy of
- * everything the agent said since the owner last spoke, and Branch. Replies
- * above it have no row at all, so there is no gap between them. While the
- * agent works the footer's line is reserved but empty.
- * #1290 attached copy to every assistant row and #1342 reverted that. */
+/* One footer per completed answer stretch; internal runs add none. */
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -21,7 +17,7 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { agentStretches, footerCopyParts, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
+const { agentStretches, footerCopyParts, replyFooter, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
@@ -67,7 +63,7 @@ test('the footer reply ends with exactly one start-edge action row holding Copy'
     'the action row sits after the reply’s last text, not beside any earlier part')
 })
 
-test('a reply above the end of the chat has no action row, so no gap', () => {
+test('an internal reply before the stretch end has no action row, so no gap', () => {
   assert.equal(metaRows(renderReply([turn], { footer: null })).length, 0)
 })
 
@@ -121,11 +117,11 @@ test('without sources the footer does not add a disclosure or change its row', (
   assert.match(row, /aria-label="Branch in new chat"/)
 })
 
-test('historical sources remain available without creating another action footer', () => {
+test('an internal reply cannot create another action footer or References', () => {
   const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
-  const html = renderReply([sourced], { footer: null })
+  const html = renderReply([sourced], { footer: null, stretchSourceRows: null })
   assert.equal(metaRows(html).length, 0)
-  assert.match(html, /References/)
+  assert.doesNotMatch(html, /References/)
 })
 
 test('while the agent works the footer line is reserved but empty', () => {
@@ -335,6 +331,23 @@ test('the footer sits on the chat’s last reply and spans its stretch', () => {
   assert.equal(footer.start, 1, 'the stretch starts after the owner’s row')
   assert.equal(footer.truncated, false)
   assert.equal(footerOf([row('a'), ownerRow]), null, 'no footer once the owner has spoken')
+})
+
+test('earlier completed answers retain one footer each while a newer answer runs', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, row('b'), ownerRow, row('c'), ownerRow, row('live')]
+  const replyGroups = assistantReplyGroups(messages)
+  const options = { messages, replyGroups, stretches: agentStretches(messages, replyGroups),
+    lastVisibleIndex: 7, liveIndex: 7, turnStarting: true, settledEnd: 5 }
+  const footers = replyFooters(options)
+  assert.deepEqual([...footers.values()].map(footer => [footer.group.start, footer.state,
+    firstIds(messages, footer)]), [
+    [3, 'settled', ['a', 'b']], [5, 'settled', ['c']], [7, 'working', ['live']],
+  ])
+  assert.deepEqual(stretchProse([...footers.values()][0].groups).map(part => part.markdown), ['a', 'b'])
+  assert.deepEqual(stretchProse([...footers.values()][1].groups).map(part => part.markdown), ['c'])
+  assert.deepEqual([...replyFooters({ ...options, liveIndex: -1, lastVisibleIndex: 6 })]
+    .map(([, footer]) => footer.state), ['settled', 'settled', 'settled'],
+    'a submitted owner row cannot remove earlier complete footers')
 })
 
 test('a stretch that reaches the loaded page’s first row may have begun earlier', () => {

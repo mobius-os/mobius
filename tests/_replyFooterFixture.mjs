@@ -4,7 +4,7 @@ import { createTaggedChat } from './_chatTracker.mjs'
 import { mockDeliveryReady, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 export async function mountReplyFooter(page, base, {
-  running = false, pendingQuestion = false, sources = [], sourceRef = null,
+  running = false, pendingQuestion = false, sources = [], sourceRef = null, earlierSources = [],
   latestAnswer = 'Latest completed answer.\n\n' + 'Answer detail. '.repeat(100),
 } = {}) {
   await page.goto(base, { waitUntil: 'domcontentloaded' })
@@ -18,6 +18,9 @@ export async function mountReplyFooter(page, base, {
     { role: 'user', content: 'Second question', cid: 'footer-second', ts: 3 },
     assistant('footer-latest', latestAnswer, 4),
   ]
+  if (earlierSources.length) messages[1].blocks.push({
+    type: 'tool', tool: 'WebSearch', status: 'done', sources: earlierSources,
+  })
   if (sourceRef) messages.at(-1).source_ref = sourceRef
   if (sources.length) messages.at(-1).blocks.push({
     type: 'tool', tool: 'WebSearch', status: 'done', sources,
@@ -58,6 +61,7 @@ export async function mountReplyFooter(page, base, {
   const copy = replies.last().getByRole('button', { name: 'Copy message' })
   // The footer is transparent at rest; its Copy exists once the reply settles.
   await expect(copy).toHaveCount(running ? 0 : 1)
+  await expect(replies.first().getByRole('button', { name: 'Copy message' })).toHaveCount(1)
   if (running) await expect(surface.locator('.chat__stop')).toBeVisible()
   if (pendingQuestion) await expect(surface.locator('.qcard')).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })

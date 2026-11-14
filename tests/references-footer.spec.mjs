@@ -57,6 +57,18 @@ for (const touch of [false, true]) {
         { timeout: 7000 }).toBe('0')
     })
 
+    test('a historical answer keeps References in its own shared footer', async ({ page }) => {
+      const f = await mountReplyFooter(page, BASE, { earlierSources: sources })
+      const older = f.replies.first()
+      const footer = older.locator('.chat__msg-meta--start')
+      await expect(footer.getByRole('button', { name: 'Copy message' })).toHaveCount(1)
+      const toggle = footer.getByRole('button', { name: 'References 2' })
+      await toggle.click()
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      await expect(footer.getByRole('link')).toHaveCount(2)
+      await expect(f.replies.last().getByRole('button', { name: 'References 2' })).toHaveCount(0)
+    })
+
     test('lazy references hold the footer through loading, failure and retry', async ({ page }) => {
       let requests = 0
       let release

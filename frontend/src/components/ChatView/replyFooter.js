@@ -1,6 +1,5 @@
-/* The chat's one reply footer: which reply holds it, in what state, and the
-   agent's stretch it copies (everything the agent said since the owner last
-   spoke). Pure, so ChatView only wires its result. */
+/* One footer per complete answer stretch, with no footer on internal runs.
+   Each copies what the agent said since the preceding visible owner row. */
 import { assistantReplyGroups, presentAssistantActivity, presentAssistantReply } from './assistantReplies.js'
 import { replyProse } from './messageCopy.js'
 
@@ -23,34 +22,34 @@ export function agentStretches(messages, replyGroups) {
   return stretches
 }
 
-/** The footer, or null when the chat does not end on a reply.
- *
- *  It sits on the reply at the very end of the chat: the live reply's group
- *  at `liveIndex` while one is shown (-1 otherwise), else the one holding the
- *  last visible row. `state` is 'settled' while no turn is starting or
- *  running; while one is, 'working' (an empty, reserved line) on a reply the
- *  turn is writing, and null on the reply that held the footer when it
- *  started, which the live surface can briefly reselect before the turn's
- *  reply exists. That reply is told apart by where it ends: `settledEnd` is
- *  the absolute index of the settled footer reply's last row, and a turn
- *  continuing that same reply adds a row after it.
- *
- *  `start` is the index of the stretch's first row after the owner's, so a
- *  hidden carrier opening it stays with it; `truncated` says the stretch may
- *  have begun before the loaded page (whose first row is at `offset`). */
-export function replyFooter({
+/** Footer state for every answer stretch on the loaded page. Only the current
+ *  stretch can be working or briefly cleared during an answered-card handoff;
+ *  older answers remain complete while a later owner turn runs. */
+export function replyFooters({
   messages, replyGroups, stretches, liveIndex = -1, lastVisibleIndex, offset = 0,
   turnStarting = false, settledEnd = null,
 }) {
-  const group = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
-  const groups = group && stretches.get(group)
-  if (!groups) return null
-  let before = groups[0].start - 1
-  while (before >= 0 && messages[before]?.hidden) before -= 1
-  const end = offset + group.end
-  const state = !turnStarting ? 'settled'
-    : liveIndex >= 0 && end !== settledEnd ? 'working' : null
-  return { group, groups, state, end, start: before + 1, truncated: before < 0 && offset > 0 }
+  const current = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
+  const footers = new Map()
+  for (const [group, groups] of stretches) {
+    let before = groups[0].start - 1
+    while (before >= 0 && messages[before]?.hidden) before -= 1
+    const end = offset + group.end
+    const state = !turnStarting || group !== current ? 'settled'
+      : liveIndex >= 0 && end !== settledEnd ? 'working' : null
+    footers.set(group, {
+      group, groups, state, end, start: before + 1,
+      truncated: before < 0 && offset > 0,
+    })
+  }
+  return footers
+}
+
+/** Compatibility selector for the current reply; the owner view uses all
+ *  entries from replyFooters so historical complete answers keep their rows. */
+export function replyFooter(options) {
+  const { replyGroups, liveIndex = -1, lastVisibleIndex } = options
+  return replyFooters(options).get(replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)) || null
 }
 
 /** What the stretch's replies say, in order, as each settled reply renders:

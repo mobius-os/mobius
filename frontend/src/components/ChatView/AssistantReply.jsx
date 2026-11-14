@@ -1,7 +1,5 @@
-/* One reply owns live/saved source rows and continuous prose. The reply that
-   ends an agent stretch also holds the stretch's References, and the one at
-   the very end of the chat holds the one footer: its time, Copy of everything
-   the agent said since the owner last spoke, and Branch (see replyFooter.js). */
+/* A reply owns continuous prose and saved/live sources. The reply ending a
+   complete answer stretch holds its time, Copy, Branch and References. */
 import { Fragment, memo, useContext, useMemo } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
@@ -147,9 +145,8 @@ function AssistantReply({
         </Fragment>
       })}
     </ul>
-    {/* Only the chat's last reply has a footer; replies above it leave no
-        gap. It is mounted while the agent works too, empty: settling fills
-        the reserved line instead of adding one under a followed transcript. */}
+    {/* One footer per complete answer stretch, never per internal run. A
+        working stretch reserves its line so settling does not jump. */}
     {footer && <MessageMetaRow
       // When the reply settled: when the run that wrote its last row ended.
       // Until the server reports that, its start, and the row says so (a
