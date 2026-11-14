@@ -1,3 +1,4 @@
+import { editorText } from './textEditor.js'
 import { useState, useRef, useEffect } from 'react'
 import useScreenWakeLock from '../../hooks/useScreenWakeLock.js'
 import { acquireAudioSession } from '../../lib/audioSession.js'
@@ -106,7 +107,7 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   useEffect(() => () => stopVoice(), [])
 
   function appendNote(note) {
-    const prev = inputRef.current?.value || ''
+    const prev = editorText(inputRef.current)
     onTranscript(prev + (prev ? ' ' : '') + note)
   }
 
@@ -221,7 +222,7 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
 
     listeningRef.current = true
     setListening(true)
-    voiceFinalRef.current = inputRef.current?.value.trimEnd() || ''
+    voiceFinalRef.current = editorText(inputRef.current).trimEnd()
     startVoiceSession()
   }
 

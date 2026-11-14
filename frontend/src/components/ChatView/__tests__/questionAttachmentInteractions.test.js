@@ -21,7 +21,8 @@ const vite = await createSsrRenderServer({
       if (id === 'question-card-hooks') return '\0question-card-hooks'
     },
     load(id) {
-      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null;`
+      // The card's only context is the local answer outbox; a test sets it here.
+      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => globalThis.__questionCardLocalAnswers ?? null; export const useId = () => 'qcard';`
     },
   }],
 })
@@ -40,7 +41,11 @@ function find(tree, predicate) {
   return element
 }
 const submit = tree => find(tree, node => node.props?.className?.split(' ').includes('qcard__submit'))
-const editor = (tree, question) => find(tree, node => node.props?.question === question)
+const editor = (tree, question) => {
+  const block = find(tree, node => node.props?.['data-question-index'] != null
+    && elements(node.props.children).some(child => child.props?.text === question))
+  return find(block.props.children, node => node.type === CustomAnswerArea)
+}
 const chipSets = tree => elements(tree).filter(node => Array.isArray(node.props?.files))
 const chips = (tree, index = 0) => chipSets(tree)[index]
 const sentSets = tree => elements(tree).filter(node => Array.isArray(node.props?.attachments))
@@ -77,6 +82,32 @@ test('Stop keeps a live card\'s hint, paperclip, and Submit in place, inert', ()
   try {
     assert.deepEqual(controls(history.result.current), [])
   } finally { history.unmount() }
+})
+
+test('a delivered answer awaiting its transcript keeps its status and inert slot when the question closes', () => {
+  // The outbox retried an answer and the server took it, so the chat no longer
+  // has a pending question, but the transcript has not recorded the answer yet.
+  globalThis.__questionCardLocalAnswers = [{
+    chatId: 'delivered-chat', deliveryOutcome: 'delivered',
+    body: { question_id: 'delivered-card', answers: { 'First?': 'A', 'Second?': 'B' } },
+  }]
+  const props = { chatId: 'delivered-chat', questionId: 'delivered-card', questions, onAnswer: () => true }
+  const rows = tree => elements(tree)
+    .map(node => node.props?.className?.split?.(' ')[0])
+    .filter(name => ['qcard__hint', 'qcard__attach', 'qcard__queue-status', 'qcard__submit'].includes(name))
+  const card = renderHook(QuestionCard, props)
+  try {
+    const live = rows(card.result.current)
+    assert.ok(live.includes('qcard__queue-status'))
+    card.rerender({ ...props, onAnswer: undefined, disabled: true })
+    assert.deepEqual(rows(card.result.current), live,
+      'closing the question must not collapse the card while its answer is confirmed')
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props.children, 'Confirming answer…')
+  } finally {
+    card.unmount()
+    delete globalThis.__questionCardLocalAnswers
+  }
 })
 
 test('pasting into question two keeps the file with that answer, upload gates submit, and submission locks all attachment edits', async () => {
@@ -368,7 +399,7 @@ test('answer paste matches the composer: Markdown by default, plain on the short
   const paste = props => {
     const changes = []
     const box = renderHook(CustomAnswerArea, {
-      question: 'Q?', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
+      questionTextId: 'q-text', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
       onChange: value => changes.push(value), ...props,
     })
     let prevented = false
@@ -410,4 +441,70 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
     const error = find(card.result.current, node => node.props?.className === 'qcard__submit-error')
     assert.equal(error.props.children, 'Attach at most 20 files to one card.')
   } finally { card.unmount(); globalThis.fetch = originalFetch }
+})
+
+test('explanation controls keep their clicks, explanation text picks, and keys pick the raw label', async () => {
+  const question = 'Install **both**?'
+  const label = '**Update**'
+  let posted
+  const card = renderHook(QuestionCard, { chatId: 'markdown-events', questionId: 'markdown-events-q',
+    questions: [{ question, options: [{ label, description: '[Notes](https://example.com)' }] }],
+    onAnswer: (...args) => { posted = args },
+  })
+  const option = () => find(card.result.current, node => node.props?.role === 'radio')
+  const container = () => find(card.result.current, node => node.props?.className?.split(' ').includes('qcard__opt'))
+  const inside = { contains: () => true }
+  try {
+    // A portaled image lightbox bubbles its backdrop click through React.
+    container().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
+    // A link, preview or copy button in the explanation, or the choice itself
+    // (which handles its own click), resolves to a control.
+    container().props.onClick({ detail: 0, currentTarget: inside, target: { closest: () => ({ tagName: 'A' }) } })
+    assert.equal(option().props['aria-checked'], false)
+    option().props.onKeyDown({ key: 'Enter', repeat: true, preventDefault: () => assert.fail('held keys repeat nothing') })
+    assert.equal(option().props['aria-checked'], false)
+    option().props.onKeyDown({ key: ' ', preventDefault: () => {} })
+    assert.equal(option().props['aria-checked'], true)
+    await submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted[0], `- ${question}: ${label}`)
+    assert.deepEqual(posted[1], { [question]: label })
+  } finally { card.unmount() }
+})
+
+test('the label control and explanation text both toggle multi-select without altering Markdown labels', () => {
+  const card = renderHook(QuestionCard, { chatId: 'markdown-multi', questionId: 'markdown-multi-q',
+    questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`', description: 'Plain text' }] }],
+  })
+  const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
+  const containers = () => elements(card.result.current).filter(node => node.props?.className?.split(' ').includes('qcard__opt'))
+  try {
+    options()[0].props.onClick({ detail: 0 })
+    containers()[1].props.onClick({ detail: 0, currentTarget: { contains: () => true }, target: { closest: () => null } })
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [true, true])
+    options()[0].props.onClick({ detail: 0 })
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [false, true])
+    const described = options()[1]
+    assert.equal(find(containers()[1], node => node.props?.id === described.props['aria-describedby']).props.className, 'qcard__opt-desc')
+    assert.equal(options()[0].props['aria-describedby'], undefined)
+  } finally { card.unmount() }
+})
+
+test('an incomplete Submit focuses the first Markdown answer choice', () => {
+  const priorWindow = globalThis.window
+  globalThis.window = { ...priorWindow, matchMedia: () => ({ matches: true }) }
+  let focused = false
+  const card = renderHook(QuestionCard, { chatId: 'markdown-focus', questionId: 'markdown-focus-q',
+    questions: [{ question: '**Choose**', options: [{ label: '**A**' }] }],
+  })
+  const questionNode = {
+    scrollIntoView: () => {},
+    querySelector: selector => {
+      assert.equal(selector, '.qcard__opt-choice[tabindex="0"], textarea')
+      return { focus: () => { focused = true } }
+    },
+  }
+  try {
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => ({ querySelector: () => questionNode }) } })
+    assert.equal(focused, true)
+  } finally { card.unmount(); globalThis.window = priorWindow }
 })

@@ -10,6 +10,7 @@ import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import {
   lazy,
   startTransition,
@@ -65,6 +66,7 @@ import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
+  requireDeliveryReady,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -857,7 +859,7 @@ export default function ChatView({
 
   const showMessageMeta = useCallback((event, key) => {
     if (event.defaultPrevented) return
-    if (event.target.closest?.('button, a, input, textarea, select, summary, [role="button"]')) return
+    if (event.target.closest?.(INTERACTIVE_TARGET)) return
     if (window.getSelection?.()?.toString()) return
     if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
     setVisibleMessageMetaKey(key)
@@ -1618,6 +1620,10 @@ export default function ChatView({
   // payload and hydrate only runtime fields — do not replace the transcript.
   const refreshRuntimeState = useCallback(async ({ shared = false } = {}) => {
     if (provisionalNewChatRef.current) return null
+    // Until activation settles it alone reads this chat, and the result below
+    // would be discarded anyway; a focus or recovery nudge during activation
+    // must not spend a runtime read the activation already makes redundant.
+    if (!activationSettledRef.current) return null
     const gen = fetchGenRef.current
     try {
       const read = () => (
@@ -1627,7 +1633,8 @@ export default function ChatView({
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
       if (chatIdStaleRef.current) return null
       // A running status alone must not attach a stream over a transcript that
-      // never loaded; a resumed reply would then look like the whole chat.
+      // never loaded; a resumed reply would then look like the whole chat. An
+      // activation retry can begin while this read is in flight.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
       // Runtime-only reads cannot retire recovery before Resume appends its acknowledged row.
@@ -2961,6 +2968,10 @@ export default function ChatView({
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
+        // The recovery edge retries a visible failed activation at once. A
+        // failure before delivery is confirmed (the startup window) must make
+        // the next ready verdict such an edge rather than wait for quiet retries.
+        requireDeliveryReady()
         if (retry != null) {
           activationRecoveryRef.current.attempts += 1
           activationRecoveryRef.current.timer = setTimeout(retryActivation, retry)
@@ -6496,7 +6507,9 @@ export default function ChatView({
           projectRef={chatInfo?.project || null}
           leftButtons={
             <BrainUsageButton
-              usageEnabled={!embedded}
+              // A hidden instance paints no gauge (a handoff cover still
+              // does); it reads usage when it is shown again.
+              usageEnabled={!embedded && (!hidden || keepTranscriptPainted)}
               chatId={chatId}
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}

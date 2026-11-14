@@ -1767,12 +1767,38 @@ async def patch_chat(
         ),
       )
 
+    if (target_provider or chat.provider or "claude") == "mobius" and (
+      "model" in agent_settings_patch or "effort" in agent_settings_patch
+    ):
+      selected_model = new_model or _coerce_agent_settings(chat.agent_settings_json).get("model")
+      selected_effort = agent_settings_patch.get(
+        "effort", _coerce_agent_settings(chat.agent_settings_json).get("effort"),
+      )
+      if "model" in agent_settings_patch and "effort" not in agent_settings_patch and (
+        providers.PROVIDERS["mobius"].model_effort_levels(selected_model) == []
+      ):
+        selected_effort = None
+        agent_settings_patch["effort"] = None
+      if not providers.PROVIDERS["mobius"].validate_model_effort(
+        selected_model, selected_effort,
+      ):
+        raise HTTPException(
+          status_code=422, detail="Effort does not belong to the selected Möbius model.",
+        )
+
     if body.clear_agent_settings:
-      chat.agent_settings_json = providers.snapshot_chat_agent_settings(
+      # Clearing picker overrides must not erase independent lifecycle state
+      # attached to an update resolver or an auto-filed Goal chat.
+      existing = _coerce_agent_settings(chat.agent_settings_json)
+      lifecycle = {key: existing[key] for key in (
+        "_app_update_resolver_batch", "archive_on_goal_complete",
+      ) if key in existing}
+      snapshot = providers.snapshot_chat_agent_settings(
         data_dir,
         chat.provider or "claude",
         fallback_model=providers.DEFAULT_MODELS.get(chat.provider or "claude"),
       )
+      chat.agent_settings_json = {**(snapshot or {}), **lifecycle} or None
     elif body.agent_settings_json is not None:
       existing = _coerce_agent_settings(chat.agent_settings_json)
       for k, v in agent_settings_patch.items():

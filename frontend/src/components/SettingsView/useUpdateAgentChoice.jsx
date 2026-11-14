@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import { resolveProviderAvailability } from '../../lib/providerAvailability.js'
 import { orderPickerModels } from '../../lib/modelPickerOrder.js'
+import { catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import { providerInfoFor, providerOrderFor } from '../ChatView/providerRegistry.jsx'
 import ModelSheet from '../ui/ModelSheet.jsx'
 import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
@@ -13,6 +14,7 @@ export function UpdateAgentPicker({ onChoice }) {
   const statusQuery = authQueries.provider.statuses.useQuery()
   const [draft, setDraft] = useState(null)
   const registry = registryQuery.data || {}
+  const catalog = catalogProviders(registry)
   const availability = resolveProviderAvailability(statusQuery)
   const saved = prefsQuery.data?.selected_agent
   const selected = draft || {
@@ -23,9 +25,10 @@ export function UpdateAgentPicker({ onChoice }) {
   const rows = providerOrderFor(registry).flatMap(provider => {
     if (!availability.configuredProviders.has(provider)) return []
     const info = providerInfoFor(provider, statusQuery.data)
-    const models = (registry[provider] || [])
+    const models = (catalog[provider] || [])
       .filter(model => !prefsQuery.data?.hidden_ids?.includes(model.id)
-        || (selected.provider === provider && selected.model === model.id))
+        || (selected.provider === provider
+          && selectedCatalogModel(registry, provider, selected.model) === model.id))
       .map(model => ({ ...model, name: model.label || model.id }))
     return models.map(model => ({ provider, model, info }))
   })
@@ -36,7 +39,8 @@ export function UpdateAgentPicker({ onChoice }) {
     if (last?.key === row.provider) last.models.push(row.model)
     else groups.push({ key: row.provider, label: row.info.label, Logo: row.info.Logo, models: [row.model] })
   }
-  const entry = rows.find(row => row.provider === selected.provider && row.model.id === selected.model)?.model
+  const effectiveModel = selectedCatalogModel(registry, selected.provider, selected.model)
+  const entry = rows.find(row => row.provider === selected.provider && row.model.id === effectiveModel)?.model
   const efforts = modelEfforts(providerInfoFor(selected.provider, statusQuery.data).efforts, entry)
   const failed = registryQuery.isError || prefsQuery.isError || prefsQuery.data?.unavailable || statusQuery.isError
   const loading = registryQuery.isPending || prefsQuery.isPending || prefsQuery.isFetching || statusQuery.isPending
@@ -44,7 +48,7 @@ export function UpdateAgentPicker({ onChoice }) {
     : loading ? 'Loading your agents…'
       : 'Uses your latest chat agent. Completed jobs are kept in Archived.'
   return <ModelSheet open collapsible title="Update agent" groups={groups}
-    provider={selected.provider} model={selected.model}
+    provider={selected.provider} model={effectiveModel}
     configuredProviders={availability.configuredProviders}
     onClose={() => onChoice(null)} notice={notice}
     efforts={efforts} effort={validEffort(efforts, selected.effort)}
@@ -55,7 +59,7 @@ export function UpdateAgentPicker({ onChoice }) {
         provider === selected.provider ? selected.effort : undefined) })
     }}
     confirmLabel="Start update agent" confirmDisabled={!entry || failed || loading}
-    onConfirm={() => onChoice({ provider: selected.provider, model: selected.model,
+    onConfirm={() => onChoice({ provider: selected.provider, model: effectiveModel,
       ...(efforts.length ? { effort: validEffort(efforts, selected.effort) } : {}) })} />
 }
 

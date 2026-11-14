@@ -70,8 +70,9 @@ import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
+import { catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import EffortStepper from '../ui/EffortStepper.jsx'
-import { modelEfforts, validEffort } from '../ui/modelEfforts.js'
+import { modelEfforts, modelSelectionSettings, rememberEffort, validEffort } from '../ui/modelEfforts.js'
 import {
   beginProviderSwitch,
   clearProviderSwitch,
@@ -371,10 +372,7 @@ export default function ChatSettingsPanel({
       allowedEfforts,
       draftEffortByProvider[providerValue] ?? draftEffort,
     )
-    const nextEffortByProvider = {
-      ...draftEffortByProvider,
-      [providerValue]: nextEffort,
-    }
+    const nextEffortByProvider = rememberEffort(draftEffortByProvider, providerValue, nextEffort)
 
     if (!hasAssistantTurns) {
       setDraftModel(value)
@@ -383,11 +381,7 @@ export default function ChatSettingsPanel({
       setDraftEffortByProvider(nextEffortByProvider)
       patchChat({
         provider: providerValue,
-        agent_settings_json: {
-          model: value,
-          effort: nextEffort,
-          effort_by_provider: nextEffortByProvider,
-        },
+        agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
       })
       return true
     }
@@ -452,19 +446,12 @@ export default function ChatSettingsPanel({
     // a stale earlier one (#7 ensemble finding).
     pendingSwitchPreviousRef.current = null
     const nextEffort = validEffort(allowedEfforts, draftEffort)
-    const nextEffortByProvider = {
-      ...draftEffortByProvider,
-      [providerValue]: nextEffort,
-    }
+    const nextEffortByProvider = rememberEffort(draftEffortByProvider, providerValue, nextEffort)
     setDraftModel(value)
     setDraftEffort(nextEffort)
     setDraftEffortByProvider(nextEffortByProvider)
     await patchChat({
-      agent_settings_json: {
-        model: value,
-        effort: nextEffort,
-        effort_by_provider: nextEffortByProvider,
-      },
+      agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
     })
   }, [
     draftProvider,
@@ -536,11 +523,11 @@ export default function ChatSettingsPanel({
   const displayedByProvider = useMemo(() => {
     const out = {}
     for (const pid of providerOrder) {
-      const live = registry?.[pid]
+      const live = catalogProviders(registry)?.[pid]
       const source = Array.isArray(live) ? live : []
-      const selectedHere = selectedProvider === pid
+      const selectedHere = selectedCatalogModel(registry, pid, selectedProvider === pid
         ? selectedModel
-        : (draftProvider === pid ? draftModel : null)
+        : (draftProvider === pid ? draftModel : null))
       out[pid] = resolveDisplayedModels(source, hiddenIds, selectedHere)
     }
     return out
@@ -667,7 +654,7 @@ export default function ChatSettingsPanel({
         )
         const rowEfforts = modelEfforts(info.efforts, m)
         const isPendingRow = pendingSwitch?.model === m.id && pendingSwitch?.provider === pid
-        const isSelected = selectedModel === m.id && selectedProvider === pid
+        const isSelected = selectedCatalogModel(registry, pid, selectedModel) === m.id && selectedProvider === pid
         return (
             <div key={`${pid}-${m.id}`}>
               <button

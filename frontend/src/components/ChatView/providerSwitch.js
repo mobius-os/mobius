@@ -1,3 +1,5 @@
+import { modelSelectionSettings } from '../ui/modelEfforts.js'
+
 export function createProviderSwitchId() {
   return globalThis.crypto?.randomUUID?.()
     || `switch-${Date.now()}-${Math.random().toString(36).slice(2)}`
@@ -13,11 +15,7 @@ export function providerSwitchPayload({
   return {
     provider,
     switch_id: switchId,
-    agent_settings_json: {
-      model,
-      effort,
-      effort_by_provider: effortByProvider,
-    },
+    agent_settings_json: modelSelectionSettings(model, effort, effortByProvider),
   }
 }
 

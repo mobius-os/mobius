@@ -32,9 +32,12 @@ test('confirming resolves the exact choice and permits another independent job',
 function mockCatalog(t, prefs = { hidden_ids: ['hidden'], recent_ids: ['claude-test'] }) {
   const query = data => ({ data, isPending: false, isError: false })
   t.mock.method(modelQueries.registry, 'useQuery', () => query({
-    codex: [{ id: 'codex-test', label: 'Codex Test', effort_levels: ['low', 'high'] }, { id: 'hidden' }],
-    claude: [{ id: 'claude-test', label: 'Claude Test', effort_levels: ['medium'] }],
-    mobius: [{ id: 'offline-model' }],
+    providers: {
+      codex: [{ id: 'codex-test', label: 'Codex Test', effort_levels: ['low', 'high'] }, { id: 'hidden' }],
+      claude: [{ id: 'claude-test', label: 'Claude Test', effort_levels: ['medium'] }],
+      mobius: [{ id: 'offline-model' }],
+    },
+    replacements: { codex: { retired: 'codex-test' } },
   }))
   t.mock.method(modelQueries.prefs, 'useQuery', () => query({
     selected_agent: { provider: 'codex', model: 'codex-test', effort: 'high' }, ...prefs,
@@ -67,6 +70,21 @@ test('an unavailable preference read cannot silently launch a different choice',
   const hook = renderHook(() => UpdateAgentPicker({ onChoice: () => {} }))
   assert.equal(hook.result.current.props.confirmDisabled, true)
   assert.match(hook.result.current.props.notice, /Could not load/)
+  hook.unmount()
+})
+
+test('a retired saved selection confirms its live replacement', t => {
+  mockCatalog(t, { hidden_ids: [], recent_ids: [] })
+  t.mock.method(modelQueries.prefs, 'useQuery', () => ({
+    data: { hidden_ids: [], recent_ids: [], selected_agent: {
+      provider: 'codex', model: 'retired', effort: 'high',
+    } }, isPending: false, isError: false,
+  }))
+  const choices = []
+  const hook = renderHook(() => UpdateAgentPicker({ onChoice: choice => choices.push(choice) }))
+  assert.equal(hook.result.current.props.model, 'codex-test')
+  hook.result.current.props.onConfirm()
+  assert.deepEqual(choices, [{ provider: 'codex', model: 'codex-test', effort: 'high' }])
   hook.unmount()
 })
 

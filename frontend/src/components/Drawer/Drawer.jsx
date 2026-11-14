@@ -30,7 +30,6 @@ import {
   projectPinnedEntries,
   reconcilePinnedOrder,
 } from './pinnedReorder.js'
-import { prefetchChatMessages } from './prefetchChatMessages.js'
 import {
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -511,9 +510,6 @@ export default function Drawer({
       }
       else current.onApp(id)
     },
-    prefetch(kind, id) {
-      if (kind === 'chat') rowActionInputsRef.current.prefetchChat(id)
-    },
     // The Recents project chip opens a chat/artifact's owning project. Reuses
     // the same open-project path as the drawer's project rows.
     openProject(project) {
@@ -637,10 +633,6 @@ export default function Drawer({
   }
   function refreshApps() {
     return appQueries.list.invalidate(queryClient)
-  }
-
-  function prefetchChat(id) {
-    void prefetchChatMessages(queryClient, id)
   }
 
   async function renameApp(id, name) {
@@ -1103,7 +1095,6 @@ export default function Drawer({
     renameProject,
     pins,
     reorderPinned,
-    prefetchChat,
   }
 
   return (
@@ -1916,7 +1907,6 @@ const DrawerRow = memo(function DrawerRow({
     // pointerdown. If no such click arrived, this is a genuinely new gesture
     // and must retire the old one-shot guard rather than inherit it.
     suppressRowClickRef.current = false
-    actions.prefetch(kind, id)
     recordItemMenuPointer(event)
     beginSecondaryMenuPress(event)
   }
@@ -1934,8 +1924,6 @@ const DrawerRow = memo(function DrawerRow({
         data-drawer-key={`${kind}:${id}`}
         data-drag-key={`${kind}:${id}`}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
-        onPointerEnter={() => actions.prefetch(kind, id)}
-        onFocus={() => actions.prefetch(kind, id)}
         onPointerDown={onRowPointerDown}
         onClick={() => {
           if (suppressRowClickRef.current) {

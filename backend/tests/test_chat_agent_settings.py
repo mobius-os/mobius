@@ -298,6 +298,25 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
   assert body["effective"]["model"] == "fallback-model"
 
 
+def test_clear_picker_settings_keeps_resolver_lifecycle(client, auth, chat, db):
+  batch = {"12": {"upstream_commit": "abc", "completed": None}}
+  chat.agent_settings_json = {
+    "model": "old-model", "_app_update_resolver_batch": batch,
+    "archive_on_goal_complete": True,
+  }
+  db.commit()
+  _write_global_settings({"model": "fallback-model"})
+  result = client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"clear_agent_settings": True},
+  )
+  assert result.status_code == 200, result.text
+  settings = result.json()["agent_settings_json"]
+  assert settings["model"] == "fallback-model"
+  assert settings["_app_update_resolver_batch"] == batch
+  assert settings["archive_on_goal_complete"] is True
+
+
 def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   client, auth, chat, db,
 ):

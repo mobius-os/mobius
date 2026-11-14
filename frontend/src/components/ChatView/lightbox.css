@@ -35,7 +35,9 @@
   border-radius: 8px;
   touch-action: none;
   user-select: none;
-  will-change: transform;
+  /* No will-change or 3D transform here: a promoted layer keeps the raster
+   * it got at the fitted size, so zoom would magnify that bitmap and blur
+   * small text instead of re-drawing from the original image. */
 }
 .lightbox-image.is-pending {
   opacity: 0;
