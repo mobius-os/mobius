@@ -94,6 +94,10 @@ def _git_env(repo: Path) -> dict:
     env.pop(var, None)
   env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
   env["GIT_TERMINAL_PROMPT"] = "0"
+  # This environment carries the GitHub token. An askpass program, inherited
+  # or named by the checkout's own core.askPass, must never run with it.
+  env["GIT_ASKPASS"] = "/bin/false"
+  env["SSH_ASKPASS"] = "/bin/false"
   env["GH_PROMPT_DISABLED"] = "1"
   token = github_auth.get_token()
   if token:

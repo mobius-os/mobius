@@ -55,11 +55,10 @@ def _repair_git_env(repo: Path, *, network: bool = False) -> dict[str, str]:
     if key.startswith("GIT_CONFIG_") or key in {
         "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
         "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
-        "GIT_ASKPASS", "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE"}:
+        "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE"}:
       env.pop(key, None)
   env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
-             GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0",
-             GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
+             GIT_OPTIONAL_LOCKS="0",
              GIT_CONFIG_COUNT=str(len(_INERT_CONFIG)))
   for index, (name, value) in enumerate(_INERT_CONFIG):
     env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
