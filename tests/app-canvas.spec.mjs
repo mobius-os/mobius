@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * AppCanvas iframe-mount contract.
  *
@@ -769,7 +770,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     await frame.locator('#ask').click()
 
     const composer = page.getByRole('textbox', { name: 'Message Möbius…' })
-    await expect(composer).toHaveValue('Act on my answers', { timeout: 8000 })
+    await expectComposerValue(composer, 'Act on my answers', { timeout: 8000 })
     await page.waitForTimeout(800)
     expect(sends).toBe(0)
 
@@ -779,7 +780,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
     const reloaded = await waitForContentFrame(page, `iframe[data-app-id="${appId}"]`)
     await reloaded.evaluate(() => setTimeout(() => window.parent.postMessage(
       { type: 'moebius:new-chat', draft: 'Delayed request', autoSend: true }, '*'), 300))
-    await expect(composer).toHaveValue('Delayed request', { timeout: 8000 })
+    await expectComposerValue(composer, 'Delayed request', { timeout: 8000 })
     await page.waitForTimeout(800)
     expect(sends).toBe(0)
   })
@@ -966,8 +967,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
         window.location.origin,
       )
     }, appId)
-    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toHaveValue(/crashed with this error/, { timeout: 8000 })
+    await expectComposerValue(page.getByRole('textbox', { name: 'Message Möbius…' }), /crashed with this error/, { timeout: 8000 })
     expect(chatsCreated).toBe(1)
   })
 
@@ -1058,8 +1058,7 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       type: 'moebius:app-error', appId: String(id), chatId: staleChatId,
       error: 'stale-frame crash',
     }, window.location.origin), [appId, formerChatId])
-    await expect(page.getByRole('textbox', { name: 'Message Möbius…' }))
-      .toHaveValue(/ClearedToy.*crashed with this error/, { timeout: 8000 })
+    await expectComposerValue(page.getByRole('textbox', { name: 'Message Möbius…' }), /ClearedToy.*crashed with this error/, { timeout: 8000 })
     expect(chatsCreated).toBe(1)
     expect(framesFetched).toBe(initialFramesFetched)
   })
@@ -1565,7 +1564,7 @@ test.describe('Shell surfaces: on-demand code', () => {
     await notice.getByRole('button', { name: 'Close' }).click()
     await expect(notice).toHaveCount(0)
     await composer.fill('still here')
-    await expect(composer).toHaveValue('still here')
+    await expectComposerValue(composer, 'still here')
 
     offline = false
     await openUsage()

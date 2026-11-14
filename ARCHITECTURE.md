@@ -677,8 +677,9 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 **Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Social)**
 install from their canonical catalog manifests through
 `backend/app/bootstrap.py` on first boot. New deployments no longer install
-Möbius · You: the Möbius account and models live in Settings and the platform's
-own catalogue, and an existing copy is an ordinary app. These are recovery or management
+Möbius · You: the Möbius account and models live in Settings; the built-in
+provider discovers its catalogue through the service, and an existing copy is
+an ordinary app. These are recovery or management
 surfaces; domain apps are installed explicitly rather than named in platform
 boot policy. Each becomes an ordinary owner-editable app under
 `/data/apps/<slug>` and follows the same update and divergence rules as any
