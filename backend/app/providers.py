@@ -281,7 +281,7 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when `model` is a KNOWN model for some OTHER provider.
+  """True when `model` is a discovered or offline model for another provider.
   Use this to reject cross-provider mismatches without blocking
   unknown / future model names — the SDK is the authority on what
   it accepts; we only intercept the specific failure mode of
@@ -340,12 +340,19 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
 
 
 def known_model_ids(provider_id: str) -> list[str]:
-  """Built-in fallback IDs, the Möbius catalogue, or an app's accepted IDs."""
+  """Accepted identities, including newly discovered native-provider models.
+
+  Catalog expiry and availability govern discovery, not ownership. Reuse the
+  last served catalog without I/O and keep offline identities when a live
+  catalog is partial. App providers retain their declaration as authority.
+  """
   provider = PROVIDERS.get(provider_id)
   if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return ([model["id"] for model in provider.declaration["models"]]
             + list(provider.declaration.get("replacements", {})))
-  return KNOWN_MODELS.get(provider_id, [])
+  cached = _model_registry_cache.get(provider_id)
+  discovered = [entry["id"] for entry in cached[1]] if cached else []
+  return list(dict.fromkeys([*KNOWN_MODELS.get(provider_id, []), *discovered]))
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -525,6 +532,27 @@ def snapshot_chat_agent_settings(
     if value is not None:
       snapshot[key] = value
   return snapshot
+
+
+def snapshot_owner_chat_choice(
+  data_dir: str,
+  configured_provider: str | None = None,
+  *,
+  allow_unselected: bool = False,
+) -> tuple[str, dict | None]:
+  """Freeze provider and model from one picker revision for a new owner chat.
+
+  Picker writes use this same lock. Without the shared read boundary, a pick
+  between provider resolution and model snapshot can split a valid pair,
+  especially for a future model absent from the offline catalog.
+  """
+  with _AGENT_SETTINGS_LOCK:
+    provider = owner_default_provider(data_dir, configured_provider)
+    selection = snapshot_chat_agent_settings(
+      data_dir, provider,
+      fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
+    )
+    return provider, selection
 
 
 def _background_default_choice(
@@ -1509,7 +1537,8 @@ def _apply_app_model_declarations(
     return
   next_ids: set[str] = set()
   claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
-  claimed_models.update(known_model_ids("mobius"))
+  for provider_id in ("mobius", "claude", "codex"):
+    claimed_models.update(known_model_ids(provider_id))
   for app_id, declaration in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is

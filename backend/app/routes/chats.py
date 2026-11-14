@@ -1431,23 +1431,12 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  # Provider follows the last-selected model (the single source of truth) so a
-  # new chat always starts on the family of the model it will actually use —
-  # never a provider whose remembered model belongs to the other family.
-  provider = providers.owner_default_provider(
-    data_dir, owner.provider if owner else None,
-  )
-
   with _OWNER_CHAT_CREATE_LOCK:
-    agent_settings = providers.snapshot_chat_agent_settings(
-      data_dir, provider,
+    provider, agent_settings = providers.snapshot_owner_chat_choice(
+      data_dir,
+      owner.provider if owner else None,
+      allow_unselected=db.query(models.Chat.id).first() is None,
     )
-    if agent_settings is None and db.query(models.Chat.id).first() is not None:
-      agent_settings = providers.snapshot_chat_agent_settings(
-        data_dir,
-        provider,
-        fallback_model=providers.DEFAULT_MODELS.get(provider),
-      )
 
     chat = chat_writer.create_chat(
       id=chat_id,
