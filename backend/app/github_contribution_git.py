@@ -88,21 +88,15 @@ def _validate_branch(value: object) -> str:
   return branch
 
 
-# Inherited variables that would redirect Git to other objects, refs,
-# programs or identities than the checkout's own.
-_INHERITED_GIT_ENV = frozenset({
-  "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE",
-  "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR",
-  "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-  "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
-  "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
-  "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE",
-  # A plain GIT_CONFIG replaces every config file Git reads.
-  "GIT_CONFIG",
-})
-_GITHUB_AUTH_ENV = frozenset({
-  "GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN",
-  "GH_CONFIG_DIR",
+# The only inherited variables any contribution command (or the pre-push
+# gate, which runs checkout code) sees: where programs live, locale, time,
+# temp space, and what https needs to reach GitHub. Everything else, server
+# secrets and Git's own GIT_* settings and traces among it, is left out.
+_INHERITED_ENV = frozenset({
+  "PATH", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+  "SSL_CERT_FILE", "SSL_CERT_DIR",
+  "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY",
+  "https_proxy", "http_proxy", "no_proxy", "all_proxy",
 })
 # Command-scope config, exactly like ``-c``: it outranks the checkout's own
 # config and reaches nested repositories, so the programs local commands
@@ -119,11 +113,6 @@ _NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
 # Contribution remotes are GitHub over https; other transports can run
 # programs, so they are refused.
 _ALLOWED_PROTOCOLS = "https"
-# Network Git never runs in a contribution checkout: it runs in a scratch
-# repository the server creates, whose config the server alone writes.
-_SCRATCH_PREFIX = "mobius-git-scratch-"
-
-
 def _git_env(repo: Path, *, network: bool = False) -> dict:
   """The one environment for every contribution Git and gh command.
 
@@ -139,8 +128,7 @@ def _git_env(repo: Path, *, network: bool = False) -> dict:
   """
   env = {
     key: value for key, value in os.environ.items()
-    if key not in _INHERITED_GIT_ENV and key not in _GITHUB_AUTH_ENV
-    and not key.startswith("GIT_CONFIG_")
+    if key in _INHERITED_ENV or key.startswith("LC_")
   }
   config = _INERT_CONFIG + ((_GITHUB_CREDENTIAL_HELPER,) if network else ())
   env.update(
@@ -207,8 +195,9 @@ def _git(
   check: bool = True,
 ) -> subprocess.CompletedProcess:
   timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
-  if args[:1] in _NETWORK_GIT and not _is_server_scratch(repo):
-    return _network_git(repo, args, check=check, timeout=timeout)
+  if args[:1] in _NETWORK_GIT:
+    if not isinstance(repo, ServerRepo):
+      return _network_git(repo, args, check=check, timeout=timeout)
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
@@ -218,16 +207,20 @@ def _git(
   )
 
 
-def _is_server_scratch(path: Path) -> bool:
-  path = Path(path)
-  return (path.parent == Path(tempfile.gettempdir())
-          and path.name.startswith(_SCRATCH_PREFIX))
+class ServerRepo(type(Path())):
+  """A repository the server created for one operation.
+
+  ``_git`` runs network commands in it directly; anything else is a
+  contribution checkout and gets a scratch repository. The server creates it
+  privately (mode 0700), but code running as the same user could still
+  reach it.
+  """
 
 
 @contextmanager
-def _server_scratch(*, bare: bool = True) -> Iterator[Path]:
-  """A fresh repository only the server writes, removed afterwards."""
-  root = Path(tempfile.mkdtemp(prefix=_SCRATCH_PREFIX))
+def _server_scratch(*, bare: bool = True) -> Iterator[ServerRepo]:
+  """A fresh repository the server creates, removed afterwards."""
+  root = ServerRepo(tempfile.mkdtemp(prefix="mobius-git-"))
   try:
     _run_cmd(["git", "init", "-q", *(("--bare",) if bare else ()), str(root)],
              cwd=root, env=_git_env(root))
@@ -249,15 +242,20 @@ def _network_git(
   It runs in a scratch repository the server creates, reading the checkout's
   objects through an alternates file the server writes, so the process that
   holds the token never reads the checkout's config, hooks or attributes.
-  A fetch starts from the checkout's refs and hands what it fetched back to
-  the checkout with a local, credential-free fetch.
+  A fetch must name each destination ref: it starts from the checkout's
+  refs and hands what it fetched back with a local, credential-free fetch.
+  A push must name its URL.
   """
   objects = _git(
     checkout, "rev-parse", "--path-format=absolute", "--git-path", "objects",
   ).stdout.strip()
-  args = list(args)
-  if args[0] == "push":
-    args = _with_push_url(checkout, args)
+  positional = [arg for arg in args[1:] if not arg.startswith("-")]
+  if args[0] == "fetch" and (len(positional) < 2 or any(":" not in r for r in positional[1:])):
+    raise ContributionSubmitError("A contribution fetch must name each destination ref.")
+  if args[0] == "push" and not (positional and ("/" in positional[0] or ":" in positional[0])):
+    # A remote name would be read from the checkout's config, which the
+    # checkout can rewrite; callers pass the URL they verified.
+    raise ContributionSubmitError("A contribution push must name its URL.")
   with _server_scratch() as scratch:
     (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
     (scratch / "objects" / "info" / "alternates").write_text(objects + "\n")
@@ -287,22 +285,6 @@ def _network_git(
     detail = (proc.stderr or proc.stdout or "command failed").strip()
     raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
   return proc
-
-
-def _with_push_url(checkout: Path, args: list[str]) -> list[str]:
-  """Replace a push's remote name with its configured URL.
-
-  The scratch repository has no remotes. Only the plain URL is read, so the
-  checkout's pushurl and URL rewrites never apply.
-  """
-  index = next(i for i, arg in enumerate(args[1:], 1) if not arg.startswith("-"))
-  remote = args[index]
-  if "/" in remote or ":" in remote:
-    return args
-  url = _git(checkout, "config", "--get", f"remote.{remote}.url", check=False).stdout.strip()
-  if not url:
-    raise RefusedBeforeSending(f"The push remote {remote} has no URL. Nothing was sent.")
-  return [*args[:index], url, *args[index + 1:]]
 
 
 class RefusedBeforeSending(ContributionSubmitError):
@@ -449,17 +431,19 @@ def _pre_push_gate(
     raise PushGateRefused(transcript)
 
 
-def _gh(repo: Path, *args: str, check: bool = True,
+def _gh(cwd: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
-  """Run gh with the token, never inside a contribution checkout.
+  """Run gh with the token, never in a contribution checkout.
 
-  Every call names its repository (-R or an API path). gh runs in an empty
-  directory, or in a server scratch repository when one is passed, so the
-  Git it starts never reads an agent-writable checkout.
+  Every call names its repository (-R or an API path), so gh runs in an
+  empty directory. Only a ``ServerRepo`` is used as gh's directory: the
+  in-repo fork command needs one whose origin is upstream. Any other
+  ``cwd`` is ignored; it keeps the ``gh(cwd, *args)`` shape the review
+  modules share.
   """
-  if _is_server_scratch(repo):
-    return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text,
-                    env=_git_env(repo, network=True))
+  if isinstance(cwd, ServerRepo):
+    return _run_cmd(["gh", *args], cwd=cwd, check=check, input_text=input_text,
+                    env=_git_env(cwd, network=True))
   with tempfile.TemporaryDirectory(prefix="mobius-gh-") as empty:
     return _run_cmd(["gh", *args], cwd=Path(empty), check=check, input_text=input_text,
                     env=_git_env(Path(empty), network=True))

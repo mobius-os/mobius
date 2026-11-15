@@ -6754,7 +6754,7 @@ def test_push_topic_branch_does_not_retry_deterministic_rejections(
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
+  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40, fork_slug="octocat/app-demo")
 
   assert "Protected branch" in error
   assert sum(call[:1] == ("push",) for call in calls) == 1
@@ -6778,7 +6778,7 @@ def test_rate_limited_transport_is_surfaced_instead_of_retried(
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
+  error = _push_topic_branch(tmp_path, "fix/demo", "a" * 40, fork_slug="octocat/app-demo")
 
   assert "429" in error
   assert sum(call[:1] == ("push",) for call in calls) == 1
@@ -6796,11 +6796,11 @@ def test_push_topic_branch_uses_the_exact_authoritative_remote_lease(
   old = "b" * 40
 
   assert github_contributions._push_topic_branch(
-    tmp_path, "fix/demo", "a" * 40, old,
+    tmp_path, "fix/demo", "a" * 40, old, fork_slug="octocat/app-demo",
   ) is None
   assert [call for call in calls if call[:1] == ("push",)] == [(
     "push", f"--force-with-lease=refs/heads/fix/demo:{old}",
-    "fork", f"{'a' * 40}:refs/heads/fix/demo",
+    "https://github.com/octocat/app-demo.git", f"{'a' * 40}:refs/heads/fix/demo",
   )]
 
 
@@ -6861,7 +6861,7 @@ def test_push_topic_branch_surfaces_transient_result_for_authoritative_recovery(
   )
   monkeypatch.setattr("app.github_contributions.time.sleep", sleeps.append)
 
-  assert "HTTP 503" in _push_topic_branch(tmp_path, "fix/demo", "a" * 40)
+  assert "HTTP 503" in _push_topic_branch(tmp_path, "fix/demo", "a" * 40, fork_slug="octocat/app-demo")
   assert sleeps == []
 
 
@@ -7967,7 +7967,7 @@ def test_submit_contribution_keeps_accepted_ready_pr_on_label_transport_failure(
   assert create_call[-2:] == ("--base", "main")
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", f"{head}:refs/heads/fix/demo-polish",
+    "https://github.com/octocat/app-demo-1.git", f"{head}:refs/heads/fix/demo-polish",
   ) in git_calls
   assert sum(call[:1] == ("fetch",) for call in git_calls) == 1
   # Exactly one pre-publication truth check (`--state all`), and no
@@ -8579,7 +8579,7 @@ def test_submit_contribution_normalizes_fallback_author_before_push(
   assert body["record"]["plan"]["attribution_normalized_from"] == old_head
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", f"{new_head}:refs/heads/fix/demo-polish",
+    "https://github.com/octocat/app-demo.git", f"{new_head}:refs/heads/fix/demo-polish",
   ) in git_calls
   assert not github_routes.contribution_runtime.personal_attempt_path(
     app_id, record_id,
@@ -8915,7 +8915,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
   assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   assert (
     "push", "--force-with-lease=refs/heads/fix/demo-polish:",
-    "fork", f"{head}:refs/heads/fix/demo-polish",
+    "https://github.com/octocat/app-demo-1.git", f"{head}:refs/heads/fix/demo-polish",
   ) in git_calls
 
 
@@ -9970,7 +9970,7 @@ def test_existing_pr_update_uses_verified_fork_even_with_upstream_permission(
   pushes = []
   monkeypatch.setattr(
     "app.github_contributions._push_topic_branch",
-    lambda _repo, pushed_branch, source, _expected_remote_sha: (
+    lambda _repo, pushed_branch, source, _expected_remote_sha, **_k: (
       pushes.append((pushed_branch, source)) or None
     ),
   )
@@ -10056,7 +10056,7 @@ def test_push_pending_receipt_recovers_accepted_push_after_crash(
       publication_stage="draft",
     )
 
-  def push(_repo, pushed_branch, source, expected_remote_sha):
+  def push(_repo, pushed_branch, source, expected_remote_sha, **_k):
     assert pushed_branch == branch
     assert source == head
     assert expected_remote_sha is None
@@ -10168,7 +10168,7 @@ def test_push_pending_no_effect_replays_once_behind_its_exact_remote_lease(
       die["now"] = False
       raise RuntimeError("hard death before git push")
 
-  def pushed(*args):
+  def pushed(*args, **_kwargs):
     pushes.append(args)
     return None
 
@@ -10371,7 +10371,7 @@ def test_definite_pr_create_rejection_keeps_branch_retryable(
     lambda *_a, **_k: "octocat/app-demo",
   )
 
-  def push(_repo, pushed_branch, source, _expected_remote_sha):
+  def push(_repo, pushed_branch, source, _expected_remote_sha, **_k):
     pushes.append((pushed_branch, source))
     remote["published"] = True
     return None
@@ -10891,7 +10891,7 @@ def test_existing_pr_update_uses_its_verified_fork_destination(
   )
   monkeypatch.setattr(
     "app.github_contributions._push_topic_branch",
-    lambda _repo, pushed_branch, source, _expected_remote_sha: (
+    lambda _repo, pushed_branch, source, _expected_remote_sha, **_k: (
       pushes.append((pushed_branch, source)) or None
     ),
   )

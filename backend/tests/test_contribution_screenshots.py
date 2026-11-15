@@ -754,7 +754,7 @@ def test_a_fork_send_resolves_the_fork_once(submit, monkeypatch):
   monkeypatch.setattr(git_ops + "_normalize_head_attribution", lambda *_a, **_k: {})
   monkeypatch.setattr(
     github_contributions, "_push_topic_branch",
-    lambda *_a: submit["events"].append(("push", "fork")),
+    lambda *_a, **_k: submit["events"].append(("push", "fork")),
   )
   submit["send"]("octo-org/project")
   assert submit["events"].count("fork") == 1

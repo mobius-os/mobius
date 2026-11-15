@@ -31,7 +31,8 @@ from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.github_contribution_contract import COAUTHOR_TRAILER, coauthor_trailer_required
 from app.github_contribution_git import (
-  _NETWORK_GIT, _git_env, _run_cmd, _scratch_home, _validate_branch, _validate_repo_slug,
+  _NETWORK_GIT, _SUBMIT_TIMEOUT, _git_env, _network_git, _run_cmd, _scratch_home,
+  _validate_branch, _validate_repo_slug,
 )
 
 
@@ -41,9 +42,15 @@ def _repair_git_env(repo: Path, *, network: bool = False) -> dict[str, str]:
 
 
 def _git(repo: Path, *args: str, check: bool = True):
-  """Run server Git without inherited config, object redirects or prompts."""
-  env = _repair_git_env(repo, network=args[:1] in _NETWORK_GIT)
-  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check, env=env)
+  """Run server Git without inherited config, object redirects or prompts.
+
+  Network commands, which carry the token, run in a server scratch
+  repository like every contribution's, never in the agent-writable checkout.
+  """
+  if args[:1] in _NETWORK_GIT:
+    return _network_git(repo, args, check=check, timeout=_SUBMIT_TIMEOUT)
+  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check,
+                  env=_repair_git_env(repo))
 
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
@@ -283,8 +290,9 @@ def prepare_checkout(gh, cwd: Path, row, target: dict, allowed_files: list[str])
   try:
     _git(checkout, "init", "-q")
     _git(checkout, "fetch", "--no-tags", "--no-recurse-submodules",
-         f"https://github.com/{slug}.git", f"refs/heads/{branch}")
-    fetched = _git(checkout, "rev-parse", "FETCH_HEAD^{commit}").stdout.strip()
+         f"https://github.com/{slug}.git", f"+refs/heads/{branch}:{_PR_HEAD_REF}")
+    fetched = _git(checkout, "rev-parse", f"{_PR_HEAD_REF}^{{commit}}").stdout.strip()
+    _git(checkout, "update-ref", "-d", _PR_HEAD_REF)
     if fetched != initial:
       _fail("The PR head moved during checkout preparation.")
     _git(checkout, "checkout", "-q", "-b", "mobius-repair", initial)
@@ -300,6 +308,7 @@ def prepare_checkout(gh, cwd: Path, row, target: dict, allowed_files: list[str])
 
 
 TARGET_BASE_REF = "refs/mobius/target-base"
+_PR_HEAD_REF = "refs/mobius/pr-head"
 
 
 def fetch_target_base(gh, cwd: Path, checkout: Path, target: dict) -> str:

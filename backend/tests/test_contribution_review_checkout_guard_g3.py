@@ -241,21 +241,40 @@ def test_a_staged_submodule_cannot_start_its_fsmonitor_or_pass_the_guard(owned, 
   assert not marker.exists()
 
 
-def test_github_credentials_reach_only_network_git(tmp_path, monkeypatch):
+URL = "https://github.com/owner/fork.git"
+NETWORK = {"fetch": ("fetch", URL, "+refs/heads/main:refs/x"),
+           "push": ("push", URL, f"{'a' * 40}:refs/heads/x")}
+
+
+def capture_git(monkeypatch):
+  """Record each Git command's directory and environment, running none."""
+  from app import github_contribution_git as git_ops
   observed = {}
-  def run(argv, *, env, **_kwargs):
-    observed[argv[argv.index("-C") + 2]] = env
-    return type("Result", (), {"returncode": 0, "stdout": ""})()
+  def run(argv, *, cwd, env, **_kwargs):
+    if argv[0] == "git" and argv[3] in ("status", "diff-tree", "fetch", "push"):
+      observed[argv[3]] = (argv[2], env)
+    return type("Result", (), {"returncode": 0, "stdout": "", "stderr": ""})()
   monkeypatch.setattr(repairs, "_run_cmd", run)
+  monkeypatch.setattr(git_ops, "_run_cmd", run)
+  return observed
+
+
+def test_github_credentials_reach_only_network_git_outside_the_checkout(tmp_path, monkeypatch):
   token_bearing_git(tmp_path, monkeypatch)
-  for command in ("status", "diff-tree", "fetch", "push"):
+  observed = capture_git(monkeypatch)
+  for command in ("status", "diff-tree"):
     repairs._git(tmp_path, command)
+  for args in NETWORK.values():
+    repairs._git(tmp_path, *args)
   for local in ("status", "diff-tree"):
-    assert "GH_TOKEN" not in observed[local] and "GH_CONFIG_DIR" not in observed[local]
-    assert observed[local]["GIT_CONFIG_KEY_0"] == "core.fsmonitor"
-  for network in ("fetch", "push"):
-    assert observed[network]["GH_TOKEN"] == "probe-token"
-    assert observed[network]["GH_CONFIG_DIR"] == str(tmp_path / "gh-auth")
+    _where, env = observed[local]
+    assert "GH_TOKEN" not in env and "GH_CONFIG_DIR" not in env
+    assert env["GIT_CONFIG_KEY_0"] == "core.fsmonitor"
+  for network in NETWORK:
+    where, env = observed[network]
+    assert where != str(tmp_path)
+    assert env["GH_TOKEN"] == "probe-token"
+    assert env["GH_CONFIG_DIR"] == str(tmp_path / "gh-auth")
   assert "GH_TOKEN" not in repairs._repair_git_env(tmp_path)
 
 
@@ -279,7 +298,8 @@ def test_push_never_runs_a_hook_planted_after_the_checkout_proof(owned, monkeypa
   hook = checkout / ".git" / "hooks" / "pre-push"
   hook.write_text(f"#!/bin/sh\nenv > {marker}\n")
   hook.chmod(0o755)
-  result = repairs._git(checkout, "push", "--porcelain", str(remote), "HEAD:refs/heads/topic", check=False)
+  head = git(checkout, "rev-parse", "HEAD")
+  result = repairs._git(checkout, "push", "--porcelain", str(remote), f"{head}:refs/heads/topic", check=False)
   assert result.returncode == 0
   assert not marker.exists()
 
@@ -289,18 +309,42 @@ def test_network_git_never_consults_a_checkout_credential_helper(owned, monkeypa
   token_bearing_git(tmp_path, monkeypatch)
   marker = tmp_path / "local-helper-ran"
   git(checkout, "config", "--local", "credential.helper", f"!f() {{ env > {marker}; }}; f")
-  observed = {}
-  def capture(argv, *, env, **_kwargs):
-    observed.update(argv=argv, env=env)
-    return type("Result", (), {"returncode": 0, "stdout": ""})()
-  monkeypatch.setattr(repairs, "_run_cmd", capture)
-  for command in ("fetch", "push"):
-    repairs._git(checkout, command)
-    # Ask Git which helpers it consults under exactly this argv and env.
-    prefix = observed["argv"][:observed["argv"].index("-C") + 2]
-    subprocess.run([*prefix, "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
-                   env=observed["env"], text=True, capture_output=True, timeout=30)
-    assert not marker.exists(), command
-  helpers = subprocess.run([*prefix, "config", "--get-all", "credential.helper"],
-                           env=observed["env"], text=True, capture_output=True).stdout
-  assert helpers.splitlines()[-2:] == ["", "!gh auth git-credential"]
+  observed = capture_git(monkeypatch)
+  for args in NETWORK.values():
+    repairs._git(checkout, *args)
+  for command, (where, env) in observed.items():
+    # Not the checkout: its config, helper included, is never read.
+    assert where != str(checkout), command
+    probe = tmp_path / f"probe-{command}.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(probe)], check=True)
+    helpers = subprocess.run(["git", "-C", str(probe), "config", "--get-all", "credential.helper"],
+                             env=env, text=True, capture_output=True).stdout
+    assert helpers.splitlines()[-2:] == ["", "!gh auth git-credential"]
+  assert not marker.exists()
+
+
+
+def test_a_repair_fetch_never_runs_a_planted_alternate_refs_command_with_the_token(
+  owned, monkeypatch,
+):
+  """A setting planted after the checkout proof is never read with the token."""
+  tmp_path, checkout = owned
+  token_bearing_git(tmp_path, monkeypatch)
+  git(checkout, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "--allow-empty", "-m", "c")
+  source = tmp_path / "source.git"
+  subprocess.run(["git", "clone", "-q", "--bare", str(checkout), str(source)], check=True)
+  other = tmp_path / "other.git"
+  subprocess.run(["git", "init", "-q", "--bare", str(other)], check=True)
+  (checkout / ".git" / "objects" / "info" / "alternates").write_text(f"{other}/objects\n")
+  marker = tmp_path / "alternate-refs-ran"
+  script = tmp_path / "alternate-refs"
+  script.write_text(f"#!/bin/sh\nenv >> {marker}\n")
+  script.chmod(0o755)
+  git(checkout, "config", "--local", "core.alternateRefsCommand", str(script))
+  git(checkout, "fetch", "-q", str(source))
+  assert marker.exists()  # plain Git does run it
+  marker.unlink()
+
+  repairs._git(checkout, "fetch", "--no-tags", str(source), "+HEAD:refs/x", check=False)
+
+  assert "probe-token" not in (marker.read_text() if marker.exists() else "")

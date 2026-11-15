@@ -482,7 +482,8 @@ def test_send_opens_the_exact_reviewed_pr_over_an_upstream_overlap(client, owner
   assert stored(app_id, "rec-overlap")["last_submit_upstream_conflict"] == signal
   # The reviewed diff was proven to be what GitHub shows, and published as-is.
   assert ("merge-base", "--all", _UPSTREAM_SHA, "fix/demo-polish") in git_calls
-  assert ("push", "--force-with-lease=refs/heads/fix/demo-polish:", "fork",
+  assert ("push", "--force-with-lease=refs/heads/fix/demo-polish:",
+          "https://github.com/octocat/app-demo-1.git",
           f"{HEAD}:refs/heads/fix/demo-polish") in git_calls
   assert not any(call[:1] in {("rebase",), ("merge",), ("reset",)} for call in git_calls)
   create = next(call for call in gh_calls if call[:2] == ("pr", "create"))

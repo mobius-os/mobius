@@ -56,7 +56,7 @@ def test_only_network_commands_carry_github_credentials(checkout, tmp_path, monk
   monkeypatch.setattr(git_ops, "_run_cmd", run)
   for command in ("status", "rev-parse", "update-ref", "diff"):
     git_ops._git(checkout, command)
-  git_ops._git(checkout, "fetch", "https://github.com/owner/repo.git")
+  git_ops._git(checkout, "fetch", "https://github.com/owner/repo.git", "+refs/heads/main:refs/x")
   git_ops._git(checkout, "ls-remote", "https://github.com/owner/repo.git")
   git_ops._git(checkout, "push", "https://github.com/owner/repo.git", "HEAD:refs/heads/topic")
   git_ops._gh(checkout, "api", "user")
@@ -303,9 +303,8 @@ def test_push_from_a_linked_worktree_lands_the_exact_commit(checkout, tmp_path):
   plain_git(review, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q",
             "--allow-empty", "-m", "reviewed", check=True)
   remote = bare_remote(tmp_path)
-  plain_git(review, "remote", "add", "fork", str(remote), check=True)
 
-  pushed = git_ops.push(review, "fork", head_of(review), "refs/heads/topic", lease="")
+  pushed = git_ops.push(review, str(remote), head_of(review), "refs/heads/topic", lease="")
   assert pushed.returncode == 0, pushed.stderr
   assert branch_at(remote) == head_of(review)
 
@@ -387,17 +386,64 @@ def test_fetch_ignores_the_checkouts_transport_settings(checkout, tmp_path, key,
   assert not marker.exists()
 
 
-def test_push_ignores_the_remotes_receive_pack(checkout, tmp_path):
+def test_network_git_never_reads_a_remote_name_or_a_bare_fetch(checkout, tmp_path):
+  """Remote settings live in the checkout's config, so callers pass URLs and
+  name every destination ref; a remote name or a FETCH_HEAD-only fetch is refused."""
   script, marker = probe(tmp_path, "receive-pack")
   remote = bare_remote(tmp_path)
   plain_git(checkout, "remote", "add", "rp", str(remote), check=True)
   plain_git(checkout, "config", "--local", "remote.rp.receivepack", str(script), check=True)
-  plain_git(checkout, "push", "rp", "HEAD:refs/heads/probe")
-  assert marker.exists()
-  marker.unlink()
 
-  assert git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic", lease="").returncode == 0
+  with pytest.raises(git_ops.ContributionSubmitError, match="must name its URL"):
+    git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic", lease="")
+  with pytest.raises(git_ops.ContributionSubmitError, match="destination ref"):
+    git_ops._git(checkout, "fetch", str(remote), "refs/heads/main")
   assert not marker.exists()
+
+
+def test_the_verified_fork_url_is_pushed_even_if_the_gate_rewrites_the_remote(
+  checkout, tmp_path, monkeypatch,
+):
+  from app import github_contributions
+
+  plain_git(checkout, "remote", "add", "fork", "https://github.com/octocat/repo.git", check=True)
+  install_hook(checkout, "#!/bin/sh\ngit remote set-url fork https://github.com/evil/repo.git\n")
+  sent = []
+  monkeypatch.setattr(git_ops, "_send_push", lambda repo, remote, *rest: (
+    sent.append(remote) or subprocess.CompletedProcess([], 0, "", "")))
+
+  assert github_contributions._push_topic_branch(
+    checkout, "topic", head_of(checkout), fork_slug="octocat/repo",
+  ) is None
+  assert "evil" in plain_git(checkout, "remote", "get-url", "fork").stdout  # the gate did rewrite it
+  assert sent == ["https://github.com/octocat/repo.git"]
+
+
+def test_commands_see_only_allowlisted_environment(checkout, tmp_path, monkeypatch):
+  monkeypatch.setenv("SECRET_KEY", "server-secret")
+  monkeypatch.setenv("GIT_TRACE_CURL", "1")
+  monkeypatch.setenv("DATABASE_URL", "postgres://secret")
+  record = tmp_path / "gate-env"
+  install_hook(checkout, f"#!/bin/sh\nenv > {record}\n")
+  git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic", lease="")
+  gate = record.read_text()
+  for name in ("SECRET_KEY", "GIT_TRACE_CURL", "DATABASE_URL", "GH_TOKEN"):
+    assert f"{name}=" not in gate, name
+
+  own = {
+    "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
+    "GIT_TERMINAL_PROMPT", "GCM_INTERACTIVE", "GIT_ASKPASS", "SSH_ASKPASS",
+    "GIT_PAGER", "GIT_EDITOR", "GH_PROMPT_DISABLED", "GIT_ALLOW_PROTOCOL",
+  }
+
+  def allowed(name: str) -> bool:
+    return (name in git_ops._INHERITED_ENV or name in own or name.startswith(("LC_", "GIT_CONFIG_")))
+
+  local = git_ops._git_env(checkout)
+  network = git_ops._git_env(checkout, network=True)
+  assert all(allowed(name) for name in local), sorted(local)
+  assert {name for name in network if not allowed(name)} == {"GH_TOKEN", "GH_CONFIG_DIR"}
+  assert network["GH_TOKEN"] == "probe-token"
 
 
 def test_gh_runs_outside_any_checkout(checkout, tmp_path, monkeypatch):
@@ -422,7 +468,8 @@ def test_an_inherited_git_config_file_is_dropped(monkeypatch, tmp_path):
 
 
 def test_only_https_transport_is_allowed(checkout, tmp_path, https_only):
-  fetched = git_ops._git(checkout, "fetch", str(bare_remote(tmp_path)), check=False)
+  fetched = git_ops._git(checkout, "fetch", str(bare_remote(tmp_path)), "+refs/heads/main:refs/x",
+                         check=False)
   assert fetched.returncode != 0
   assert "transport 'file' not allowed" in fetched.stderr
 

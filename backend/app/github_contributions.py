@@ -3654,9 +3654,17 @@ def _push_topic_branch(
   branch: str,
   commit: str,
   expected_remote_sha: str | None = None,
+  *,
+  fork_slug: str,
 ) -> str | None:
-  """Push a reviewed topic to the owner's configured fork remote."""
-  return _push_branch(repo, "fork", branch, commit, expected_remote_sha)
+  """Push a reviewed topic to the owner's verified fork.
+
+  The URL comes from the verified fork, never from the checkout's ``fork``
+  remote, which code in the checkout (the gate, say) could rewrite.
+  """
+  return _push_branch(
+    repo, f"https://github.com/{fork_slug}.git", branch, commit, expected_remote_sha,
+  )
 
 
 def _github_remote_slug(remote_url: str) -> str | None:
@@ -4635,7 +4643,7 @@ def _submit_prepared_pr(
             last_push_error = None
           else:
             last_push_error = _push_topic_branch(
-              repo, branch, push_source_sha, remote_before_push,
+              repo, branch, push_source_sha, remote_before_push, fork_slug=fork_slug,
             )
         except _git_ops.RefusedBeforeSending as exc:
           last_push_error, refused_locally = exc.detail or exc.message, exc
@@ -5143,12 +5151,6 @@ def _push_stack_tip_with_lease(
   for attempt in range(_PUSH_RETRIES):
     try:
       proc = _git_ops._send_push(repo, remote, landed_sha, ref, expected_base)
-    except _git_ops.RefusedBeforeSending:
-      # Nothing left this time, but an earlier attempt's outcome is unknown.
-      if not saw_ambiguous_attempt:
-        raise
-      last_actual = None
-      break
     except (subprocess.TimeoutExpired, OSError) as exc:
       proc = None
       last_error = str(exc)
