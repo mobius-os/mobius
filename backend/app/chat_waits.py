@@ -230,6 +230,41 @@ class WaitValidationError(ValueError):
   """A declare request that cannot become a well-formed wait."""
 
 
+def _identical_armed_wait_from_run(
+  db: Session, *, chat_id: str, run_id: str, description: str,
+  condition_owner: str, kind: str, command: str | None, condition: dict | None,
+  interval: int, delay_secs: int | None, deadline: int,
+) -> models.ChatWait | None:
+  """Return this run's armed wait with exactly this declaration, if any."""
+  candidates = (
+    db.query(models.ChatWait)
+    .filter(
+      models.ChatWait.chat_id == chat_id,
+      models.ChatWait.created_by_run_id == run_id,
+      models.ChatWait.status == "armed",
+      models.ChatWait.kind == kind,
+    )
+    .populate_existing()
+    .all()
+  )
+
+  def offset(row: models.ChatWait, moment) -> int | None:
+    return None if moment is None else round((moment - row.created_at).total_seconds())
+
+  for row in candidates:
+    if (
+      row.description == description[:500]
+      and row.condition_owner == condition_owner
+      and row.command == command
+      and row.condition_json == condition
+      and row.interval_secs == interval
+      and offset(row, row.due_at) == delay_secs
+      and offset(row, row.deadline_at) == deadline
+    ):
+      return row
+  return None
+
+
 def declare_wait(
   db: Session,
   *,
@@ -316,6 +351,26 @@ def declare_wait(
     next_check_at = due_at
     deadline = max(deadline, int(delay_secs))
 
+  deadline_at = now + timedelta(seconds=deadline)
+  if created_by_run_id is not None:
+    # Share first attachment's fence through the Wait commit. The writer
+    # either adopts this row or declaration reads its already-attached Goal.
+    fence_owner(db)
+    # A client that timed out cannot know whether its declaration committed.
+    # Behind the fence, an identical retry from the same run sees the earlier
+    # row and receives it rather than arming a duplicate that wakes twice.
+    already_armed = _identical_armed_wait_from_run(
+      db, chat_id=chat_id, run_id=created_by_run_id, description=description,
+      condition_owner=(
+        condition_owner or ("Time" if kind == "timer" else "External system")
+      ),
+      kind=kind, command=command, condition=condition, interval=interval,
+      delay_secs=delay_secs if kind == "timer" else None, deadline=deadline,
+    )
+    if already_armed is not None:
+      db.rollback()
+      return already_armed
+
   armed = (
     db.query(models.ChatWait)
     .filter(
@@ -328,12 +383,6 @@ def declare_wait(
     raise WaitValidationError(
       f"this chat already has {armed} armed waits; cancel one first"
     )
-
-  deadline_at = now + timedelta(seconds=deadline)
-  if created_by_run_id is not None:
-    # Share first attachment's fence through the Wait commit. The writer
-    # either adopts this row or declaration reads its already-attached Goal.
-    fence_owner(db)
   source = (
     db.query(models.ChatRun).filter(
       models.ChatRun.id == created_by_run_id,

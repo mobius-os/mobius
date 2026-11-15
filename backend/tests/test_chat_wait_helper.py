@@ -101,3 +101,22 @@ def test_wait_for_decision_is_exact_top_level_operation_not_an_external_poll(mon
               {"chat_id": "source", "question_id": ""}):
     with pytest.raises(ValueError):
       control._call_wait_for_decision(bad)
+
+
+def test_a_lost_reply_is_reported_as_possibly_applied_not_as_a_failure(monkeypatch):
+  path = Path(__file__).parents[1] / "scripts" / "chat_wait.py"
+  spec = importlib.util.spec_from_file_location("chat_wait_timeout", path)
+  waits = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(waits)
+  monkeypatch.setenv("API_BASE_URL", "http://local.test")
+  monkeypatch.setenv("AGENT_TOKEN", "token")
+  monkeypatch.setenv("CHAT_ID", "chat")
+
+  def slow(*args, **kwargs):
+    raise TimeoutError("timed out")
+
+  monkeypatch.setattr(waits, "urlopen", slow)
+  with pytest.raises(SystemExit) as lost:
+    waits.declare_wait("Ready", delay_secs=60)
+  assert "may already have taken effect" in str(lost.value)
+  assert "returns the wait it already armed" in str(lost.value)
