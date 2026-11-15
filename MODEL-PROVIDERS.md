@@ -14,18 +14,51 @@ retain their saved provider/model selection but
 cannot run it while the provider app is absent; Möbius does not silently send
 those chats to a different company.
 
-The shared transport is **OpenAI Responses-compatible HTTPS**, driven by the
-existing Codex agent runtime. A compatible endpoint must support streamed
-Responses with tool calls; merely offering Chat Completions is insufficient.
+An app-secret declaration names its wire protocol with optional `protocol`:
+
+- `responses` (the default) — **OpenAI Responses-compatible HTTPS**, driven by
+  the Codex agent runtime; `/responses` is appended to `base_url` (commonly
+  ending in `/v1`). A compatible endpoint must support streamed Responses with
+  tool calls; merely offering Chat Completions is insufficient.
+- `anthropic_messages` — **Anthropic Messages-compatible HTTPS**, driven by
+  the Claude agent runtime. `base_url` is the API root the Anthropic SDKs use
+  (`/v1/messages` is appended). Each such provider gets its own Claude config
+  directory with Möbius's Claude settings defaults, and every Claude model
+  alias resolves to its `default_model`.
+
+Each provider's engine home (Codex threads, Claude config and transcripts)
+lives with the other engine homes under `cli-auth/app-<id>/`, outside the
+app's own storage. The app's storage API and its browser code cannot reach
+it, so they cannot read its transcripts or plant engine configuration. This
+is not a boundary against an app service, which runs with file access to the
+data volume. Deleting the app deletes that home. Older versions kept it in
+the app's storage; a one-time startup sweep deletes those copies for apps
+that declare a model provider rather than moving them, since the app could
+have written to them, so chats on those providers start a new engine thread
+reseeded from the chat.
+
+Both runtimes talk to the loopback model relay
+(`backend/app/routes/model_relay.py`), never to the provider. The agent
+process holds only a server-derived relay token; the relay checks it, attaches
+the decrypted key, repairs request shapes compatible providers reject, and
+streams the response back unchanged. Today's repairs: Messages requests fold
+mid-conversation `system` turns into user turns (the Claude runtime emits them;
+many compatible providers accept only user/assistant), and Responses requests
+omit `content: null` on replayed reasoning items (some providers emit that and
+then reject it as input). The relay answers only direct loopback connections
+without proxy forwarding headers.
+
 The app owns its setup UI, connection instructions, and one encrypted app
 secret. The owner enters the key into the app's own browser UI (which writes
 `PUT /api/apps/{app_id}/secrets/{secret_name}`); it is not a manifest value and
-must not pass through a chat prompt. The core only checks whether the secret
-exists when displaying availability. At turn launch it decrypts the secret for
-the inference transport and excludes that environment variable from Codex
-shell tools. The provider app's endpoint receives the conversation and tool
-requests, so installing and connecting one is a substantive trust and billing
-decision. No background provider is enabled automatically by adding an app.
+must not pass through a chat prompt. Availability checks only that the secret
+decrypts; only the relay uses the key, and it never leaves the server. The provider
+app's endpoint receives the conversation and tool requests, so installing and
+connecting one is a substantive trust and billing decision. No background
+provider is enabled automatically by adding an app. Runs record only the usage
+a provider actually reports: the engines' own prices do not apply to another
+company's models, so no cost is recorded, and all-zero usage is recorded as
+unknown.
 
 Example declaration, based on DeepSeek's Responses API (model names are
 illustrative and should be updated by the app publisher as the API changes):
@@ -113,13 +146,19 @@ removes a provider from pickers and blocks new turns without deleting chats.
 - App models are currently manifest-declared, not discovered live. An app can
   publish an update when its upstream model list changes. A later version can
   add an app-owned model-discovery service without changing picker consumers.
-- The first version handles one Responses provider per app and one bearer-key
-  secret. OAuth, provider-specific headers, multiple endpoints per app, and
-  non-Responses protocols need separate reviewed contracts, not ad-hoc fields.
-- Secret isolation is the same transport-env boundary used for Codex connector
-  credentials. A future inference proxy could keep the raw key outside the
-  agent process entirely; that would be stronger against arbitrary code the
-  agent executes. This version must not be described as that stronger boundary.
-- Test the exact provider protocol against a mock streamed Responses server
+- One provider per app, one protocol per provider, and one bearer-key secret.
+  OAuth, provider-specific headers, multiple endpoints per app, and further
+  protocols (such as Chat Completions, which Codex no longer speaks) need
+  separate reviewed contracts, not ad-hoc fields.
+- The raw key stays outside the agent process for both protocols; only the
+  relay token is there. Codex shell tools, including helpers in a shared
+  host, do not receive it; the Claude engine reads it from
+  `ANTHROPIC_API_KEY`, which its shell tools inherit. The token lets code the
+  agent runs spend on that provider through the local relay, so it bounds
+  disclosure of the key, not spending.
+- The relay repairs request shapes only. It does not rewrite streamed
+  responses: a provider whose stream is malformed (for example, reused content
+  block indices) is incompatible until the provider fixes it.
+- Test the exact provider protocol against a matching mock streamed server
   before claiming compatibility with any particular remote vendor. Live paid
   inference should be tested only after the owner explicitly authorizes it.
