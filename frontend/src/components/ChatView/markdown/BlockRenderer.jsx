@@ -1,7 +1,7 @@
 import { useMemo } from 'react'
-import { Marked } from 'marked'
 import { MemoBlock, MathBlock } from './blocks.jsx'
-import { mathTokens } from './mathTokens.js'
+import InlineContent from './InlineContent.jsx'
+import { inlineTokens, tokenize } from './markdownParser.js'
 import { groupMarkdownImages } from './imageGallery.js'
 import ImageGallery from './ImageGallery.jsx'
 import AppLinkCard from './AppLinkCard.jsx'
@@ -10,49 +10,14 @@ import { markdownRangeTokens } from './steerMarkdownRange.js'
 import '../markdown.css'
 
 /**
- * Configured marked instances with math token support. Tokenization stays tiny
- * and synchronous; the renderer loads KaTeX only when a math token is present.
- *
- * Owner messages and replies share this one formatter. Owner-written text
- * differs in exactly two ways, both so the bubble shows what was typed:
- *   - a typed single line break stays a line break (marked's `breaks`), where
- *     replies keep CommonMark's soft-break joining;
- *   - tag-like text stays literal text. The renderer drops raw HTML tokens,
- *     which is right for replies but would silently hide pasted `Promise<void>`
- *     or a stack trace's `<anonymous>`. A tokenizer returning undefined (not
- *     false, which falls back to the default) leaves that text to the
- *     paragraph and text tokenizers; autolinks such as `<https://…>` still work.
- * These are separate instances rather than per-call options because
- * `Marked#lexer(src, options)` replaces the instance defaults, extensions
- * included.
+ * InlineMarkdown — one-line agent text such as a choice label: emphasis, code
+ * and math only. `1. Fast` or `# Plan` stay text rather than becoming a list or
+ * heading, tag-like text stays literal, and a link or image shows as its text,
+ * so the result never holds a control and can sit inside one (a radio).
  */
-function configuredMarked(options = {}) {
-  const instance = new Marked(options)
-  instance.use(mathTokens())
-  return instance
-}
-
-const md = configuredMarked()
-const mdOwnerText = configuredMarked({
-  breaks: true,
-  tokenizer: { html: () => undefined, tag: () => undefined },
-})
-// Agent-written chat notes are plain Markdown: a `$` there is a shell variable
-// or a price, never TeX, so they lex without math tokens.
-const plainMd = new Marked()
-
-
-export function markdownImageHrefs(text) {
-  const hrefs = []
-  md.walkTokens(tokenize(text), token => {
-    if (token.type === 'image') hrefs.push(token.href)
-  })
-  return hrefs
-}
-
-function tokenize(text, { writtenByOwner = false, math = true } = {}) {
-  if (!math) return plainMd.lexer(text || '')
-  return (writtenByOwner ? mdOwnerText : md).lexer(text || '')
+export function InlineMarkdown({ text }) {
+  const tokens = useMemo(() => inlineTokens(text), [text])
+  return <InlineContent tokens={tokens} />
 }
 
 
@@ -90,7 +55,7 @@ export function ProgressiveMarkdown({
         aria-atomic={isStreaming ? 'false' : undefined}
       >
         {tokens.map((token, i) => {
-          const appCard = appLinkCardFromParagraph(token, window.location.href)
+          const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
           if (appCard) {
             return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
           }
@@ -131,7 +96,8 @@ export function ProgressiveMarkdown({
  * Settled blocks normally render once. A pathological cold transcript can
  * prepare one long block over several hidden frames; `renderFraction` reveals
  * token prefixes while one memoized token tree keeps already-prepared DOM.
- * `writtenByOwner` selects the owner-text rules described at `configuredMarked`.
+ * `writtenByOwner` and `literalTags` select the rules described in
+ * markdownParser.js.
  * `math={false}` renders plain Markdown with no TeX (agent-written notes).
  */
 export function StandardMarkdown({
@@ -139,6 +105,7 @@ export function StandardMarkdown({
   markdownRange,
   renderFraction,
   writtenByOwner = false,
+  literalTags = false,
   onInternalNav,
   mediaDimensions,
   allowAppBlocks = false,
@@ -152,8 +119,8 @@ export function StandardMarkdown({
   const tokens = useMemo(
     () => groupMarkdownImages(markdownRange
       ? markdownRangeTokens(markdownRange)
-      : tokenize(text, { writtenByOwner, math })),
-    [text, markdownRange, writtenByOwner, math],
+      : tokenize(text, { writtenByOwner, literalTags, math })),
+    [text, markdownRange, writtenByOwner, literalTags, math],
   )
   const fraction = Number(renderFraction)
   const visibleTokens = Number.isFinite(fraction) && fraction > 0 && fraction < 1
@@ -163,7 +130,7 @@ export function StandardMarkdown({
   return (
     <div className="standard-markdown md-blocks">
       {visibleTokens.map((token, i) => {
-        const appCard = appLinkCardFromParagraph(token, window.location.href)
+        const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
         if (appCard) {
           return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
         }

@@ -31,3 +31,18 @@ test('pane controls retain their native focus instead of handing it to the compo
     wasFocused: false, pointerType: 'mouse', button: 0, target: control,
   }), false)
 })
+
+test('custom controls with an ARIA widget role keep the press, like native controls', () => {
+  // Matches like Element.closest for an element carrying only this role.
+  const withRole = role => ({
+    closest: selector => selector.split(',').includes(`[role="${role}"]`) ? {} : null,
+  })
+  for (const role of ['radio', 'checkbox', 'switch', 'tab', 'option', 'button', 'link']) {
+    assert.equal(shouldFocusComposerAfterPanePointer({
+      wasFocused: false, pointerType: 'mouse', button: 0, target: withRole(role),
+    }), false, role)
+  }
+  assert.equal(shouldFocusComposerAfterPanePointer({
+    wasFocused: false, pointerType: 'mouse', button: 0, target: withRole('note'),
+  }), true, 'non-widget roles are content')
+})

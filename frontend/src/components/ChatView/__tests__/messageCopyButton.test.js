@@ -12,6 +12,50 @@ const copyButton = readFileSync(new URL('../MessageCopyButton.jsx', import.meta.
 const metaRow = readFileSync(new URL('../MessageMetaRow.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
+/** ChatView.css read as rules: each rule's selectors (whitespace-normalized,
+ *  split at top-level commas), its enclosing @media condition, and its
+ *  declarations. Lets a test ask what a selector declares without depending
+ *  on the stylesheet's formatting or comments. */
+function cssRules(source) {
+  const rules = []
+  const walk = (body, media) => {
+    let at = 0
+    for (;;) {
+      const open = body.indexOf('{', at)
+      if (open < 0) return
+      let depth = 1
+      let close = open + 1
+      while (depth > 0 && close < body.length) {
+        if (body[close] === '{') depth += 1
+        else if (body[close] === '}') depth -= 1
+        close += 1
+      }
+      const head = body.slice(at, open).replace(/\s+/g, ' ').trim()
+      const inner = body.slice(open + 1, close - 1)
+      if (head.startsWith('@media')) walk(inner, head.slice('@media'.length).trim())
+      else if (!head.startsWith('@')) {
+        rules.push({
+          media,
+          selectors: head.split(/,(?![^(]*\))/).map(selector => selector.trim()),
+          declarations: Object.fromEntries(inner.split(';').map(line => line.split(':'))
+            .filter(parts => parts.length > 1)
+            .map(([name, ...value]) => [name.trim(), value.join(':').replace(/\s+/g, ' ').trim()])),
+        })
+      }
+      at = close
+    }
+  }
+  walk(source.replace(/\/\*[\s\S]*?\*\//g, ''), null)
+  return rules
+}
+const chatRules = cssRules(readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8'))
+/** What `selector` declares, outside any @media or within the one whose
+ *  condition includes `media`. */
+const declared = (selector, media = null) => Object.assign({}, ...chatRules
+  .filter(rule => rule.selectors.includes(selector)
+    && (media ? rule.media?.includes(media) : rule.media == null))
+  .map(rule => rule.declarations))
+
 test('messageCopyText joins prose blocks and skips activity chrome', () => {
   const msg = {
     role: 'assistant',
@@ -62,30 +106,35 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('older reply actions reveal only on tap; only the latest reply keeps its row in view', () => {
+test('the chat has one reply footer, on the reply at its very end', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  assert.doesNotMatch(css, /\.chat__reply:hover\s*>\s*\.chat__msg-meta/,
-    'hovering an earlier reply must not reveal another Copy above the current reply')
+  // Only the chat's last reply has a footer row at all (replyFooter.test),
+  // so hovering an earlier reply has nothing to reveal.
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  assert.match(chatView, /metaVisible=\{\(!turnActive && last\) \|\| visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
-    'only the idle latest reply pins its actions; a new turn hides the previous footer')
+  // Which reply holds the footer and in what state is replyFooter's,
+  // behaviour-tested in replyFooter.test.js.
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
 })
 
-test('ChatView passes each reply whether it ends the agent’s stretch', () => {
-  assert.match(chatView, /endsStretch=\{endsAgentStretch\(peerTimeline\.messages, replyGroups, group\)\}/)
-})
-
-test('copy follows the timestamp inside one tap-revealed metadata row', () => {
-  assert.ok(
-    metaRow.indexOf('<time className="chat__ts">')
-      < metaRow.indexOf('<MessageCopyButton read={copy} />'),
-    'copy must render immediately after the timestamp',
-  )
+test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
+  // The order time, Copy, Branch is rendered behaviour: replyFooter.test.js.
+  assert.equal(declared('.chat__reply > .chat__msg-meta--start').visibility, 'inherit',
+    'on every device the transparent footer stays focusable')
+  const focused = declared('.chat__reply:has(:focus-visible) > .chat__msg-meta--start')
+  assert.deepEqual([focused.opacity, focused['pointer-events']], ['1', 'auto'],
+    'keyboard focus in the reply or footer reveals it, whatever the pointer')
+  const hover = '.chat__reply:hover > .chat__msg-meta--start'
+  assert.equal(declared(hover, '(pointer: fine)').opacity, '1', 'a fine pointer hovering the reply reveals it')
+  assert.deepEqual(declared(hover), {}, 'hover alone, as on touch, does not')
+  assert.match(chatView, /metaVisible=\{group === footerGroup && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+    'a tap reveals the footer for a moment, as on owner rows')
+  const button = declared('.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed)')
+  assert.deepEqual([button.width, button.height, button.padding], ['24px', '24px', '0'],
+    'Copy and Branch are equal square buttons with centred icons')
   assert.match(chatView, /visible=\{visibleMessageMetaKey === dataKey\}/)
 
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
@@ -117,4 +166,17 @@ test('a copy that fails says so instead of silently doing nothing', () => {
   assert.match(copyButton, /setCopyState\(copied \? 'copied' : 'failed'\)/)
   assert.match(copyButton, /role="status" aria-live="polite"/,
     'the outcome is announced, like tool-output copy')
+})
+
+test('replies in one agent stretch sit as close as rows within a reply', () => {
+  // An answered card, wait or helper result between two replies is hidden, so
+  // the replies are adjacent; the conversation gap belongs between speakers.
+  const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.equal(declared('.chat__list').gap, 'var(--chat-list-gap)')
+  assert.equal(declared('.chat__list > :is(.chat__reply, .chat__msg--peer) + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply)')['margin-block-start'],
+    'calc(8px - var(--chat-list-gap))', 'adjacent replies cancel the list gap down to 8px')
+  // The Thinking row a new turn shows first sits where its reply will, so
+  // the swap does not move the transcript.
+  assert.match(chatView, /<li className="chat__msg chat__msg--assistant chat__msg--pending-reply">/)
+  assert.match(css, /\.chat__reply-rows > \.chat__msg \+ \.chat__msg[^{]*\{\s*margin-top: 8px;/)
 })

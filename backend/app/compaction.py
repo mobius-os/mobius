@@ -376,7 +376,7 @@ async def _run_provider_summarize_turn(
 
   if provider_runtime_kind(provider_id) == "claude_sdk":
     return await _run_claude_summarize_turn(
-      prompt, data_dir=data_dir, model=model, effort=effort,
+      prompt, data_dir=data_dir, provider_id=provider_id, model=model, effort=effort,
     )
   # Every Codex-runtime provider (the Möbius subscription and any future
   # adapter on that CLI) synthesizes through the same Codex turn,
@@ -398,6 +398,7 @@ async def _run_claude_summarize_turn(
   prompt: str,
   *,
   data_dir: str,
+  provider_id: str,
   model: str | None,
   effort: str | None,
 ) -> str:
@@ -413,7 +414,9 @@ async def _run_claude_summarize_turn(
 
   from app.providers import get_provider
 
-  env = get_provider("claude").build_env(base_env={}, data_dir=data_dir)
+  # The chat's own provider owns credentials: an app connection on the Claude
+  # engine must summarize through its relay, never the owner's Claude login.
+  env = get_provider(provider_id).build_env(base_env={}, data_dir=data_dir)
   claude_effort = "xhigh" if effort == "ultracode" else effort
   options = ClaudeAgentOptions(
     env=env,
@@ -585,6 +588,29 @@ async def _run_codex_summarize_turn(
   effort: str | None,
 ) -> str:
   """Run an ephemeral, read-only Codex turn and return its final message."""
+  if provider_id == "mobius":
+    from app.providers import mobius_runtime_snapshot
+    async with mobius_runtime_snapshot(data_dir, model, effort) as snapshot:
+      if not snapshot.model:
+        raise CompactionError(
+          "This Möbius model is unavailable. Refresh models and choose a current model."
+        )
+      return await _run_codex_summarize_prepared(
+        prompt, data_dir=data_dir, provider_id=provider_id,
+        model=snapshot.model, effort=snapshot.effort,
+        provider_config_overrides=snapshot.config_overrides,
+      )
+  return await _run_codex_summarize_prepared(
+    prompt, data_dir=data_dir, provider_id=provider_id,
+    model=model, effort=effort,
+  )
+
+
+async def _run_codex_summarize_prepared(
+  prompt: str, *, data_dir: str, provider_id: str,
+  model: str | None, effort: str | None,
+  provider_config_overrides: list[str] | None = None,
+) -> str:
   from app.providers import CODEX_NATIVE_HELPERS_OFF, CODEX_TOOLS_OFF, get_provider
 
   provider = get_provider(provider_id)
@@ -609,12 +635,19 @@ async def _run_codex_summarize_turn(
   # The read-only sandbox remains defense in depth for any future built-in
   # that ignores a feature gate.
   for override in (
-    *CODEX_NATIVE_HELPERS_OFF, *provider.codex_config_overrides(), *CODEX_TOOLS_OFF,
+    *CODEX_NATIVE_HELPERS_OFF,
+    *(provider_config_overrides if provider_config_overrides is not None else provider.codex_config_overrides()),
+    *CODEX_TOOLS_OFF,
   ):
     cmd.extend(("--config", override))
   if model:
     cmd.extend(("--model", model))
-  if effort in ("none", "minimal", "low", "medium", "high", "xhigh"):
+  if (
+    (provider_id == "mobius" and effort and effort != "none")
+    or (provider_id != "mobius" and effort in (
+      "none", "minimal", "low", "medium", "high", "xhigh",
+    ))
+  ):
     cmd.extend(("--config", f"model_reasoning_effort={json.dumps(effort)}"))
   cmd.append("-")
   env = provider.build_env(
