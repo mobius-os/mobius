@@ -306,11 +306,14 @@ async def get_db():
   still returns its connection at once. FastAPI exits a sync generator
   dependency through a worker-thread hop that a pending cancellation skips,
   which left the session open until garbage collection. Opening and closing
-  both stay in worker threads, off the event loop.
+  both stay in worker threads, off the event loop. The close has its own
+  limiter, as FastAPI's own dependency exit does: on the shared pool it could
+  wait behind threads that are themselves waiting for the connection it is
+  about to return.
   """
   db = await anyio.to_thread.run_sync(SessionLocal)
   try:
     yield db
   finally:
     with anyio.CancelScope(shield=True):
-      await anyio.to_thread.run_sync(db.close)
+      await anyio.to_thread.run_sync(db.close, limiter=anyio.CapacityLimiter(1))
