@@ -6713,6 +6713,7 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       agent_activity_binding=agent_activity_binding,
+      provider_id=provider_id,
     )
     register_active_sink(chat_id, sink)
     runner_result: dict = {}
@@ -6913,6 +6914,7 @@ async def _run_chat_impl_with_db(
       chat_id,
       run_token=run_token,
       agent_activity_binding=agent_activity_binding,
+      provider_id=provider_id,
     )
     register_active_sink(chat_id, sink)
     # As in the Codex path, do not pin a pooled connection while the provider

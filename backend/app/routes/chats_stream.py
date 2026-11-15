@@ -48,7 +48,6 @@ from app.chat_writer import (
 from app.app_chat_scopes import ScopedStartRefused
 from app.continuations import has_runnable_pending
 from app.chat_steering import (
-  active_model_for_chat,
   has_live_steerable_turn,
   steer_into_active_turn,
 )
@@ -1505,30 +1504,9 @@ async def _send_message_impl(
       # won the transition lock first.
       db.rollback()
       chat = get_active_chat_for_principal(db, chat_id, principal)
-      # Started and queued turns record recency with their writer admission;
-      # this route alone owns a successfully steered live turn's model.
-      record_use = _owner_model_use_send(principal, body)
-      already_saved = bool(body.cid and (
-        any(cid_of(row) == body.cid for row in (chat.pending_messages or []))
-        or transcript_rows.client_message_seq(db, chat, body.cid) is not None
-      )) if record_use else False
-      steer_model = (
-        active_model_for_chat(chat_id, chat.provider or "claude")
-        if record_use else None
-      )
-      response = await _send_message_locked(
+      return await _send_message_locked(
         body, chat_id, principal, db, chat, restore_archived,
       )
-      if record_use and not already_saved and response.status_code == 202:
-        status = json.loads(response.body).get("status")
-        if status == "steered" and steer_model:
-          from app.routes.chats import _remember_owner_model_use
-          try:
-            _remember_owner_model_use(db, steer_model)
-          except Exception:
-            db.rollback()
-            log.exception("Could not record owner model use chat_id=%s", chat_id)
-      return response
 
 
 def _owner_model_use_send(principal: Principal, body: schemas.SendMessage) -> bool:

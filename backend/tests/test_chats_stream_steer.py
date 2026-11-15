@@ -199,8 +199,17 @@ def test_steers_into_live_codex_turn_when_flag_on(
   append, `steered_into_turn` broadcast, response status `steered`."""
   chat_id = "codexsteer"
   _make_codex_chat(chat_id, steer_enabled=True)
-  registry.register(_make_active_codex_turn(chat_id))
+  handle = _make_active_codex_turn(chat_id)
+  handle.model = "gpt-5.4"
+  registry.register(handle)
   create_broadcast(chat_id)
+  db = SessionLocal()
+  try:
+    owner = db.query(models.Owner).first()
+    owner.model_prefs_json = {"recent_ids": ["gpt-5.6-sol", "gpt-5.4"]}
+    db.commit()
+  finally:
+    db.close()
 
   steered_calls = []
 
@@ -220,6 +229,9 @@ def test_steers_into_live_codex_turn_when_flag_on(
 
   assert res.status_code == 202, res.text
   assert res.json()["status"] == "steered"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "gpt-5.4", "gpt-5.6-sol",
+  ]
   # The SDK steer was invoked with the message content.
   assert steered_calls == [(chat_id, "actually use blue")]
 
@@ -948,6 +960,70 @@ def test_claude_force_steer_defers_to_runner_and_reorders(client, auth):
     ("assistant", "A2 answer"),
   ]
   assert chat.pending_messages in (None, [])
+
+
+def test_force_steer_records_original_owner_rows_at_real_claude_cut(
+  client, auth,
+):
+  """A fast-forward uses the delivered row and active model, not its POST caller."""
+  from app.chat import _ChatEventSink, register_active_sink
+  from app.chat_writer import AppendPending, get_writer
+
+  chat_id = "owner-force-model-use"
+  db = SessionLocal()
+  try:
+    owner = db.query(models.Owner).first()
+    owner.model_prefs_json = {"recent_ids": ["claude-sonnet-4-6", "claude-opus-4-7"]}
+    chat = create_chat(
+      id=chat_id, title="Owner steer", provider="claude",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"model": "claude-sonnet-4-6"},
+    )
+    db.add(chat)
+    db.commit()
+  finally:
+    db.close()
+  row = get_writer().submit(AppendPending(
+    chat_id=chat_id, run_token="", owner_input=True,
+    user_msg={"role": "user", "content": "use blue", "ts": 10,
+              "cid": "owner-fast-forward"},
+  )).result(timeout=5)["stored"]
+  assert row.get("_owner_input_at")
+  handle = _make_active_claude_client(chat_id)
+  handle.model = "claude-opus-4-7"
+  registry.register(handle)
+  sink = _ChatEventSink(
+    create_broadcast(chat_id), chat_id, run_token="owner-force-run",
+    provider_id="claude",
+  )
+  register_active_sink(chat_id, sink)
+  prefs_url = "/api/owner/model-prefs"
+  before = client.get(prefs_url, headers=auth).json()["recent_ids"]
+  assert before == ["claude-sonnet-4-6", "claude-opus-4-7"]
+
+  request = {"content": "use blue", "force_steer": True,
+             "consume_pending_cids": ["owner-fast-forward"]}
+  first = client.post(f"/api/chats/{chat_id}/messages", json=request, headers=auth)
+  assert first.status_code == 202, first.text
+  assert first.json()["status"] == "steered"
+  # Native admission is not a delivery receipt, nor may a duplicate POST
+  # claim a second use while the same durable cid remains queued.
+  repeated = client.post(f"/api/chats/{chat_id}/messages", json=request, headers=auth)
+  assert repeated.status_code == 202, repeated.text
+  assert len(_claude_attempts(handle)) == 1
+  assert client.get(prefs_url, headers=auth).json()["recent_ids"] == before
+
+  asyncio.run(_consume_claude_steers(handle, sink))
+  assert _read_chat(chat_id).pending_messages in (None, [])
+  assert client.get(prefs_url, headers=auth).json()["recent_ids"] == [
+    "claude-opus-4-7", "claude-sonnet-4-6",
+  ]
+  declined = client.post(f"/api/chats/{chat_id}/messages", json=request, headers=auth)
+  assert declined.status_code == 202, declined.text
+  assert declined.json()["status"] == "not_steered"
+  assert client.get(prefs_url, headers=auth).json()["recent_ids"] == [
+    "claude-opus-4-7", "claude-sonnet-4-6",
+  ]
 
 
 def test_split_gates_snapshots_so_continuation_cannot_clobber_a1(

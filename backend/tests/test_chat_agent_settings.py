@@ -881,6 +881,7 @@ def test_direct_steer_uses_active_model_not_new_same_provider_pick(
   client, auth, chat, db, monkeypatch,
 ):
   """A picker change mid-turn does not change the live steer target."""
+  from app.chat_writer import AppendSteeredUserMessage, get_writer
   from app.routes import chats_stream
 
   owner = db.query(models.Owner).first()
@@ -890,7 +891,6 @@ def test_direct_steer_uses_active_model_not_new_same_provider_pick(
   monkeypatch.setattr(chats_stream, "is_chat_running", lambda _id: True)
   monkeypatch.setattr(chats_stream, "has_live_steerable_turn", lambda *_a: True)
   monkeypatch.setattr(chats_stream, "_browser_may_steer_run", lambda *_a: True)
-  monkeypatch.setattr(chats_stream, "active_model_for_chat", lambda *_a: "claude-opus-4-7")
 
   async def admit_steer(*_args):
     return True
@@ -901,9 +901,81 @@ def test_direct_steer_uses_active_model_not_new_same_provider_pick(
   })
   assert sent.status_code == 202, sent.text
   assert sent.json()["status"] == "steered"
+  # The HTTP acknowledgement alone does not prove provider delivery.
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "claude-sonnet-4-6", "claude-opus-4-7",
+  ]
+  db.refresh(chat)
+  row = next(m for m in chat.pending_messages if m.get("cid") == "active-model-steer")
+  get_writer().submit(AppendSteeredUserMessage(
+    chat_id=chat.id, run_token="", user_msgs=[row],
+    consume_pending_cids=["active-model-steer"],
+    active_model="claude-opus-4-7",
+  )).result(timeout=5)
   assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
     "claude-opus-4-7", "claude-sonnet-4-6",
   ]
+
+
+@pytest.mark.parametrize("origin,owner_input,expected_use", [
+  ("owner", True, True),
+  ("embed", True, False),
+  ("app", False, False),
+  ("guest", True, False),
+  ("helper", False, False),
+])
+def test_steer_cut_recency_uses_original_pending_provenance(
+  client, auth, chat, db, origin, owner_input, expected_use,
+):
+  """Only a newly delivered direct-owner row may reorder at a live cut."""
+  from app.browser_access import BrowserAccessGrant
+  from app.chat_writer import AppendPending, AppendSteeredUserMessage, get_writer
+
+  owner = db.query(models.Owner).first()
+  owner.model_prefs_json = {"recent_ids": ["claude-sonnet-4-6", "claude-opus-4-7"]}
+  chat.agent_settings_json = {"model": "claude-sonnet-4-6"}
+  app_id = None
+  grant_id = None
+  if origin in ("embed", "app"):
+    app = models.App(
+      slug="steer-provenance-app", source_dir="/tmp/steer-provenance-app",
+      name="Steer provenance app", description="test",
+      jsx_source="export default () => null",
+    )
+    db.add(app)
+    db.flush()
+    app_id = app.id
+  if origin == "guest":
+    grant_id = "steer-guest-grant-1234567890"
+    db.add(BrowserAccessGrant(
+      id=grant_id, owner_id=owner.id, label="Steer guest", kind="invitation",
+    ))
+  db.commit()
+  cid = f"steered-{origin}"
+  row = get_writer().submit(AppendPending(
+    chat_id=chat.id, run_token="", owner_input=owner_input,
+    initiated_by_app_id=app_id, browser_grant_id=grant_id,
+    user_msg={"role": "user", "content": "course correction", "ts": 10,
+              "cid": cid},
+  )).result(timeout=5)["stored"]
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "claude-sonnet-4-6", "claude-opus-4-7",
+  ]
+  def cut():
+    return get_writer().submit(AppendSteeredUserMessage(
+      chat_id=chat.id, run_token="", user_msgs=[row],
+      consume_pending_cids=[cid], active_model="claude-opus-4-7",
+    )).result(timeout=5)
+
+  first = cut()
+  assert len(first["stored_messages"]) == 1
+  expected = (["claude-opus-4-7", "claude-sonnet-4-6"] if expected_use else
+              ["claude-sonnet-4-6", "claude-opus-4-7"])
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == expected
+  # The writer's cid gate discards a repeated delivery and never promotes it.
+  second = cut()
+  assert second["stored_messages"] == []
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == expected
 
 
 def test_first_send_freezes_model_before_later_global_picker_change(

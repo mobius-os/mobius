@@ -509,23 +509,6 @@ def _mirror_agent_defaults(
     db.commit()
 
 
-def _remember_owner_model_use(db: Session, model_id: str | None) -> None:
-  """Record an admitted owner send, serialized with visibility edits."""
-  if not model_id:
-    return
-  from sqlalchemy import text
-
-  db.commit()
-  db.execute(text("BEGIN IMMEDIATE"))
-  owner = db.query(models.Owner).first()
-  if owner is not None:
-    db.refresh(owner)
-    owner.model_prefs_json = providers.remember_recent_model(
-      owner.model_prefs_json, model_id,
-    )
-  db.commit()
-
-
 def _switch_request_fingerprint(provider_id: str, settings_patch: dict) -> str:
   """Bind an idempotency key to the provider/settings it represents."""
   payload = json.dumps(

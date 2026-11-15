@@ -1034,6 +1034,7 @@ class AppendSteeredUserMessage(_Command):
   user_msg: dict = field(default_factory=dict)
   user_msgs: list[dict] = field(default_factory=list)
   consume_pending_cids: list[str] = field(default_factory=list)
+  active_model: str | None = None
 
 
 @dataclass
@@ -5153,6 +5154,25 @@ class ChatWriterActor:
       stored_messages.append(new_msg)
     _stamp_provider_batch(stored_messages)
     transcript_rows.append_many(db, chat, stored_messages)
+    # The cut, not the fast-forwarding POST, owns delivery. Use the ORIGINAL
+    # durable rows: force-steer's caller may be an app or a retry, and the
+    # transcript copy has already shed owner-input provenance. A duplicate
+    # cut has no newly stored cid and therefore cannot reorder again.
+    stored_cids = {cid_of(msg) for msg in stored_messages}
+    if (
+      cmd.active_model and stored_cids
+      and any(
+        cid_of(row) in stored_cids
+        and row.get("_owner_input_at") and not row.get("hidden")
+        and row.get("_initiated_by_app_id") is None
+        and row.get("_browser_grant_id") is None
+        for row in pending
+      )
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    ):
+      self._remember_admitted_owner_model_use(db, cmd.active_model)
     # The steer cut is where a steered helper result reaches its provider, so
     # its delivery is recorded in this same commit.
     from app.delegations import carrier_results, mark_results_delivered

@@ -759,6 +759,8 @@ export default function useStreamConnection(chatId, {
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
   onSteeredIntoTurnRef.current = onSteeredIntoTurn
+  const onOwnerSendAcceptedRef = useRef(onOwnerSendAccepted)
+  onOwnerSendAcceptedRef.current = onOwnerSendAccepted
   const onSteerDeliveryFailedRef = useRef(onSteerDeliveryFailed)
   onSteerDeliveryFailedRef.current = onSteerDeliveryFailed
   const onLiveQuestionRef = useRef(onLiveQuestion)
@@ -1372,6 +1374,10 @@ export default function useStreamConnection(chatId, {
               message: event.message || null,
             })
           } else if (event.type === 'steered_into_turn') {
+            // The writer committed the selected durable rows and their model
+            // use together. HTTP steer acceptance alone can still fail at
+            // provider delivery, so refresh only at this exact cut.
+            onOwnerSendAcceptedRef.current?.()
             // THE CUT. The backend has committed the split — the pre-steer
             // assistant segment is sealed and the user message is in the
             // transcript — so the caller drops the queued-tray entry and
@@ -1868,7 +1874,7 @@ export default function useStreamConnection(chatId, {
       responseData = data
       if (!hidden && !forceSteer && !answers && !selected_options
         && continuation !== 'manual' && continuation !== 'queue'
-        && (['started', 'steered'].includes(data.status) || data.started === true)) {
+        && (data.status === 'started' || data.started === true)) {
         onOwnerSendAccepted?.()
       }
       // Any parsed 2xx response is authoritative acceptance (including
