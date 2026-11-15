@@ -524,6 +524,13 @@ def _sweep_git_transfers(_context: StartupContext) -> None:
   shutil.rmtree(git_transfer_root(), ignore_errors=True)
 
 
+def _sweep_contribution_git_scratch(_context: StartupContext) -> None:
+  """Discard contribution Git scratch an earlier process left behind."""
+  from app.github_contribution_git import sweep_scratch_root
+
+  sweep_scratch_root()
+
+
 async def _reconcile_compiled_bundles(context: StartupContext) -> None:
   from app.compiler import (
     reap_orphaned_bundles,
@@ -806,6 +813,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("reconcile agent lifecycle", _reconcile_agent_lifecycle),
   StartupTask("reap staging bundles", _reap_staging_bundles),
   StartupTask("sweep app Git transfers", _sweep_git_transfers),
+  StartupTask("sweep contribution Git scratch", _sweep_contribution_git_scratch),
   StartupTask(
     "reconcile compiled bundles",
     _reconcile_compiled_bundles,
