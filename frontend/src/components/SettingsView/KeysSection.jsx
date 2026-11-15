@@ -62,7 +62,7 @@ export function replaceWarning(key, names) {
 }
 
 function usersLine(key, names) {
-  const users = (key.grants?.apps || []).map(id => appLabel(names, id))
+  const users = (key.grants?.apps || []).map(grant => appLabel(names, grant.id))
   if (key.grants?.agents) users.push('agents')
   return users.length ? users.join(', ') : 'Not shared yet'
 }
@@ -134,10 +134,8 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
         <KeyRequest
           key={requestFormKey(request)}
           request={request}
-          keyRecord={keys.find(key => key.name === request.key)}
           names={names}
           onAnswered={refresh}
-          onOpenKey={onOpenKey}
         />
       ))}
 
@@ -180,20 +178,25 @@ function requestAppName(request, names) {
   return request.app_name || appLabel(names, request.app)
 }
 
-function KeyRequest({ request, keyRecord, names, onAnswered, onOpenKey }) {
+function KeyRequest({ request, names, onAnswered }) {
   const [value, setValue] = useState('')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const isNew = !request.key_exists
-  const outside = isNew ? [] : (request.outside_sites || [])
   const appName = requestAppName(request, names)
+  // The app only proposes: Allow grants exactly what this card shows, and the
+  // sites go to this app's own grant, never to another app or the agents.
+  const inject = request.inject || BEARER
+  const sites = request.sites || []
 
   async function answer(kind) {
     setBusy(kind)
     setError('')
     try {
       const response = kind === 'approve'
-        ? await api.keys.approve(request.id, { ticket: request.ticket, ...(isNew ? { value } : {}) })
+        ? await api.keys.approve(request.id, {
+          ticket: request.ticket, sites, ...(isNew ? { value, inject } : {}),
+        })
         : await api.keys.deny(request.id)
       await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Deny')
       onAnswered()
@@ -206,16 +209,18 @@ function KeyRequest({ request, keyRecord, names, onAnswered, onOpenKey }) {
   return (
     <div className="settings-keys__request" role="group" aria-label={`${appName} asks to use ${request.key}`}>
       <p className="settings-keys__request-lead">
-        <strong>{appName}</strong> wants to use {isNew ? 'a new key' : 'your key'} <strong>{request.key}</strong>
+        <strong>{appName}</strong>{' '}
+        {request.granted
+          ? <>wants to use your key <strong>{request.key}</strong> on more sites</>
+          : <>wants to use {isNew ? 'a new key' : 'your key'} <strong>{request.key}</strong></>}
       </p>
       {request.reason && <p className="settings-keys__muted">{request.reason}</p>}
-      {isNew ? (
-        request.sites.length > 0 && (
-          <p className="settings-keys__muted">On {request.sites.map(siteLine).join('; ')}</p>
-        )
-      ) : (
-        <KeyRequestSites request={request} keyRecord={keyRecord} onOpenKey={onOpenKey} />
-      )}
+      <p className="settings-keys__muted">
+        {sites.length > 0
+          ? `On ${sites.map(siteLine).join('; ')}. Only ${appName} gets these sites.`
+          : `It names no sites, so ${appName} can't send this key anywhere until you add one on the key's page.`}
+      </p>
+      {isNew && <p className="settings-keys__muted">Sent as <code>{sentAs(inject)}</code></p>}
       {isNew && (
         <input
           className="settings-keys__input"
@@ -234,36 +239,10 @@ function KeyRequest({ request, keyRecord, names, onAnswered, onOpenKey }) {
           Deny
         </button>
         <button type="button" className="settings__btn settings__btn--sm" onClick={() => answer('approve')} disabled={Boolean(busy) || (isNew && !value)}>
-          {busy === 'approve' ? 'Allowing…' : outside.length > 0 ? 'Allow on its current sites' : 'Allow'}
+          {busy === 'approve' ? 'Allowing…' : 'Allow'}
         </button>
       </div>
     </div>
-  )
-}
-
-/**
- * An existing key's sites are shared by everyone who may use it, so allowing
- * one app never changes them: the card says where the key works and what
- * the app asked for beyond that.
- */
-function KeyRequestSites({ request, keyRecord, onOpenKey }) {
-  const sites = keyRecord?.grants?.sites || []
-  const outside = request.outside_sites || []
-  return (
-    <>
-      <p className="settings-keys__muted">
-        {sites.length > 0
-          ? `It can use it only where this key already works: ${sites.map(siteLine).join('; ')}`
-          : 'This key has no sites yet, so it can’t be used anywhere until you add one.'}
-      </p>
-      {outside.length > 0 && (
-        <p className="settings-keys__muted">
-          It also asks for {outside.map(siteLine).join('; ')}. Allow leaves that out. Adding a site
-          on the key’s page lets every app and agent that uses this key send it there too.{' '}
-          <button type="button" className="settings-keys__link" onClick={() => onOpenKey(request.key)}>Open key</button>
-        </p>
-      )}
-    </>
   )
 }
 
@@ -331,12 +310,17 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
   const { apps, names } = useAppNames()
   const { save, error, busy } = useSaveKey(key.name)
   const grantedApps = key.grants?.apps || []
-  const ungranted = apps.filter(app => !grantedApps.includes(app.id))
+  const grantedIds = grantedApps.map(grant => grant.id)
+  const ungranted = apps.filter(app => !grantedIds.includes(app.id))
   const setGrants = grants => save(recordFor(key, { grants }))
+  // A new app starts with no sites; its own row adds the ones it may reach.
   const grantApp = app => save(recordFor(key, {
-    grants: { apps: [...grantedApps, app.id] },
+    grants: { apps: [...grantedApps, { id: app.id, sites: [] }] },
     installations: { [app.id]: app.installation },
   }))
+  const setAppSites = (id, sites) => setGrants({
+    apps: grantedApps.map(grant => (grant.id === id ? { ...grant, sites } : grant)),
+  })
 
   return (
     <div className="settings-keys-page">
@@ -351,7 +335,7 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
         <div className="settings-keys-card__row">
           <span className="settings-keys-card__copy">
             <strong>Agents</strong>
-            <small>Through the vault, on its sites. Agents can still read any key.</small>
+            <small>Can read it and send it to the sites below</small>
           </span>
           <Switch
             className="settings-keys-switch"
@@ -361,19 +345,15 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
             aria-label="Agents can use this key"
           />
         </div>
-        {grantedApps.map(id => (
-          <div className="settings-keys-card__row" key={id}>
-            <span className="settings-keys-card__copy"><strong>{appLabel(names, id)}</strong></span>
-            <button
-              type="button"
-              className="settings-keys__icon-btn"
-              aria-label={`Stop ${appLabel(names, id)} using this key`}
-              onClick={() => setGrants({ apps: grantedApps.filter(other => other !== id) })}
-              disabled={busy}
-            >
-              <X width={16} height={16} aria-hidden="true" />
-            </button>
-          </div>
+        {grantedApps.map(grant => (
+          <AppGrantRow
+            key={grant.id}
+            grant={grant}
+            label={appLabel(names, grant.id)}
+            busy={busy}
+            onRemove={() => setGrants({ apps: grantedApps.filter(other => other.id !== grant.id) })}
+            onSites={sites => setAppSites(grant.id, sites)}
+          />
         ))}
         {ungranted.length > 0 && (
           <label className="settings-keys-card__row settings-keys-card__row--add">
@@ -395,17 +375,24 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
         )}
       </section>
 
-      <h2 className="settings-group__title settings-keys-page__heading">Sites</h2>
+      <h2 className="settings-group__title settings-keys-page__heading">Sites for you and agents</h2>
       <section className="settings-list settings-keys-card">
-        <SitesRows keyRecord={key} setGrants={setGrants} busy={busy} />
+        <SitesRows
+          sites={key.grants?.sites || []}
+          onChange={sites => setGrants({ sites })}
+          busy={busy}
+          empty="No sites yet: you and your agents can't send this key until you add one."
+        />
       </section>
       <p className="settings-keys__muted settings-keys-page__note">
-        Every app and agent that can use this key can send it to these sites.
+        {key.multiline
+          ? 'This key has several lines, so it can be sent only in the address, never as a header.'
+          : 'Each app has its own sites, under Who can use it.'}
       </p>
 
       <SentAs keyRecord={key} save={save} busy={busy} />
 
-      <h2 className="settings-group__title settings-keys-page__heading">Recent use</h2>
+      <h2 className="settings-group__title settings-keys-page__heading">Recent activity</h2>
       <section className="settings-list settings-keys-card">
         <KeyUsage name={key.name} names={names} />
       </section>
@@ -415,12 +402,87 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
   )
 }
 
+/** One app allowed to use the key, with the sites only that app may reach. */
+function AppGrantRow({ grant, label, busy, onRemove, onSites }) {
+  const [open, setOpen] = useState(false)
+  const count = grant.sites.length
+  return (
+    <div className="settings-keys-grant">
+      <div className="settings-keys-card__row">
+        <button type="button" className="settings-keys-card__copy settings-keys-grant__toggle" onClick={() => setOpen(!open)} aria-expanded={open}>
+          <strong>{label}</strong>
+          <small className={count === 0 ? 'settings-keys__warn' : undefined}>
+            {count === 0 ? 'No sites yet' : count === 1 ? siteLine(grant.sites[0]) : `${count} sites`}
+          </small>
+        </button>
+        <button
+          type="button"
+          className="settings-keys__icon-btn"
+          aria-label={`Stop ${label} using this key`}
+          onClick={onRemove}
+          disabled={busy}
+        >
+          <X width={16} height={16} aria-hidden="true" />
+        </button>
+      </div>
+      {open && (
+        <div className="settings-keys-grant__sites">
+          <SitesRows
+            sites={grant.sites}
+            onChange={onSites}
+            busy={busy}
+            empty={`No sites yet: ${label} can't send this key until you add one.`}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** The value field: one masked line, or a box for keys with several lines. */
+function ValueInput({ value, onChange, multiline, onMultiline, placeholder, label, autoFocus }) {
+  return (
+    <>
+      {multiline ? (
+        <textarea
+          className="settings-keys__input settings-keys__textarea"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder="Paste the whole key, including its first and last lines"
+          aria-label={label}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoFocus={autoFocus}
+          rows={6}
+        />
+      ) : (
+        <input
+          className="settings-keys__input"
+          type="password"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          placeholder={placeholder}
+          aria-label={label}
+          autoComplete="new-password"
+          spellCheck={false}
+          autoFocus={autoFocus}
+        />
+      )}
+      <label className="settings-keys__check">
+        <input type="checkbox" checked={multiline} onChange={e => onMultiline(e.target.checked)} />
+        <span>Several lines <em>· a certificate or key file</em></span>
+      </label>
+    </>
+  )
+}
+
 function ValueRow({ keyRecord: key, names, save, busy }) {
   const savedBy = savedByApp(key, names)
   const warning = replaceWarning(key, names)
   const [shown, setShown] = useState(null)
   const [replacing, setReplacing] = useState(false)
   const [next, setNext] = useState('')
+  const [multiline, setMultiline] = useState(Boolean(key.multiline))
   const [error, setError] = useState('')
 
   async function show() {
@@ -463,15 +525,13 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
       {error && <small className="settings-keys__error" role="alert">{error}</small>}
       {replacing && (
         <form className="settings-keys-card__form" onSubmit={replace} autoComplete="off">
-          <input
-            className="settings-keys__input"
-            type="password"
+          <ValueInput
             value={next}
-            onChange={e => setNext(e.target.value)}
+            onChange={setNext}
+            multiline={multiline}
+            onMultiline={setMultiline}
             placeholder="Paste the new key"
-            aria-label="New key value"
-            autoComplete="new-password"
-            spellCheck={false}
+            label="New key value"
             autoFocus
           />
           {warning && <small className="settings-keys__muted" role="note">{warning}</small>}
@@ -485,8 +545,7 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
   )
 }
 
-function SitesRows({ keyRecord: key, setGrants, busy }) {
-  const sites = key.grants?.sites || []
+function SitesRows({ sites, onChange, busy, empty }) {
   const [adding, setAdding] = useState(false)
   const [host, setHost] = useState('')
   const [paths, setPaths] = useState('/*')
@@ -498,7 +557,7 @@ function SitesRows({ keyRecord: key, setGrants, busy }) {
       methods: DEFAULT_METHODS,
       paths: paths.split(',').map(path => path.trim()).filter(Boolean),
     }
-    if (await setGrants({ sites: [...sites, site] })) {
+    if (await onChange([...sites, site])) {
       setAdding(false)
       setHost('')
       setPaths('/*')
@@ -508,7 +567,7 @@ function SitesRows({ keyRecord: key, setGrants, busy }) {
   return (
     <>
       {sites.length === 0 && !adding && (
-        <p className="settings-keys-card__row settings-keys__muted">No sites yet: nobody can use this key until you add one.</p>
+        <p className="settings-keys-card__row settings-keys__muted">{empty}</p>
       )}
       {sites.map((site, index) => (
         <div className="settings-keys-card__row" key={`${site.host}-${index}`}>
@@ -520,7 +579,7 @@ function SitesRows({ keyRecord: key, setGrants, busy }) {
             type="button"
             className="settings-keys__icon-btn"
             aria-label={`Remove ${site.host}`}
-            onClick={() => setGrants({ sites: sites.filter((_, i) => i !== index) })}
+            onClick={() => onChange(sites.filter((_, i) => i !== index))}
             disabled={busy}
           >
             <X width={16} height={16} aria-hidden="true" />
@@ -607,7 +666,14 @@ function usageText(entry, names) {
   if (entry.outcome === 'requested') return `${who} asked to use it`
   if (entry.outcome === 'failed') return `${who} couldn't reach the site`
   if (entry.outcome === 'denied') return entry.host === '-' ? `${who} tried to read the value` : `${who} was refused`
-  if (entry.outcome.startsWith('revoked app:')) return `${appLabel(names, Number(entry.outcome.split(':')[1]))} lost access (app deleted)`
+  if (entry.outcome === 'added') return `${who} added it`
+  if (entry.outcome === 'updated') return `${who} changed it`
+  if (entry.outcome === 'released') return `${who} gave it up`
+  const app = appLabel(names, Number(entry.outcome.split(':')[1]?.split(' ')[0]))
+  if (entry.outcome.startsWith('revoked app:')) return `${app} lost access (app deleted)`
+  if (entry.outcome.startsWith('granted app:')) return `${who} let ${app} use it`
+  if (entry.outcome.startsWith('denied app:')) return `${who} refused ${app}`
+  if (entry.outcome.startsWith('forgot request app:')) return `${who} let ${app} ask again`
   return null
 }
 
@@ -672,6 +738,7 @@ function NewKey({ onCreated }) {
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
   const [host, setHost] = useState('')
+  const [multiline, setMultiline] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const nameValid = NAME_PATTERN.test(name)
@@ -702,10 +769,10 @@ function NewKey({ onCreated }) {
           <span>Name</span>
           <input className="settings-keys__input" value={name} onChange={e => setName(e.target.value)} placeholder="openweather" aria-invalid={name !== '' && !nameValid} required autoFocus />
         </label>
-        <label className="settings-keys-card__field">
+        <div className="settings-keys-card__field">
           <span>Key</span>
-          <input className="settings-keys__input" type="password" value={value} onChange={e => setValue(e.target.value)} placeholder="Paste the key" autoComplete="new-password" spellCheck={false} required />
-        </label>
+          <ValueInput value={value} onChange={setValue} multiline={multiline} onMultiline={setMultiline} placeholder="Paste the key" label="Key" />
+        </div>
         <label className="settings-keys-card__field">
           <span>Site it's for</span>
           <input className="settings-keys__input" value={host} onChange={e => setHost(e.target.value)} placeholder="api.example.com" inputMode="url" />

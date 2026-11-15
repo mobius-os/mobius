@@ -144,13 +144,16 @@ def test_handshake_from_request_to_use_without_seeing_the_value(client, auth, db
   assert client.post("/api/keys/requests", headers=app_auth, json=ASK).json()["status"] == "pending"
   assert [p["title"] for p in pushes] == ["Weather asks to use a key"]
   denied = client.get("/api/keys/use/weather_api/api.example.com/v1/today", headers=app_auth)
-  assert denied.status_code == 404 and denied.headers["X-Vault-Denied"] == "1"
+  # The same refusal as for a key it was not given: an app learns no key names.
+  assert denied.status_code == 403 and denied.headers["X-Vault-Denied"] == "1"
 
   # The owner sees the request with the app's own name, then approves it.
   [request] = client.get("/api/keys", headers=auth).json()["requests"]
   assert request["app"] == weather.id and request["app_name"] == "Weather"
-  assert client.post(f"/api/keys/requests/{request['id']}/approve", headers=auth,
-                     json={"value": DUMMY, "ticket": request["ticket"]}).status_code == 200
+  # What the Settings card sends: the value plus the slot and sites it showed.
+  assert client.post(f"/api/keys/requests/{request['id']}/approve", headers=auth, json={
+    "value": DUMMY, "ticket": request["ticket"], "inject": request["inject"], "sites": request["sites"],
+  }).status_code == 200
   assert client.post("/api/keys/requests", headers=app_auth, json=ASK).json()["status"] == "granted"
 
   used = client.post(
@@ -194,7 +197,7 @@ def test_an_app_cannot_borrow_another_apps_grant(client, auth, db, vault):
                          "grants": {"apps": [], "agents": False, "sites": [SITE]}})
   weather, other = _app(db, "weather"), _app(db, "other")
   vault.put_key("maps", {"inject": ASK["inject"],
-                         "grants": {"apps": [weather.id], "agents": False, "sites": [SITE]}})
+                         "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   path = "/api/keys/use/maps/api.example.com/v1/x"
   # A forged vault caller header is dropped; the token decides.
   forged = {**_app_auth(db, other), "X-Vault-Caller": f"app:{weather.id}"}
@@ -238,8 +241,73 @@ def test_an_agent_replacing_a_saved_key_tells_the_owner(client, auth, db, vault,
   assert pushes == []
   assert client.put("/api/keys/fresh", headers=agent, json={**body, "value": "third-dummy-key"}).status_code == 200
   [notice] = pushes
-  assert notice["title"] == "An agent replaced a saved key"
+  assert notice["title"] == "An agent changed a saved key"
+  assert "replaced its value" in notice["body"]
   assert "fresh" in notice["body"] and "third" not in notice["body"]
+
+
+def test_an_agent_adding_a_site_tells_the_owner_and_is_logged_as_the_agent(client, auth, db, vault, pushes):
+  agent = _agent_auth(db)
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [], "agents": True, "sites": [SITE]}})
+  [page] = client.get("/api/keys", headers=auth).json()["keys"]
+  wider = {"inject": ASK["inject"], "revision": page["revision"], "grants": {"apps": [], "agents": True, "sites": [
+    SITE, {"host": "other.example.net", "methods": ["POST"], "paths": ["/*"]}]}}
+  assert client.put("/api/keys/maps", headers=agent, json=wider).status_code == 200
+  [notice] = pushes
+  assert "added sites" in notice["body"] and "replaced" not in notice["body"]
+  assert vault.usage(key="maps")[0]["caller"] == "agent:chat-keys"
+
+
+def test_only_the_owners_own_input_lets_an_app_use_a_key(client, auth, db, vault):
+  weather = _app(db, "weather")
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [], "agents": True, "sites": [SITE]}})
+  asked = client.post("/api/keys/requests", headers=_app_auth(db, weather), json={**ASK, "key": "maps"}).json()
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  agent = _agent_auth(db)
+  refused = client.post(f"/api/keys/requests/{asked['id']}/approve", headers=agent,
+                        json={"sites": [SITE], "ticket": card["ticket"]})
+  assert refused.status_code == 403
+  [listed] = [a for a in client.get("/api/apps/", headers=auth).json() if a["id"] == weather.id]
+  grant = {"inject": ASK["inject"], "installations": {str(weather.id): listed["storage_generation"]},
+           "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": True, "sites": [SITE]}}
+  assert client.put("/api/keys/maps", headers=agent, json=grant).status_code == 403
+  assert vault.list_keys()[0]["grants"]["apps"] == []
+  assert client.post(f"/api/keys/requests/{asked['id']}/approve", headers=auth,
+                     json={"sites": [SITE], "ticket": card["ticket"]}).status_code == 200
+  assert vault.list_keys()[0]["grants"]["apps"] == [{"id": weather.id, "sites": [kv.validate_site(SITE)]}]
+  # Narrowing an app's sites or taking it off a key only takes access away.
+  narrowed = {"inject": ASK["inject"], "grants": {"apps": [{"id": weather.id, "sites": []}], "agents": True, "sites": [SITE]}}
+  assert client.put("/api/keys/maps", headers=agent, json=narrowed).status_code == 200
+  assert client.put("/api/keys/maps", headers=agent, json={**narrowed, "grants": {**narrowed["grants"], "apps": []}}).status_code == 200
+
+
+def test_a_granted_app_asks_for_more_sites_and_the_owner_is_told(client, auth, db, vault, pushes):
+  weather = _app(db, "weather")
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  tiles = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
+  ask = {"key": "maps", "reason": "Map tiles", "sites": [SITE, tiles]}
+  answer = client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ask).json()
+  assert answer["status"] == "granted" and answer["sites_request"] == "pending"
+  assert answer["sites_not_allowed"] == [tiles] and "created" not in answer
+  assert [p["title"] for p in pushes] == ["Weather asks to use a key on more sites"]
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert request["granted"] is True and request["sites"] == [tiles]
+  assert client.post(f"/api/keys/requests/{request['id']}/approve", headers=auth,
+                     json={"sites": [tiles], "ticket": request["ticket"]}).status_code == 200
+  assert client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ask).json() == {
+    "status": "granted", "key": "maps",
+  }
+
+
+def test_a_slow_site_is_not_reported_as_a_stopped_vault(client, auth, db, vault, monkeypatch):
+  async def slow(*args, **kwargs):
+    raise key_vault.VaultTimeout("The site took too long to answer through the key vault.")
+  monkeypatch.setattr(key_vault, "vault_use", slow)
+  response = client.get("/api/keys/use/maps/api.example.com/v1/x", headers=auth)
+  assert response.status_code == 504 and "too long" in response.text
 
 
 def test_guest_lineage_cannot_read_or_use_keys(client, auth, db, vault):
@@ -288,7 +356,7 @@ def test_forgetting_an_app_needs_no_vault_when_nothing_was_ever_stored(monkeypat
 def test_a_compressed_echo_never_carries_the_key_to_the_app(client, auth, db, vault, path):
   weather = _app(db, "weather")
   vault.put_key("echoed", {"value": DUMMY, "inject": ASK["inject"],
-                           "grants": {"apps": [weather.id], "agents": False, "sites": [SITE]}})
+                           "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   used = client.get(f"/api/keys/use/echoed/api.example.com{path}", headers=_app_auth(db, weather))
   assert used.status_code == 200
   assert DUMMY not in used.text and DUMMY.encode() not in used.content
@@ -299,7 +367,7 @@ def test_a_compressed_echo_never_carries_the_key_to_the_app(client, auth, db, va
 def test_an_encoding_the_vault_cannot_read_is_refused(client, auth, db, vault):
   weather = _app(db, "weather")
   vault.put_key("echoed", {"value": DUMMY, "inject": ASK["inject"],
-                           "grants": {"apps": [weather.id], "agents": False, "sites": [SITE]}})
+                           "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   refused = client.get("/api/keys/use/echoed/api.example.com/v1/brotli", headers=_app_auth(db, weather))
   assert refused.status_code == 502 and refused.headers["X-Vault-Denied"] == "1"
   assert DUMMY not in refused.text
@@ -331,8 +399,8 @@ def test_saved_app_secrets_move_into_the_vault_once(client, auth, db, vault):
     f"{second.id}/bot.token": "bot-token",
   }
   keys = {k["name"]: k for k in vault.list_keys()}
-  assert keys["api_key"]["grants"]["apps"] == [first.id]
-  assert keys[f"app{second.id}-api_key"]["grants"]["apps"] == [second.id]
+  assert _ids(keys["api_key"]["grants"]) == [first.id]
+  assert _ids(keys[f"app{second.id}-api_key"]["grants"]) == [second.id]
   assert vault.reveal(f"app{second.id}-api_key", ("owner", "")) == "second-secret"
   # Each provider key starts allowed on its provider's site only; others on none.
   assert keys["api_key"]["grants"]["sites"] == [PROVIDER_SITE]
@@ -419,23 +487,23 @@ def test_the_deprecated_secret_routes_use_the_vault(client, auth, db, vault):
   assert client.get(path, headers=app_auth).status_code == 403
   assert client.get(path, headers=_agent_auth(db)).text == "saved-by-app"
   [record] = vault.list_keys()
-  assert record["name"] == "provider-key" and record["grants"]["apps"] == [weather.id]
+  assert record["name"] == "provider-key" and _ids(record["grants"]) == [weather.id]
   assert record["grants"]["sites"] == []   # borrowing waits for the owner's sites
   # Another app cannot touch it.
   other = _app(db, "other")
   assert client.head(path, headers=_app_auth(db, other)).status_code == 403
   # Deleting a shared key only withdraws this app's grant.
   vault.put_key("provider-key", {"inject": record["inject"],
-                                 "grants": {**record["grants"], "apps": [weather.id, other.id]}})
+                                 "grants": {**record["grants"], "apps": [{"id": weather.id, "sites": []}, {"id": other.id, "sites": []}]}})
   assert client.delete(path, headers=app_auth).status_code == 204
-  assert [k["grants"]["apps"] for k in vault.list_keys()] == [[other.id]]
+  assert [_ids(k["grants"]) for k in vault.list_keys()] == [[other.id]]
   assert client.head(path, headers=app_auth).status_code == 404
 
 
 def test_borrowing_a_key_never_lets_an_app_replace_it(client, auth, db, vault):
   weather = _app(db, "weather")
   owner_record = {"value": DUMMY, "inject": ASK["inject"],
-                  "grants": {"apps": [weather.id], "agents": False, "sites": [SITE]}}
+                  "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}}
   vault.put_key("provider-key", owner_record)                    # the owner's key, lent to the app
   vault.put_key(f"app{weather.id}-provider-key", {**owner_record, "grants": {"apps": [], "sites": []}})
   path = f"/api/apps/{weather.id}/secrets/provider-key"
@@ -493,7 +561,7 @@ def test_simultaneous_saves_leave_one_key_per_app_secret(client, auth, db, vault
 def test_a_borrowed_key_reaches_only_a_model_provider_on_its_sites(client, auth, db, vault):
   app = _app(db, "router")
   vault.put_key("shared-provider", {"value": DUMMY, "inject": ASK["inject"], "grants": {
-    "apps": [app.id], "agents": False, "sites": [SITE],
+    "apps": [{"id": app.id, "sites": [SITE]}], "agents": False, "sites": [SITE],
   }})
   reveal = key_vault.reveal_model_provider_key
   assert reveal(app.id, "shared-provider", "https://api.example.com/v1") == DUMMY
@@ -531,11 +599,11 @@ def test_narrowing_an_apps_own_provider_key_stops_its_provider(client, auth, db,
   reveal = key_vault.reveal_model_provider_key
   assert reveal(app.id, "api_key", provider) == DUMMY
   assert reveal(app.id, "api_key", "https://elsewhere.example.com/v1") is None
+  # The provider runs for the app, so it follows the app's own sites.
+  safe = [{"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]}]
   narrowed = client.put(f"/api/keys/{record['name']}", headers=auth, json={
     "inject": record["inject"], "revision": record["revision"],
-    "grants": {**record["grants"], "sites": [
-      {"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]},
-    ]},
+    "grants": {**record["grants"], "apps": [{"id": app.id, "sites": safe}]},
   })
   assert narrowed.status_code == 200, narrowed.text
   assert key_vault.model_provider_key_sync(app.id, "api_key", provider) is None
@@ -577,32 +645,32 @@ def test_wiping_an_apps_data_erases_its_own_secrets_but_not_borrowed_keys(client
                     json={"value": "apps-own"}).status_code == 204
   _legacy_secret(app.id, "old_token", "legacy-value")
   vault.put_key("lent", {"value": DUMMY, "inject": ASK["inject"],
-                         "grants": {"apps": [app.id], "agents": False, "sites": [SITE]}})
+                         "grants": {"apps": [{"id": app.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   assert client.delete(f"/api/apps/{app.id}/data", headers=auth).status_code == 204
   keys = {k["name"]: k for k in vault.list_keys()}
   assert "token" not in keys
-  assert keys["lent"]["grants"]["apps"] == [app.id]
+  assert _ids(keys["lent"]["grants"]) == [app.id]
   assert not (Path(get_settings().data_dir) / "app-secrets" / str(app.id)).exists()
 
 
 def test_adding_a_key_never_replaces_one_with_the_same_name(client, auth, db, vault):
   app = _app(db, "holder")
   vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
-                           "grants": {"apps": [app.id], "agents": False, "sites": [SITE]}})
+                           "grants": {"apps": [{"id": app.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   added = client.put("/api/keys/shared", headers=auth, json={
     "value": "other", "inject": ASK["inject"],
     "grants": {"apps": [], "agents": True, "sites": []}, "create_only": True,
   })
   assert added.status_code == 409
   [kept] = vault.list_keys()
-  assert vault.reveal("shared", ("owner", "")) == DUMMY and kept["grants"]["apps"] == [app.id]
+  assert vault.reveal("shared", ("owner", "")) == DUMMY and _ids(kept["grants"]) == [app.id]
 
 
 def test_a_settings_save_from_a_stale_page_is_refused(client, auth, db, vault):
   import asyncio
   app = _app(db, "purged")
   vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
-                           "grants": {"apps": [app.id], "agents": False, "sites": [SITE]}})
+                           "grants": {"apps": [{"id": app.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
   [page] = client.get("/api/keys", headers=auth).json()["keys"]
   asyncio.run(key_vault.forget_app(app.id))
   saved = client.put("/api/keys/shared", headers=auth, json={
@@ -644,7 +712,7 @@ def test_a_grant_chosen_on_a_stale_page_never_reaches_an_app_reusing_the_id(clie
   _purge(db, chosen)
   newcomer = _app(db, "newcomer", app_id)
   saved = client.put("/api/keys/shared", headers=auth, json={
-    "inject": page["inject"], "grants": {**page["grants"], "apps": [app_id]},
+    "inject": page["inject"], "grants": {**page["grants"], "apps": [{"id": app_id, "sites": [SITE]}]},
     "revision": page["revision"], "installations": {str(app_id): offered[app_id]},
   })
   assert saved.status_code == 409
@@ -658,7 +726,7 @@ def test_a_new_grant_names_the_installation_the_owner_chose(client, auth, db, va
                            "grants": {"apps": [], "agents": False, "sites": [SITE]}})
   weather = _app(db, "weather")
   [page] = client.get("/api/keys", headers=auth).json()["keys"]
-  grant = {"inject": page["inject"], "grants": {**page["grants"], "apps": [weather.id]}}
+  grant = {"inject": page["inject"], "grants": {**page["grants"], "apps": [{"id": weather.id, "sites": [SITE]}]}}
   assert client.put("/api/keys/shared", headers=auth, json=grant).status_code == 409
   [listed] = [a for a in client.get("/api/apps/", headers=auth).json() if a["id"] == weather.id]
   saved = client.put("/api/keys/shared", headers=auth, json={
@@ -673,7 +741,7 @@ def test_a_new_grant_names_the_installation_the_owner_chose(client, auth, db, va
     "inject": page["inject"], "grants": {**page["grants"], "agents": True},
     "revision": page["revision"],
   })
-  assert kept.status_code == 200 and vault.list_keys()[0]["grants"]["apps"] == [weather.id]
+  assert kept.status_code == 200 and _ids(vault.list_keys()[0]["grants"]) == [weather.id]
 
 
 def test_a_grant_waiting_on_app_removal_is_refused(client, auth, db, vault):
@@ -691,7 +759,7 @@ def test_a_grant_waiting_on_app_removal_is_refused(client, auth, db, vault):
   app_id, installation = app.id, app_storage_generation(app.token_nonce)
   [page] = vault.list_keys()
   principal = Principal(owner=db.query(models.Owner).first(), app_id=None)
-  body = {"inject": page["inject"], "grants": {**page["grants"], "apps": [app_id]},
+  body = {"inject": page["inject"], "grants": {**page["grants"], "apps": [{"id": app_id, "sites": [SITE]}]},
           "revision": page["revision"], "installations": {str(app_id): installation}}
 
   async def scenario():
@@ -822,7 +890,7 @@ def test_a_borrow_whose_body_outlives_the_app_never_uses_the_newcomers_grant(cli
     db.commit()
     _app(db, "newcomer", app_id)
     vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
-                             "grants": {"apps": [app_id], "agents": False, "sites": [SITE]}})
+                             "grants": {"apps": [{"id": app_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
     return {"type": "http.request", "body": b"{}", "more_body": False}
 
   request = Request({
@@ -884,7 +952,7 @@ def test_an_app_is_never_purged_while_a_borrow_it_started_is_on_its_way_to_the_v
       db.commit()
       _app(db, "newcomer", app_id)
       vault.put_key("shared", {"inject": ASK["inject"],
-                               "grants": {"apps": [app_id], "agents": False, "sites": [SITE]}})
+                               "grants": {"apps": [{"id": app_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
 
   async def scenario():
     borrow = asyncio.create_task(
@@ -955,7 +1023,7 @@ def test_a_cancelled_borrow_keeps_the_app_until_the_vault_has_answered(
       db.commit()
       _app(db, "newcomer", app_id)
       vault.put_key("shared", {"inject": ASK["inject"],
-                               "grants": {"apps": [app_id], "agents": False, "sites": [SITE]}})
+                               "grants": {"apps": [{"id": app_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
 
   async def scenario():
     borrow = asyncio.create_task(keys_routes.use_key(
@@ -1027,27 +1095,28 @@ def test_a_borrow_the_vault_may_still_act_on_keeps_the_app_unpurged(
   assert allowed is purge_allowed
 
 
-def test_approving_an_app_never_sends_a_shared_key_to_new_sites(client, auth, db, vault):
-  """K lets A use api.example.com; B asks for K on another site with POST and
-  DELETE. Allow lets B use K where it already works and nowhere else, and
-  A gains nothing."""
+def test_approving_one_apps_sites_never_widens_another_app_or_the_agents(client, auth, db, vault):
+  """K lets A use api.example.com; B asks for K on another site. Allow gives
+  B exactly the sites the owner's answer carries, and A and the agents gain
+  nothing."""
   first, second = _app(db, "first"), _app(db, "second")
   vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
-                           "grants": {"apps": [first.id], "agents": False, "sites": [SITE]}})
-  elsewhere = {"host": "evil.example.net", "methods": ["POST", "DELETE"], "paths": ["/*"]}
+                           "grants": {"apps": [{"id": first.id, "sites": [SITE]}], "agents": True, "sites": [SITE]}})
+  elsewhere = {"host": "other.example.net", "methods": ["POST"], "paths": ["/*"]}
   asked = client.post("/api/keys/requests", headers=_app_auth(db, second),
                       json={**ASK, "key": "shared", "sites": [elsewhere]})
   assert asked.json()["status"] == "pending"
   [card] = client.get("/api/keys", headers=auth).json()["requests"]
-  # Settings sends only the ticket when the key exists.
   approved = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
-                         json={"ticket": card.get("ticket")})
+                         json={"ticket": card["ticket"], "sites": card["sites"]})
   assert approved.status_code == 200, approved.text
-  for app in (first, second):
-    sent = client.post("/api/keys/use/shared/evil.example.net/collect", headers=_app_auth(db, app))
-    assert sent.status_code == 403 and sent.headers["X-Vault-Denied"] == "1"
+  sent = client.post("/api/keys/use/shared/other.example.net/collect", headers=_app_auth(db, first))
+  assert sent.status_code == 403 and sent.headers["X-Vault-Denied"] == "1"
+  assert client.post("/api/keys/use/shared/other.example.net/collect", headers=_agent_auth(db)).status_code == 403
   assert client.get("/api/keys/use/shared/api.example.com/v1/x",
-                    headers=_app_auth(db, second)).status_code == 200
+                    headers=_app_auth(db, second)).status_code == 403
   assert vault.list_keys()[0]["grants"]["sites"] == [kv.validate_site(SITE)]
-  outside = [{"host": "evil.example.net", "methods": ["DELETE", "POST"], "paths": ["/*"]}]
-  assert card.get("outside_sites") == outside and approved.json()["outside"] == outside
+
+def _ids(grants):
+  """The app ids a key is granted to (each grant also carries its own sites)."""
+  return [grant["id"] for grant in grants["apps"]]

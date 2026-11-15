@@ -44,7 +44,10 @@ def _call(method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
   connection = _UnixConnection(VAULT_SOCKET)
   try:
     payload = json.dumps(body).encode() if body is not None else None
-    headers = {"Content-Type": "application/json"} if payload else {}
+    # The value came from the owner's own sealed card, so the change is theirs.
+    headers = {"X-Vault-Caller": "owner"}
+    if payload:
+      headers["Content-Type"] = "application/json"
     connection.request(method, path, body=payload, headers=headers)
     response = connection.getresponse()
     return response.status, json.loads(response.read() or b"{}")

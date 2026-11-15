@@ -37,8 +37,14 @@ WEATHER = 7
 ECHO_SITE = {"host": "echo.example.com", "methods": ["GET", "POST"], "paths": ["/anything/*"]}
 
 
+def _apps(*ids, sites=None):
+  return [{"id": app_id, "sites": [ECHO_SITE] if sites is None else sites} for app_id in ids]
+
+
 def _grants(**overrides):
-  return {"apps": [WEATHER], "agents": True, "sites": [ECHO_SITE], **overrides}
+  if "apps" in overrides and all(isinstance(a, int) for a in overrides["apps"]):
+    overrides["apps"] = _apps(*overrides["apps"])
+  return {"apps": _apps(WEATHER), "agents": True, "sites": [ECHO_SITE], **overrides}
 
 
 @pytest.fixture
@@ -49,7 +55,7 @@ def vault(tmp_path):
 
 
 def test_value_is_encrypted_at_rest_and_reloads(tmp_path, vault):
-  for path in (vault.store_path, vault.usage_path):
+  for path in (vault.store_path, vault.audit_path, vault.stats_path):
     assert DUMMY.encode() not in path.read_bytes()
   assert stat.S_IMODE(vault.dir.stat().st_mode) == 0o700
   assert stat.S_IMODE(vault.store_path.stat().st_mode) == 0o600
@@ -113,7 +119,7 @@ def test_owner_and_agents_may_reveal_but_apps_never(vault):
     vault.reveal("echo", ("app", str(WEATHER)))
   outcomes = [(e["caller"], e["outcome"]) for e in vault.usage(key="echo")[:3]]
   assert outcomes == [("app:7", "denied"), ("owner", "revealed"), ("agent:chat-1", "revealed")]
-  assert DUMMY not in vault.usage_path.read_text()
+  assert DUMMY not in vault.audit_path.read_text()
 
 
 # -- the handshake: an app asks once, the owner answers ------------------------
@@ -141,7 +147,9 @@ def test_approving_a_new_key_creates_it_and_grants_only_that_app(vault):
   ticket = _ticket(vault, request["id"])
   with pytest.raises(kv.VaultError, match="needs a value"):
     vault.approve_request(request["id"], {"ticket": ticket})
-  vault.approve_request(request["id"], {"value": DUMMY, "ticket": ticket})
+  # What the Settings card sends: the value plus the slot and sites it showed.
+  vault.approve_request(request["id"], {"value": DUMMY, "ticket": ticket,
+                                        "inject": ASK["inject"], "sites": ASK["sites"]})
   assert vault.list_requests() == []
   assert vault.request_access(9, ASK)["status"] == "granted"
   inject, value = vault.authorize("maps", ("app", "9"), "GET", "maps.example.com", "/v1/route")
@@ -150,83 +158,142 @@ def test_approving_a_new_key_creates_it_and_grants_only_that_app(vault):
     vault.authorize("maps", ("app", "10"), "GET", "maps.example.com", "/v1/route")
 
 
-def test_approving_an_existing_key_adds_only_the_app(vault):
-  """The key's sites are every grantee's: approving one app never widens them."""
-  asked = {**ASK, "key": "echo", "sites": [
-    {"host": "echo.example.com", "methods": ["GET", "DELETE"], "paths": ["/anything/x*", "/other"]},
-    ASK["sites"][0],
-  ]}
-  request = vault.request_access(9, asked)
-  [card] = vault.list_requests()
-  outside = [
-    {"host": "echo.example.com", "methods": ["DELETE"], "paths": ["/anything/x*", "/other"]},
-    {"host": "echo.example.com", "methods": ["GET"], "paths": ["/other"]},
-    {"host": "maps.example.com", "methods": ["GET"], "paths": ["/v1/*"]},
-  ]
-  assert card["outside_sites"] == outside
+def test_approval_applies_only_what_the_owners_answer_carries(vault):
+  # The app proposed a query slot and its own sites; the answer repeats neither.
+  request = vault.request_access(9, ASK)
+  vault.approve_request(request["id"], {"value": DUMMY, "ticket": _ticket(vault, request["id"])})
+  [record] = [k for k in vault.list_keys() if k["name"] == "maps"]
+  assert record["inject"] == kv.DEFAULT_INJECT
+  assert record["grants"]["apps"] == [{"id": 9, "sites": []}] and record["grants"]["sites"] == []
+  with pytest.raises(kv.VaultError, match="not an allowed site"):
+    vault.authorize("maps", ("app", "9"), "GET", "maps.example.com", "/v1/route")
+
+
+@pytest.mark.parametrize("header", ["User-Agent", "referer", "Origin", "Content-Type", "X-Forwarded-For"])
+def test_a_key_is_never_sent_in_a_header_sites_log_as_metadata(header):
+  with pytest.raises(kv.VaultError, match="can't carry a key"):
+    kv.validate_inject({"type": "header", "name": header})
+
+
+def test_approving_sites_for_one_app_never_widens_another_app_or_agents(vault):
+  request = vault.request_access(9, {**ASK, "key": "echo"})
   ticket = _ticket(vault, request["id"])
-  for change in ({"sites": asked["sites"]}, {"value": "other"}, {"inject": ASK["inject"]}):
+  for change in ({"value": "other"}, {"inject": ASK["inject"]}):
     with pytest.raises(kv.VaultError, match="already exists"):
       vault.approve_request(request["id"], {**change, "ticket": ticket})
-  assert vault.approve_request(request["id"], {"ticket": ticket})["outside"] == outside
+  vault.approve_request(request["id"], {"sites": ASK["sites"], "ticket": ticket})
   [record] = [k for k in vault.list_keys() if k["name"] == "echo"]
-  assert record["grants"] == _grants(apps=[WEATHER, 9])
+  assert record["grants"]["apps"] == [*_apps(WEATHER), {"id": 9, "sites": ASK["sites"]}]
+  assert record["grants"]["sites"] == [ECHO_SITE]
   assert record["inject"] == HEADER_SLOT  # the app cannot change how the key is sent
-  assert vault.reveal("echo", ("owner", "")) == DUMMY
-  vault.authorize("echo", ("app", "9"), "GET", "echo.example.com", "/anything/x")
+  vault.authorize("echo", ("app", "9"), "GET", "maps.example.com", "/v1/route")
+  for caller in (("app", str(WEATHER)), ("agent", "c1"), ("owner", "")):
+    with pytest.raises(kv.VaultError, match="not an allowed site"):
+      vault.authorize("echo", caller, "GET", "maps.example.com", "/v1/route")
   with pytest.raises(kv.VaultError, match="not an allowed site"):
-    vault.authorize("echo", ("app", "9"), "GET", "maps.example.com", "/v1/route")
+    vault.authorize("echo", ("app", "9"), "GET", "echo.example.com", "/anything/x")
 
 
-@pytest.mark.parametrize("host", [
-  "*.supabase.co", "*.workers.dev", "*.vercel.app", "*.execute-api.us-east-1.amazonaws.com",
-])
-def test_an_app_cannot_ask_for_every_subdomain_where_a_stranger_could_own_one(vault, host):
-  """On a shared domain anyone can stand up a subdomain that logs the key it
-  receives, so an approved wildcard request would send the owner's value to
-  the app author's own host."""
-  asked = {**ASK, "key": "SUPABASE_SERVICE_KEY",
-           "sites": [ASK["sites"][0], {"host": host, "methods": ["POST"], "paths": ["/rest/v1/*"]}]}
-  with pytest.raises(kv.VaultError, match="exact sites") as refused:
-    vault.request_access(7, asked)
-  assert refused.value.status == 400
-  assert vault.list_requests() == []
-  # The owner can still choose a wildcard for a key on its own page.
-  vault.put_key("SUPABASE_SERVICE_KEY", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants(
-    apps=[], sites=[{"host": host, "methods": ["POST"], "paths": ["/rest/v1/*"]}],
-  )})
+def test_a_version_one_store_keeps_each_apps_reach_when_migrated(tmp_path):
+  folder = tmp_path / "old"
+  v = kv.Vault(folder)
+  v.put_key("echo", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  payload = json.loads(v.store_path.read_text())
+  payload["keys"]["echo"]["grants"]["apps"] = [WEATHER]  # how version 1 stored a grant
+  payload["version"] = 1
+  v.store_path.write_text(json.dumps(payload))
+  migrated = kv.Vault(folder)
+  assert json.loads(migrated.store_path.read_text())["version"] == kv.STORE_VERSION
+  [listed] = migrated.list_keys()
+  assert listed["grants"]["apps"] == [{"id": WEATHER, "sites": [ECHO_SITE]}]
+  assert migrated.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")[1] == DUMMY
 
 
-def test_a_narrower_path_is_within_a_wider_one_only_when_every_match_is():
-  within = kv._pattern_within
-  assert within("/v1/*", "/v1/*") and within("/v1/a*", "/v1/*") and within("/v1/x", "/*")
-  assert not within("/v1/*", "/v1/a*") and not within("/v2/x", "/v1/*")
-  assert not within("/v1/*", "/v1/?")   # a ? matches one character, not any text
+def test_a_granted_app_can_ask_for_more_sites_for_itself_only(vault):
+  extra = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
+  ask = {"key": "echo", "reason": "Map tiles", "sites": [ECHO_SITE, extra]}
+  answer = vault.request_access(WEATHER, ask)
+  assert answer["status"] == "granted" and answer["sites_request"] == "pending" and answer["created"] is True
+  assert answer["sites_not_allowed"] == [extra]
+  again = vault.request_access(WEATHER, ask)
+  assert again["sites_request"] == "pending" and "created" not in again
+  # Meanwhile the app keeps the sites it already had.
+  vault.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
+  [request] = vault.list_requests()
+  assert request["granted"] is True and request["sites"] == [extra]
+  vault.approve_request(request["id"], {"sites": [extra], "ticket": request["ticket"]})
+  vault.authorize("echo", ("app", str(WEATHER)), "GET", "tiles.example.com", "/a.png")
+  with pytest.raises(kv.VaultError, match="not an allowed site"):
+    vault.authorize("echo", ("agent", "c1"), "GET", "tiles.example.com", "/a.png")
+  assert vault.request_access(WEATHER, ask) == {"status": "granted", "key": "echo"}
 
 
-def test_an_approval_answers_only_the_request_it_was_shown(vault):
-  shown = vault.request_access(9, ASK)
-  ticket = _ticket(vault, shown["id"])
-  vault.forget_app(9)                       # purged; the id goes to another app
-  again = vault.request_access(9, ASK)
-  assert again["id"] == shown["id"]
-  for body in ({"value": DUMMY, "ticket": ticket}, {"value": DUMMY}):
-    with pytest.raises(kv.VaultError, match="changed since it was shown"):
-      vault.approve_request(shown["id"], body)
-  assert vault.request_access(9, ASK)["status"] == "pending"
+def test_one_app_cannot_crowd_out_other_apps_requests(vault):
+  for index in range(kv.MAX_REQUESTS_PER_APP):
+    vault.request_access(9, {**ASK, "key": f"k{index}"})
+  with pytest.raises(kv.VaultError, match="This app has too many"):
+    vault.request_access(9, {**ASK, "key": "one-more"})
+  assert vault.request_access(10, ASK)["status"] == "pending"
 
 
-def test_denied_requests_stay_denied_without_new_requests(vault):
-  request = vault.request_access(9, ASK)
-  vault.deny_request(request["id"])
-  assert vault.request_access(9, ASK) == {"status": "denied", "key": "maps", "id": request["id"]}
-  assert vault.forget_request(request["id"]) is True
-  assert vault.request_access(9, ASK)["created"] is True
+def test_an_app_learns_nothing_about_key_names_it_was_not_given(vault):
+  refusals = []
+  for name in ("echo", "no-such-key"):
+    with pytest.raises(kv.VaultError) as caught:
+      vault.authorize(name, ("app", "99"), "GET", "echo.example.com", "/anything/x")
+    refusals.append((caught.value.status, caught.value.reason))
+  assert refusals[0] == refusals[1] == (403, "app:99 may not use this key")
 
 
-def test_a_grant_from_the_key_editor_settles_the_request(vault):
+def test_the_agents_switch_keeps_agents_from_reading_as_well_as_using(vault):
+  vault.put_key("echo", {"inject": HEADER_SLOT, "grants": _grants(agents=False)})
+  with pytest.raises(kv.VaultError, match="Agents are switched off"):
+    vault.reveal("echo", ("agent", "chat-1"))
+  with pytest.raises(kv.VaultError, match="may not use"):
+    vault.authorize("echo", ("agent", "chat-1"), "GET", "echo.example.com", "/anything/x")
+  assert vault.reveal("echo", ("owner", "")) == DUMMY
+  assert vault.reveal("echo", ("platform", "app-7")) == DUMMY
+
+
+def test_refused_traffic_cannot_push_reads_and_changes_out_of_the_log(vault, monkeypatch):
+  monkeypatch.setattr(kv, "USAGE_ROTATE_BYTES", 4096)
+  vault.reveal("echo", ("agent", "chat-1"))
+  for _ in range(200):
+    vault.log_traffic("x" * 5000, "app:9", "GET", "h" * 5000 + ".example.com", "/p" * 5000, "denied")
+  outcomes = [e["outcome"] for e in vault.usage(key="echo", limit=500)]
+  assert "revealed" in outcomes and "added" in outcomes
+  assert max(len(line) for line in vault.usage_path.read_text().splitlines()) < 1200
+
+
+def test_use_counts_survive_log_rotation_and_restart(tmp_path, vault, monkeypatch):
+  monkeypatch.setattr(kv, "USAGE_ROTATE_BYTES", 2048)
+  vault.put_key("quiet", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  vault.log_traffic("quiet", "agent:c1", "GET", "echo.example.com", "/anything/x", "used", status=200)
+  for _ in range(100):
+    vault.log_traffic("echo", "app:7", "GET", "echo.example.com", "/anything/x", "used", status=200)
+  vault.log_traffic("no-such-key", "app:9", "GET", "echo.example.com", "/x", "denied")
+  reloaded = {k["name"]: k for k in kv.Vault(tmp_path / "vault").list_keys()}
+  assert reloaded["quiet"]["uses"] == 1 and reloaded["quiet"]["last_used"] is not None
+  assert reloaded["echo"]["uses"] == 100
+  assert "no-such-key" not in json.loads((tmp_path / "vault" / "stats.json").read_text())["keys"]
+  vault.revoke_key("quiet")
+  assert "quiet" not in json.loads((tmp_path / "vault" / "stats.json").read_text())["keys"]
+
+
+def test_a_store_from_before_counters_counts_its_remaining_log_once(tmp_path, vault):
+  vault.log_traffic("echo", "app:7", "GET", "echo.example.com", "/anything/x", "used", status=200)
+  (tmp_path / "vault" / "stats.json").unlink()
+  [record] = kv.Vault(tmp_path / "vault").list_keys()
+  assert record["uses"] == 1
+
+
+def test_a_grant_from_the_key_editor_settles_the_request_once_its_sites_are_given(vault):
   vault.request_access(9, {**ASK, "key": "echo"})
-  vault.put_key("echo", {"inject": HEADER_SLOT, "grants": _grants(apps=[WEATHER, 9])})
+  vault.put_key("echo", {"inject": HEADER_SLOT, "grants": _grants(apps=[*_apps(WEATHER), {"id": 9, "sites": []}])})
+  # Granted, but not on the sites it asked for: the ask stays, as one for more sites.
+  [left] = vault.list_requests()
+  assert left["granted"] is True
+  vault.put_key("echo", {"inject": HEADER_SLOT, "grants": _grants(apps=[*_apps(WEATHER), {"id": 9, "sites": ASK["sites"]}])})
   assert vault.list_requests() == []
 
 
@@ -249,10 +316,10 @@ def test_ambiguous_paths_are_refused_before_rule_matching(path):
 
 
 def test_wildcard_site_matches_subdomains_only():
-  grants = {"sites": [{"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]}]}
-  assert kv.site_allows(grants, "api.example.com", "GET", "/x") is None
-  assert kv.site_allows(grants, "example.com", "GET", "/x")
-  assert kv.site_allows(grants, "evilexample.com", "GET", "/x")
+  sites = [{"host": "*.example.com", "methods": ["GET"], "paths": ["/*"]}]
+  assert kv.site_allows(sites, "api.example.com", "GET", "/x") is None
+  assert kv.site_allows(sites, "example.com", "GET", "/x")
+  assert kv.site_allows(sites, "evilexample.com", "GET", "/x")
 
 
 def test_header_slot_replaces_any_caller_supplied_copy():
@@ -489,13 +556,18 @@ def test_redirects_are_returned_not_followed(client):
 
 
 def test_owner_operations_and_handshake_over_the_socket(client):
-  added = client.put("/keys/second", json={
-    "value": "another-dummy-key", "inject": {"type": "query", "name": "key"},
+  owner = {"X-Vault-Caller": "owner"}
+  # Every change names who made it, and apps never change keys.
+  assert client.put("/keys/second", json={"value": "another-dummy-key", "inject": HEADER_SLOT}).status_code == 403
+  assert client.put("/keys/second", headers={"X-Vault-Caller": "app:7"},
+                    json={"value": "another-dummy-key", "inject": HEADER_SLOT}).status_code == 403
+  added = client.put("/keys/second", headers=owner, json={
+    "value": "another-dummy-key", "inject": {"type": "query", "name": "key"}, "grants": {"agents": True},
   })
   assert added.json() == {"name": "second", "created": True}
   listed = client.get("/keys").text
   assert "second" in listed and DUMMY not in listed and "another-dummy-key" not in listed
-  assert client.put("/keys/x", json={"inject": HEADER_SLOT}).status_code == 400
+  assert client.put("/keys/x", headers=owner, json={"inject": HEADER_SLOT}).status_code == 400
   revealed = client.get("/keys/second/value", headers={"X-Vault-Caller": "agent:c1"})
   assert revealed.json() == {"name": "second", "value": "another-dummy-key"}
   assert client.get("/keys/second/value", headers={"X-Vault-Caller": "app:7"}).status_code == 403
@@ -506,11 +578,14 @@ def test_owner_operations_and_handshake_over_the_socket(client):
   assert asked["status"] == "pending"
   assert [r["id"] for r in client.get("/requests").json()["requests"]] == [asked["id"]]
   [listed] = client.get("/requests").json()["requests"]
-  approved = client.post(f"/requests/{asked['id']}/approve",
+  approved = client.post(f"/requests/{asked['id']}/approve", headers={"X-Vault-Caller": "agent:c1"},
                          json={"value": "maps-dummy-key", "ticket": listed["ticket"]})
   assert approved.json()["granted"] == 9
-  assert client.delete("/keys/second").status_code == 200
-  assert client.delete("/keys/second").status_code == 404
+  assert [(e["caller"], e["outcome"]) for e in client.get("/usage?key=maps").json()["usage"][:2]] == [
+    ("agent:c1", "granted app:9"), ("agent:c1", "added"),
+  ]
+  assert client.delete("/keys/second", headers=owner).status_code == 200
+  assert client.delete("/keys/second", headers=owner).status_code == 404
 
 
 def test_non_public_destination_is_logged_as_a_refusal(vault):
@@ -529,24 +604,57 @@ def test_a_purged_app_loses_every_grant_and_request(vault):
   vault.request_access(9, ASK)
   assert vault.forget_app(WEATHER) == {"keys": ["echo"], "deleted": [], "requests": 1}
   [record] = vault.list_keys()
-  assert record["grants"]["apps"] == []
+  assert _ids(record["grants"]) == []
   assert [r["app"] for r in vault.list_requests()] == [9]
   with pytest.raises(kv.VaultError, match="may not use"):
     vault.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
 
 
+def _inflate(headers, payload, piece=7):
+  inflater = kv.Inflater(headers)
+  out = b"".join(inflater.feed(payload[i:i + piece]) for i in range(0, len(payload), piece))
+  return inflater.headers, out + inflater.finish()
+
+
 def test_decoding_is_bounded_and_strips_the_encoding(monkeypatch):
   import gzip as _gzip
-  headers, body = kv.decoded_body([("Content-Encoding", "gzip"), ("X-A", "1")], _gzip.compress(b"hello"))
+  import zlib as _zlib
+  headers, body = _inflate([("Content-Encoding", "gzip"), ("X-A", "1")], _gzip.compress(b"hello"))
   assert body == b"hello" and headers == [("X-A", "1")]
-  assert kv.decoded_body([("Content-Encoding", "identity")], b"x") == ([], b"x")
+  raw = _zlib.compressobj(wbits=-15)
+  assert _inflate([("Content-Encoding", "deflate")], raw.compress(b"raw deflate") + raw.flush())[1] == b"raw deflate"
+  assert _inflate([("Content-Encoding", "identity")], b"x") == ([], b"x")
   monkeypatch.setattr(kv, "MAX_RESPONSE_BYTES", 1000)
   with pytest.raises(kv.VaultError, match="too large"):
-    kv.decoded_body([("Content-Encoding", "gzip")], _gzip.compress(b"a" * 5000))
+    _inflate([("Content-Encoding", "gzip")], _gzip.compress(b"a" * 5000))
+  with pytest.raises(kv.VaultError, match="too large"):
+    _inflate([], b"a" * 1001)
   with pytest.raises(kv.VaultError, match="unsupported"):
-    kv.decoded_body([("Content-Encoding", "gzip, br")], b"")
+    kv.Inflater([("Content-Encoding", "gzip, br")])
   with pytest.raises(kv.VaultError, match="could not be decompressed"):
-    kv.decoded_body([("Content-Encoding", "gzip")], b"not gzip")
+    _inflate([("Content-Encoding", "gzip")], b"not gzip at all")
+
+
+@pytest.mark.parametrize("piece", [1, 2, 5, 13, 1000])
+def test_an_echo_split_across_pieces_is_still_redacted(piece):
+  forms = kv.secret_forms(DUMMY)
+  body = b'{"a":"' + DUMMY.encode() + b'","b":"' + forms[0] + b'","tail":"ok"}'
+  redactor = kv.StreamRedactor(forms)
+  out = b"".join(redactor.feed(body[i:i + piece]) for i in range(0, len(body), piece)) + redactor.finish()
+  assert out == kv.redact(body, forms)
+  assert DUMMY.encode() not in out
+
+
+@pytest.mark.parametrize("echo", [
+  "fake\\/Key+with\\/slash0123==",                       # JSON with escaped slashes
+  "fake%2fKey%2bwith%2fslash0123%3d%3d",                   # lowercase percent-encoding
+  "fake&#x2F;Key&#x2B;with&#x2F;slash0123&#x3D;&#x3D;",    # HTML hex entities
+  "fake&#47;Key&#43;with&#47;slash0123&#61;&#61;",         # HTML decimal entities
+  "fake\\u002fKey\\u002bwith\\u002fslash0123\\u003d\\u003d",  # JSON unicode escapes
+])
+def test_redaction_covers_how_sites_escape_an_echoed_key(echo):
+  forms = kv.secret_forms("fake/Key+with/slash0123==")
+  assert kv.redact(b'{"echo":"' + echo.encode() + b'"}', forms) == b'{"echo":"' + kv.REDACTED + b'"}'
 
 
 def test_create_only_refuses_an_occupied_name_and_an_update_never_moves_origin(vault):
@@ -554,7 +662,7 @@ def test_create_only_refuses_an_occupied_name_and_an_update_never_moves_origin(v
     vault.put_key("echo", {"value": "other", "inject": HEADER_SLOT, "create_only": True})
   assert vault.reveal("echo", ("owner", "")) == DUMMY
   # An app's own key is granted to it, as save_owned creates it.
-  own = {"apps": [7], "agents": True, "sites": []}
+  own = {"apps": [{"id": 7, "sites": []}], "agents": True, "sites": []}
   vault.put_key("mine", {"value": DUMMY, "inject": HEADER_SLOT, "grants": own, "create_only": True,
                          "origin": {"app": 7, "name": "api.key"}})
   # Changing how the key is sent keeps it the app's own.
@@ -575,7 +683,7 @@ def test_an_owner_value_ends_the_apps_ownership_of_the_key(vault):
   vault.put_key("OPENAI_API_KEY", {"value": "owners-real-key", "inject": record["inject"],
                                    "grants": record["grants"]})
   [record] = [k for k in vault.list_keys() if k["name"] == "OPENAI_API_KEY"]
-  assert record["origin"] is None and record["grants"]["apps"] == []
+  assert record["origin"] is None and _ids(record["grants"]) == []
   # The app can neither delete nor replace it; its next save is a key of its own.
   assert vault.release_owned(9, "OPENAI_API_KEY") is None
   assert vault.save_owned(9, "OPENAI_API_KEY", "app-chosen") == {
@@ -629,10 +737,10 @@ def test_releasing_an_owned_key_keeps_the_owners_current_sharing(vault):
   [record] = [k for k in vault.list_keys() if k["name"] == saved["name"]]
   # The owner shares the key and changes how it is sent after the app saved it.
   vault.put_key(saved["name"], {"inject": HEADER_SLOT,
-                                "grants": {**record["grants"], "apps": [9, 11]}})
+                                "grants": {**record["grants"], "apps": _apps(9, 11, sites=[])}})
   assert vault.release_owned(9, "api.key") == {"name": saved["name"], "deleted": False}
   [kept] = [k for k in vault.list_keys() if k["name"] == saved["name"]]
-  assert kept["grants"]["apps"] == [11] and kept["inject"] == HEADER_SLOT
+  assert _ids(kept["grants"]) == [11] and kept["inject"] == HEADER_SLOT
   assert vault.reveal(saved["name"], ("owner", "")) == DUMMY
   # It is no longer the app's own key, so a second release finds nothing.
   assert vault.release_owned(9, "api.key") is None
@@ -651,13 +759,13 @@ def test_erasing_an_apps_data_erases_only_its_own_keys(vault):
   alone = vault.save_owned(WEATHER, "token", DUMMY)["name"]
   shared = vault.save_owned(WEATHER, "shared", DUMMY)["name"]
   [record] = [k for k in vault.list_keys() if k["name"] == shared]
-  vault.put_key(shared, {"inject": HEADER_SLOT, "grants": {**record["grants"], "apps": [WEATHER, 9]}})
+  vault.put_key(shared, {"inject": HEADER_SLOT, "grants": {**record["grants"], "apps": _apps(WEATHER, 9, sites=[])}})
   assert vault.erase_owned(WEATHER) == [alone]
   keys = {k["name"]: k for k in vault.list_keys()}
   assert alone not in keys
-  assert keys[shared]["grants"]["apps"] == [9]
+  assert _ids(keys[shared]["grants"]) == [9]
   # "echo" is only lent to WEATHER: the owner's grant is not app data.
-  assert keys["echo"]["grants"]["apps"] == [WEATHER]
+  assert _ids(keys["echo"]["grants"]) == [WEATHER]
 
 
 def test_a_purge_erases_the_apps_own_keys(vault):
@@ -674,14 +782,14 @@ def test_a_purged_creator_leaves_no_ownership_for_an_app_that_reuses_its_id(vaul
   # App 5 saves its own key; the owner shares it with Weather on a site.
   name = vault.save_owned(5, "api_key", DUMMY)["name"]
   vault.put_key(name, {"inject": HEADER_SLOT,
-                       "grants": {"apps": [5, WEATHER], "agents": True, "sites": [ECHO_SITE]}})
+                       "grants": {"apps": [{"id": 5, "sites": [ECHO_SITE]}, {"id": WEATHER, "sites": [ECHO_SITE]}], "agents": True, "sites": [ECHO_SITE]}})
   assert _origin(vault, name) == {"app": 5, "name": "api_key"}
   vault.forget_app(5)
   assert _origin(vault, name) is None
   # A new app that reuses id 5 asks, and the owner approves it as usual.
   asked = vault.request_access(5, {**ASK, "key": name, "sites": [ECHO_SITE]})
   vault.approve_request(asked["id"], {"ticket": _ticket(vault, asked["id"])})
-  assert 5 in next(k for k in vault.list_keys() if k["name"] == name)["grants"]["apps"]
+  assert 5 in _ids(next(k for k in vault.list_keys() if k["name"] == name)["grants"])
   # It borrows the key; it does not own it, so saving its own secret makes a new key.
   assert _origin(vault, name) is None
   assert vault.save_owned(5, "api_key", "other-dummy-key")["name"] != name
@@ -692,12 +800,12 @@ def test_a_purged_creator_leaves_no_ownership_for_an_app_that_reuses_its_id(vaul
 def test_an_origin_lasts_only_while_its_app_holds_a_grant(vault):
   # Released while shared: the key stays for the other app, without an owner.
   shared = vault.save_owned(5, "token", DUMMY)["name"]
-  vault.put_key(shared, {"inject": HEADER_SLOT, "grants": {"apps": [5, WEATHER], "agents": True, "sites": []}})
+  vault.put_key(shared, {"inject": HEADER_SLOT, "grants": {"apps": [{"id": 5, "sites": []}, {"id": WEATHER, "sites": []}], "agents": True, "sites": []}})
   vault.release_owned(5, "token")
   assert _origin(vault, shared) is None
   # The owner removing the creating app from the grants also ends its ownership.
   kept = vault.save_owned(6, "token", DUMMY)["name"]
-  vault.put_key(kept, {"inject": HEADER_SLOT, "grants": {"apps": [WEATHER], "agents": True, "sites": []}})
+  vault.put_key(kept, {"inject": HEADER_SLOT, "grants": {"apps": [{"id": WEATHER, "sites": []}], "agents": True, "sites": []}})
   assert _origin(vault, kept) is None
 
 
@@ -794,5 +902,56 @@ def test_values_with_line_breaks_are_kept_but_never_sent_in_a_header(vault):
 
 def test_usage_counts_cover_the_whole_log(vault):
   for _ in range(600):
-    vault.log_usage("echo", "agent", "GET", "echo.example.com", "/anything/x", "used")
+    vault.log_traffic("echo", "agent", "GET", "echo.example.com", "/anything/x", "used")
   assert vault.list_keys()[0]["uses"] == 600
+
+
+def _ids(grants):
+  """The app ids a key is granted to (each grant also carries its own sites)."""
+  return [grant["id"] for grant in grants["apps"]]
+
+
+class _Slow(BaseHTTPRequestHandler):
+  protocol_version = "HTTP/1.1"
+  release = None
+
+  def log_message(self, *args):
+    pass
+
+  def do_GET(self):
+    self.send_response(200)
+    self.send_header("Content-Type", "text/event-stream")
+    self.send_header("Transfer-Encoding", "chunked")
+    self.end_headers()
+    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n"
+    self.wfile.write(b"%x\r\n%s\r\n" % (len(first), first))
+    self.wfile.flush()
+    type(self).release.wait(20)
+    last = b"data: last\n\n"
+    self.wfile.write(b"%x\r\n%s\r\n0\r\n\r\n" % (len(last), last))
+    self.wfile.flush()
+
+
+def test_answers_stream_back_as_they_arrive_with_the_key_hidden(vault):
+  _Slow.release = threading.Event()
+  upstream = ThreadingHTTPServer(("127.0.0.1", 0), _Slow)
+  threading.Thread(target=upstream.serve_forever, daemon=True).start()
+  local = lambda host, timeout: http.client.HTTPConnection(  # noqa: E731
+    "127.0.0.1", upstream.server_address[1], timeout=timeout,
+  )
+  try:
+    with _vault_socket(vault, local) as client:
+      with client.stream("GET", "/use/echo/echo.example.com/anything/events",
+                         headers={"X-Vault-Caller": "agent:c1"}) as response:
+        pieces = response.iter_bytes()
+        first = next(pieces)
+        # The first event arrived while the site is still holding the rest.
+        assert not _Slow.release.is_set()
+        assert first.startswith(b"data: first") and DUMMY.encode() not in first
+        _Slow.release.set()
+        rest = b"".join(pieces)
+      assert b"data: last" in first + rest and DUMMY.encode() not in first + rest
+  finally:
+    _Slow.release.set()
+    upstream.shutdown()
+  assert vault.usage(key="echo")[0]["outcome"] == "used"

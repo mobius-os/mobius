@@ -60,6 +60,14 @@ class VaultUnavailable(RuntimeError):
     self.may_have_reached_vault = may_have_reached_vault
 
 
+class VaultTimeout(RuntimeError):
+  """The vault took the request but its answer took too long (usually the site).
+
+  The vault may still be acting on it, like a ``VaultUnavailable`` that may
+  have reached the vault.
+  """
+
+
 class VaultRefused(RuntimeError):
   """The vault refused; ``reason`` is caller-facing."""
 
@@ -103,6 +111,10 @@ async def vault_call(
       response = await client.request(
         method, path, json=payload, headers=_caller_headers(caller),
       )
+  except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+    raise VaultUnavailable("The key vault is not running.") from exc
+  except httpx.TimeoutException as exc:
+    raise VaultTimeout("The key vault did not answer in time.") from exc
   except (httpx.TransportError, OSError) as exc:
     raise VaultUnavailable("The key vault is not running.") from exc
   return _settle(response)
@@ -124,33 +136,53 @@ def vault_call_sync(method: str, path: str, *, caller: str | None = None) -> dic
 async def vault_use(
   method: str, target: str, *, caller: str, headers: list[tuple[str, str]],
   body: bytes | None,
-) -> httpx.Response:
+) -> tuple[httpx.Response, httpx.AsyncClient]:
   """Relay one use request (``/use/<key>/<host>/<path>?<query>``) as is.
 
-  The vault answers refusals itself (``X-Vault-Denied``), so any response is
-  returned to the caller unchanged; only an unreachable vault raises.
+  Returns the vault's answer with its body still open, so it streams on as
+  the site sends it; the caller closes both the response and the client
+  (``close_use``). The vault answers refusals itself (``X-Vault-Denied``), so
+  any response is returned unchanged; only an unreachable or silent vault
+  raises.
   """
-  transport = httpx.AsyncHTTPTransport(uds=str(vault_socket()))
+  client = httpx.AsyncClient(
+    transport=httpx.AsyncHTTPTransport(uds=str(vault_socket())),
+    base_url="http://vault", timeout=_USE_TIMEOUT_SECS,
+  )
   try:
-    async with httpx.AsyncClient(
-      transport=transport, base_url="http://vault", timeout=_USE_TIMEOUT_SECS,
-    ) as client:
-      request = client.build_request(
-        method, target, headers=[*headers, ("X-Vault-Caller", caller)], content=body,
-      )
-      # The caller's raw path must reach the vault byte for byte: its path
-      # rules refuse encoded slashes and dot segments that normalising here
-      # would hide.
-      request.url = request.url.copy_with(raw_path=target.encode("ascii"))
-      return await client.send(request)
+    request = client.build_request(
+      method, target, headers=[*headers, ("X-Vault-Caller", caller)], content=body,
+    )
+    # The caller's raw path must reach the vault byte for byte: its path
+    # rules refuse encoded slashes and dot segments that normalising here
+    # would hide.
+    request.url = request.url.copy_with(raw_path=target.encode("ascii"))
+    return await client.send(request, stream=True), client
   except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+    await client.aclose()
     raise VaultUnavailable("The key vault is not running.") from exc
+  except httpx.TimeoutException as exc:
+    await client.aclose()
+    # The vault itself answers at once; a timeout here is the site being slow.
+    raise VaultTimeout("The site took too long to answer through the key vault.") from exc
   except (httpx.TransportError, OSError) as exc:
+    await client.aclose()
     # The request may already be with the vault, which acts on it whether or
     # not anyone is still waiting for the answer.
     raise VaultUnavailable(
       "The key vault did not answer.", may_have_reached_vault=True,
     ) from exc
+  except BaseException:
+    await client.aclose()
+    raise
+
+
+async def close_use(answer: tuple[httpx.Response, httpx.AsyncClient]) -> None:
+  response, client = answer
+  try:
+    await response.aclose()
+  finally:
+    await client.aclose()
 
 
 # -- an app's own key names --------------------------------------------------
@@ -171,9 +203,14 @@ def owned_key_in(keys: list[dict], app_id: int, name: str) -> dict | None:
   """
   want = {"app": int(app_id), "name": name}
   return next(
-    (k for k in keys if k.get("origin") == want and int(app_id) in k["grants"]["apps"]),
+    (k for k in keys if k.get("origin") == want and _grant_of(k, app_id) is not None),
     None,
   )
+
+
+def _grant_of(key: dict, app_id: int) -> dict | None:
+  """``app_id``'s own grant on a listed key: its id and the sites it may reach."""
+  return next((g for g in key["grants"]["apps"] if g["id"] == int(app_id)), None)
 
 
 def resolve_key_in(keys: list[dict], app_id: int, name: str) -> str | None:
@@ -186,7 +223,7 @@ def resolve_key_in(keys: list[dict], app_id: int, name: str) -> str | None:
   if owned is not None:
     return owned["name"]
   exact = next((k for k in keys if k["name"] == name), None)
-  if exact is not None and app_id in exact["grants"]["apps"]:
+  if exact is not None and _grant_of(exact, app_id) is not None:
     return exact["name"]
   return None
 
@@ -211,9 +248,18 @@ def provider_site(base_url: str) -> dict | None:
   path = url.path.rstrip("/") + "/responses"
   if (
     url.scheme != "https" or url.port not in (None, 443) or not url.hostname
+    # Credentials, a query or a fragment in the address are never part of a site.
+    or url.username is not None or url.password is not None or url.query or url.fragment
     # A literal address, never a site pattern: the manifest is the app's word.
     or "*" in url.hostname or any(ch in path for ch in "*?[]")
   ):
+    return None
+  rules = _vault_rules()
+  try:
+    # The same path rules a use meets: no dot segments or encoded slashes that
+    # would match a narrow site rule but reach another endpoint.
+    rules.normalized_request_path(path)
+  except rules.VaultError:
     return None
   return {"host": url.hostname, "methods": ["POST"], "paths": [path]}
 
@@ -222,17 +268,20 @@ def model_provider_key_in(keys: list[dict], app_id: int, name: str, base_url: st
   """The key an app's declared model provider may be sent with.
 
   The platform sends the value to the provider's ``base_url`` for the app, so
-  the key, whether the app created it or the owner lets it borrow one, must
-  allow that destination by the same site rule a use through the vault meets.
-  An app's own key starts with that site (``store_app_key``).
+  the app's own grant on the key, whether the app created it or the owner
+  lets it borrow one, must allow that destination by the same site rule a use
+  through the vault meets. An app's own key starts with that site
+  (``store_app_key``). A key with line breaks is never sent.
   """
   key = resolve_key_in(keys, app_id, name)
   site = provider_site(base_url)
   if key is None or site is None:
     return None
-  grants = next(k["grants"] for k in keys if k["name"] == key)
+  record = next(k for k in keys if k["name"] == key)
+  if record.get("multiline"):
+    return None
   allowed = _vault_rules().site_allows(
-    grants, site["host"], "POST", site["paths"][0],
+    _grant_of(record, app_id)["sites"], site["host"], "POST", site["paths"][0],
   ) is None
   return key if allowed else None
 
@@ -304,7 +353,7 @@ def _vault_has_answered(error: BaseException | None) -> bool:
 async def borrow(
   app_id: int, installation: str | None, method: str, target: str, *,
   caller: str, headers: list[tuple[str, str]], body: bytes | None,
-) -> httpx.Response:
+) -> tuple[httpx.Response, httpx.AsyncClient]:
   """Relay an app's use request, keeping the app from being forgotten until
   the vault can no longer act on it.
 
@@ -336,9 +385,12 @@ async def borrow(
     answered = not task.cancelled() and _vault_has_answered(error)
     if error is not None:
       settled.log_abandoned_failure(task, "Key borrow")
+    elif not task.cancelled():
+      # Nobody will read the answer: close its stream.
+      asyncio.ensure_future(close_use(task.result()))
 
   try:
-    response = await settled.settle(
+    answer = await settled.settle(
       vault_use(method, target, caller=caller, headers=headers, body=body),
       what="Key borrow", abandoned=after_cancel,
     )
@@ -346,8 +398,10 @@ async def borrow(
     answered = _vault_has_answered(exc)
     raise
   else:
+    # The vault has authorized and answered; what remains is the site's body
+    # streaming through, which the caller reads and closes (``close_use``).
     answered = True
-    return response
+    return answer
   finally:
     if answered:
       left = _borrows_in_flight.pop(app_id) - 1
@@ -399,7 +453,7 @@ async def for_granted_apps(key_name: str, app_ids: list[int], installations: dic
       await locks.enter_async_context(fs_locks.app_storage_lock(app_id))
     if wanted:
       key = next((k for k in (await vault_call("GET", "/keys"))["keys"] if k["name"] == key_name), None)
-      added = set(wanted) - set(key["grants"]["apps"] if key else [])
+      added = set(wanted) - {g["id"] for g in (key["grants"]["apps"] if key else [])}
       with SessionLocal() as db:
         live = {
           app.id: app_storage_generation(app.token_nonce)
@@ -608,7 +662,7 @@ async def forget_app(app_id: int) -> None:
   refuse_purge_while_borrowing(app_id)
   await asyncio.to_thread(_remove_legacy_secrets, app_id)
   if _vault_ever_used():
-    await vault_call("DELETE", f"/apps/{int(app_id)}")
+    await vault_call("DELETE", f"/apps/{int(app_id)}", caller="platform:app-purge")
 
 
 async def _import_when_ready() -> None:

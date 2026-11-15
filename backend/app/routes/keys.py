@@ -1,7 +1,11 @@
 """Keys: the owner's vault, the agent's reveal, and the app handshake.
 
-- The owner manages keys in Settings › Keys and answers app requests.
-- The owner and the owner's agents may read a key's value.
+- The owner and the owner's top-level agents manage keys in Settings › Keys.
+  Only the owner's own input lets an app use a key or reach more sites
+  (approving its request, adding it to a key, widening its sites), so an
+  agent can never widen what an app may borrow.
+- The owner and the owner's agents may read a key's value, unless the key's
+  Agents switch is off.
 - An app never receives a value. It asks once for a key by name
   (``POST /api/keys/requests``); after the owner approves, it sends requests
   through ``/api/keys/use/<key>/<host>/<path>`` with its own app token, and
@@ -16,7 +20,9 @@ from __future__ import annotations
 
 from urllib.parse import quote, urlencode
 
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app import activity, key_vault, models, push
@@ -54,6 +60,8 @@ async def _relay(method: str, path: str, payload: dict | None = None, *, caller:
     return await key_vault.vault_call(method, path, payload, caller=caller)
   except key_vault.VaultUnavailable as exc:
     raise HTTPException(503, str(exc)) from exc
+  except key_vault.VaultTimeout as exc:
+    raise HTTPException(504, str(exc)) from exc
   except key_vault.VaultRefused as exc:
     raise HTTPException(exc.status, exc.reason) from exc
 
@@ -75,12 +83,49 @@ def _caller(principal: Principal) -> str:
   return "owner" if is_owner_input_principal(principal) else "agent"
 
 
-def _app_ids(grants) -> list[int]:
-  """The app ids a save grants; the vault itself refuses malformed grants."""
+def _app_sites(grants) -> dict[int, set]:
+  """Each app a save grants, with its sites; the vault refuses malformed grants."""
   apps = grants.get("apps") if isinstance(grants, dict) else None
   if not isinstance(apps, list):
-    return []
-  return [a for a in apps if isinstance(a, int) and not isinstance(a, bool) and a >= 1]
+    return {}
+  return {
+    grant["id"]: _site_keys(grant.get("sites"))
+    for grant in apps
+    if isinstance(grant, dict) and type(grant.get("id")) is int and grant["id"] >= 1
+  }
+
+
+def _site_keys(sites) -> set:
+  return {
+    (site.get("host"), tuple(site.get("methods") or ()), tuple(site.get("paths") or ()))
+    for site in (sites if isinstance(sites, list) else []) if isinstance(site, dict)
+  }
+
+
+def _widens_an_app(existing: dict | None, grants) -> bool:
+  """Whether a save lets an app use the key, or use it on more sites.
+
+  Removing an app or narrowing its sites only takes access away; widening is
+  the owner's own decision.
+  """
+  before = _app_sites(existing["grants"] if existing else None)
+  return any(
+    app_id not in before or not sites <= before[app_id]
+    for app_id, sites in _app_sites(grants).items()
+  )
+
+
+def _agent_changes(existing: dict, body: dict) -> list[str]:
+  """What an agent's save changes that could redirect or widen a key's use."""
+  changes = []
+  if "value" in body:
+    changes.append("replaced its value")
+  if "inject" in body and body["inject"] != existing["inject"]:
+    changes.append("changed how it is sent")
+  grants = body.get("grants") if isinstance(body.get("grants"), dict) else {}
+  if not _site_keys(grants.get("sites")) <= _site_keys(existing["grants"]["sites"]):
+    changes.append("added sites")
+  return changes
 
 
 # -- the owner's view ---------------------------------------------------------
@@ -91,7 +136,7 @@ async def list_keys() -> dict:
     keys = (await key_vault.vault_call("GET", "/keys"))["keys"]
     requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
     available = True
-  except key_vault.VaultUnavailable:
+  except (key_vault.VaultUnavailable, key_vault.VaultTimeout):
     keys, requests, available = [], [], False
   return {"available": available, "keys": keys, "requests": requests}
 
@@ -115,12 +160,17 @@ async def put_key(
     k: body[k] for k in ("value", "inject", "grants", "revision", "create_only") if k in body
   }
   installations = body.get("installations")
+  existing = next(
+    (key for key in (await _relay("GET", "/keys"))["keys"] if key["name"] == name), None,
+  )
+  if not is_owner_input_principal(principal) and _widens_an_app(existing, allowed.get("grants")):
+    raise HTTPException(403, "Only you can let an app use a key or reach more sites, from Settings › Keys.")
   try:
     async with key_vault.for_granted_apps(
-      name, _app_ids(allowed.get("grants")),
+      name, list(_app_sites(allowed.get("grants"))),
       installations if isinstance(installations, dict) else {},
     ):
-      result = await _relay("PUT", f"/keys/{quote(name, safe='')}", allowed)
+      result = await _relay("PUT", f"/keys/{quote(name, safe='')}", allowed, caller=_caller(principal))
   except key_vault.AppGone as gone:
     raise HTTPException(
       409, f"App {gone.args[0]} is not the installation you chose; it may have been "
@@ -128,24 +178,25 @@ async def put_key(
     ) from None
   except key_vault.VaultUnavailable as exc:
     raise HTTPException(503, str(exc)) from exc
-  if "value" in allowed and not result.get("created") and _is_agent(principal):
-    # Agents may set keys up, but silently swapping one could point every
-    # grantee at another account, so the owner hears about each replacement.
-    activity.log_event("key_replaced", key=name, chat_id=principal.chat_id)
+  changes = _agent_changes(existing, allowed) if existing and _is_agent(principal) else []
+  if changes:
+    # Agents may set keys up, but a silent change could point every grantee
+    # at another account or another site, so the owner hears about each one.
+    activity.log_event("key_changed", key=name, chat_id=principal.chat_id, changes=changes)
     await push.notify_owner_async(
       db, principal.owner.id,
-      title="An agent replaced a saved key",
-      body=f"“{name}” was replaced by an agent. Review it in Settings › Keys.",
+      title="An agent changed a saved key",
+      body=f"An agent {' and '.join(changes)} for “{name}”. Review it in Settings › Keys.",
       source_type="system",
       target="/shell/?settings=keys",
-      tag=f"key-replaced-{name}",
+      tag=f"key-changed-{name}",
     )
   return result
 
 
 @router.delete("/{name}", dependencies=[*owner_only, Depends(reject_cross_site)])
-async def revoke_key(name: str) -> dict:
-  return await _relay("DELETE", f"/keys/{quote(name, safe='')}")
+async def revoke_key(name: str, principal: Principal = Depends(get_principal)) -> dict:
+  return await _relay("DELETE", f"/keys/{quote(name, safe='')}", caller=_caller(principal))
 
 
 @router.get("/{name}/value")
@@ -157,19 +208,29 @@ async def reveal_key(name: str, principal: Principal = Depends(get_principal)) -
 
 
 @router.post("/requests/{request_id}/approve", dependencies=[*owner_only, Depends(reject_cross_site)])
-async def approve_request(request_id: str, body: dict = Body(default={})) -> dict:
+async def approve_request(
+  request_id: str, body: dict = Body(default={}),
+  principal: Principal = Depends(get_principal),
+) -> dict:
+  """Grant exactly what the owner's answer carries: the app only proposed it.
+
+  Letting an app use a key is the owner's own decision, so agents are refused.
+  """
+  if not is_owner_input_principal(principal):
+    raise HTTPException(403, "Only you can let an app use a key, from Settings › Keys.")
   allowed = {k: body[k] for k in ("value", "inject", "sites", "ticket") if k in body}
-  return await _relay("POST", f"/requests/{quote(request_id, safe='')}/approve", allowed)
+  return await _relay("POST", f"/requests/{quote(request_id, safe='')}/approve", allowed,
+                      caller=_caller(principal))
 
 
 @router.post("/requests/{request_id}/deny", dependencies=[*owner_only, Depends(reject_cross_site)])
-async def deny_request(request_id: str) -> dict:
-  return await _relay("POST", f"/requests/{quote(request_id, safe='')}/deny")
+async def deny_request(request_id: str, principal: Principal = Depends(get_principal)) -> dict:
+  return await _relay("POST", f"/requests/{quote(request_id, safe='')}/deny", caller=_caller(principal))
 
 
 @router.delete("/requests/{request_id}", dependencies=[*owner_only, Depends(reject_cross_site)])
-async def forget_request(request_id: str) -> dict:
-  return await _relay("DELETE", f"/requests/{quote(request_id, safe='')}")
+async def forget_request(request_id: str, principal: Principal = Depends(get_principal)) -> dict:
+  return await _relay("DELETE", f"/requests/{quote(request_id, safe='')}", caller=_caller(principal))
 
 
 # -- the app handshake --------------------------------------------------------
@@ -182,8 +243,9 @@ async def request_key(
 ) -> dict:
   """An app asks to use a key; asking again reports the current answer.
 
-  The answer is ``granted``, ``pending`` or ``denied``. The owner is told once,
-  when the request is new.
+  The answer is ``granted``, ``pending`` or ``denied``. A granted app asking
+  for sites it lacks gets ``sites_not_allowed`` and ``sites_request`` (the
+  state of its ask for those sites). The owner is told once, when an ask is new.
   """
   if principal.app_id is None:
     raise HTTPException(403, "Only apps ask for keys; you and your agents manage them in Settings › Keys.")
@@ -206,7 +268,8 @@ async def request_key(
     activity.log_event("key_requested", app_id=app.id, key=answer["key"])
     await push.notify_owner_async(
       db, principal.owner.id,
-      title=f"{app.name} asks to use a key",
+      title=(f"{app.name} asks to use a key on more sites" if answer.get("sites_request")
+             else f"{app.name} asks to use a key"),
       body=f"Review “{answer['key']}” in Settings › Keys.",
       source_type="system",
       target="/shell/?settings=keys",
@@ -245,18 +308,21 @@ async def use_key(
   # cannot be purged (freeing the id) while the vault could still act on it.
   try:
     if principal.app_id is not None:
-      upstream = await key_vault.borrow(
+      answer = await key_vault.borrow(
         principal.app_id, principal.app_instance_id, request.method, target,
         caller=caller, headers=headers, body=body or None,
       )
     else:
-      upstream = await key_vault.vault_use(
+      answer = await key_vault.vault_use(
         request.method, target, caller=caller, headers=headers, body=body or None,
       )
   except key_vault.AppGone:
     raise HTTPException(404, "App not found.") from None
   except key_vault.VaultUnavailable as exc:
     raise HTTPException(503, str(exc)) from exc
+  except key_vault.VaultTimeout as exc:
+    raise HTTPException(504, str(exc)) from exc
+  upstream = answer[0]
   response_headers = {
     k: v for k, v in upstream.headers.items() if k.lower() not in _DROPPED_RESPONSE_HEADERS
   }
@@ -264,4 +330,17 @@ async def use_key(
   response_headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
   response_headers["X-Content-Type-Options"] = "nosniff"
   response_headers["Cache-Control"] = "no-store"
-  return Response(upstream.content, status_code=upstream.status_code, headers=response_headers)
+
+  async def pieces():
+    # Pieces pass on as the site sends them (streamed model output, server
+    # events). A break mid-answer ends this response early rather than
+    # completing a truncated body.
+    try:
+      async for piece in upstream.aiter_raw():
+        yield piece
+    except httpx.HTTPError:
+      return
+    finally:
+      await key_vault.close_use(answer)
+
+  return StreamingResponse(pieces(), status_code=upstream.status_code, headers=response_headers)
