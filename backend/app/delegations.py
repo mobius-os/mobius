@@ -1342,9 +1342,9 @@ def helper_answer_continuation_id(question_id: str) -> str:
 
 
 def _delegation_status_batch(
-  db: Session, rows: list[models.Delegation], *, include_lineage: bool = False,
+  db: Session, rows: list[models.Delegation], *, load_failed_results: bool = False,
 ) -> tuple[dict[str, str], dict[str, models.ChatRun]]:
-  """Project a helper collection with one read, without child transcripts.
+  """Project helper statuses, optionally refining failures from saved reports.
 
   Use the same exact latest-run ordering and status rules as result-bearing
   reads. Plans need only statuses, not the runs' provider or activity payloads.
@@ -1356,7 +1356,7 @@ def _delegation_status_batch(
     models.ChatRun.id, models.ChatRun.chat_id, models.ChatRun.status,
     models.ChatRun.root_run_id,
   ]
-  if include_lineage:
+  if load_failed_results:
     run_columns.extend((
       models.ChatRun.continuation_json, models.ChatRun.initiated_by_app_id,
       models.ChatRun.browser_grant_id,
@@ -1373,7 +1373,26 @@ def _delegation_status_batch(
     statuses[row.id] = _project_delegation_status(
       row, run, "", awaiting_answer=_awaits_answer(row, run, question_root),
     )[0]
-  return statuses, {chat_id: run for chat_id, (run, _) in by_chat.items()}
+  latest_runs = {chat_id: run for chat_id, (run, _) in by_chat.items()}
+  if load_failed_results:
+    # Review-required failures predate a structured run outcome: their marker
+    # lives in the report. Read those reports in a batch, never every healthy
+    # child's transcript just to attach its status to the parent's context.
+    failed_rows = [row for row in rows if statuses[row.id] == "failed"]
+    if failed_rows:
+      bodies = transcript_rows.assistant_bodies_by_chat(
+        db, [row.child_chat_id for row in failed_rows],
+      )
+      for row in failed_rows:
+        run = latest_runs.get(row.child_chat_id)
+        attempt_ids = _attempt_run_ids(db, run)
+        result = _assistant_result_from_newest(
+          bodies.get(row.child_chat_id, ()),
+          run_ids=attempt_ids if run is not None else None,
+        )
+        if REVIEW_REQUIRED_MARKER in result:
+          statuses[row.id] = "needs_review"
+  return statuses, latest_runs
 
 
 def helper_answer_run_id(child_chat_id: str, question_id: str) -> str:
@@ -1807,7 +1826,7 @@ def own_helper_statuses(
     .order_by(models.Delegation.created_at.asc())
     .all()
   )
-  statuses, latest_runs = _delegation_status_batch(db, rows, include_lineage=True)
+  statuses, _ = _delegation_status_batch(db, rows, load_failed_results=True)
   waiting = [row.id for row in rows if statuses[row.id] == "needs_input"]
   questions = {
     question.delegation_id: question_view(question)
@@ -1822,23 +1841,6 @@ def own_helper_statuses(
       ).all() if waiting else []
     )
   }
-  # Review-required failures predate a structured run outcome: their marker
-  # lives in the report. Read those reports in a batch, never every healthy
-  # child's transcript just to attach its status to the parent's context.
-  failed_rows = [row for row in rows if statuses[row.id] == "failed"]
-  if failed_rows:
-    bodies = transcript_rows.assistant_bodies_by_chat(
-      db, [row.child_chat_id for row in failed_rows],
-    )
-    for row in failed_rows:
-      run = latest_runs.get(row.child_chat_id)
-      attempt_ids = _attempt_run_ids(db, run)
-      result = _assistant_result_from_newest(
-        bodies.get(row.child_chat_id, ()),
-        run_ids=attempt_ids if run is not None else None,
-      )
-      if REVIEW_REQUIRED_MARKER in result:
-        statuses[row.id] = "needs_review"
   items = []
   for row in rows:
     status = statuses[row.id]
@@ -2527,22 +2529,49 @@ def background_helper_chat_ids(db: Session, parent_chat_ids) -> set[str]:
   }
 
 
-def serialize_background_helpers(db: Session, parent_chat_id: str) -> dict:
-  """Compact owner-facing helper summary; child transcripts stay private."""
+def serialize_background_helpers(
+  db: Session, parent_chat_id: str, *, goal: dict | None = None,
+) -> dict:
+  """Bounded helper rows with exact totals, before either source is capped.
+
+  Background work alone owns automatic wake eligibility. The optional Goal
+  view unions direct, unsettled Goal helpers for the footer without changing
+  that wake count. Keeping both bounded views lets the reader hide a retained
+  Goal during an unrelated turn without guessing omitted membership.
+  """
   rows = _self_resuming_helper_rows(db, {parent_chat_id})
-  return {
-    "count": len(rows),
-    "items": [
-      {
-        "id": row.id,
-        "task_key": row.task_key,
-        "title": row.task_key,
-        "provider": row.provider,
-        "status": status,
-      }
-      for row, status in rows[:BACKGROUND_HELPER_ITEM_LIMIT]
-    ],
+  # Wake eligibility remains owned by the original projection. Refine only
+  # the bounded visible rows' presentation using the result-aware batch path.
+  visible_statuses, _ = _delegation_status_batch(
+    db, [row for row, status in rows[:BACKGROUND_HELPER_ITEM_LIMIT] if status == "failed"],
+    load_failed_results=True,
+  )
+  items = {
+    row.id: {
+      "id": row.id, "task_key": row.task_key, "title": row.task_key,
+      "provider": row.provider, "status": visible_statuses.get(row.id, status),
+    }
+    for row, status in rows
   }
+  result = {
+    "count": len(items),
+    "items": list(items.values())[:BACKGROUND_HELPER_ITEM_LIMIT],
+  }
+  if goal and goal.get("status") in {"active", "paused"}:
+    eligible = ACTIVE_DELEGATION_STATUSES | AWAITING_INPUT_DELEGATION_STATUSES
+    for node in (goal.get("plan") or {}).get("delegations", []):
+      if node.get("id") and node.get("status") in eligible:
+        items.setdefault(node["id"], {
+          "id": node["id"], "task_key": node.get("task_key"),
+          "title": node.get("title"), "provider": node.get("provider"),
+          "status": node["status"],
+        })
+    result["with_goal"] = {
+      "goal_id": goal["id"],
+      "count": len(items),
+      "items": list(items.values())[:BACKGROUND_HELPER_ITEM_LIMIT],
+    }
+  return result
 
 
 def publish_parent_waiting_changed(parent_chat_id: str) -> None:
