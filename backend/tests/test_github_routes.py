@@ -10519,7 +10519,7 @@ def test_a_refusing_pre_push_gate_is_a_rejection_never_ambiguous(
   ]
   assert events[0][1]["branch"] == branch
   assert events[0][2]["last_submit_push_sha"] == head
-  assert events[1][1]["action"] == "push_rejected"
+  assert events[1][1]["action"] == "push_gate_refused"
   assert caught.value.code == code
   assert says in caught.value.message
   assert "GitHub would not accept" not in caught.value.message

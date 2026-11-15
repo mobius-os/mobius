@@ -423,12 +423,15 @@ def test_commands_see_only_allowlisted_environment(checkout, tmp_path, monkeypat
   monkeypatch.setenv("SECRET_KEY", "server-secret")
   monkeypatch.setenv("GIT_TRACE_CURL", "1")
   monkeypatch.setenv("DATABASE_URL", "postgres://secret")
+  monkeypatch.setenv("MOBIUS_PREPUSH_FULL", "1")
   record = tmp_path / "gate-env"
   install_hook(checkout, f"#!/bin/sh\nenv > {record}\n")
   git_ops.push(checkout, str(bare_remote(tmp_path)), head_of(checkout), "refs/heads/topic", lease="")
   gate = record.read_text()
   for name in ("SECRET_KEY", "GIT_TRACE_CURL", "DATABASE_URL", "GH_TOKEN"):
     assert f"{name}=" not in gate, name
+  # The repository gate's own switches still reach it.
+  assert "MOBIUS_PREPUSH_FULL=1" in gate
 
   own = {
     "GIT_CEILING_DIRECTORIES", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL",
@@ -437,7 +440,8 @@ def test_commands_see_only_allowlisted_environment(checkout, tmp_path, monkeypat
   }
 
   def allowed(name: str) -> bool:
-    return (name in git_ops._INHERITED_ENV or name in own or name.startswith(("LC_", "GIT_CONFIG_")))
+    return (name in git_ops._INHERITED_ENV or name in own
+            or name.startswith(("LC_", "GIT_CONFIG_", "MOBIUS_PREPUSH_")))
 
   local = git_ops._git_env(checkout)
   network = git_ops._git_env(checkout, network=True)
@@ -496,3 +500,51 @@ def test_a_checkout_credential_program_never_sees_the_token(checkout, tmp_path, 
   subprocess.run(["git", "-C", str(checkout), "credential", "fill"], input=request,
                  env=env, text=True, capture_output=True, timeout=30)
   assert not marker.exists()
+
+
+def test_the_token_bearing_fetch_starts_no_git_in_the_checkout(checkout, tmp_path, monkeypatch):
+  """Git lists an alternate's refs by running Git in it; that is switched off."""
+  source = source_repo(tmp_path, checkout)
+  trace = tmp_path / "trace"
+  monkeypatch.setattr(git_ops, "_INHERITED_ENV", git_ops._INHERITED_ENV | {"GIT_TRACE"})
+  monkeypatch.setenv("GIT_TRACE", str(trace))
+
+  git_ops._git(checkout, "fetch", "--no-tags", str(source), "+refs/heads/ahead:refs/x")
+
+  lines = trace.read_text().splitlines()
+  assert any("fetch" in line for line in lines)
+  assert not [line for line in lines if f"--git-dir={checkout}" in line]
+
+
+@pytest.mark.parametrize("args", [
+  ("fetch", "{source}", "+refs/heads/ahead:"),
+  ("fetch", "--depth", "1", "{source}", "+refs/heads/ahead:refs/x"),
+  ("fetch", "-o", "x", "{source}", "+refs/heads/ahead:refs/x"),
+  ("fetch", "--upload-pack=sh", "{source}", "+refs/heads/ahead:refs/x"),
+  ("push", "--receive-pack=sh", "{source}", "HEAD:refs/heads/x"),
+])
+def test_unusual_network_arguments_are_refused_not_guessed(checkout, tmp_path, args):
+  source = source_repo(tmp_path, checkout)
+  with pytest.raises(git_ops.ContributionSubmitError):
+    git_ops._git(checkout, *(arg.format(source=source) for arg in args))
+
+
+def test_a_failed_copy_back_honours_check_false(checkout, tmp_path):
+  source = source_repo(tmp_path, checkout)
+  current = plain_git(checkout, "symbolic-ref", "HEAD").stdout.strip()
+  # Git refuses to fetch into the checked-out branch.
+  result = git_ops._git(checkout, "fetch", "--no-tags", "--force", str(source),
+                        f"+refs/heads/ahead:{current}", check=False)
+  assert result.returncode != 0
+
+
+def test_startup_clears_scratch_a_crashed_process_left(tmp_path):
+  from app import startup
+  left = git_ops.scratch_root() / "repo-left-behind"
+  left.mkdir()
+  (left / "pack").write_text("large")
+  assert oct(git_ops.scratch_root().stat().st_mode & 0o777) == "0o700"
+
+  startup._sweep_contribution_git_scratch(None)
+
+  assert not left.exists()

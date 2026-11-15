@@ -3649,6 +3649,18 @@ def _push_branch(
   return (proc.stderr or proc.stdout or "").strip() or "Git push failed."
 
 
+def _push_refusal(
+  detail: str, refused_locally: ContributionSubmitError | None, record_patch: dict,
+) -> ContributionSubmitError:
+  """The rejection for a push that did not land: the gate's own, or GitHub's."""
+  if refused_locally is not None:
+    return ContributionSubmitError(
+      refused_locally.message, code=refused_locally.code,
+      detail=refused_locally.detail, record_patch=record_patch,
+    )
+  return push_rejected(detail, record_patch=record_patch)
+
+
 def _push_topic_branch(
   repo: Path,
   branch: str,
@@ -3685,28 +3697,11 @@ def _github_remote_slug(remote_url: str) -> str | None:
 
 
 def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str:
-  """Make local remote `fork` point at the approving owner's fork."""
-  # A cached `fork` remote is never trusted on its own: it can name a fork the
-  # owner has since deleted on GitHub, and pushing reviewed code at a missing
-  # repository fails with an opaque error. Drop any existing remote and always
-  # re-resolve through `gh repo fork`, which is idempotent — it reuses the
-  # owner's fork or creates one — so a stale, ambient, or deleted remote all
-  # heal the same way. The staged contribution checkout is disposable, so
-  # replacing the remote is safe.
-  if _git_ops._git(repo, "remote", "get-url", "fork", check=False).returncode == 0:
-    _git_ops._git(repo, "remote", "remove", "fork", check=False)
-
-  origin = _git_ops._git(repo, "remote", "get-url", "origin", check=False)
-  origin_slug = (
-    _github_remote_slug(origin.stdout) if origin.returncode == 0 else None
-  )
-  if not origin_slug or origin_slug.lower() != upstream_repo.lower():
-    _git_ops._git(
-      repo,
-      "remote", "set-url" if origin.returncode == 0 else "add",
-      "origin", f"https://github.com/{upstream_repo}.git",
-    )
-
+  """Resolve and verify the approving owner's fork of ``upstream_repo``."""
+  # The fork is re-resolved through `gh repo fork` every time, which is
+  # idempotent: it reuses the owner's fork or creates one, so a deleted fork
+  # heals too. The checkout's own remotes are neither read nor written; the
+  # push goes to the URL verified here.
   # gh 2.96 rejects --remote with a repository argument, so the in-repo fork
   # command runs in a server scratch repository whose origin is upstream:
   # gh, holding the token, never runs Git in the agent-writable checkout.
@@ -3720,7 +3715,6 @@ def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str
       "Could not verify the fork remote for this GitHub account. "
       "Reconnect GitHub or ask the agent to prepare the contribution again."
     )
-  _git_ops._git(repo, "remote", "add", "fork", f"https://github.com/{final_slug}.git")
   return final_slug
 
 
@@ -4525,7 +4519,7 @@ def _submit_prepared_pr(
             last_push_error = _push_branch(
               repo, push_remote, branch, push_source_sha, remote_before_push,
             )
-        except _git_ops.RefusedBeforeSending as exc:
+        except _git_ops.PushGateRefused as exc:
           last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
@@ -4573,16 +4567,12 @@ def _submit_prepared_pr(
           else:
             if attempt_event is not None:
               attempt_event("armed", {
-                "action": "push_rejected", "repo": upstream_repo,
+                "action": "push_gate_refused" if refused_locally else "push_rejected",
+                "repo": upstream_repo,
                 "head_repository": upstream_repo, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            if refused_locally is not None:
-              raise ContributionSubmitError(
-                refused_locally.message, code=refused_locally.code,
-                detail=refused_locally.detail, record_patch=record_patch,
-              ) from refused_locally
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            raise _push_refusal(last_push_error, refused_locally, record_patch)
 
     else:
       if public_branch_recovery:
@@ -4645,7 +4635,7 @@ def _submit_prepared_pr(
             last_push_error = _push_topic_branch(
               repo, branch, push_source_sha, remote_before_push, fork_slug=fork_slug,
             )
-        except _git_ops.RefusedBeforeSending as exc:
+        except _git_ops.PushGateRefused as exc:
           last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
@@ -4693,16 +4683,12 @@ def _submit_prepared_pr(
           else:
             if attempt_event is not None:
               attempt_event("armed", {
-                "action": "push_rejected", "repo": upstream_repo,
+                "action": "push_gate_refused" if refused_locally else "push_rejected",
+                "repo": upstream_repo,
                 "head_repository": fork_slug, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            if refused_locally is not None:
-              raise ContributionSubmitError(
-                refused_locally.message, code=refused_locally.code,
-                detail=refused_locally.detail, record_patch=record_patch,
-              ) from refused_locally
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            raise _push_refusal(last_push_error, refused_locally, record_patch)
 
       published_repo = fork_slug
     pushed_branch_url = (
