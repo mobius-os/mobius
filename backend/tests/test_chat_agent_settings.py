@@ -924,12 +924,15 @@ def test_direct_steer_uses_active_model_not_new_same_provider_pick(
   ("guest", True, False),
   ("helper", False, False),
 ])
+@pytest.mark.parametrize("removed_before_cut", [False, True])
 def test_steer_cut_recency_uses_original_pending_provenance(
-  client, auth, chat, db, origin, owner_input, expected_use,
+  client, auth, chat, db, origin, owner_input, expected_use, removed_before_cut,
 ):
   """Only a newly delivered direct-owner row may reorder at a live cut."""
   from app.browser_access import BrowserAccessGrant
-  from app.chat_writer import AppendPending, AppendSteeredUserMessage, get_writer
+  from app.chat_writer import (
+    AppendPending, AppendSteeredUserMessage, CancelPending, get_writer,
+  )
 
   owner = db.query(models.Owner).first()
   owner.model_prefs_json = {"recent_ids": ["claude-sonnet-4-6", "claude-opus-4-7"]}
@@ -961,6 +964,12 @@ def test_steer_cut_recency_uses_original_pending_provenance(
   assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
     "claude-sonnet-4-6", "claude-opus-4-7",
   ]
+  if removed_before_cut:
+    removed = get_writer().submit(CancelPending(
+      chat_id=chat.id, run_token="", cid=cid,
+    )).result(timeout=5)
+    assert removed["pending"] == []
+
   def cut():
     return get_writer().submit(AppendSteeredUserMessage(
       chat_id=chat.id, run_token="", user_msgs=[row],

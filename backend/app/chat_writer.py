@@ -5154,20 +5154,32 @@ class ChatWriterActor:
       stored_messages.append(new_msg)
     _stamp_provider_batch(stored_messages)
     transcript_rows.append_many(db, chat, stored_messages)
-    # The cut, not the fast-forwarding POST, owns delivery. Use the ORIGINAL
-    # durable rows: force-steer's caller may be an app or a retry, and the
-    # transcript copy has already shed owner-input provenance. A duplicate
-    # cut has no newly stored cid and therefore cannot reorder again.
+    # The cut, not the fast-forwarding POST, owns delivery. Prefer the current
+    # durable row's provenance. Stop may have removed it after the route's
+    # queue selection but before this deferred cut: only for a selected cid
+    # missing from pending, use that server-captured row. AppendPending stamped
+    # its owner/app/browser provenance; the route never accepts client-supplied
+    # transcript rows. A duplicate cut has no newly stored cid to promote.
     stored_cids = {cid_of(msg) for msg in stored_messages}
-    if (
-      cmd.active_model and stored_cids
-      and any(
-        cid_of(row) in stored_cids
-        and row.get("_owner_input_at") and not row.get("hidden")
+    pending_by_cid = {cid_of(row): row for row in pending}
+    captured_by_cid = {}
+    for row in raw_user_msgs:
+      captured_by_cid.setdefault(cid_of(row), row)
+    selected_cids = set(cmd.consume_pending_cids)
+
+    def admitted_owner_row(cid):
+      row = pending_by_cid.get(cid)
+      if row is None and cid in selected_cids:
+        row = captured_by_cid.get(cid)
+      return bool(
+        row and row.get("_owner_input_at") and not row.get("hidden")
         and row.get("_initiated_by_app_id") is None
         and row.get("_browser_grant_id") is None
-        for row in pending
       )
+
+    if (
+      cmd.active_model and stored_cids
+      and any(admitted_owner_row(cid) for cid in stored_cids)
       and not db.query(models.Delegation.id).filter(
         models.Delegation.child_chat_id == chat.id,
       ).first()

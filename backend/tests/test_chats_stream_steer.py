@@ -1013,6 +1013,13 @@ def test_force_steer_records_original_owner_rows_at_real_claude_cut(
   assert len(_claude_attempts(handle)) == 1
   assert client.get(prefs_url, headers=auth).json()["recent_ids"] == before
 
+  # Stop/cancel may remove the pending reservation after native acceptance.
+  # The runner still owes this already-validated row its durable cut.
+  removed = client.delete(
+    f"/api/chats/{chat_id}/pending/owner-fast-forward", headers=auth,
+  )
+  assert removed.status_code == 200, removed.text
+  assert _read_chat(chat_id).pending_messages in (None, [])
   asyncio.run(_consume_claude_steers(handle, sink))
   assert _read_chat(chat_id).pending_messages in (None, [])
   assert client.get(prefs_url, headers=auth).json()["recent_ids"] == [
