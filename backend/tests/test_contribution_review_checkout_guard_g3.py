@@ -15,6 +15,8 @@ from app import contribution_review_repairs as repairs
 
 TARGET = {"repo": "owner/base", "base_ref": "main"}
 
+pytestmark = pytest.mark.usefixtures("allow_local_test_remotes")
+
 
 def git(repo: Path, *args: str) -> str:
   return subprocess.run(["git", "-C", str(repo), *args], check=True, text=True,

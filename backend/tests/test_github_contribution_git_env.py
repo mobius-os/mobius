@@ -13,6 +13,8 @@ import pytest
 from app import github_auth
 from app import github_contribution_git as git_ops
 
+pytestmark = pytest.mark.usefixtures("allow_local_test_remotes")
+
 
 def plain_git(repo: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
   return subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True,
@@ -42,23 +44,31 @@ def checkout(tmp_path, monkeypatch):
   return repo
 
 
-def test_only_network_commands_carry_github_credentials(checkout, monkeypatch):
+def test_only_network_commands_carry_github_credentials(checkout, tmp_path, monkeypatch):
   seen = {}
 
-  def run(argv, *, env, **_k):
-    seen.setdefault(argv[3] if argv[0] == "git" else "gh", env)
+  def run(argv, *, cwd, env, **_k):
+    command = argv[3] if argv[0] == "git" else "gh"
+    if command not in ("init", "update-ref", "rev-parse") or str(cwd) == str(checkout):
+      seen.setdefault(command, (Path(cwd), env))
     return subprocess.CompletedProcess(argv, 0, "", "")
 
   monkeypatch.setattr(git_ops, "_run_cmd", run)
-  for command in ("status", "rev-parse", "update-ref", "diff", "fetch", "ls-remote"):
+  for command in ("status", "rev-parse", "update-ref", "diff"):
     git_ops._git(checkout, command)
-  git_ops._git(checkout, "push", "origin", "HEAD:refs/heads/topic")  # the network step
+  git_ops._git(checkout, "fetch", "https://github.com/owner/repo.git")
+  git_ops._git(checkout, "ls-remote", "https://github.com/owner/repo.git")
+  git_ops._git(checkout, "push", "https://github.com/owner/repo.git", "HEAD:refs/heads/topic")
   git_ops._gh(checkout, "api", "user")
   for local in ("status", "rev-parse", "update-ref", "diff"):
-    assert "GH_TOKEN" not in seen[local] and "GH_CONFIG_DIR" not in seen[local], local
+    _cwd, env = seen[local]
+    assert "GH_TOKEN" not in env and "GH_CONFIG_DIR" not in env, local
   for network in ("fetch", "push", "ls-remote", "gh"):
-    assert seen[network]["GH_TOKEN"] == "probe-token", network
-    assert seen[network]["GH_CONFIG_DIR"] == str(github_auth.GH_AUTH_DIR)
+    cwd, env = seen[network]
+    assert env["GH_TOKEN"] == "probe-token", network
+    assert env["GH_CONFIG_DIR"] == str(github_auth.GH_AUTH_DIR)
+    # Never in the agent-writable checkout.
+    assert not str(cwd).startswith(str(checkout)), network
   assert "GH_TOKEN" not in git_ops._git_env(checkout)
 
 
@@ -255,56 +265,93 @@ def test_the_platform_gate_refuses_a_reverted_private_path_without_the_token(
   assert branch_at(remote) is None
 
 
-# -- checkout config while the token is present -------------------------------
+# -- token-bearing Git never reads the checkout ---------------------------------
 
 @pytest.fixture
 def https_only(monkeypatch):
   monkeypatch.setattr(git_ops, "_ALLOWED_PROTOCOLS", "https")
 
 
-def refused_names(checkout: Path) -> str:
-  with pytest.raises(git_ops.UnapprovedCheckoutConfig) as refused:
-    git_ops._git(checkout, "fetch", "https://github.com/owner/repo.git")
-  return refused.value.message
-
-
-def test_a_contribute_checkout_passes_the_config_allowlist(checkout, tmp_path):
-  for key, value in (
-    ("remote.origin.url", "https://github.com/owner/repo.git"),
-    ("remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"),
-    ("remote.origin.gh-resolved", "base"),
-    ("branch.fix/v1.2.remote", "origin"), ("branch.fix/v1.2.merge", "refs/heads/fix/v1.2"),
-    ("branch.fix/v1.2.pushRemote", "fork"),
-    ("user.name", "x"), ("user.email", "x@x"),
-    ("core.hooksPath", str(checkout / ".git" / "hooks")),
-    ("extensions.worktreeConfig", "true"),
-  ):
-    plain_git(checkout, "config", "--local", key, value, check=True)
-  review = tmp_path / "review"
-  plain_git(checkout, "worktree", "add", "-q", str(review), check=True)
-  plain_git(review, "config", "--worktree", "core.sparseCheckout", "true", check=True)
-  plain_git(review, "config", "--worktree", "core.sparseCheckoutCone", "true", check=True)
-
-  for repo in (checkout, review):
-    assert git_ops.unapproved_config(repo, git_ops._CONTRIBUTION_CHECKOUT_CONFIG) is None
-
-
-def test_an_alternate_refs_command_never_runs_during_fetch(checkout, tmp_path):
-  script, marker = probe(tmp_path, "alternate-refs")
-  other = bare_remote(tmp_path)
-  (checkout / ".git" / "objects" / "info" / "alternates").write_text(f"{other}/objects\n")
-  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", str(script), check=True)
+def source_repo(tmp_path: Path, checkout: Path) -> Path:
+  """A stand-in for GitHub one commit ahead of the checkout."""
   source = tmp_path / "source.git"
   subprocess.run(["git", "clone", "-q", "--bare", str(checkout), str(source)], check=True)
+  work = tmp_path / "ahead"
+  subprocess.run(["git", "clone", "-q", str(source), str(work)], check=True)
+  plain_git(work, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q",
+            "--allow-empty", "-m", "ahead", check=True)
+  plain_git(work, "push", "-q", "origin", "HEAD:refs/heads/ahead", check=True)
+  return source
+
+
+def test_fetch_hands_the_fetched_ref_to_the_checkout_and_a_linked_worktree(checkout, tmp_path):
+  source = source_repo(tmp_path, checkout)
+  ahead = plain_git(source, "rev-parse", "refs/heads/ahead").stdout.strip()
+  review = tmp_path / "review"
+  plain_git(checkout, "worktree", "add", "-q", str(review), check=True)
+
+  for repo, ref in ((checkout, "refs/mobius-submit/a"), (review, "refs/mobius-submit/b")):
+    git_ops._git(repo, "fetch", "--no-tags", "--force", str(source),
+                 f"+refs/heads/ahead:{ref}")
+    assert plain_git(repo, "rev-parse", ref).stdout.strip() == ahead
+    assert plain_git(repo, "cat-file", "-e", f"{ahead}^{{commit}}").returncode == 0
+
+
+def test_push_from_a_linked_worktree_lands_the_exact_commit(checkout, tmp_path):
+  review = tmp_path / "review"
+  plain_git(checkout, "worktree", "add", "-q", str(review), check=True)
+  plain_git(review, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q",
+            "--allow-empty", "-m", "reviewed", check=True)
+  remote = bare_remote(tmp_path)
+  plain_git(review, "remote", "add", "fork", str(remote), check=True)
+
+  pushed = git_ops.push(review, "fork", head_of(review), "refs/heads/topic", lease="")
+  assert pushed.returncode == 0, pushed.stderr
+  assert branch_at(remote) == head_of(review)
+
+
+def test_an_alternate_refs_command_never_runs_with_the_token(checkout, tmp_path):
+  script, marker = probe(tmp_path, "alternate-refs")
+  (checkout / ".git" / "objects" / "info" / "alternates").write_text(
+    f"{bare_remote(tmp_path)}/objects\n")
+  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", str(script), check=True)
+  source = source_repo(tmp_path, checkout)
   plain_git(checkout, "fetch", "-q", str(source))
   assert marker.exists()
   marker.unlink()
 
-  assert "core.alternaterefscommand" in refused_names(checkout)
-  assert not marker.exists()
+  git_ops._git(checkout, "fetch", "--no-tags", str(source), "+refs/heads/ahead:refs/x")
+  assert "probe-token" not in (marker.read_text() if marker.exists() else "")
 
 
-def test_a_push_signing_program_never_runs_during_push(checkout, tmp_path):
+def test_a_racing_config_change_never_reaches_the_token(checkout, tmp_path):
+  """The checkout's config is never read by the process that holds the token."""
+  import threading
+
+  script, marker = probe(tmp_path, "race")
+  (checkout / ".git" / "objects" / "info" / "alternates").write_text(
+    f"{bare_remote(tmp_path)}/objects\n")
+  source = source_repo(tmp_path, checkout)
+  done = threading.Event()
+
+  def flip():
+    while not done.is_set():
+      plain_git(checkout, "config", "--local", "core.alternateRefsCommand", str(script))
+      plain_git(checkout, "config", "--local", "--unset", "core.alternateRefsCommand")
+
+  flipper = threading.Thread(target=flip)
+  flipper.start()
+  try:
+    for attempt in range(20):
+      git_ops._git(checkout, "fetch", "--no-tags", "--force", str(source),
+                   f"+refs/heads/ahead:refs/race/{attempt}", check=False)
+  finally:
+    done.set()
+    flipper.join()
+  assert "probe-token" not in (marker.read_text() if marker.exists() else "")
+
+
+def test_a_push_signing_program_never_runs_and_the_push_lands(checkout, tmp_path):
   script, marker = probe(tmp_path, "gpg")
   remote = bare_remote(tmp_path)
   plain_git(remote, "config", "receive.certNonceSeed", "probe", check=True)
@@ -315,45 +362,63 @@ def test_a_push_signing_program_never_runs_during_push(checkout, tmp_path):
   assert marker.exists()
   marker.unlink()
 
-  with pytest.raises(git_ops.UnapprovedCheckoutConfig) as refused:
-    git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
-  assert "push.gpgsign" in refused.value.message
+  pushed = git_ops.push(checkout, str(remote), head_of(checkout), "refs/heads/topic", lease="")
+  assert pushed.returncode == 0, pushed.stderr
   assert not marker.exists()
-  assert branch_at(remote) is None
+  assert branch_at(remote) == head_of(checkout)
 
 
 @pytest.mark.parametrize("key, value", [
-  ("url.ext::{script}.insteadOf", "https://github.com/owner/repo.git"),
+  ("url.ext::{script}.insteadOf", "{source}"),
   ("remote.origin.uploadpack", "{script}"),
-  ("remote.origin.receivepack", "{script}"),
-  # Git cannot even read config that includes a non-config file: refused too.
-  ("include.path", "{script}"),
 ])
-def test_other_program_naming_settings_are_refused_before_any_network_command(
-  checkout, tmp_path, key, value,
-):
-  script, _marker = probe(tmp_path, "named")
-  plain_git(checkout, "config", "--local", key.format(script=script), value.format(script=script),
-            check=True)
-  message = refused_names(checkout)
-  assert key.split(".")[0] in message or "unreadable" in message
+def test_fetch_ignores_the_checkouts_transport_settings(checkout, tmp_path, key, value):
+  script, marker = probe(tmp_path, "named")
+  source = source_repo(tmp_path, checkout)
+  plain_git(checkout, "remote", "add", "origin", str(source), check=True)
+  plain_git(checkout, "config", "--local", "protocol.ext.allow", "always", check=True)
+  plain_git(checkout, "config", "--local", key.format(script=script),
+            value.format(script=script, source=source), check=True)
+  plain_git(checkout, "fetch", "-q", str(source) if "url." in key else "origin")
+  assert marker.exists()
+  marker.unlink()
+
+  git_ops._git(checkout, "fetch", "--no-tags", str(source), "+refs/heads/ahead:refs/x")
+  assert not marker.exists()
 
 
-def test_an_inherited_git_config_file_cannot_hide_the_checkouts_settings(
-  checkout, tmp_path, monkeypatch,
-):
-  empty = tmp_path / "empty-config"
-  empty.write_text("")
-  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", "true", check=True)
-  monkeypatch.setenv("GIT_CONFIG", str(empty))
+def test_push_ignores_the_remotes_receive_pack(checkout, tmp_path):
+  script, marker = probe(tmp_path, "receive-pack")
+  remote = bare_remote(tmp_path)
+  plain_git(checkout, "remote", "add", "rp", str(remote), check=True)
+  plain_git(checkout, "config", "--local", "remote.rp.receivepack", str(script), check=True)
+  plain_git(checkout, "push", "rp", "HEAD:refs/heads/probe")
+  assert marker.exists()
+  marker.unlink()
 
-  assert "core.alternaterefscommand" in refused_names(checkout)
+  assert git_ops.push(checkout, "rp", head_of(checkout), "refs/heads/topic", lease="").returncode == 0
+  assert not marker.exists()
 
 
-def test_gh_in_a_checkout_follows_the_same_config_rule(checkout, tmp_path):
-  plain_git(checkout, "config", "--local", "core.alternateRefsCommand", "true", check=True)
-  with pytest.raises(git_ops.UnapprovedCheckoutConfig):
-    git_ops._gh(checkout, "repo", "view")
+def test_gh_runs_outside_any_checkout(checkout, tmp_path, monkeypatch):
+  bin_dir = tmp_path / "bin"
+  bin_dir.mkdir()
+  seen = tmp_path / "gh-cwd"
+  fake = bin_dir / "gh"
+  fake.write_text(f"#!/bin/sh\n{{ pwd; git rev-parse --git-dir 2>&1; }} > {seen}\nexit 0\n")
+  fake.chmod(0o755)
+  monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+  git_ops._gh(checkout, "pr", "view", "1", "-R", "owner/repo")
+
+  where, repo_check = seen.read_text().splitlines()[:2]
+  assert not where.startswith(str(checkout))
+  assert "not a git repository" in repo_check
+
+
+def test_an_inherited_git_config_file_is_dropped(monkeypatch, tmp_path):
+  monkeypatch.setenv("GIT_CONFIG", str(tmp_path / "elsewhere"))
+  assert "GIT_CONFIG" not in git_ops._git_env(tmp_path)
 
 
 def test_only_https_transport_is_allowed(checkout, tmp_path, https_only):

@@ -32,13 +32,6 @@ from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.github_contribution_contract import COAUTHOR_TRAILER, coauthor_trailer_required
 from app.github_contribution_git import (
   _NETWORK_GIT, _git_env, _run_cmd, _scratch_home, _validate_branch, _validate_repo_slug,
-  UNREADABLE_CONFIG, unapproved_config,
-)
-
-_REPAIR_CHECKOUT_CONFIG = (
-  "core.repositoryformatversion", "core.filemode", "core.bare",
-  "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode",
-  "user.name", "user.email",
 )
 
 
@@ -371,11 +364,16 @@ def _assert_git_metadata(path: Path) -> None:
   hooks = git_dir / "hooks"
   if hooks.exists() and (hooks.is_symlink() or any(not p.name.endswith(".sample") for p in hooks.iterdir())):
     _fail("The dedicated checkout contains unapproved Git hooks.")
-  # A repair checkout has no remotes or worktrees: only what init writes.
-  unapproved = unapproved_config(path, _REPAIR_CHECKOUT_CONFIG)
-  if unapproved == UNREADABLE_CONFIG:
+  # --file and --no-includes parse only this local file. Inspect names, never
+  # values, so a rejection cannot leak credentials planted in config.
+  names = _git(path, "config", "--file", str(git_dir / "config"),
+               "--no-includes", "--name-only", "--list", check=False)
+  if names.returncode != 0:
     _fail("The dedicated checkout's Git configuration could not be verified.")
-  if unapproved is not None:
+  allowed = {"core.repositoryformatversion", "core.filemode", "core.bare",
+             "core.logallrefupdates", "core.ignorecase", "core.precomposeunicode",
+             "user.name", "user.email"}
+  if any(name.lower() not in allowed for name in names.stdout.splitlines()):
     _fail("The dedicated checkout contains unapproved Git configuration.")
   replaced = _git(path, "for-each-ref", "--format=%(refname)", "refs/replace", check=False)
   if replaced.returncode != 0:

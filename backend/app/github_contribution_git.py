@@ -14,7 +14,6 @@ import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
-from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.parse import quote
@@ -98,8 +97,7 @@ _INHERITED_GIT_ENV = frozenset({
   "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
   "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
   "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE",
-  # A plain GIT_CONFIG replaces every config file Git reads, which would hide
-  # the checkout's own settings from the allowlist.
+  # A plain GIT_CONFIG replaces every config file Git reads.
   "GIT_CONFIG",
 })
 _GITHUB_AUTH_ENV = frozenset({
@@ -107,10 +105,9 @@ _GITHUB_AUTH_ENV = frozenset({
   "GH_CONFIG_DIR",
 })
 # Command-scope config, exactly like ``-c``: it outranks the checkout's own
-# config and reaches nested repositories. Network commands rely on the
-# allowlist below; these few keep the programs local commands would most
-# often start (fsmonitor, hooks, ssh, credential helper) from running at all.
-# The empty helper drops every helper configured so far.
+# config and reaches nested repositories, so the programs local commands
+# would most often start (fsmonitor, hooks, ssh, credential helper) do not
+# run. The empty helper drops every helper configured so far.
 _INERT_CONFIG = (
   ("core.fsmonitor", "false"), ("submodule.recurse", "false"),
   ("core.hooksPath", "/dev/null"), ("core.sshCommand", "false"),
@@ -119,32 +116,12 @@ _INERT_CONFIG = (
 # The one credential source, for commands that talk to GitHub.
 _GITHUB_CREDENTIAL_HELPER = ("credential.helper", "!gh auth git-credential")
 _NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
-# Contribution remotes are GitHub over https. Local paths, ssh and ext:: are
-# refused: their transports run programs the checkout's config can name.
+# Contribution remotes are GitHub over https; other transports can run
+# programs, so they are refused.
 _ALLOWED_PROTOCOLS = "https"
-# The only settings a contribution checkout's own config (local and worktree
-# scope) may carry when the token is present. Git keeps adding settings that
-# start programs, so network commands check names against this allowlist
-# instead of overriding a list of known-dangerous ones.
-_CONTRIBUTION_CHECKOUT_CONFIG = (
-  # Repository format and filesystem facts Git writes at init or clone.
-  "core.repositoryformatversion", "core.filemode", "core.bare",
-  "core.logallrefupdates", "core.symlinks", "core.ignorecase",
-  "core.precomposeunicode", "extensions.worktreeconfig",
-  # The platform points this at its installed gate. Hooks never run inside
-  # contribution Git (the gate runs as its own step), so the value is inert.
-  "core.hookspath",
-  # Sparse review worktrees.
-  "core.sparsecheckout", "core.sparsecheckoutcone",
-  # Remotes and tracking. URLs still pass the https-only transport rule; gh
-  # marks the repository it resolved.
-  "remote.*.url", "remote.*.fetch", "remote.*.gh-resolved",
-  "branch.*.remote", "branch.*.merge", "branch.*.pushremote",
-  # Partial clones name their promisor remote and filter.
-  "remote.*.promisor", "remote.*.partialclonefilter",
-  # Identity; contribution commits are written with explicit identity anyway.
-  "user.name", "user.email",
-)
+# Network Git never runs in a contribution checkout: it runs in a scratch
+# repository the server creates, whose config the server alone writes.
+_SCRATCH_PREFIX = "mobius-git-scratch-"
 
 
 def _git_env(repo: Path, *, network: bool = False) -> dict:
@@ -153,12 +130,12 @@ def _git_env(repo: Path, *, network: bool = False) -> dict:
   Global and system config are ignored, nothing prompts, only https transport
   is allowed, and the commonest programs a checkout's config can name
   (fsmonitor, hooks, credential helper, askpass, ssh, pager, editor) are
-  inert. ``_git`` and ``_gh`` also refuse a network command when the
-  checkout's own config sets anything outside an allowlist. GitHub
-  credentials are present only for ``network`` commands (fetch, push,
-  ls-remote and gh); a local command never carries them, though it can
-  still run a program the checkout names, such as a filter, without
-  credentials. ``_run_cmd`` also gives every command an empty home.
+  inert. GitHub credentials are present only for ``network`` commands, and
+  those never run in an agent-writable checkout: ``_git`` runs them in a
+  server-owned scratch repository and ``_gh`` outside any checkout. A local
+  command never carries credentials, though it can still run a program the
+  checkout names, such as a filter. ``_run_cmd`` also gives every command an
+  empty home.
   """
   env = {
     key: value for key, value in os.environ.items()
@@ -230,16 +207,102 @@ def _git(
   check: bool = True,
 ) -> subprocess.CompletedProcess:
   timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
-  network = args[:1] in _NETWORK_GIT
-  if network:
-    _assert_network_ready(repo)
+  if args[:1] in _NETWORK_GIT and not _is_server_scratch(repo):
+    return _network_git(repo, args, check=check, timeout=timeout)
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
     timeout=timeout,
-    env=_git_env(repo, network=network),
+    env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
   )
+
+
+def _is_server_scratch(path: Path) -> bool:
+  path = Path(path)
+  return (path.parent == Path(tempfile.gettempdir())
+          and path.name.startswith(_SCRATCH_PREFIX))
+
+
+@contextmanager
+def _server_scratch(*, bare: bool = True) -> Iterator[Path]:
+  """A fresh repository only the server writes, removed afterwards."""
+  root = Path(tempfile.mkdtemp(prefix=_SCRATCH_PREFIX))
+  try:
+    _run_cmd(["git", "init", "-q", *(("--bare",) if bare else ()), str(root)],
+             cwd=root, env=_git_env(root))
+    yield root
+  finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _refs(repo: Path) -> dict[str, str]:
+  listed = _git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
+  return dict(reversed(line.split(" ", 1)) for line in listed.stdout.splitlines() if line)
+
+
+def _network_git(
+  checkout: Path, args: tuple[str, ...], *, check: bool, timeout: int,
+) -> subprocess.CompletedProcess:
+  """Run one token-bearing fetch, push or ls-remote for ``checkout``.
+
+  It runs in a scratch repository the server creates, reading the checkout's
+  objects through an alternates file the server writes, so the process that
+  holds the token never reads the checkout's config, hooks or attributes.
+  A fetch starts from the checkout's refs and hands what it fetched back to
+  the checkout with a local, credential-free fetch.
+  """
+  objects = _git(
+    checkout, "rev-parse", "--path-format=absolute", "--git-path", "objects",
+  ).stdout.strip()
+  args = list(args)
+  if args[0] == "push":
+    args = _with_push_url(checkout, args)
+  with _server_scratch() as scratch:
+    (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (scratch / "objects" / "info" / "alternates").write_text(objects + "\n")
+    before = {}
+    if args[0] == "fetch":
+      before = _refs(checkout)
+      _run_cmd(
+        ["git", "-C", str(scratch), "update-ref", "--stdin"], cwd=scratch,
+        env=_git_env(scratch),
+        input_text="".join(f"create {ref} {sha}\n" for ref, sha in before.items()),
+      )
+    proc = _run_cmd(
+      ["git", "-C", str(scratch), *args], cwd=scratch, check=False,
+      timeout=timeout, env=_git_env(scratch, network=True),
+    )
+    if args[0] == "fetch" and proc.returncode == 0:
+      fetched = [ref for ref, sha in _refs(scratch).items() if before.get(ref) != sha]
+      if fetched:
+        # Local and credential-free: the checkout copies what it fetched.
+        _run_cmd(
+          ["git", "-C", str(checkout), "fetch", "--quiet", "--no-tags", "--force",
+           "--no-write-fetch-head", str(scratch), *(f"+{ref}:{ref}" for ref in fetched)],
+          cwd=checkout, timeout=timeout,
+          env={**_git_env(checkout), "GIT_ALLOW_PROTOCOL": "file"},
+        )
+  if check and proc.returncode != 0:
+    detail = (proc.stderr or proc.stdout or "command failed").strip()
+    raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
+  return proc
+
+
+def _with_push_url(checkout: Path, args: list[str]) -> list[str]:
+  """Replace a push's remote name with its configured URL.
+
+  The scratch repository has no remotes. Only the plain URL is read, so the
+  checkout's pushurl and URL rewrites never apply.
+  """
+  index = next(i for i, arg in enumerate(args[1:], 1) if not arg.startswith("-"))
+  remote = args[index]
+  if "/" in remote or ":" in remote:
+    return args
+  url = _git(checkout, "config", "--get", f"remote.{remote}.url", check=False).stdout.strip()
+  if not url:
+    raise RefusedBeforeSending(f"The push remote {remote} has no URL. Nothing was sent.")
+  return [*args[:index], url, *args[index + 1:]]
 
 
 class RefusedBeforeSending(ContributionSubmitError):
@@ -254,50 +317,6 @@ class PushGateRefused(RefusedBeforeSending):
     super().__init__(refused.message, code=refused.code, detail=refused.detail)
 
 
-class UnapprovedCheckoutConfig(RefusedBeforeSending):
-  """The checkout's own Git config sets something outside the allowlist."""
-
-  def __init__(self, name: str):
-    super().__init__(
-      f"This checkout's Git configuration sets {name}, which Möbius does not "
-      "allow while it talks to GitHub. Nothing was sent. Remove the setting "
-      "or prepare the contribution again.",
-      code="checkout_config_unapproved",
-    )
-
-
-UNREADABLE_CONFIG = "an unreadable setting"
-
-
-def unapproved_config(repo: Path, allowed: tuple[str, ...]) -> str | None:
-  """The first setting in ``repo``'s own config (local and worktree scope)
-  outside ``allowed``, or None. Includes are not followed: an include is
-  itself a setting no allowlist names. Only names are read, never values,
-  and unreadable config counts as unapproved.
-  """
-  listed = _git(
-    repo, "config", "--no-includes", "--show-scope", "--name-only", "--list", check=False,
-  )
-  if listed.returncode != 0:
-    return UNREADABLE_CONFIG
-  names = [
-    name.lower() for scope, _, name in
-    (line.partition("\t") for line in listed.stdout.splitlines())
-    if scope in ("local", "worktree")
-  ]
-  return next(
-    (name for name in names if not any(fnmatchcase(name, rule) for rule in allowed)),
-    None,
-  )
-
-
-def _assert_network_ready(repo: Path) -> None:
-  """Refuse a network command in a checkout whose config is not allowlisted."""
-  name = unapproved_config(repo, _CONTRIBUTION_CHECKOUT_CONFIG)
-  if name is not None:
-    raise UnapprovedCheckoutConfig(name)
-
-
 def push(
   repo: Path, remote: str, commit: str, ref: str, *, lease: str,
 ) -> subprocess.CompletedProcess:
@@ -306,8 +325,7 @@ def push(
   The gate runs once, as its own local step, then the token-bearing push
   sends the same commit id. ``lease`` is the expected remote tip ("" for
   absent). Raises ``RefusedBeforeSending`` when the gate refuses or times
-  out or the checkout's config is not allowlisted, and otherwise returns
-  the push's result unchecked.
+  out, and otherwise returns the push's result unchecked.
   """
   _pre_push_gate(repo, remote, commit, ref, lease)
   return _send_push(repo, remote, commit, ref, lease)
@@ -433,12 +451,18 @@ def _pre_push_gate(
 
 def _gh(repo: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
-  # Beyond plain API calls, gh runs Git in the checkout with the token, so
-  # the same config rule applies there.
-  if args[:1] != ("api",) and _git(repo, "rev-parse", "--git-dir", check=False).returncode == 0:
-    _assert_network_ready(repo)
-  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text,
-                  env=_git_env(repo, network=True))
+  """Run gh with the token, never inside a contribution checkout.
+
+  Every call names its repository (-R or an API path). gh runs in an empty
+  directory, or in a server scratch repository when one is passed, so the
+  Git it starts never reads an agent-writable checkout.
+  """
+  if _is_server_scratch(repo):
+    return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text,
+                    env=_git_env(repo, network=True))
+  with tempfile.TemporaryDirectory(prefix="mobius-gh-") as empty:
+    return _run_cmd(["gh", *args], cwd=Path(empty), check=check, input_text=input_text,
+                    env=_git_env(Path(empty), network=True))
 
 
 def _assert_clean_worktree(repo: Path) -> None:

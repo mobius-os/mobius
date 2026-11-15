@@ -22,6 +22,8 @@ from app.github_contributions import (
 from app.routes import contribution_relay
 from tests.test_contribution_staging import staging  # noqa: F401  (fixture)
 
+pytestmark = pytest.mark.usefixtures("allow_local_test_remotes")
+
 
 def _png(seed: int) -> bytes:
   """A tiny valid PNG whose pixel differs per seed."""

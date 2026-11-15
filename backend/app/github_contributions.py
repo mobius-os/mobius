@@ -3699,16 +3699,20 @@ def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str
       "origin", f"https://github.com/{upstream_repo}.git",
     )
 
-  # gh 2.96 rejects --remote with a repository argument; origin selects
-  # the upstream repo for the in-repo fork command.
-  _git_ops._gh(repo, "repo", "fork", "--remote", "--remote-name", "fork")
-  final = _git_ops._git(repo, "remote", "get-url", "fork", check=False)
+  # gh 2.96 rejects --remote with a repository argument, so the in-repo fork
+  # command runs in a server scratch repository whose origin is upstream:
+  # gh, holding the token, never runs Git in the agent-writable checkout.
+  with _git_ops._server_scratch(bare=False) as scratch:
+    _git_ops._git(scratch, "remote", "add", "origin", f"https://github.com/{upstream_repo}.git")
+    _git_ops._gh(scratch, "repo", "fork", "--remote", "--remote-name", "fork")
+    final = _git_ops._git(scratch, "remote", "get-url", "fork", check=False)
   final_slug = _github_remote_slug(final.stdout) if final.returncode == 0 else None
   if not final_slug or final_slug.split("/", 1)[0].lower() != login.lower():
     raise ContributionSubmitError(
       "Could not verify the fork remote for this GitHub account. "
       "Reconnect GitHub or ask the agent to prepare the contribution again."
     )
+  _git_ops._git(repo, "remote", "add", "fork", f"https://github.com/{final_slug}.git")
   return final_slug
 
 

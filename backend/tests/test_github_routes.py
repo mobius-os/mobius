@@ -6831,14 +6831,15 @@ def test_git_push_timeout_outlives_the_mandatory_pre_push_gate(
   monkeypatch.setattr(contribution_git.subprocess, "Popen", Popen)
 
   contribution_git._git(tmp_path, "status", "--porcelain")
-  contribution_git.push(tmp_path, "origin", "a" * 40, "refs/heads/demo", lease="")
+  url = "https://github.com/owner/repo.git"
+  contribution_git.push(tmp_path, url, "a" * 40, "refs/heads/demo", lease="")
 
   ordinary = calls[0][1]["timeout"]
   push = calls[-1]
   # The gate runs as its own local step, before and apart from the push, and
   # both keep the long deadline the gate needs.
   assert push[0][3:] == [
-    "push", "--force-with-lease=refs/heads/demo:", "origin", f"{'a' * 40}:refs/heads/demo",
+    "push", "--force-with-lease=refs/heads/demo:", url, f"{'a' * 40}:refs/heads/demo",
   ]
   assert waits[0] == contribution_git._PUSH_TIMEOUT > ordinary
   assert push[1]["timeout"] == contribution_git._PUSH_TIMEOUT

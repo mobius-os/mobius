@@ -178,12 +178,13 @@ def idle_storage_guard(monkeypatch):
   monkeypatch.setattr(storage_guard.StorageGuard, "run", idle)
 
 
-@pytest.fixture(autouse=True)
-def _contribution_git_reaches_local_test_remotes(monkeypatch):
-  """Tests stand in for GitHub with local bare repositories.
+@pytest.fixture
+def allow_local_test_remotes(monkeypatch):
+  """For tests that stand in for GitHub with local bare repositories.
 
-  Production contribution Git allows only https; local-path transport would
-  let checkout config start programs. Tests that probe that keep "https".
+  Production contribution Git allows only https. Only the test modules that
+  need local remotes opt in, so the rest of the suite would catch production
+  code that relied on local transport.
   """
   from app import github_contribution_git
   monkeypatch.setattr(github_contribution_git, "_ALLOWED_PROTOCOLS", "https:file")
