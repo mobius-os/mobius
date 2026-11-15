@@ -16,6 +16,7 @@ from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
 
+import anyio
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import NullPool
@@ -298,10 +299,21 @@ class Base(DeclarativeBase):
   pass
 
 
-def get_db():
-  """Yields a database session and closes it after the request."""
-  db = SessionLocal()
+async def get_db():
+  """Yields a database session and closes it after the request.
+
+  The close is shielded so a cancelled request (a client that disconnected)
+  still returns its connection at once. FastAPI exits a sync generator
+  dependency through a worker-thread hop that a pending cancellation skips,
+  which left the session open until garbage collection. Opening and closing
+  both stay in worker threads, off the event loop. The close has its own
+  limiter, as FastAPI's own dependency exit does: on the shared pool it could
+  wait behind threads that are themselves waiting for the connection it is
+  about to return.
+  """
+  db = await anyio.to_thread.run_sync(SessionLocal)
   try:
     yield db
   finally:
-    db.close()
+    with anyio.CancelScope(shield=True):
+      await anyio.to_thread.run_sync(db.close, limiter=anyio.CapacityLimiter(1))
