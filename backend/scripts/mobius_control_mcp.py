@@ -1542,7 +1542,7 @@ _TOOL_DEFINITIONS = {
         "plan_task": {"type": "string", "minLength": 1, "maxLength": 128,
                       "description": "Optional Goal task id to file this helper under."},
         "title": {
-          "type": "string",
+          "type": "string", "maxLength": 256,
           "description": "What the owner reads for this helper: a short plain-language phrase in sentence case, no jargon, e.g. \"Fixing the tray's closing conversation\". name stays its stable id.",
         },
       },

@@ -210,7 +210,7 @@ def test_spawn_forwards_an_optional_title_and_lists_it(monkeypatch):
   assert "title" not in sent[-1]
   schema = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]
   assert "title" in schema["properties"] and "title" not in schema["required"]
-  assert set(schema["properties"]["title"]) == {"type", "description"}
+  assert schema["properties"]["title"]["maxLength"] == 256
 
 
 def test_claude_pointer_does_not_replace_missing_helpers_with_a_provider_cli():

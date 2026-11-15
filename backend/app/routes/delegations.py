@@ -65,8 +65,10 @@ class DelegationSubmit(BaseModel):
   # An older app may send this field. Reject read, never silently promote it.
   scope: Literal["write"] | None = None
   cwd: str | None = Field(default=None, max_length=1024)
-  # What the owner reads for this helper; task_key stays its identity.
-  title: str | None = None
+  # What the owner reads for this helper; task_key stays its identity. It is
+  # stored as the helper's chat title, so it is bounded by that column. The
+  # stored copy only collapses whitespace, so it never exceeds this bound.
+  title: str | None = Field(default=None, max_length=256)
   # The parent Goal plan task this helper works on; omitted means the plan's
   # single running task, if there is exactly one.
   plan_task: str | None = Field(default=None, min_length=1, max_length=128)

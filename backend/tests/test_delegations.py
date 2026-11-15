@@ -4070,6 +4070,24 @@ def test_helper_title_is_its_locked_chat_title_with_a_readable_fallback(
     "fix-tray.close_v2": title, "audit-restart": "Audit restart",
   }
 
+  # A title is bounded by the chat title it is stored as: the longest one is
+  # kept whole, and a longer one is refused rather than cut.
+  longest = "T" * 256
+  bounded = client.post("/api/delegations", json={
+    **body, "task_key": "longest-title", "title": longest,
+  }, headers=auth)
+  assert bounded.status_code == 201, bounded.text
+  assert bounded.json()["title"] == longest
+  assert db.get(models.Chat, bounded.json()["child_chat_id"]).title == longest
+  refused = client.post("/api/delegations", json={
+    **body, "task_key": "too-long-title", "title": longest + "T",
+  }, headers=auth)
+  assert refused.status_code == 422
+  assert "256" in refused.text
+  assert db.query(models.Delegation).filter(
+    models.Delegation.task_key == "too-long-title",
+  ).count() == 0
+
   # Helpers from before titles keep their generated chat name.
   child.title = "Delegation · fix-tray.close_v2"
   db.commit()
