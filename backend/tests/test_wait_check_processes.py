@@ -144,7 +144,9 @@ def test_timeout_reaps_children_after_the_shell_has_exited(tmp_path, monkeypatch
     try:
       with open(f"/proc/{child_pid}/stat") as stat:
         return stat.read().split()[2]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+      # The child can be reaped between open() and read(); then read() fails
+      # with ESRCH instead of open() failing with ENOENT.
       return "gone"
 
   # An adopted zombie may await the container's init; it must not be running.
