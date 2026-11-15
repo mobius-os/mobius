@@ -7714,7 +7714,7 @@ def test_terminal_checkout_cleanup_retries_separate_git_dir_partial_failure(
   assert not git_dir.exists()
 
 
-def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
+def test_ensure_owner_fork_remote_runs_in_a_scratch_whose_origin_is_upstream(
   tmp_path, monkeypatch,
 ):
   from app.routes.github import _ensure_owner_fork_remote
@@ -7755,10 +7755,10 @@ def test_ensure_owner_fork_remote_runs_in_repo_after_pinning_origin(
   fork_slug = _ensure_owner_fork_remote(repo, "mobius-os/app-demo", "octocat")
 
   assert fork_slug == "octocat/app-demo-1"
-  assert (
-    "remote", "set-url", "origin",
-    "https://github.com/mobius-os/app-demo.git",
-  ) in git_calls
+  # gh forks from a server scratch whose origin is upstream; the checkout's
+  # own remotes are never read or rewritten.
+  assert ("remote", "add", "origin", "https://github.com/mobius-os/app-demo.git") in git_calls
+  assert not any(call[:2] in {("remote", "set-url"), ("remote", "remove")} for call in git_calls)
   assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
   assert all("mobius-os/app-demo" not in call for call in gh_calls)
 
@@ -7800,9 +7800,9 @@ def test_ensure_owner_fork_remote_never_trusts_a_cached_remote(
   fork_slug = _ensure_owner_fork_remote(repo, "mobius-os/mobius", "octocat")
 
   assert fork_slug == "octocat/mobius"
-  # The cached remote is dropped and re-resolved through gh, never returned
-  # directly — so a deleted fork heals instead of failing the push.
-  assert ("remote", "remove", "fork") in git_calls
+  # The fork is always re-resolved through gh, never read from a cached
+  # remote, so a deleted fork heals instead of failing the push.
+  assert ("remote", "remove", "fork") not in git_calls
   assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
 
 
@@ -8910,7 +8910,7 @@ def test_submit_contribution_replaces_stale_fork_remote_before_push(
     headers={"Authorization": f"Bearer {owner_token}"},
   )
   assert r.status_code == 200, r.text
-  assert ("remote", "remove", "fork") in git_calls
+  assert ("remote", "remove", "fork") not in git_calls
   assert ("repo", "fork", "--remote", "--remote-name", "fork") in gh_calls
   assert not any(call[:2] == ("remote", "set-url") for call in git_calls)
   assert (
