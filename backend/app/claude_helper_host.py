@@ -1181,9 +1181,12 @@ async def run_claude_host_turn(
   env_file = TurnEnvFile(Path(turn_env.get("TMPDIR") or data_dir), marker, turn_env)
   settings = agent_settings or {}
   model = settings.get("model") or (run_policy.model if run_policy else None)
-  effort = settings.get("effort") or (run_policy.effort if run_policy else None)
+  # The turn's resolved effort, including "none", wins over the raw policy.
+  effort = settings["effort"] if "effort" in settings else (run_policy.effort if run_policy else None)
   from app.providers import model_supports_effort
-  supports_effort = await model_supports_effort(data_dir, model)
+  supports_effort = await model_supports_effort(
+    data_dir, model, provider_id=helper_host_key.provider_id,
+  )
   if not supports_effort:
     effort = None
   _host_session, agent_id, launch_tool_use_id = parse_session(session_id)

@@ -181,7 +181,6 @@ def test_app_list_reads_run_off_the_event_loop(client, auth, monkeypatch):
 async def test_cancelled_app_list_closes_its_session_after_the_read(
   auth, monkeypatch, read,
 ):
-  import gc
   import threading
   import anyio
   import httpx
@@ -225,8 +224,6 @@ async def test_cancelled_app_list_closes_its_session_after_the_read(
       release.set()
       await asyncio.gather(task, return_exceptions=True)
 
-  # A cancelled request can leave get_db in a traceback cycle; finalize it.
-  gc.collect()
   assert scope.cancelled_caught
   assert events == ["read finished", "session closed"]
 

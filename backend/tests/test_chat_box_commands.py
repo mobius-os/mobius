@@ -496,6 +496,9 @@ class _Provider:
   def build_env(self, **_kwargs):
     return {}
 
+  def resolve_selection(self, model, effort):
+    return model, effort
+
 
 @pytest.mark.asyncio
 async def test_the_next_turn_carries_added_side_questions_once(monkeypatch, chat):

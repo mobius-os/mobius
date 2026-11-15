@@ -122,7 +122,10 @@ async def test_mobius_switch_filters_picker_and_default_without_hiding_other_mod
 ):
   data_dir = str(tmp_path)
   assert providers.mobius_models_enabled(data_dir)
-  monkeypatch.setattr(providers, "sync_app_model_providers", lambda *_a, **_kw: None)
+  async def no_registry_refresh(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(providers, "refresh_app_model_providers", no_registry_refresh)
   providers.invalidate_model_cache()
   try:
     for provider_id in providers.PROVIDERS:
