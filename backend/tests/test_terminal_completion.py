@@ -996,6 +996,9 @@ def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatc
     def build_env(self, **kwargs):
       return {}
 
+    def resolve_selection(self, model, effort):
+      return model, effort
+
   monkeypatch.setattr(chat_mod, "registered_provider", lambda pid: _Unsupported())
 
   def runtime_kind(_provider):

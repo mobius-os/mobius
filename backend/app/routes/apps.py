@@ -550,6 +550,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
   await asyncio.to_thread(_rmtree_strict, secrets_dir)
+  # The app's model engine home (threads, transcripts) is id-keyed too.
+  from app.providers import app_engine_home
+  await asyncio.to_thread(_rmtree_strict, app_engine_home(settings.data_dir, deleted_app_id))
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent

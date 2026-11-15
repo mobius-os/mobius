@@ -10,6 +10,7 @@ import { helperPresentation, isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { helperTitle } from './helperTitle.js'
 import { modelDisplayName } from './chatUsageFormat.js'
 import { modelQueries } from '../../hooks/queries.js'
 import { catalogProviders } from '../../lib/modelCatalog.js'
@@ -57,7 +58,7 @@ export function HelperEventConversation({ event, chatId, host, onClose, onIntern
   return <HelperConversation
     chatId={chatId}
     taskId={event.delegation_id}
-    name={event.task_key || 'Helper'}
+    name={helperTitle(event)}
     status={event.status}
     host={host}
     onClose={onClose}
@@ -70,7 +71,7 @@ export function HelperEventConversation({ event, chatId, host, onClose, onIntern
    it took. A tap asks `onOpen` to show its conversation; `children` (the
    transcript row's own dialog) render inside the row. */
 export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
-  const name = event.task_key || 'Helper'
+  const name = helperTitle(event)
   const working = isWorkingHelper({ ...event, type: 'helper_result' })
   const paused = event.status === 'paused'
   const live = useElapsed(event.started_at, working && !paused)

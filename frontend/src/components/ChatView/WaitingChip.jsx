@@ -113,7 +113,8 @@ function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', unli
 const sameHelperRows = (before, after) => before.length === after.length && before.every((row, index) => {
   const next = after[index]
   return row.delegation_id === next.delegation_id && row.status === next.status
-    && row.task_key === next.task_key && row.provider === next.provider
+    && row.title === next.title && row.task_key === next.task_key
+    && row.provider === next.provider
 })
 const HelperList = memo(HelperListRows, (before, after) => (
   before.chatId === after.chatId

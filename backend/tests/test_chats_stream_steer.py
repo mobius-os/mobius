@@ -1033,6 +1033,63 @@ def test_force_steer_records_original_owner_rows_at_real_claude_cut(
   ]
 
 
+def test_app_messages_claude_sink_records_its_actual_model_at_cut(
+  client, auth, monkeypatch,
+):
+  """An app Messages provider steers on Claude and records its own model."""
+  from app import providers
+  from app.chat import _ChatEventSink, register_active_sink
+  from app.chat_writer import AppendPending, get_writer
+  from tests.test_app_model_relay import _manifest
+
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  chat_id = "app-claude-owner-model-use"
+  db = SessionLocal()
+  try:
+    owner = db.query(models.Owner).first()
+    owner.model_prefs_json = {"recent_ids": ["example/pro", "example/flash"]}
+    chat = create_chat(
+      id=chat_id, title="App Messages steer", provider="app-4242",
+      messages=[{"role": "user", "content": "Q1", "ts": 1}],
+      agent_settings_json={"model": "example/pro"},
+    )
+    db.add(chat)
+    db.commit()
+  finally:
+    db.close()
+  row = get_writer().submit(AppendPending(
+    chat_id=chat_id, run_token="", owner_input=True,
+    user_msg={"role": "user", "content": "use the flash model", "ts": 10,
+              "cid": "app-claude-owner-row"},
+  )).result(timeout=5)["stored"]
+  assert row.get("_owner_input_at")
+  handle = _make_active_claude_client(chat_id)
+  handle.model = "example/flash"
+  registry.register(handle)
+  sink = _ChatEventSink(
+    create_broadcast(chat_id), chat_id, run_token="app-claude-run",
+    provider_id="app-4242",
+  )
+  register_active_sink(chat_id, sink)
+
+  sent = client.post(f"/api/chats/{chat_id}/messages", json={
+    "content": "use the flash model", "force_steer": True,
+    "consume_pending_cids": ["app-claude-owner-row"],
+  }, headers=auth)
+  assert sent.status_code == 202, sent.text
+  assert sent.json()["status"] == "steered"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "example/pro", "example/flash",
+  ]
+  asyncio.run(_consume_claude_steers(handle, sink))
+  assert _read_chat(chat_id).pending_messages in (None, [])
+  assert _read_messages(chat_id)[-1]["cid"] == "app-claude-owner-row"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "example/flash", "example/pro",
+  ]
+
+
 def test_split_gates_snapshots_so_continuation_cannot_clobber_a1(
   client, auth, monkeypatch,
 ):

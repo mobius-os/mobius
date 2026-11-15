@@ -160,13 +160,16 @@ CLAUDE_SETTINGS_DEFAULTS = {
 }
 
 
-def ensure_claude_settings_defaults(data_dir: str | Path) -> list[str]:
+def ensure_claude_settings_defaults(
+  data_dir: str | Path, *, config_dir: str | Path | None = None,
+) -> list[str]:
   """Add Möbius's Claude settings defaults and return the keys it added.
 
-  Every unrelated Claude preference is preserved. Malformed or non-object
-  settings fail loudly rather than being replaced.
+  ``config_dir`` names a Claude home other than the owner's. Every unrelated
+  Claude preference is preserved. Malformed or non-object settings fail
+  loudly rather than being replaced.
   """
-  path = Path(data_dir) / "cli-auth" / "claude" / "settings.json"
+  path = Path(config_dir or Path(data_dir) / "cli-auth" / "claude") / "settings.json"
   if path.exists():
     decoded = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(decoded, dict):
