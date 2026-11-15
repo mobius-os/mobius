@@ -720,6 +720,7 @@ def test_the_conversation_panel_shows_a_helpers_own_steps(client, owner_token, d
   assert response.status_code == 200, response.text
   body = response.json()
   assert body["provider"] == "claude" and body["child_chat_id"] == child_id
+  assert body["status"] == "completed"
   assert [b.get("role") or b.get("type") for b in body["blocks"]] == ["user", "tool", "assistant"]
   assert body["blocks"][0]["content"] == "Do the bounded task."
   assert body["title"] == "Child"
@@ -799,3 +800,24 @@ def test_message_agent_answers_an_exact_question_and_reports_an_attached_retry(m
   assert "nothing new started" in again["note"]
   with pytest.raises(ValueError):
     control._call_message_agent({"helper": "migrate", "message": "x", "question_id": " "})
+
+
+@pytest.mark.parametrize("status", ["failed", "completed"])
+def test_helper_preview_distinguishes_ordinary_failure_from_completion(
+  client, owner_token, db, status,
+):
+  parent, child, delegation = _seed_delegation(
+    db, suffix=f"preview-{status}", child_status=status,
+    result_blocks=[{"type": "error", "message": "Private failure diagnostic"}],
+  )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  response = client.get(f"/api/chats/{parent}/helpers/{delegation}", headers=headers)
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == status
+  assert response.json()["blocks"] == [
+    {"role": "user", "content": "Do the bounded task."},
+  ]
+  assert "Private failure diagnostic" not in response.text
+  assert client.get(
+    f"/api/chats/{child}/helpers/{delegation}", headers=headers,
+  ).status_code == 404
