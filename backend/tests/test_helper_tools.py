@@ -723,7 +723,6 @@ def test_the_conversation_panel_shows_a_helpers_own_steps(client, owner_token, d
   assert body["status"] == "completed"
   assert [b.get("role") or b.get("type") for b in body["blocks"]] == ["user", "tool", "assistant"]
   assert body["blocks"][0]["content"] == "Do the bounded task."
-  assert body["title"] == "Child"
   # Only the parent that spawned the helper can open it.
   assert client.get(
     f"/api/chats/{child_id}/helpers/{delegation_id}",

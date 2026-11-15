@@ -33,7 +33,7 @@ from app.delegations import (
   normalize_cwd,
   parent_root_run_id,
   delegation_source_work_id,
-  helper_title,
+  humanize_task_key,
   _parent_wake_continuation_root,
   parent_wake_blocker,
   publish_parent_waiting_changed,
@@ -763,7 +763,7 @@ async def message_delegation(
       db.commit()
       started = await start_programmatic_chat_turn(
         chat_id=row.child_chat_id,
-        title=helper_title(db, row),
+        title=humanize_task_key(row.task_key),
         content=body.message,
         provider=row.provider,
         initiated_by_app_id=row.app_id,

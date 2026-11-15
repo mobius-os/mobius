@@ -219,8 +219,9 @@ class Chat(Base):
   id = Column(String(64), primary_key=True)
   title = Column(String(256), nullable=False, default="New chat")
   # Naming precedence: user > agent > first-message. `title_locked` flips true
-  # when the OWNER manually renames; the agent's title-sync (PATCH by_agent=true)
-  # then never overwrites it. A clear-title PATCH resets it to false so the name
+  # when the OWNER manually renames, and a helper's chat starts locked with the
+  # title its parent gave it at spawn; the agent's title-sync (PATCH
+  # by_agent=true) then never overwrites it. A clear-title PATCH resets it to false so the name
   # drops back to the agent summary / first message and gets re-derived.
   title_locked = Column(Boolean, nullable=False, default=False)
   # The previous release's whole-transcript JSON. Message rows are the

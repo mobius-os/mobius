@@ -162,10 +162,6 @@ def helper_titles(db: Session, rows) -> dict[str, str]:
   }
 
 
-def helper_title(db: Session, row: models.Delegation) -> str:
-  return helper_titles(db, [row])[row.id]
-
-
 def delegation_ownership_match(
   parent_chat_id: str, parent_root_run_id: str, goal_id: str | None,
   task_key: str, *, row: models.Delegation | None = None,
@@ -408,7 +404,9 @@ async def ensure_delegation_started(
 
     started = await start_turn(
       chat_id=row.child_chat_id,
-      title=helper_title(db, row),
+      # Helper chats are locked at spawn, so this names only an older,
+      # unlocked helper chat's first turn.
+      title=humanize_task_key(row.task_key),
       content=content,
       provider=row.provider,
       initiated_by_app_id=row.app_id,
