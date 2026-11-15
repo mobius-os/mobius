@@ -9,8 +9,7 @@ from urllib.parse import quote
 
 import httpx
 
-from app.config import get_settings
-from app.contribution_records import MAX_RECORD_BYTES
+from app.contribution_records import MAX_RECORD_BYTES, records_dir as _contributions_dir
 
 _API_BASE = "https://api.github.com"
 _GITHUB_REPO = re.compile(
@@ -76,10 +75,6 @@ fragment repositoryHead on Repository {
   }
 }
 """.strip()
-
-
-def _contributions_dir(app_id: int) -> Path:
-  return Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
 
 
 def _read_record_tolerant(path: Path) -> dict | None:

@@ -243,7 +243,7 @@ FastAPI app. `main.py` is the factory (CORS, rate limiting, routers, static serv
 | `pending_questions.py` | Shared `PendingQuestion` dataclass for AskUserQuestion interception (split out to break the `questions`↔runner import cycle; the registry itself lives in `questions.py`) |
 | `tool_summaries.py` | Tool-input summary strings (shared by SDK + subprocess paths) |
 | `tool_sources.py` | `normalize_tool_sources()` — normalizes provider web-search results into bounded `{title, url, snippet}` metadata stored on WebSearch blocks and rendered once in the message-level Sources row; an iterative count/depth budget and HTTP(S)-only URL gate keep provider payload cost fixed before SSE or persistence |
-| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, then SIGTERMs its own pid; shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
+| `restart_util.py` | `restart_this_worker()` — arms a daemon SIGKILL fallback, drains, then publishes the restart request the root-owned poller accepts (an unpublishable request ends the boot with SIGKILL instead); shared by `/api/admin/restart` and `/api/platform/restart` so the two restart paths can't drift. Pairs with uvicorn's `--timeout-graceful-shutdown 10` (entrypoint.sh) — without a bound, an open chat SSE stream held graceful shutdown open forever and the container never cycled (6ac51b0) |
 
 ### Mini-apps, storage, files
 
@@ -677,8 +677,9 @@ stamp `entrypoint.sh` writes at boot), `platform_sha`, `platform_dirty`,
 **Bootstrap apps (Store, Skills, Memory, Reflection, Integrations, and Social)**
 install from their canonical catalog manifests through
 `backend/app/bootstrap.py` on first boot. New deployments no longer install
-Möbius · You: the Möbius account and models live in Settings and the platform's
-own catalogue, and an existing copy is an ordinary app. These are recovery or management
+Möbius · You: the Möbius account and models live in Settings; the built-in
+provider discovers its catalogue through the service, and an existing copy is
+an ordinary app. These are recovery or management
 surfaces; domain apps are installed explicitly rather than named in platform
 boot policy. Each becomes an ordinary owner-editable app under
 `/data/apps/<slug>` and follows the same update and divergence rules as any
@@ -1179,9 +1180,16 @@ recovery. The platform process then publishes an intent and restart request; it
 does not terminate itself on the normal path.
 
 The frozen root-owned entrypoint poller validates and consumes the request,
-records its one-shot nonce in `/data/.restart-ledger`, and only then terminates
-pid 1. At the very start of the next entrypoint invocation, the ledger binds
-that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
+records its one-shot nonce in `/data/.restart-ledger`, and only then asks the
+image's container supervisor (`backend/runtime/container_supervisor.py`) to end
+the boot and rerun the entrypoint inside the same container. If the worker
+cannot publish its request at all, it ends its boot as a failure (SIGKILL, exit
+137), so the host's restart policy replaces the container. Because an in-app
+Restart keeps the container, root-made changes outside `/data` (for example
+under `/etc`, `/usr` or `/app`) survive it on every host, as they already did
+under Docker's own restart; only a container replacement (a redeploy or image
+update) resets them. At the very start of the next entrypoint invocation, the
+ledger binds that accepted nonce to the new `MOBIUS_BOOT_ID`. The app only continues a
 restart park when the root-owned boot acknowledgement matches the nonce on the
 latest exact DB run and the restart policy is on. At startup, the same
 authorization converts matching stranded `running` rows into due restart parks
@@ -2027,7 +2035,7 @@ Published apps should generate one random UUID once and declare it as `package_i
 
 **Update discovery.** `GET /api/apps/{id}/update-check` and `GET /api/apps/{id}/update-candidate-preview` fetch the candidate Git commit (optionally from a catalog `manifest_url`) and resolve it to an installed row with the installer's own rule, `install.resolve_package_row`: permanent `package_id`, then the stored or ref-independent address, then a `previous_manifest_url` whose resolved GitHub repository id equals the candidate's (an unresolved identity, as on a legacy row, proves nothing), then a `previous_id` rename. The install preview uses the same rule. A candidate is offered only when that rule names this app, so discovery never offers an update that install would refuse or apply to a different row. When it doesn't, `update-check` returns `update_available: null` with `candidate_rejected: {code, message}`, and the preview answers 409 with the same object as `detail`. Discovery reads a candidate only from the app's own Git origin: a catalog `manifest_url` in another repository (a moved or renamed repository, or another owner's) is not fetched and is reported as `repository_moved`. Reinstalling from the Store follows such a move when the new repository proves it is the same app (a same-owner `previous_id` rename, or matching GitHub repository ids for a permanent package); otherwise it adds a separate app. A candidate in the app's own repository that the rule does not name as this app is `identity_mismatch`. Clients should treat unknown codes the same way. Every other unknown (no Git source, a failed fetch, an unreadable package) keeps `candidate_rejected: null`.
 
-Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, `agent_activities`, and `shell_shortcuts` (`false` stops the app frame capturing the shell's keyboard shortcuts, for apps such as editors that need those chords). `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author`, `license`, and `homepage` are not validated or stored. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. Logical `static_assets` destination `x` is materialized at source path `static/x`. One 64 MiB `PACKAGE_MAX_BYTES` bounds every file a package declares (entry, icon, job, source files, static assets and file seeds), summed per declaration because each is written separately (`manifest_contract.package_bytes`): HTTP and Git installs charge that sum, local apply and `validate-app.py` check it from file sizes, and Store publication bounds both it and its whole tree, so every published app is installable. Beyond the 64 KiB manifest cap and the skill and system-prompt caps that bound agent context, no declared file or file kind has its own size or count cap; Store publication also limits a release to 250 files. The compile contract refuses a compiled module larger than the 8 MiB the shell loads, so large data belongs in `static_assets`, fetched at runtime.
+Optional fields the parser recognizes include `package_id`, `moved_to`, `previous_id`, `icon`, colors/display, `offline_capable`, `embeds_agent`, `offline`, `permissions`, `storage_seeds`, `static_assets`, `source_files`, `skills`, `system_prompt`, `schedule`, `agent_activities`, and `shell_shortcuts` (`false` stops the app frame capturing the shell's keyboard shortcuts, for apps such as editors that need those chords). `previous_id` and `previous_manifest_url` remain bounded migration aids for installs that predate permanent package identities; they are not the steady-state identity model. Decorative-only fields such as `author` and `homepage` are not validated or stored. `license` is not stored either, but Store publication requires it to be one of the free licenses the Store offers (`store_licenses.OFFERED_LICENSES`), with its text in a root license file (normally `LICENSE`). An app the Store already lists may instead keep another free license it declares (`store_licenses.LISTED_FREE_SPDX`); the Host admits that update only when the listed revision declares the same one. Three gotchas: (1) **`runtime` (`imports`/`esm_deps`) is informational**; dependency resolution is governed by the pinned self-contained compiler in `app_compile_contract.py`. (2) **`storage_seeds` value type is a switch**: a string is a repo-relative file the installer fetches; a non-string is stored inline as JSON. (3) **`schedule.job` has dual semantics** — with an exactly five-field `schedule.default` it installs recurring cron; without it the script is an on-demand build hook. In either mode the script declares its interpreter with an absolute shebang; the platform never guesses from its filename or executable bit. Logical `static_assets` destination `x` is materialized at source path `static/x`. One 64 MiB `PACKAGE_MAX_BYTES` bounds every file a package declares (entry, icon, job, source files, static assets and file seeds), summed per declaration because each is written separately (`manifest_contract.package_bytes`): HTTP and Git installs charge that sum, local apply and `validate-app.py` check it from file sizes, and Store publication bounds both it and its whole tree, so every published app is installable. Beyond the 64 KiB manifest cap and the skill and system-prompt caps that bound agent context, no declared file or file kind has its own size or count cap; Store publication also limits a release to 250 files. The compile contract refuses a compiled module larger than the 8 MiB the shell loads, so large data belongs in `static_assets`, fetched at runtime.
 
 `agent_activities` is the app-neutral presentation contract for scripts an app
 asks the chat agent to run. Each activity declares an id, a repo-relative
@@ -2132,6 +2140,28 @@ through the owner's connection, as part of the shared workspace, and resolve
 handles in the public directory. This is an API boundary, not a sandbox
 around what a guest-started agent or a guest-edited app can later do.
 
+The owner may turn on **Full access** for one account grant (`full_access`,
+off by default; a one-time link is a bare cookie and never holds it). It lifts
+exactly one gate, `require_owner_or_full_access_control`, for that grant's
+lineage while `browser_access.has_full_access` holds; it is read on every
+check, so turning it off or revoking applies to the next request, including
+work the guest already started. It is a deliberate subset of what a connected
+Möbius with Full access can do (that one holds the owner's own agent bearer):
+deleting and recovering chats and projects, watching and stopping a chat's
+compaction, setting an app's badge, deleting an uninstalled app, applying
+reviewed app and platform updates, cancelling an update that was never
+swapped in, restarting, and notification housekeeping. A delegated helper's
+bearer never passes it. `require_installation_owner_control` itself never
+admits a guest, so a route stays owner-only unless it opts in, and a test pins
+the opted-in set. By rule, no opted-in route mints or uses a credential,
+spends or chooses the owner's credit or provider, makes the owner's own
+decision (app consent and permissions, runtime capabilities, payments,
+settings), manages sharing or invites of any kind, subscribes to the owner's
+notifications, forges the owner's records, or starts work under the owner's
+lineage or creates anything else that would outlive the grant (jobs,
+schedules, reminders, skills, resolver chats, hosted publications, paired
+machines). Shared folders and screen control refuse every guest.
+
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input
 keeps its content and identity. A remote stop is not claimed until confirmed:
@@ -2160,6 +2190,18 @@ transaction consumes the browser-bound proof,
 rechecks local permission, and retires the previous browser session. Failed proof
 validation leaves that prior session unchanged. Verified proof admission expires
 within 60 seconds; old pending rows are pruned on subsequent starts.
+
+A recipient can leave without waiting for the owner. Shared with me carries a
+`leave_url` for every share and invitation, to a confirmation page in the
+sharing instance's shared shell. A sharing instance that predates leaving
+shows a page that cannot complete it.
+Its Leave button is a same-origin POST to `/session/account/leave/start`, so
+a cross-site link alone ends nothing; that runs the same proof flow under a
+separate pending cookie. The cookie that matches the callback state decides
+its purpose, so a sign-in proof can never leave and a leave proof can never
+sign in. A leave proof is spent in the callback itself, which runs the
+owner's revoke and `end_grant`, including directory removal, so no
+confirmation window can lapse. Declining an invitation is the same action.
 
 Local validation pins the issuer, runtime origin and grantor credential generation
 (or managed instance ID and owner subject). Changing those bindings invalidates

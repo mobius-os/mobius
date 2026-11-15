@@ -1,14 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Chat as MessageSquare, ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
+import { ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps-sdk-ui/components/Icon'
 import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
 import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
-import { liveProjectChat, projectChatStatus } from '../../lib/projectChats.js'
+import { liveProjectChat } from '../../lib/projectChats.js'
 import ProjectThemeResource, { ProjectThemeSourceView } from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectArtifacts from './ProjectArtifacts.jsx'
+import ProjectChatList from './ProjectChatList.jsx'
 import ProjectFinder from './ProjectFinder.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectCollaborationPanel from './ProjectCollaborationPanel.jsx'
@@ -26,6 +27,8 @@ export default function ProjectWorkspace({
   onOpenChat,
   liveChatById,
   onCreateChat,
+  pinnedChatIds,
+  chatActions,
   onOpenArtifact,
   entryFile,
   onEntryFileHandled,
@@ -270,18 +273,13 @@ export default function ProjectWorkspace({
                 ) : chats.length === 0 ? (
                   <p className="projects-empty">Describe what you want to make in a new chat. It can work with all the files in this project.</p>
                 ) : (
-                  <div className="project-chats__list">
-                    {chats.map(row => {
-                      const chat = liveProjectChat(row, liveChatById?.get(String(row.id)))
-                      const status = projectChatStatus(chat)
-                      return (
-                        <button key={chat.id} type="button" className="project-chats__row" onClick={() => onOpenChat?.(chat)}>
-                          <MessageSquare width={16} height={16} aria-hidden="true" />
-                          <span><strong>{chat.title || 'New chat'}</strong>{status && <small className={chat.running ? 'project-chats__status--working' : undefined}>{status}</small>}</span>
-                        </button>
-                      )
-                    })}
-                  </div>
+                  <ProjectChatList
+                    chats={chats.map(row => liveProjectChat(row, liveChatById?.get(String(row.id))))}
+                    pinnedChatIds={pinnedChatIds}
+                    chatActions={chatActions}
+                    onOpenChat={chat => onOpenChat?.(chat)}
+                    onError={setError}
+                  />
                 )}
               </section>
             </div>

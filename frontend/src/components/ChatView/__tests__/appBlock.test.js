@@ -102,16 +102,23 @@ test('an app may name its expand control, bounded and optional', () => {
   assert.equal(appBlockFromToken(token({ ...base, expand_label: 7 })).expandLabel, '')
 })
 
-test('an embedded transcript view may only open a conversation or an app', () => {
+test('an embedded transcript view may only open a conversation, an app, or Settings', () => {
   const seen = []
   const navigate = target => seen.push(target)
   transcriptHostRequest({ type: 'moebius:open-chat', chatId: 'c1' }, { navigate })
   transcriptHostRequest({ type: 'moebius:open-app', appId: 3, intent: 'x:1' }, { navigate })
-  assert.deepEqual(seen, ['/shell/?chat=c1', '/shell/?app=3&intent=x%3A1'])
-  for (const request of [{ type: 'moebius:new-chat' }, { type: 'moebius:open-settings' }, { type: 'moebius:open-chat' }]) {
-    assert.throws(() => transcriptHostRequest(request, { navigate }), /only open conversations and apps/)
+  transcriptHostRequest({ type: 'moebius:open-settings', section: 'mobius-account' }, { navigate })
+  transcriptHostRequest({ type: 'moebius:open-settings', section: 'retired-section' }, { navigate })
+  assert.deepEqual(seen, [
+    '/shell/?chat=c1',
+    '/shell/?app=3&intent=x%3A1',
+    '/shell/?settings=mobius-account',
+    '/shell/?settings=ai-providers',
+  ])
+  for (const request of [{ type: 'moebius:new-chat' }, { type: 'moebius:chat-control' }, { type: 'moebius:open-chat' }]) {
+    assert.throws(() => transcriptHostRequest(request, { navigate }), /only open conversations, apps and Settings/)
   }
-  assert.equal(seen.length, 2)
+  assert.equal(seen.length, 4)
 })
 
 test('inline sessions are opt-in and never apply to link-only blocks', () => {

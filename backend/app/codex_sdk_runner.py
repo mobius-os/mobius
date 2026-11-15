@@ -41,7 +41,7 @@ import shutil
 import time
 import uuid
 from collections.abc import Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -99,7 +99,7 @@ from app.question_bridge import (
   QuestionPersistenceError,
   park_question,
 )
-from app.runtime_types import RunnerResult
+from app.runtime_types import RunnerResult, prompt_not_sent_result
 from app.usage_metrics import (
   codex_call_input_tokens,
   codex_cost_usd,
@@ -948,20 +948,19 @@ class ActiveCodexTurn:
       raise
 
   async def interrupt(self) -> None:
-    """Signals the live turn and waits for runner-side drain."""
+    """Signals the live turn and waits for runner-side drain.
+
+    The `_finished` wait has no bound of its own: ``stop(timeout)`` is the
+    only budget, so a wedged runner makes ``stop`` time out and report the
+    turn as not stopped.
+    """
     self._interrupt_requested = True
     self._reject_pending_steer()
     try:
       await self.turn.interrupt()
     except Exception as exc:
       log.warning("codex interrupt() raised: %s", exc)
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      log.warning(
-        "codex active_turn._finished never resolved within 5s; runner is wedged"
-      )
-      return
+    await asyncio.shield(self._finished)
 
   async def clear_goal(self) -> None:
     """Stop this attempt; the platform writer owns Goal dismissal."""
@@ -1744,6 +1743,7 @@ async def _run_codex_sdk_turn(
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
+  provider_config_overrides: list[str] | None = None,
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
@@ -1894,6 +1894,7 @@ async def _run_codex_sdk_turn(
   )
   config_overrides = _codex_config_overrides()
   config_overrides.extend(
+    provider_config_overrides if provider_config_overrides is not None else
     get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
   )
   config_overrides.extend(_codex_platform_hook_overrides())
@@ -2203,7 +2204,7 @@ async def _run_codex_sdk_turn(
       current_session_id = thread.id
       if abort_requested():
         log.info("Codex turn aborted before turn setup chat_id=%s", chat_id)
-        return {**aborted_result(), "prompt_sent": False}
+        return prompt_not_sent_result(current_session_id)
       if session_id is not None and current_session_id != session_id:
         # The requested Codex session is gone (rollout cleaned up, or a phantom
         # id) — Codex returned a fresh thread instead of resuming. Rather than
@@ -2892,6 +2893,7 @@ async def run_codex_sdk_turn(
   run_policy=None,
   connector_plan=None,
   provider_id: str = "codex",
+  provider_config_overrides: list[str] | None = None,
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
@@ -2912,29 +2914,48 @@ async def run_codex_sdk_turn(
 
   ownership = await acquire_codex_session_activity_async(data_dir)
   try:
-    return await _run_codex_sdk_turn(
-      user_message=user_message,
-      session_id=session_id,
-      base_env=base_env,
-      cwd=cwd,
-      chat_id=chat_id,
-      bc=bc,
-      pending_questions=pending_questions,
-      db=db,
-      agent_settings=agent_settings,
-      system_prompt=system_prompt,
-      resumed_context=resumed_context,
-      fork_from=fork_from,
-      should_abort=should_abort,
-      retire_native_goal=retire_native_goal,
-      run_policy=run_policy,
-      connector_plan=connector_plan,
-      provider_id=provider_id,
-      data_dir=data_dir,
-      coordination_enabled=coordination_enabled,
-      helper_host_key=helper_host_key,
-      goal_brief_refresh=goal_brief_refresh,
-    )
+    async with contextlib.AsyncExitStack() as runtime:
+      if provider_id == "mobius":
+        from app.providers import mobius_runtime_snapshot
+        agent_settings = dict(agent_settings or {})
+        snapshot = await runtime.enter_async_context(mobius_runtime_snapshot(
+          data_dir, agent_settings.get("model"), agent_settings.get("effort"),
+        ))
+        if not snapshot.model:
+          return {**prompt_not_sent_result(session_id),
+                  "error": "This Möbius model is unavailable. Refresh models and choose a current model."}
+        if helper_host_key is not None:
+          from app.helper_hosts import setup_digest
+          helper_host_key = replace(helper_host_key, setup=setup_digest(
+            helper_host_key.setup, snapshot.declaration,
+          ))
+        agent_settings.update(model=snapshot.model, effort=snapshot.effort)
+        base_env = {**base_env, "MOBIUS_AGENT_MODEL": snapshot.model}
+        provider_config_overrides = snapshot.config_overrides
+      return await _run_codex_sdk_turn(
+        user_message=user_message,
+        session_id=session_id,
+        base_env=base_env,
+        cwd=cwd,
+        chat_id=chat_id,
+        bc=bc,
+        pending_questions=pending_questions,
+        db=db,
+        agent_settings=agent_settings,
+        system_prompt=system_prompt,
+        resumed_context=resumed_context,
+        fork_from=fork_from,
+        should_abort=should_abort,
+        retire_native_goal=retire_native_goal,
+        run_policy=run_policy,
+        connector_plan=connector_plan,
+        provider_id=provider_id,
+        provider_config_overrides=provider_config_overrides,
+        data_dir=data_dir,
+        coordination_enabled=coordination_enabled,
+        helper_host_key=helper_host_key,
+        goal_brief_refresh=goal_brief_refresh,
+      )
   finally:
     ownership.release()
     from app.file_cache import reclaim_provider_cache

@@ -2,15 +2,17 @@
 
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import models, push_relay
+from app import models, notification_channels, push_relay
 from app.database import SessionLocal, get_db
 from app.deps import get_current_owner_for_lifecycle_control, reject_cross_site
-from app.push import get_public_key_base64url
+from app.push import tap_url, get_public_key_base64url
 from app.schemas import (
   PushDeviceRequest,
   PushSubscribeRequest,
@@ -21,6 +23,7 @@ from app.timeutil import now_naive_utc
 router = APIRouter(prefix="/api/push", tags=["push"])
 # Enough to tell phones apart in Settings without exposing a usable token.
 _TOKEN_TAIL = 6
+_MAX_CHANNELS = 10
 
 
 @router.get("/vapid-key")
@@ -233,3 +236,157 @@ def remove_device(
 ):
   """Disconnect one of the owner's phones (API; there is no Settings UI, the phone's own notification setting decides)."""
   _remove(db, background, owner.id, models.PushDevice.id == device_id)
+
+
+# Outside channels (Slack, Discord, ntfy, any webhook). A channel receives
+# owner notifications, so like a subscription only the owner may manage one.
+# The link is a credential: it goes in once and is never read back.
+
+
+class ChannelCreate(BaseModel):
+  url: str = Field(min_length=8, max_length=2000)
+  kind: Literal["slack", "discord", "ntfy", "webhook"] | None = None
+  label: str | None = Field(default=None, max_length=80)
+  # None: every notification. A list: only notifications from those apps.
+  app_ids: list[int] | None = Field(default=None, max_length=200)
+  include_body: bool = False
+
+
+class ChannelUpdate(BaseModel):
+  # A replacement link; like on add, it is checked, encrypted and never returned.
+  url: str | None = Field(default=None, min_length=8, max_length=2000)
+  label: str | None = Field(default=None, max_length=80)
+  app_ids: list[int] | None = Field(default=None, max_length=200)
+  all_notifications: bool | None = None
+  include_body: bool | None = None
+
+
+def _channel_out(row: models.NotificationChannel) -> dict:
+  def iso(value):
+    return value.replace(tzinfo=UTC).isoformat() if value else None
+  return {
+    "id": row.id,
+    "kind": row.kind,
+    "label": row.label,
+    "urlHint": row.url_hint,
+    "appIds": row.app_ids,
+    "includeBody": bool(row.include_body),
+    "createdAt": iso(row.created_at),
+    "lastSentAt": iso(row.last_sent_at),
+    "lastError": row.last_error,
+  }
+
+
+def _owned_channel(db: Session, owner_id: int, channel_id: str) -> models.NotificationChannel:
+  row = db.query(models.NotificationChannel).filter(
+    models.NotificationChannel.id == channel_id,
+    models.NotificationChannel.owner_id == owner_id,
+  ).one_or_none()
+  if row is None:
+    raise HTTPException(404, "Channel not found.")
+  return row
+
+
+@router.get("/channels")
+def list_channels(
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  rows = db.query(models.NotificationChannel).filter(
+    models.NotificationChannel.owner_id == owner.id,
+  ).order_by(models.NotificationChannel.created_at).all()
+  return [_channel_out(row) for row in rows]
+
+
+@router.post("/channels", status_code=201, dependencies=[Depends(reject_cross_site)])
+def create_channel(
+  body: ChannelCreate,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  """Add a channel; the link must be a public https address."""
+  kind = body.kind or notification_channels.detect_kind(body.url.strip())
+  url = notification_channels.check_url(body.url, kind)
+  if db.query(models.NotificationChannel).filter(
+    models.NotificationChannel.owner_id == owner.id,
+  ).count() >= _MAX_CHANNELS:
+    raise HTTPException(409, f"Up to {_MAX_CHANNELS} channels can be added.")
+  row = models.NotificationChannel(
+    id=str(uuid.uuid4()),
+    owner_id=owner.id,
+    kind=kind,
+    label=(body.label or "").strip() or notification_channels.KIND_NAMES[kind],
+    url_encrypted=notification_channels.encrypt_url(url),
+    url_hint=notification_channels.url_hint(url),
+    app_ids=sorted(set(body.app_ids)) if body.app_ids is not None else None,
+    include_body=body.include_body,
+  )
+  db.add(row)
+  db.commit()
+  return _channel_out(row)
+
+
+@router.patch("/channels/{channel_id}", dependencies=[Depends(reject_cross_site)])
+def update_channel(
+  channel_id: str,
+  body: ChannelUpdate,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  row = _owned_channel(db, owner.id, channel_id)
+  if body.url is not None:
+    kind = notification_channels.detect_kind(body.url.strip())
+    url = notification_channels.check_url(body.url, kind)
+    if row.label == notification_channels.KIND_NAMES[row.kind]:
+      row.label = notification_channels.KIND_NAMES[kind]
+    row.kind = kind
+    row.url_encrypted = notification_channels.encrypt_url(url)
+    row.url_hint = notification_channels.url_hint(url)
+    # The old link's failure says nothing about the new one.
+    row.last_error = None
+  if body.label is not None:
+    row.label = body.label.strip() or notification_channels.KIND_NAMES[row.kind]
+  if body.all_notifications:
+    row.app_ids = None
+  elif body.app_ids is not None:
+    row.app_ids = sorted(set(body.app_ids))
+  if body.include_body is not None:
+    row.include_body = body.include_body
+  db.commit()
+  return _channel_out(row)
+
+
+@router.delete(
+  "/channels/{channel_id}", status_code=204, dependencies=[Depends(reject_cross_site)],
+)
+def delete_channel(
+  channel_id: str,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  db.delete(_owned_channel(db, owner.id, channel_id))
+  db.commit()
+
+
+@router.post("/channels/{channel_id}/test", dependencies=[Depends(reject_cross_site)])
+def test_channel(
+  channel_id: str,
+  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  db: Session = Depends(get_db),
+):
+  """Send a sample message now and report how it went."""
+  row = _owned_channel(db, owner.id, channel_id)
+  target = notification_channels.Target(
+    id=row.id, kind=row.kind, url_encrypted=row.url_encrypted,
+    include_body=True,
+  )
+  db.close()
+  message = notification_channels.Message(
+    title="Möbius notifications are connected",
+    body="Notifications you choose in Settings will appear here.",
+    url=tap_url("/shell/?settings=notifications-elsewhere"),
+    notification_id=f"test-{uuid.uuid4()}", source_type="system", source_id=None,
+  )
+  error = notification_channels.deliver(target, message)
+  notification_channels.record_outcome(target, error)
+  return {"ok": error is None, "error": error}

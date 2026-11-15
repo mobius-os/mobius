@@ -30,6 +30,7 @@ from app import activity, deployment_control, models, platform_update
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.restart_util import (
@@ -233,7 +234,7 @@ def sign_out_everywhere(
   dependencies=[Depends(reject_cross_site)],
 )
 def restart_server(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ):
   """Soft restart for the normal Settings surface.
 

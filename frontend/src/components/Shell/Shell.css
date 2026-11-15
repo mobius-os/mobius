@@ -407,6 +407,21 @@
   pointer-events: auto;
 }
 
+/* An app frame can't read the device's bottom inset (env() reads 0 inside it),
+   and outside full immersive its --mobius-safe-bottom is 0 too (see
+   lib/safeAreaInsets.js), so the shell keeps the frame above the home
+   indicator / navigation bar. The strip below shows the shell's --bg. While
+   the shell is fitted above a keyboard, --shell-bottom-inset is 0: the
+   keyboard covers the bar, so the frame rests directly on it. Full immersive
+   apps get the real insets and stay full-bleed. */
+.shell__app-view {
+  padding-bottom: var(--shell-bottom-inset, env(safe-area-inset-bottom, 0px));
+}
+
+.shell--immersive .shell__app-view {
+  padding-bottom: 0;
+}
+
 /* Chat entry keeps the outgoing surface mounted only as a geometry/runtime
    owner while the incoming ChatView settles below. Its content is hidden
    immediately: showing the previous chat OR app after the drawer has closed

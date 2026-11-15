@@ -166,8 +166,11 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
     ],
     "listing": listing,
     "draft": {**listing, "hero": ""},
+    "license_options": [{"spdx": "MIT", "name": "MIT License"}],
   }
-  monkeypatch.setattr(community, "store_listing_review", lambda value, problems: review)
+  monkeypatch.setattr(
+    community, "store_listing_review", lambda value, problems, **_: review,
+  )
 
   preview = await community.preview_local_app_publication(42, DB(), None)
 
@@ -182,6 +185,7 @@ async def test_local_publication_preview_is_bound_to_the_accepted_listing(
   assert preview["asset_root"] == accepted_base
   assert preview["ready"] is True
   assert preview["listing"] is listing
+  assert preview["license_options"] is review["license_options"]
 
 
 @pytest.mark.asyncio
@@ -564,6 +568,156 @@ async def test_local_publish_rejects_an_incomplete_listing_before_github_writes(
   assert source_called is False
 
 
+def _ready_listing_files(license: str) -> list[dict[str, str]]:
+  manifest = {
+    "id": "pocket-list",
+    "name": "Pocket List",
+    "description": "A small shared list.",
+    "version": "1.0.0",
+    "entry": "index.jsx",
+    "icon": "icon.png",
+    "license": license,
+    "store": {
+      "tagline": "Small and exact.",
+      "description": "A calm list for the things that matter.",
+      "screenshots": [{"src": "static/store/screen.png", "alt": "Three items."}],
+    },
+  }
+  return [
+    {"path": path, "content_base64": base64.b64encode(content).decode()}
+    for path, content in (
+      ("mobius.json", json.dumps(manifest).encode()),
+      ("index.jsx", b"export default function App() { return null }"),
+      ("icon.png", _png()),
+      ("static/store/screen.png", _png()),
+      ("LICENSE", b"License text"),
+    )
+  ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("license", "publications", "passes"),
+  [
+    # Updating an app the Store lists keeps its other free license; the Host
+    # checks it is the license the listed revision declares.
+    ("BSD-3-Clause", [{"local_app_id": "app:42:pocket-list", "revision_id": "rev_1"}], True),
+    # A first listing needs a license the Store offers.
+    ("BSD-3-Clause", [], False),
+    ("BSD-3-Clause", [{"local_app_id": "app:7:other", "revision_id": "rev_1"}], False),
+    ("BSD-3-Clause", [{"local_app_id": "app:42:pocket-list", "revision_id": None}], False),
+    # An offered license never asks whether the app is listed.
+    ("MIT", None, True),
+    ("Proprietary", None, False),
+  ],
+)
+async def test_local_publish_keeps_another_free_license_only_for_a_listed_app(
+  monkeypatch, db, license, publications, passes,
+):
+  _local_app(db)
+  asked = []
+
+  @asynccontextmanager
+  async def source_lock(_):
+    yield
+
+  async def fake_broker(method, path, **kwargs):
+    asked.append(path)
+    if path == "/identity":
+      return {"issuer": "https://www.mobius.you", "subject": "user_owner"}, 200, {}
+    assert (method, path) == ("GET", "/v1/community/publications")
+    assert publications is not None
+    if kwargs["params"]["offset"] == 0:
+      # Earlier pages are followed to the end.
+      return {"items": [{"local_app_id": "app:1:first"}], "next_offset": 100}, 200, {}
+    return {"items": publications, "next_offset": None}, 200, {}
+
+  class SourceStarted(Exception):
+    pass
+
+  async def source_started(**_kwargs):
+    raise SourceStarted
+
+  monkeypatch.setattr(community.github_auth, "get_token", lambda: "local-only-token")
+  monkeypatch.setattr(community.community_broker, "request", fake_broker)
+  monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
+  monkeypatch.setattr(
+    community, "build_public_snapshot",
+    lambda _: ("a" * 40, _ready_listing_files(license)),
+  )
+  monkeypatch.setattr(community, "_publish_local_source", source_started)
+  publish = community.publish_local_app_to_github(
+    community.PublishLocalGitHubAppIn(
+      app_id=42, repository_name="pocket-list", confirm_source_public=True,
+    ),
+    db,
+    None,
+    "store:publish-local:license-0001",
+  )
+
+  if passes:
+    with pytest.raises(SourceStarted):
+      await publish
+  else:
+    with pytest.raises(HTTPException) as raised:
+      await publish
+    assert raised.value.status_code == 400
+    assert raised.value.detail["code"] == "listing_incomplete"
+  assert asked[0] == "/identity"
+  assert len(asked) == (1 if publications is None else 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+  ("broker", "listed"),
+  [("listed", True), ("unlisted", False), ("unavailable", False)],
+)
+async def test_publication_preview_asks_whether_a_listed_license_is_kept(
+  monkeypatch, broker, listed,
+):
+  app = SimpleNamespace(id=42, slug="pocket-list", name="Pocket List",
+                        source_dir="/data/apps/pocket-list")
+
+  class Query:
+    def filter(self, *_):
+      return self
+
+    def first(self):
+      return app
+
+  class DB:
+    def query(self, *_):
+      return Query()
+
+  @asynccontextmanager
+  async def source_lock(_):
+    yield
+
+  async def fake_broker(method, path, **kwargs):
+    if broker == "unavailable":
+      raise community.CommunityBrokerError(503, "The Store is unavailable.")
+    items = [{"local_app_id": "app:42:pocket-list", "revision_id": "rev_1"}]
+    return {"items": items if broker == "listed" else [], "next_offset": None}, 200, {}
+
+  monkeypatch.setattr(community.community_broker, "request", fake_broker)
+  monkeypatch.setattr(community.fs_locks, "source_dir_lock", source_lock)
+  monkeypatch.setattr(
+    community, "read_public_snapshot",
+    lambda _: ("a" * 40, _ready_listing_files("BSD-3-Clause"), []),
+  )
+  monkeypatch.setattr(
+    community.store_listing_source, "note_what_saving_fixes", lambda *_: None,
+  )
+
+  preview = await community.preview_local_app_publication(42, DB(), None)
+
+  assert preview["ready"] is listed
+  license_item = next(item for item in preview["checklist"] if item["id"] == "license")
+  assert license_item["done"] is listed
+  assert preview["draft"]["license"] == ""
+  assert preview["draft"]["declared_license"] == "BSD-3-Clause"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("repository_preexists_empty", [False, True])
 async def test_local_app_publish_creates_or_resumes_empty_github_source_then_lists_exact_commit(
@@ -662,7 +816,7 @@ async def test_local_app_publish_creates_or_resumes_empty_github_source_then_lis
       }],
     ),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
@@ -749,7 +903,7 @@ async def test_retryable_host_failure_survives_reload_and_resumes_without_republ
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json"}]),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community, "_publish_local_source", fake_source)
   monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
   monkeypatch.setattr(community, "_request", fake_host)
@@ -850,7 +1004,7 @@ async def test_permanent_host_failure_preserves_actionable_outcome(monkeypatch, 
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json"}]),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community, "_publish_local_source", fake_source)
   monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
   monkeypatch.setattr(community, "_request", reject_manifest)
@@ -966,7 +1120,7 @@ async def test_local_app_publish_reuses_identical_managed_main_without_new_write
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
@@ -1059,7 +1213,7 @@ async def test_local_app_update_only_fast_forwards_its_managed_main(
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(community, "_github_json", fake_github)
   monkeypatch.setattr(community, "_prepare_existing_github_revision", fake_prepare)
@@ -1156,7 +1310,7 @@ def _patch_existing_repository_publication(monkeypatch, github_calls, *, in_hist
     community, "build_public_snapshot",
     lambda _: ("a" * 40, [{"path": "mobius.json", "mode": "100644", "content_base64": "e30="}]),
   )
-  monkeypatch.setattr(community, "public_store_listing", lambda _: {})
+  monkeypatch.setattr(community, "public_store_listing", lambda _files, **_: {})
   monkeypatch.setattr(community.httpx, "AsyncClient", lambda **kwargs: Client())
   monkeypatch.setattr(
     community, "_github_json",

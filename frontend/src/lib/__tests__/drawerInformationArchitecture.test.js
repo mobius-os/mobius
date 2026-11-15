@@ -5,6 +5,7 @@ import {
   buildDrawerSections,
   filterInstalledApps,
   findDrawerMenuItem,
+  reconcileStripOrder,
 } from '../../components/Drawer/drawerInformationArchitecture.js'
 
 test('drawer separates mixed pins from mixed recents ordered by activity', () => {
@@ -25,9 +26,10 @@ test('drawer separates mixed pins from mixed recents ordered by activity', () =>
   ])
   assert.deepEqual(sections.recents.map(entry => [entry.kind, entry.item.id]), [
     ['chat', 'new-chat'],
-    ['app', 1],
     ['chat', 'old-chat'],
   ])
+  // Pinned apps stay in the Apps strip as well as Pinned.
+  assert.deepEqual(sections.recentApps.map(app => app.id), [1, 2])
   assert.deepEqual(sections.apps.map(app => app.id), [2, 1])
 })
 
@@ -68,46 +70,9 @@ test('app opens outrank bundle updates without changing catalogue order', () => 
     },
   ])
 
-  assert.deepEqual(sections.recents.map(entry => entry.item.id), [1, 2])
+  assert.deepEqual(sections.recents, [])
+  assert.deepEqual(sections.recentApps.map(app => app.id), [1, 2])
   assert.deepEqual(sections.apps.map(app => app.id), [1, 2])
-})
-
-test('opened project artifacts join Recents once, plainly, and rebuilds do not manufacture recency', () => {
-  const project = {
-    id: 12,
-    name: 'Portfolio',
-    color: '#3b82f6',
-    created_at: '2026-08-25T09:00:00Z',
-    artifacts: [
-      {
-        id: 'site', name: 'Website', status: 'ok', has_output: true,
-        updated_at: '2026-08-25T11:30:00Z',
-        last_opened_at: '2026-08-25T11:30:00Z',
-      },
-      { id: 'draft', name: 'Draft', status: 'idle', has_output: false, updated_at: '2026-08-25T12:00:00Z' },
-    ],
-  }
-  const before = buildDrawerSections([
-    { id: 'chat', has_messages: true, activity_at: '2026-08-25T11:45:00Z' },
-  ], [], [project])
-  assert.deepEqual(before.recents.map(entry => [entry.kind, entry.item.id]), [
-    ['chat', 'chat'],
-    ['artifact', '12:site'],
-    ['project', 12],
-  ])
-  assert.equal(before.recents[1].item.artifact_id, 'site')
-  assert.equal('project' in before.recents[1].item, false, 'an artifact row carries no project belonging')
-  assert.equal(before.recents[1].item.display_name, 'Portfolio · Website', 'a Recents result is named for its project')
-
-  project.artifacts[0].updated_at = '2026-08-25T12:10:00Z'
-  const after = buildDrawerSections([
-    { id: 'chat', has_messages: true, activity_at: '2026-08-25T11:45:00Z' },
-  ], [], [project])
-  assert.deepEqual(after.recents.map(entry => [entry.kind, entry.item.id]), [
-    ['chat', 'chat'],
-    ['artifact', '12:site'],
-    ['project', 12],
-  ])
 })
 
 test('pinned order is stable across mixed timestamp formats (Z vs naive UTC)', () => {
@@ -166,4 +131,20 @@ test('a drawer menu item becomes ordinary absence when its row disappears', () =
   assert.equal(findDrawerMenuItem({ kind: 'app', id: app.id }, [chat], [app]), app)
   assert.equal(findDrawerMenuItem({ kind: 'chat', id: chat.id }, [], [app]), null)
   assert.equal(findDrawerMenuItem(null, [chat], [app]), null)
+})
+
+test('the Apps row keeps in-view apps in place and brings scrolled-to apps to the front', () => {
+  const order = ['a', 'b', 'c', 'd', 'e', 'f', 'g']
+  // Opening an app already visible without scrolling leaves the row alone.
+  assert.deepEqual(reconcileStripOrder(order, ['c', 'a', 'b', 'd', 'e', 'f', 'g'], 'c', 5), order)
+  // An app that needed scrolling moves to the front.
+  assert.deepEqual(
+    reconcileStripOrder(order, ['f', 'a', 'b', 'c', 'd', 'e', 'g'], 'f', 5),
+    ['f', 'a', 'b', 'c', 'd', 'e', 'g'],
+  )
+  // New installs join at the front; uninstalled apps drop out.
+  assert.deepEqual(reconcileStripOrder(order, ['n', 'a', 'b', 'c', 'd', 'e', 'f'], null, 5),
+    ['n', 'a', 'b', 'c', 'd', 'e', 'f'])
+  // A list that has not loaded yet keeps the remembered order.
+  assert.deepEqual(reconcileStripOrder(order, [], null, 5), order)
 })

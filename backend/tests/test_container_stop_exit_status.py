@@ -1,9 +1,11 @@
 """A planned container stop must exit 0; genuine failures must not.
 
 Railway reports any non-zero container exit as "Deployment crashed" and emails
-the owner. Every planned Möbius stop ends in SIGTERM, which `su` and uvicorn
-re-raise after shutting down, so the image's init must map that one status to
-a clean exit while leaving real failures (and SIGKILL/OOM) visible.
+the owner. A host's planned stop (a redeploy, `docker stop`) ends in SIGTERM,
+which `su` and uvicorn re-raise after shutting down, so the image's init chain
+(tini plus the container supervisor) must map that one status to a clean exit
+while leaving real failures (and SIGKILL/OOM) visible. An in-app restart never
+stops the container at all; see test_container_supervisor.py.
 """
 
 import json
@@ -22,7 +24,13 @@ def _image_entrypoint() -> list[str]:
   dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
   match = re.search(r"^ENTRYPOINT\s+(\[.*\])\s*$", dockerfile, re.MULTILINE)
   assert match, "Dockerfile must declare an exec-form ENTRYPOINT"
-  return json.loads(match.group(1))
+  # Run the image's frozen runtime helpers (the container supervisor) from
+  # this checkout, so the test covers the exact chain the image runs.
+  return [
+    str(ROOT / "backend/runtime" / arg.removeprefix("/app/runtime/"))
+    if arg.startswith("/app/runtime/") else arg
+    for arg in json.loads(match.group(1))
+  ]
 
 
 def _exit_status_under_entrypoint(child_script: str) -> int:

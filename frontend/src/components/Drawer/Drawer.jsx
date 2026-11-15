@@ -4,7 +4,10 @@ import { createPortal } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { EmptyMessage } from '@openai/apps-sdk-ui/components/EmptyMessage'
 import {
+  Archive,
+  Clock,
   Pause,
+  Pin,
   Play,
   Stop,
 } from '@openai/apps-sdk-ui/components/Icon'
@@ -13,14 +16,12 @@ import { api, reservePinnedIntent } from '../../api/client.js'
 import { appQueries, chatQueries, projectQueries } from '../../hooks/queries.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import {
-  AppsNavIcon,
   NewChatNavIcon,
   ProjectsNavIcon,
   SettingsNavIcon,
 } from '../navigationIcons.js'
 import AppIcon from '../AppIcon.jsx'
-import ProjectCreateMenu from '../Projects/ProjectCreateMenu.jsx'
-import ProjectArtifactIcon from '../Projects/ProjectArtifactIcon.jsx'
+import DrawerAppsStrip from './DrawerAppsStrip.jsx'
 import ProjectIdentityIcon from '../Projects/ProjectIdentityIcon.jsx'
 import {
   computePinnedDrag,
@@ -30,7 +31,6 @@ import {
   projectPinnedEntries,
   reconcilePinnedOrder,
 } from './pinnedReorder.js'
-import { prefetchChatMessages } from './prefetchChatMessages.js'
 import {
   drawerCloseWatchdogMs,
   drawerWidthFromPointerDelta,
@@ -43,20 +43,15 @@ import {
   settleDrawerSwipe,
   watchDismissPointerEnd,
 } from '../../lib/drawerLifecycle.js'
-import {
-  PRESS_MENU_HOLD_MS,
-  PRE_HOLD_MOVE_PX,
-} from '../Shell/dragController.js'
 import InstallSheet from './InstallSheet.jsx'
 import AppsDirectory from './AppsDirectory.jsx'
 import DrawerItemActionMenu from './DrawerItemActionMenu.jsx'
-import { createPinnedMutationQueue } from './pinnedMutationQueue.js'
+import InlineRenameInput from './InlineRenameInput.jsx'
+import useItemMenuGestures, { itemMenuPlacement } from './useItemMenuGestures.js'
 import {
   buildDrawerSections,
   filterInstalledApps,
   findDrawerMenuItem,
-  nextPendingPinnedAt,
-  projectPendingDrawerPins,
 } from './drawerInformationArchitecture.js'
 import ShareAppSheet from './ShareAppSheet.jsx'
 import { isDrawerAppShareEligible } from './appShareState.js'
@@ -101,7 +96,6 @@ function writeListTab(tab) {
 // downstream.
 const EMPTY_SET = new Set()
 const EMPTY_LIST = []
-const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500
 
 // Content still below the viewport bottom, in the scroller's own units.
 function scrollBelowViewport(root) {
@@ -121,23 +115,9 @@ export default function Drawer({
   activeView,
   activeAppId,
   projects = EMPTY_LIST,
-  projectsStatus = 'success',
-  onRetryProjects,
-  activeProjectId,
   activeProjectChatProjectId,
-  activeArtifactRef,
-  projectTemplates = EMPTY_LIST,
   onProject,
-  onProjectRename,
-  onProjectColor,
-  onProjectDelete,
-  onArtifact,
   onProjectsOpen,
-  onProjectCreate,
-  onProjectImportGithub,
-  // Same import path the Projects screen offers, so a page or local app can
-  // become an editable project from either + menu.
-  onProjectImportSource,
   chats,
   chatsStatus = 'success',
   onRetryChats,
@@ -149,6 +129,10 @@ export default function Drawer({
   onDeleteChat,
   // Owner filing: (chatId, archived) moves a chat between Recents and Archived.
   onSetChatArchived,
+  // Shell owns chat rename and every pin, so a project page's Chats list acts
+  // through the same paths: (chatId, title), and usePinnedItemMutations().
+  onRenameChat,
+  pins,
   onDeleteApp,
   onDeleteAppData,
   onNotice,
@@ -197,32 +181,21 @@ export default function Drawer({
   const failedSet = failedChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
-  // An open artifact is its own destination: it never lights up a project row.
-  const activeProject = projects.find(project => (
-    (activeView === 'project' && String(activeProjectId) === String(project.id))
-    || (activeView === 'chat'
-      && String(activeProjectChatProjectId) === String(project.id))
-  ))
+  // Projects are reached only through the Projects entry, so it stays lit on
+  // the Projects screen, inside a project, and in a project's chat — the same
+  // rule as the collapsed rail.
+  const projectsActive = activeView === 'projects'
+    || activeView === 'project'
+    || Boolean(activeProjectChatProjectId)
   // One source of truth for which row the focused pane is showing, so a chat
   // and an app are selected by the same rule wherever the row is rendered.
   const isRowActive = ({ kind, item }) => (
     kind === 'chat'
       ? activeView === 'chat' && activeChatId === item.id
-      : kind === 'artifact'
-        ? activeView === 'artifact' && String(activeArtifactRef) === String(item.id)
-        : kind === 'project'
-          ? activeView === 'project' && String(activeProjectId) === String(item.id)
-          : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
+      : activeView === 'canvas' && Number(activeAppId) === Number(item.id)
   )
   const resizeRef = useRef(null)
   const pinnedReorderGenerationRef = useRef(0)
-  const pinMutationGenerationRef = useRef(0)
-  const pinMutationQueueRef = useRef(null)
-  if (pinMutationQueueRef.current === null) {
-    pinMutationQueueRef.current = createPinnedMutationQueue()
-  }
-  const lastPendingPinnedAtRef = useRef(null)
-  const [pendingPins, setPendingPins] = useState(() => new Map())
   const [pinnedOrderHandoff, setPinnedOrderHandoff] = useState(null)
   // Recents and Archived are two lists in one panel, windowed by the same
   // machinery below; each device remembers which one it shows.
@@ -241,21 +214,17 @@ export default function Drawer({
     setListTab(tab)
     writeListTab(tab)
   }, [])
-  const projectedDrawerItems = useMemo(() => projectPendingDrawerPins(
-    chats,
-    apps,
-    projects,
-    pendingPins,
-  ), [chats, apps, projects, pendingPins])
+  // Pins still in flight are already applied; Shell owns pin mutations.
+  const projectedDrawerItems = pins.projectedItems
   const {
     pinned: basePinnedItems,
     recents: allRecents,
+    recentApps,
     archived: archivedItems,
     apps: sortedApps,
   } = useMemo(() => buildDrawerSections(
     projectedDrawerItems.chats,
     projectedDrawerItems.apps,
-    projectedDrawerItems.projects,
   ), [projectedDrawerItems])
   const listItems = showingArchived ? archivedItems : allRecents
 
@@ -341,6 +310,9 @@ export default function Drawer({
     if (!open) return
     measureListWindow()
   }, [measureListWindow, open, pinnedItems.length, listTab])
+  const measureListWindowIfOpen = useCallback(() => {
+    if (open) measureListWindow()
+  }, [measureListWindow, open])
   useEffect(() => {
     if (!open) return undefined
     const root = navigationScrollRef.current
@@ -398,6 +370,12 @@ export default function Drawer({
 
     const chatId = String(activeChatId)
     if (revealedActiveChatRef.current === chatId) return
+    // A project chat is reached from its project folder, not Recents, so never
+    // scroll the drawer down looking for it.
+    if (activeProjectChatProjectId) {
+      revealedActiveChatRef.current = chatId
+      return
+    }
 
     const isPinned = pinnedItems.some(({ kind, item }) => (
       kind === 'chat' && String(item.id) === chatId
@@ -426,6 +404,7 @@ export default function Drawer({
     revealedActiveChatRef.current = chatId
   }, [
     activeChatId,
+    activeProjectChatProjectId,
     activeView,
     listItems,
     open,
@@ -442,7 +421,6 @@ export default function Drawer({
     openMenu,
     projectedDrawerItems.chats,
     projectedDrawerItems.apps,
-    projectedDrawerItems.projects,
   )
   const {
     open: openItemMenuHistory,
@@ -458,24 +436,15 @@ export default function Drawer({
   useEffect(() => {
     if (openMenu && !activeMenuItem) closeItemMenu()
   }, [openMenu, activeMenuItem, closeItemMenu])
-  const [renamingState, setRenamingState] = useState(null) // { kind, id } | null
-  // Mirrors `renaming` synchronously (not via useEffect — that's one render
-  // behind) so outside-tap cancellation sees the current edit immediately.
-  const renamingRef = useRef(null)
-  const overlayCancelRef = useRef(false)
+  const [renaming, setRenaming] = useState(null) // { kind, id, surface } | null
   // Closing on pointerdown makes the drawer feel immediate, but WebKit may
   // retarget the compatibility click from that same touch to content revealed
   // beneath the scrim. Keep ownership of exactly that click. A new pointer or
   // keyboard activation clears a stale claim first, so a touch sequence that
   // produces no click cannot poison the owner's next action.
   const outsideDismissClickRef = useRef(false)
-  const renaming = renamingState
-  const setRenaming = useCallback((next) => {
-    renamingRef.current = next
-    setRenamingState(next)
-  }, [])
   // The app whose "Add to home screen" sheet is open,
-  // or null. Mirrors openMenu/renamingState — one at a time, owned here
+  // or null. Mirrors openMenu/renaming — one at a time, owned here
   // rather than in Shell so this stays drawer-local.
   const [installingApp, setInstallingApp] = useState(null)
   const [appQuery, setAppQuery] = useState('')
@@ -526,18 +495,10 @@ export default function Drawer({
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
       if (kind === 'chat') current.onChat(id)
-      else if (kind === 'artifact') current.onArtifact?.(id)
-      else if (kind === 'project') {
-        const project = current.projects.find(row => String(row.id) === String(id))
-        if (project) current.onProject?.(project)
-      }
       else current.onApp(id)
     },
-    prefetch(kind, id) {
-      if (kind === 'chat') rowActionInputsRef.current.prefetchChat(id)
-    },
-    // The Recents project chip opens a chat/artifact's owning project. Reuses
-    // the same open-project path as the drawer's project rows.
+    // A project chat's chip, or an app's "Open project" action, opens the
+    // owning project.
     openProject(project) {
       const current = rowActionInputsRef.current
       current.resetAppsSurfaceUi({ restoreFocus: false })
@@ -563,13 +524,8 @@ export default function Drawer({
     submitRename(kind, id, previous, next) {
       const current = rowActionInputsRef.current
       current.setRenaming(null)
-      if (current.overlayCancelRef.current) {
-        current.overlayCancelRef.current = false
-        return
-      }
       if (!next || next === previous) return
-      if (kind === 'chat') current.renameChat(id, next)
-      else if (kind === 'project') current.renameProject(id, next)
+      if (kind === 'chat') current.onRenameChat(id, next)
       else current.renameApp(id, next)
     },
     copyName(name) {
@@ -582,10 +538,7 @@ export default function Drawer({
       })
     },
     pin(kind, id, next) {
-      const current = rowActionInputsRef.current
-      if (kind === 'chat') current.pinChat(id, next)
-      else if (kind === 'project') current.pinProject(id, next)
-      else current.pinApp(id, next)
+      rowActionInputsRef.current.pins.pin(kind, id, next)
     },
     reorderPinned(orderedKeys) {
       return rowActionInputsRef.current.reorderPinned(orderedKeys)
@@ -596,10 +549,6 @@ export default function Drawer({
     remove(kind, id) {
       const current = rowActionInputsRef.current
       if (kind === 'chat') current.onDeleteChat(id)
-      else if (kind === 'project') {
-        const project = current.projects.find(row => String(row.id) === String(id))
-        if (project) current.onProjectDelete?.(project)
-      }
       else current.onDeleteApp?.(id)
     },
     removeData(id) {
@@ -621,15 +570,6 @@ export default function Drawer({
     // content underneath. Primary pointerdown both acknowledges the outside
     // tap immediately and pairs with the scrim's touch-action:none contract.
     if (e.button !== 0 || !e.isPrimary) return
-    if (renamingRef.current || overlayCancelRef.current) {
-      // Defensive fallback for browsers that reach the overlay before the
-      // rename row's document-capture listener. Cancel the rename and let this
-      // same outside gesture close the drawer; one tap should never be needed
-      // merely to clear an intermediate drawer state.
-      overlayCancelRef.current = true
-      renamingRef.current = null
-      setRenaming(null)
-    }
     outsideDismissClickRef.current = true
     e.preventDefault()
     e.stopPropagation()
@@ -677,21 +617,8 @@ export default function Drawer({
     return appQueries.list.invalidate(queryClient)
   }
 
-  function prefetchChat(id) {
-    void prefetchChatMessages(queryClient, id)
-  }
-
-  async function renameChat(id, title) {
-    if (await saveDrawerRename(() => api.chats.update(id, { title }), onNotice)) refreshChats()
-  }
-
   async function renameApp(id, name) {
     if (await saveDrawerRename(() => api.apps.update(id, { name }), onNotice)) refreshApps()
-  }
-
-  async function renameProject(id, name) {
-    const project = projects.find(row => String(row.id) === String(id))
-    if (project) await saveDrawerRename(() => onProjectRename?.(project, name), onNotice)
   }
 
   async function publishHostedApp(id) {
@@ -726,87 +653,6 @@ export default function Drawer({
     return updated
   }
 
-  function mutatePin(kind, id, pinned, { queryKey, request, recover }) {
-    const generation = ++pinMutationGenerationRef.current
-    const intentWitness = reservePinnedIntent()
-    const itemKey = `${kind}:${id}`
-    const optimisticPinnedAt = pinned
-      ? nextPendingPinnedAt(
-        projectedDrawerItems.chats,
-        projectedDrawerItems.apps,
-        projectedDrawerItems.projects,
-        { previous: lastPendingPinnedAtRef.current },
-      )
-      : null
-    if (optimisticPinnedAt) lastPendingPinnedAtRef.current = optimisticPinnedAt
-    const pending = {
-      generation,
-      pinned,
-      pinnedAt: optimisticPinnedAt,
-    }
-    setPendingPins(current => new Map(current).set(itemKey, pending))
-
-    return pinMutationQueueRef.current.enqueue(async () => {
-      try {
-        const updated = await request(await intentWitness)
-        const persistedPinnedAt = updated?.pinned_at ?? null
-        if (pinned && !persistedPinnedAt) {
-          throw new Error('Pin update returned no canonical rank')
-        }
-
-        // Retire any list request that began before the committed write, then
-        // place the server's exact rank in the canonical cache. The pending
-        // projection keeps the owner's choice visible until this queue item
-        // retires, but never becomes durable ordering truth.
-        try {
-          await queryClient.cancelQueries({ queryKey, exact: true })
-        } catch {}
-        const applyPersistedPin = list => (list || []).map(item => (
-          String(item.id) === String(id)
-            ? { ...item, pinned_at: persistedPinnedAt }
-            : item
-        ))
-        queryClient.setQueryData(queryKey, applyPersistedPin)
-      } catch {
-        onNotice?.(`Couldn’t ${pinned ? 'pin' : 'unpin'} that item.`, { variant: 'error' })
-        // A timeout can race a successful server commit. Recovery is outside
-        // the queue so one unavailable list read cannot block later intent.
-        void Promise.resolve().then(recover).catch(() => {})
-      } finally {
-        setPendingPins(current => {
-          if (current.get(itemKey)?.generation !== generation) return current
-          const next = new Map(current)
-          next.delete(itemKey)
-          return next
-        })
-      }
-    })
-  }
-
-  function pinChat(id, pinned) {
-    return mutatePin('chat', id, pinned, {
-      queryKey: chatQueries.keys.all,
-      request: witness => api.chats.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshChats,
-    })
-  }
-
-  function pinApp(id, pinned) {
-    return mutatePin('app', id, pinned, {
-      queryKey: appQueries.keys.all,
-      request: witness => api.apps.setPinned(id, pinned, { intentWitness: witness }),
-      recover: refreshApps,
-    })
-  }
-
-  function pinProject(id, pinned) {
-    return mutatePin('project', id, pinned, {
-      queryKey: projectQueries.keys.all,
-      request: witness => api.projects.setPinned(id, pinned, { intentWitness: witness }),
-      recover: () => projectQueries.list.invalidate(queryClient),
-    })
-  }
-
   // Persist a new order for the one combined pinned list (chats, apps, and
   // projects share it). The visible handoff remains authoritative until the
   // ONE atomic server transaction returns exact ranks for all three query
@@ -815,12 +661,11 @@ export default function Drawer({
     if (!Array.isArray(orderedKeys) || orderedKeys.length === 0) return
     const generation = ++pinnedReorderGenerationRef.current
     const intentWitness = reservePinnedIntent()
-    return pinMutationQueueRef.current.enqueue(async () => {
+    return pins.enqueue(async () => {
       if (generation !== pinnedReorderGenerationRef.current) return false
       const currentPinned = buildDrawerSections(
         queryClient.getQueryData(chatQueries.keys.all) || chats,
         queryClient.getQueryData(appQueries.keys.all) || apps,
-        queryClient.getQueryData(projectQueries.keys.all) || projects,
       ).pinned
       const currentKeys = currentPinned.map(({ kind, item }) => `${kind}:${item.id}`)
       const visibleKeys = reconcilePinnedOrder(orderedKeys, currentKeys)
@@ -828,7 +673,13 @@ export default function Drawer({
         visibleKeys.length < 2
         || visibleKeys.every((key, index) => key === currentKeys[index])
       ) return false
-      const items = visibleKeys.map(key => {
+      // Pinned projects live only on the Projects screen, but the server's
+      // atomic reorder covers every pin, so carry them after the drawer rows.
+      const hiddenProjectKeys = (queryClient.getQueryData(projectQueries.keys.all) || projects)
+        .filter(project => project.pinned_at)
+        .map(project => `project:${project.id}`)
+      const sentKeys = [...visibleKeys, ...hiddenProjectKeys]
+      const items = sentKeys.map(key => {
         const sep = key.indexOf(':')
         return { kind: key.slice(0, sep), id: key.slice(sep + 1) }
       })
@@ -847,7 +698,7 @@ export default function Drawer({
           `${item.kind}:${item.id}`,
           item.pinned_at,
         ]))
-        if (rank.size !== visibleKeys.length || visibleKeys.some(key => !rank.has(key))) {
+        if (rank.size !== sentKeys.length || sentKeys.some(key => !rank.has(key))) {
           throw new Error('Pinned reorder returned an incomplete order')
         }
         if (generation !== pinnedReorderGenerationRef.current) return false
@@ -973,6 +824,11 @@ export default function Drawer({
   function clearClickSuppression() {
     suppressGeneratedClickRef.current = false
   }
+  // A child that pans on its own (the Apps row) asks for the same one-shot
+  // swallow of the touch click its release generates.
+  const suppressReleaseClick = useCallback(() => {
+    suppressGeneratedClickRef.current = true
+  }, [])
 
   function onDrawerClickCapture(e) {
     if (interactionLocked) {
@@ -1049,6 +905,9 @@ export default function Drawer({
     // A row is being lifted out of the drawer — the drag controller owns this
     // gesture; swipe-to-close stands down (design §3.1).
     if (dragActiveRef?.current) { drawerGestureRef.current = null; return }
+    // A sideways-scrolling strip (the Apps row) owns horizontal swipes that
+    // start on it; swipe-to-close would otherwise steal them.
+    if (e.target?.closest?.('[data-drawer-hscroll]')) { drawerGestureRef.current = null; return }
     drawerGestureRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -1203,14 +1062,13 @@ export default function Drawer({
 
   rowActionInputsRef.current = {
     onChat,
+    onAppsOpen,
     onApp,
     onAddSourceToProjects,
     onProject,
-    onProjectDelete,
-    onArtifact,
-    projects,
     onDeleteChat,
     onSetChatArchived,
+    onRenameChat,
     onDeleteApp,
     onDeleteAppData,
     onNotice,
@@ -1221,15 +1079,9 @@ export default function Drawer({
     setInstallingApp,
     resetAppsSurfaceUi,
     setSharingApp,
-    overlayCancelRef,
-    renameChat,
     renameApp,
-    renameProject,
-    pinChat,
-    pinApp,
-    pinProject,
+    pins,
     reorderPinned,
-    prefetchChat,
   }
 
   return (
@@ -1310,39 +1162,19 @@ export default function Drawer({
 
             <div className="drawer__scroll drawer__scroll--navigation" ref={navigationScrollRef}>
               <button
-                ref={appsButtonRef}
                 type="button"
-                className={`drawer__item drawer__item--apps${activeView === 'apps' ? ' drawer__item--active' : ''}`}
-                aria-current={activeView === 'apps' ? 'page' : undefined}
-                onClick={openApps}
+                className={`drawer__item drawer__item--projects${projectsActive ? ' drawer__item--active' : ''}`}
+                aria-current={activeView === 'projects' ? 'page' : undefined}
+                onClick={() => {
+                  resetAppsSurfaceUi({ restoreFocus: false })
+                  onProjectsOpen?.()
+                }}
               >
                 <span className="drawer__item-icon" aria-hidden="true">
-                  <AppsNavIcon />
+                  <ProjectsNavIcon />
                 </span>
-                <span className="drawer__item-text">Apps</span>
+                <span className="drawer__item-text">Projects</span>
               </button>
-
-              <div className="drawer__projects-nav">
-                <button
-                  type="button"
-                  className={`drawer__item drawer__item--projects${activeView === 'projects' || activeView === 'project' || activeProject ? ' drawer__item--active' : ''}`}
-                  aria-current={activeView === 'projects' ? 'page' : undefined}
-                  onClick={onProjectsOpen}
-                >
-                  <span className="drawer__item-icon" aria-hidden="true">
-                    <ProjectsNavIcon />
-                  </span>
-                  <span className="drawer__item-text">Projects</span>
-                </button>
-                <ProjectCreateMenu
-                  templates={projectTemplates}
-                  onCreate={onProjectCreate}
-                  onImportGithub={onProjectImportGithub}
-                  onImportSource={onProjectImportSource}
-                  className="drawer__projects-add"
-                  align="end"
-                />
-              </div>
 
               {nowPlaying && (
                 <NowPlaying
@@ -1356,7 +1188,9 @@ export default function Drawer({
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
                   <h2 id="drawer-pinned-label" className="drawer__label">
+                    <Pin className="drawer__section-icon" width={16} height={16} aria-hidden="true" />
                     <span>Pinned</span>
+                    <span className="drawer__section-count">{pinnedItems.length}</span>
                   </h2>
                   {pinnedItems.map(({ kind, item }) => (
                     <DrawerRow
@@ -1387,6 +1221,26 @@ export default function Drawer({
                   ))}
                 </section>
               )}
+
+              <DrawerAppsStrip
+                apps={recentApps}
+                activeAppId={activeView === 'canvas' ? activeAppId : null}
+                ownerInputSet={ownerInputSet}
+                streamingSet={streamingSet}
+                newAppSet={newAppSet}
+                actions={rowActions}
+                drawerRowGesturesRef={drawerRowGesturesRef}
+                suppressReleaseClick={suppressReleaseClick}
+                titleRef={appsButtonRef}
+                appsViewActive={activeView === 'apps'}
+                onOpenAll={openApps}
+                renamingId={renaming?.surface === 'strip' && renaming.kind === 'app' ? renaming.id : null}
+                onApp={(id) => {
+                  resetAppsSurfaceUi({ restoreFocus: false })
+                  onApp?.(id)
+                }}
+                onLayoutChange={measureListWindowIfOpen}
+              />
 
               <section
                 ref={listSectionRef}
@@ -1422,8 +1276,15 @@ export default function Drawer({
                         aria-selected={listTab === tab}
                         aria-controls="drawer-list-panel"
                         tabIndex={listTab === tab ? 0 : -1}
+                        // A pointer press switches lists without taking focus:
+                        // a mouse-focused tab would show the keyboard ring after
+                        // any later key press, even Shift or Alt-Tab.
+                        onMouseDown={event => event.preventDefault()}
                         onClick={() => selectListTab(tab)}
                       >
+                        {tab === 'recents'
+                          ? <Clock className="drawer__section-icon" width={16} height={16} aria-hidden="true" />
+                          : <Archive className="drawer__section-icon" width={16} height={16} aria-hidden="true" />}
                         {tab === 'recents' ? 'Recents' : 'Archived'}
                         {tab === 'archived' && archivedItems.some(({ item }) => (
                           ownerInputSet.has(item.id) || failedSet.has(item.id)
@@ -1453,14 +1314,7 @@ export default function Drawer({
                     />
                   )}
                   {listItems.length > 0 ? visibleListItems.map(({ kind, item }) => (
-                    kind === 'artifact' ? (
-                      <DrawerArtifactRow
-                        key={`${kind}:${item.id}`}
-                        item={item}
-                        active={isRowActive({ kind, item })}
-                        actions={rowActions}
-                      />
-                    ) : <DrawerRow
+                    <DrawerRow
                       key={`${kind}:${item.id}`}
                       kind={kind}
                       item={item}
@@ -1485,9 +1339,9 @@ export default function Drawer({
                       dragActiveRef={dragActiveRef}
                       drawerRowGesturesRef={drawerRowGesturesRef}
                     />
-                  )) : chatsStatus === 'loading' || appsStatus === 'loading' || projectsStatus === 'loading' ? (
+                  )) : chatsStatus === 'loading' || appsStatus === 'loading' ? (
                     <p className="drawer__list-status" role="status">Loading {showingArchived ? 'archived chats' : 'recents'}…</p>
-                  ) : chatsStatus === 'error' || appsStatus === 'error' || projectsStatus === 'error' ? (
+                  ) : chatsStatus === 'error' || appsStatus === 'error' ? (
                     <div className="drawer__list-status" role="alert">
                       <span>{showingArchived ? 'Archived chats' : 'Recents'} unavailable.</span>
                       <button
@@ -1495,7 +1349,6 @@ export default function Drawer({
                         onClick={() => {
                           onRetryChats?.()
                           onRetryApps?.()
-                          onRetryProjects?.()
                         }}
                       >
                         Retry
@@ -1662,28 +1515,6 @@ function NowPlaying({ session, app, onOpen, onControl }) {
 }
 
 
-// A built artifact is a plain Recents destination: name and type glyph only,
-// no project belonging. Its project is reachable from the project's own row.
-const DrawerArtifactRow = memo(function DrawerArtifactRow({ item, active, actions }) {
-  return (
-    <div className={`drawer__row drawer__row--artifact${active ? ' drawer__row--active' : ''}`}>
-      <button
-        type="button"
-        className={`drawer__item${active ? ' drawer__item--active' : ''}`}
-        aria-current={active ? 'page' : undefined}
-        aria-label={`Open ${item.display_name || item.name || item.artifact_id}`}
-        onClick={() => actions.select('artifact', item.id)}
-      >
-        <span className="drawer__item-icon drawer__artifact-icon" aria-hidden="true">
-          <ProjectArtifactIcon artifact={item} size={19} strokeWidth={1.8} />
-        </span>
-        <span className="drawer__item-text">{item.display_name || item.name || item.artifact_id}</span>
-      </button>
-    </div>
-  )
-})
-
-
 /** One row in the chat or app list — handles select, inline rename,
  * contextual actions, and confirm-delete in a single self-contained unit
  * so the parent only orchestrates which row is currently expanded. */
@@ -1731,64 +1562,21 @@ const DrawerRow = memo(function DrawerRow({
             : 'Manual recovery needed'
   const slug = item.slug
   const wrapRef = useRef(null)
-  const inputRef = useRef(null)
-  const holdTimerRef = useRef(null)
-  const holdOriginRef = useRef(null)
   const itemButtonRef = useRef(null)
-  const suppressCardClickRef = useRef(false)
   const suppressRowClickRef = useRef(false)
   const reorderCleanupRef = useRef(null)
-  const secondaryReleaseCleanupRef = useRef(null)
   const drawerGestureHandlerRef = useRef(null)
-  // iOS may dispatch its long-press contextmenu AFTER pointercancel. Keep the
-  // touch provenance independent of the live pointer session so that delayed
-  // native event cannot open actions before a release. It expires, and keyboard
-  // or mouse input clears it, so accessibility and desktop context menus remain.
-  const touchMenuPointerAtRef = useRef(0)
-  // Cancel-on-outside-tap during rename. Capture-phase listeners on
-  // pointerdown AND click anywhere outside the rename input normally call
-  // preventDefault + stopPropagation so another row, Settings, or New chat
-  // does NOT fire its own click — the rename just exits. The scrim is the one
-  // exception: it remains a reliable drawer-close surface, so a scrim tap
-  // cancels the rename and continues to Drawer.handleOverlayPointerDown.
-  // Both events are needed: pointerdown prevents focus shift,
-  // click is a separate event that some browsers fire regardless.
-  // `cancelingRef` tells `commitRename` to bail when the impending
-  // blur fires, so the value is discarded rather than committed.
-  // `swallowClickRef` tracks that a cancel just happened so the
-  // click listener knows to swallow the following click event.
-  const cancelingRef = useRef(false)
-  const swallowClickRef = useRef(false)
-  useEffect(() => {
-    if (!renaming) return
-    function onOutsidePointer(e) {
-      const inputEl = inputRef.current
-      if (!inputEl || inputEl.contains(e.target)) return
-      cancelingRef.current = true
-      actions.cancelRename()
-      if (e.target?.closest?.('.drawer-overlay')) return
-      e.preventDefault()
-      e.stopPropagation()
-      swallowClickRef.current = true
-    }
-    function onOutsideClick(e) {
-      if (!swallowClickRef.current) return
-      swallowClickRef.current = false
-      e.preventDefault()
-      e.stopPropagation()
-    }
-    document.addEventListener('pointerdown', onOutsidePointer, true)
-    document.addEventListener('click', onOutsideClick, true)
-    return () => {
-      document.removeEventListener('pointerdown', onOutsidePointer, true)
-      document.removeEventListener('click', onOutsideClick, true)
-    }
-  }, [renaming, actions])
+  const {
+    triggerProps: cardMenuTriggerProps,
+    consumeHeldClick,
+    openItemMenu,
+    openMenuFromKey,
+    recordItemMenuPointer,
+    beginSecondaryMenuPress,
+  } = useItemMenuGestures(openItemMenuAt)
 
   useEffect(() => () => {
-    if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
     reorderCleanupRef.current?.()
-    secondaryReleaseCleanupRef.current?.()
   }, [])
 
   drawerGestureHandlerRef.current = {
@@ -1807,72 +1595,7 @@ const DrawerRow = memo(function DrawerRow({
     }
   }, [drawerRowGesturesRef, id, kind, variant])
 
-  // Autofocus + select-all on rename open so the user can either retype from
-  // scratch or tap into the existing name to edit it. Defer one frame: opening
-  // rename tears down the action menu, and focusing synchronously here races
-  // the browser moving focus off the just-unmounted menu item, which overrides
-  // the editor focus. A frame later the teardown has settled and focus sticks.
-  useEffect(() => {
-    if (!renaming) return undefined
-    const frame = requestAnimationFrame(() => {
-      const input = inputRef.current
-      if (!input) return
-      input.focus()
-      input.select()
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [renaming])
-
-  function commitRename() {
-    if (cancelingRef.current) {
-      cancelingRef.current = false
-      return  // outside-tap canceled — discard the value
-    }
-    const value = inputRef.current?.value || ''
-    actions.submitRename(kind, id, label, value.trim())
-  }
-
-  function onRenameBlur() {
-    const input = inputRef.current
-    requestAnimationFrame(() => {
-      const active = document.activeElement
-      if (active === input) return
-      // Closing the action menu calls history.back() to release its Back-stack
-      // entry; that popstate drops focus to <body> a frame later. That is the
-      // app moving focus, not the user leaving the field, so reclaim it instead
-      // of committing — otherwise the just-opened editor blur-commits and
-      // vanishes. A real exit tabs to another control; outside-pointer and
-      // Escape cancel through their own paths (cancelingRef).
-      const focusDropped = !active
-        || active === document.body
-        || active === document.documentElement
-      if (focusDropped && input?.isConnected && !cancelingRef.current) {
-        input.focus()
-        return
-      }
-      commitRename()
-    })
-  }
-
-  function onInputKeyDown(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-    else if (e.key === 'Escape') { e.preventDefault(); actions.cancelRename() }
-  }
-
   // Every app card and drawer row enters the same placed action-menu path.
-  // Pointer gestures use their real release point; keyboard invocations fall
-  // back to the bottom-center of the focused item instead of the event's 0,0.
-  function itemMenuPlacement(point) {
-    const rect = itemButtonRef.current?.getBoundingClientRect()
-    const hasPoint = Number.isFinite(Number(point?.x))
-      && Number.isFinite(Number(point?.y))
-      && (Number(point.x) !== 0 || Number(point.y) !== 0)
-    return {
-      clientX: hasPoint ? Number(point.x) : (rect?.left || 0) + (rect?.width || 0) / 2,
-      clientY: hasPoint ? Number(point.y) : rect?.bottom || 0,
-    }
-  }
-
   function openItemMenuAt(
     point,
     trigger = itemButtonRef.current,
@@ -1882,132 +1605,29 @@ const DrawerRow = memo(function DrawerRow({
       kind,
       id,
       surface,
-      placement: itemMenuPlacement(point),
+      placement: itemMenuPlacement(point, itemButtonRef.current),
       focusFirstAction,
       restoreFocusTarget: trigger,
     })
   }
 
-  function suppressTouchContextMenu(event) {
-    // On Android, contextmenu is itself a PointerEvent and may arrive before
-    // pointerup or pointercancel. Stop it during capture so React's bubble-phase
-    // menu opener cannot mistake the browser's hold threshold for our release.
-    // Provenance remains as a fallback for browsers that expose it as a plain
-    // MouseEvent; keyboard input clears that provenance below.
-    const contextPointerType = event.nativeEvent?.pointerType || ''
-    const freshTouchPointer = touchMenuPointerAtRef.current > 0
-      && performance.now() - touchMenuPointerAtRef.current < TOUCH_CONTEXT_MENU_PROVENANCE_MS
-    const fromTouch = contextPointerType === 'touch' || contextPointerType === 'pen'
-    if (event.type !== 'contextmenu' || (!fromTouch && !freshTouchPointer)) return false
-    event.preventDefault()
-    event.stopPropagation()
-    event.nativeEvent?.stopImmediatePropagation?.()
-    return true
-  }
-
-  function openItemMenu(event) {
-    // Touch menus open only from the shared gesture controller during its
-    // stationary hold. Native contextmenu would steal that timing and re-open
-    // actions on release, so suppress it; mouse and keyboard remain semantic.
-    if (suppressTouchContextMenu(event)) return
-    event.preventDefault()
-    event.stopPropagation()
-    // Chromium raises mouse contextmenu on secondary-button DOWN. The matching
-    // UP below owns that gesture and opens only after release, so focus cannot
-    // snap back to the source or select a collision-flipped menu item.
-    if (event.type === 'contextmenu' && secondaryReleaseCleanupRef.current) return
-    openItemMenuAt({
-      x: event.clientX,
-      y: event.clientY,
-    }, event.currentTarget, {
-      focusFirstAction: event.type === 'keydown',
-    })
-  }
-
-  function recordItemMenuPointer(event) {
-    touchMenuPointerAtRef.current = event.pointerType === 'mouse'
-      ? 0
-      : performance.now()
-  }
-
-  function beginSecondaryMenuPress(event) {
-    if (event.pointerType !== 'mouse' || event.button !== 2) return false
-    event.preventDefault()
-    secondaryReleaseCleanupRef.current?.()
-    const sourceBtn = event.currentTarget
-    const pointerId = event.pointerId
-    const openingPoint = { x: event.clientX, y: event.clientY }
-    let timer = null
-    const cleanup = () => {
-      window.removeEventListener('pointerup', onSecondaryPointerUp, true)
-      window.removeEventListener('pointercancel', cleanup, true)
-      window.removeEventListener('blur', cleanup, true)
-      if (timer !== null) clearTimeout(timer)
-      if (secondaryReleaseCleanupRef.current === cleanup) {
-        secondaryReleaseCleanupRef.current = null
-      }
-    }
-    const onSecondaryPointerUp = upEvent => {
-      if (upEvent.pointerId !== pointerId || upEvent.button !== 2) return
-      upEvent.preventDefault()
-      cleanup()
-      openItemMenuAt(openingPoint, sourceBtn)
-    }
-    window.addEventListener('pointerup', onSecondaryPointerUp, true)
-    window.addEventListener('pointercancel', cleanup, true)
-    window.addEventListener('blur', cleanup, true)
-    timer = setTimeout(cleanup, 1500)
-    secondaryReleaseCleanupRef.current = cleanup
-    return true
-  }
-
   if (renaming) {
-    if (variant === 'card') {
-      return (
-        <div className="apps-directory__card apps-directory__card--editing">
-          <input
-            ref={inputRef}
-            className="drawer__rename-input"
-            defaultValue={label}
-            maxLength={drawerNameMaxLength(kind)}
-            onKeyDown={onInputKeyDown}
-            onBlur={onRenameBlur}
-            aria-label="Rename app"
-          />
-        </div>
-      )
-    }
-    return (
-      <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>
-        <input
-          ref={inputRef}
-          className="drawer__rename-input"
-          defaultValue={label}
-          maxLength={drawerNameMaxLength(kind)}
-          onKeyDown={onInputKeyDown}
-          onBlur={onRenameBlur}
-          aria-label={`Rename ${kind}`}
-        />
-      </div>
+    const editor = (
+      <InlineRenameInput
+        className="drawer__rename-input"
+        initialValue={label}
+        maxLength={drawerNameMaxLength(kind)}
+        ariaLabel={variant === 'card' ? 'Rename app' : `Rename ${kind}`}
+        onSubmit={next => actions.submitRename(kind, id, label, next)}
+        onCancel={actions.cancelRename}
+      />
     )
+    return variant === 'card'
+      ? <div className="apps-directory__card apps-directory__card--editing">{editor}</div>
+      : <div className={`drawer__item drawer__item--editing ${active ? 'drawer__item--active' : ''}`}>{editor}</div>
   }
 
   if (variant === 'card') {
-    function beginCardHold(event) {
-      if (event.pointerType === 'mouse' || event.button !== 0) return
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdOriginRef.current = { x: event.clientX, y: event.clientY }
-      holdTimerRef.current = setTimeout(() => {
-        holdTimerRef.current = null
-        suppressCardClickRef.current = true
-        openItemMenuAt(holdOriginRef.current)
-      }, PRESS_MENU_HOLD_MS)
-    }
-    function cancelCardHold() {
-      if (holdTimerRef.current) clearTimeout(holdTimerRef.current)
-      holdTimerRef.current = null
-      holdOriginRef.current = null
-    }
     return (
       <div className="apps-directory__card">
         <button
@@ -2016,33 +1636,10 @@ const DrawerRow = memo(function DrawerRow({
           className="apps-directory__card-main"
           aria-label={`Open ${label}`}
           onClick={() => {
-            if (suppressCardClickRef.current) {
-              suppressCardClickRef.current = false
-              return
-            }
+            if (consumeHeldClick()) return
             actions.select(kind, id)
           }}
-          onContextMenuCapture={suppressTouchContextMenu}
-          onContextMenu={openItemMenu}
-          onPointerDown={event => {
-            recordItemMenuPointer(event)
-            if (beginSecondaryMenuPress(event)) return
-            beginCardHold(event)
-          }}
-          onPointerUp={cancelCardHold}
-          onPointerCancel={cancelCardHold}
-          onPointerMove={event => {
-            const origin = holdOriginRef.current
-            if (origin && Math.hypot(event.clientX - origin.x, event.clientY - origin.y) > PRE_HOLD_MOVE_PX) {
-              cancelCardHold()
-            }
-          }}
-          onKeyDown={event => {
-            touchMenuPointerAtRef.current = 0
-            if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-              openItemMenu(event)
-            }
-          }}
+          {...cardMenuTriggerProps}
         >
           <AppIcon
             item={item}
@@ -2272,7 +1869,6 @@ const DrawerRow = memo(function DrawerRow({
     // pointerdown. If no such click arrived, this is a genuinely new gesture
     // and must retire the old one-shot guard rather than inherit it.
     suppressRowClickRef.current = false
-    actions.prefetch(kind, id)
     recordItemMenuPointer(event)
     beginSecondaryMenuPress(event)
   }
@@ -2290,8 +1886,6 @@ const DrawerRow = memo(function DrawerRow({
         data-drawer-key={`${kind}:${id}`}
         data-drag-key={`${kind}:${id}`}
         data-pinned-key={pinned ? `${kind}:${id}` : undefined}
-        onPointerEnter={() => actions.prefetch(kind, id)}
-        onFocus={() => actions.prefetch(kind, id)}
         onPointerDown={onRowPointerDown}
         onClick={() => {
           if (suppressRowClickRef.current) {
@@ -2307,22 +1901,11 @@ const DrawerRow = memo(function DrawerRow({
         onContextMenu={openItemMenu}
         onKeyDown={event => {
           suppressRowClickRef.current = false
-          touchMenuPointerAtRef.current = 0
-          if (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10')) {
-            openItemMenu(event)
-          }
+          openMenuFromKey(event)
         }}
       >
         {kind === 'app' && (
           <AppIcon item={item} label={label} className="drawer__app-icon" />
-        )}
-        {kind === 'project' && (
-          <ProjectIdentityIcon
-            project={item}
-            size={24}
-            className="drawer__project-icon"
-            label={`${label} project`}
-          />
         )}
         {/* Status dot. Sits before the text so the user's eye
             picks it up alongside the label rather than at the row's
@@ -2369,7 +1952,7 @@ const DrawerItemMenu = memo(function DrawerItemMenu({
   actions,
   restoreFocusRef,
 }) {
-  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && ['app', 'artifact'].includes(menu.kind)))
+  const importSources = projectQueries.importSources.useQuery(Boolean(menu && item && menu.kind === 'app'))
   const projectAction = projectSourceAction(projects, importSources.data, menu?.kind, menu?.id)
   const kind = menu?.kind || 'chat'
   const id = menu?.id

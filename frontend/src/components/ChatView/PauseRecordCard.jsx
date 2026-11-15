@@ -5,11 +5,13 @@
 import { Pause } from '@openai/apps-sdk-ui/components/Icon'
 import MarkerCard from './MarkerCard.jsx'
 import { errorCardViewModel } from './ErrorCard.jsx'
+import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 
 const TITLES = {
   restart: 'Paused for a platform update',
-  storage: 'Paused while storage was low',
-  memory: 'Paused while memory was low',
+  ...Object.fromEntries(
+    Object.entries(RESOURCE_PAUSE_LABELS).map(([kind, labels]) => [kind, labels.paused]),
+  ),
   rate_limit: 'Paused at a rate limit',
   credits: 'Paused while out of credits',
   model_capacity: 'Paused while the model was busy',

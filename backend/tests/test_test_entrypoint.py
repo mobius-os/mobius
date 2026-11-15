@@ -1,6 +1,7 @@
 """The default test entrypoint stays fast, hermetic, and checkout-owned."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -169,7 +170,14 @@ def _checkout_with_fake_backend_node_tools(root, lock):
   _git(root, "commit", "-q", "-m", "base")
 
 
-def _run_host_runner_in_worktree(tmp_path, worktree_lock=None, break_acorn=False, main_lock=None):
+def _env_without_node_drift_opt_in():
+  """The caller's environment, minus the opt-in a developer may export to run this suite."""
+  return {k: v for k, v in os.environ.items() if k != "MOBIUS_WT_PYTEST_NODE_DRIFT"}
+
+
+def _run_host_runner_in_worktree(
+  tmp_path, worktree_lock=None, break_acorn=False, main_lock=None, extra_env=None,
+):
   main = tmp_path / "main"
   main.mkdir()
   _checkout_with_fake_backend_node_tools(main, main_lock or _lockfile())
@@ -183,6 +191,7 @@ def _run_host_runner_in_worktree(tmp_path, worktree_lock=None, break_acorn=False
   return subprocess.run(
     [str(HOST_RUNNER), "test_probe.py", "-q"],
     cwd=worktree, capture_output=True, text=True, timeout=60,
+    env={**_env_without_node_drift_opt_in(), **(extra_env or {})},
   )
 
 
@@ -218,6 +227,30 @@ def test_host_runner_refuses_a_lockfile_that_changes_the_backend_node_tools(tmp_
   result = _run_host_runner_in_worktree(tmp_path, worktree_lock=_lockfile(changes))
   assert result.returncode == 1, result.stdout + result.stderr
   assert "no verified backend Node dependencies match this worktree" in result.stderr
+  assert "MOBIUS_WT_PYTEST_NODE_DRIFT=1" in result.stderr
+
+
+def test_host_runner_reuses_the_primary_node_tree_with_a_warning_when_drift_is_opted_in(tmp_path):
+  result = _run_host_runner_in_worktree(
+    tmp_path,
+    worktree_lock=_lockfile({"node_modules/rolldown": {"version": "1.1.0"}}),
+    extra_env={"MOBIUS_WT_PYTEST_NODE_DRIFT": "1"},
+  )
+  if result.returncode == 78:
+    pytest.skip("no pytest runtime available for the host runner here")
+  assert result.returncode == 0, result.stdout + result.stderr
+  assert "not dependency-authoritative" in result.stderr
+
+
+def test_node_drift_opt_in_still_refuses_when_the_primary_checkout_has_no_node_tools(tmp_path):
+  result = _run_host_runner_in_worktree(
+    tmp_path,
+    worktree_lock=_lockfile({"node_modules/rolldown": {"version": "1.1.0"}}),
+    break_acorn=True,
+    extra_env={"MOBIUS_WT_PYTEST_NODE_DRIFT": "1"},
+  )
+  assert result.returncode == 1, result.stdout + result.stderr
+  assert "MOBIUS_WT_PYTEST_NODE_DRIFT=1 needs the primary checkout's Node tools" in result.stderr
 
 
 @pytest.mark.parametrize("missing", [

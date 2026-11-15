@@ -158,11 +158,13 @@ Read the run's returned brief. The parent alone calls `/repair-checkout` and
 `/repairs`; independent reviewers are admitted through `/reviewers`, inherit
 the parent's Goal, and report exact head/base evidence through
 `/independent-reviews`. A repair author cannot supply their independent review.
-Each exact head and base admits one reviewer and one verdict: `/reviewers`
-returns that same reviewer again and a second report is refused, so a
-needs_you verdict cannot be replaced by asking another reviewer. Continue only
-through a new repair (a new head), an observed target-base advance, or a new
-owner grant.
+Each exact head and base admits one verdict: `/reviewers` returns that same
+reviewer again and a second report is refused. The one exception is a reviewer
+that ended in error without reporting: `/reviewers` then cancels it and starts a
+replacement (at most 3 attempts). A live, paused, stopped or finished reviewer
+is never replaced, and once a receipt exists its needs_you verdict cannot be
+replaced by asking another reviewer. Continue only through a new repair (a new
+head), an observed target-base advance, or a new owner grant.
 
 `/repairs` validates the repair from its server checkout and saves it as a
 *proposal* (`repair_attempts` entry with state `proposed`: the head before,

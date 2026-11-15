@@ -23,8 +23,9 @@ CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict
                 "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                 "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                 "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
-                "owner_confirm": True}
+                "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
+                "pr_machine": True, "owner_confirm": True,
+                "follow_after_send": True, "follow_ask_mode": True}
 
 def takeover(setup, monkeypatch):
   db, row, principal = setup
@@ -487,9 +488,13 @@ def test_second_report_from_one_reviewer_names_the_real_recovery(setup, monkeypa
   assert "/reviewers returns this same one" in detail
   assert "new repair (a new head)" in detail and "target-base advance" in detail and "new grant" in detail
   brief = " ".join(domain.takeover_brief(row).split())
-  assert "/reviewers returns that same reviewer again" in brief
   skill = Path(__file__).resolve().parents[1] / "scripts" / "seed-skills" / "github-workflows.md"
-  assert "`/reviewers` returns that same reviewer again" in " ".join(skill.read_text().split())
+  skill_text = " ".join(skill.read_text().split())
+  # Both sets of instructions state the rule and its one exception, so a parent learns the replacement path.
+  assert "/reviewers returns that same reviewer again, except when it ended in error without reporting" in brief
+  assert "at most 3 attempts" in brief and "once a receipt exists" in brief
+  assert "`/reviewers` returns that same reviewer again" in skill_text
+  assert "ended in error without reporting" in skill_text and "at most 3 attempts" in skill_text
 
 
 def configure_repair(setup, monkeypatch):
@@ -635,6 +640,20 @@ def test_independent_review_brief_bounds_parallel_tests_to_the_container_quota()
   assert "focused tests" in brief
 
 
+@pytest.mark.parametrize("mode,build", [
+  ("review", lambda row: domain.brief(row)),
+  ("review_fix_merge", lambda row: domain.takeover_brief(row)),
+  ("review", lambda row: domain.independent_brief(row, {**TARGET, "base_sha": "b" * 40, "head_sha": "h" * 40})),
+])
+def test_every_run_bearer_instruction_names_the_token_that_works(setup, mode, build):
+  """The run endpoints refuse MOBIUS_RUN_TOKEN, so no brief may leave the bearer unnamed."""
+  row = setup[1]
+  row.mode = mode
+  text = " ".join(build(row).split())
+  assert text.count("run bearer") == text.count(domain.RUN_BEARER_NOTE) >= 1
+  assert "$AGENT_TOKEN" in text and "MOBIUS_RUN_TOKEN is not the bearer" in text
+
+
 def test_independent_reviewer_admission_is_durable_same_model_and_never_restarts(setup, monkeypatch):
   from app import delegations
   db, row, principal = takeover(setup, monkeypatch)
@@ -682,6 +701,70 @@ def test_durable_reviewer_reports_after_spawning_turn_completes(setup, monkeypat
   db.get(models.ChatRun, parent.run_id).status = "completed"
   db.commit()
   assert asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))["independent_receipt_id"]
+
+
+def start_reviewer(db, row, parent):
+  return asyncio.run(routes.start_independent_reviewer(1, row.id, routes.PullIdentity(**ITEM), db, parent))
+
+
+def reviewer_steps(db, row):
+  db.refresh(row)
+  return [step["delegation_id"] for step in row.outcomes_json[domain.key(ITEM)]["reviewer_steps"]]
+
+
+def test_reviewer_that_failed_without_a_receipt_is_replaced_and_cannot_report_late(setup, monkeypatch):
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.commit()
+  replacement = start_reviewer(db, row, parent)["delegation"]["id"]
+  assert replacement != child.id
+  assert reviewer_steps(db, row) == [child.id, replacement]
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == replacement
+  # The old reviewer goes through the ordinary cancel path: terminal event, no auto-resume.
+  db.refresh(child)
+  old_chat = db.get(models.Chat, child.child_chat_id)
+  assert child.cancelled_at is not None
+  assert not old_chat.auto_resume_on_restart and not old_chat.auto_resume_on_limit
+  assert db.query(models.AgentLifecycleEvent).filter_by(
+    source_event_id=f"delegation:{child.id}:terminal:cancelled", event_type="agent_terminal").count() == 1
+  with pytest.raises(HTTPException) as late:
+    asyncio.run(routes.independent_review(1, row.id, body, db, reviewer))
+  assert late.value.status_code == 403
+  # The all-clear is still recorded only through a registered step: the new one.
+  fresh_chat = db.get(models.Delegation, replacement).child_chat_id
+  db.add(models.ChatRun(id="replacement-run", chat_id=fresh_chat, status="running"))
+  db.commit()
+  fresh = Principal(owner=parent.owner, app_id=None, chat_id=fresh_chat, run_id="replacement-run",
+    delegation_id=replacement)
+  assert asyncio.run(routes.independent_review(1, row.id, body, db, fresh))["independent_receipt_id"]
+
+
+@pytest.mark.parametrize("status", ["running", "parked", "stopped", "completed", "interrupted"])
+def test_reviewer_that_is_working_paused_stopped_or_finished_keeps_its_seat(setup, monkeypatch, status):
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = status
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
+
+
+def test_failed_reviewer_with_queued_work_is_not_replaced(setup, monkeypatch):
+  db, row, parent, child, _, _ = reviewer_context(setup, monkeypatch)
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.get(models.Chat, child.child_chat_id).pending_messages = [{"content": "resume the review"}]
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
+
+
+def test_reviewer_with_a_recorded_receipt_is_never_replaced(setup, monkeypatch):
+  db, row, parent, child, reviewer, body = reviewer_context(setup, monkeypatch)
+  needs_you = body.model_copy(update={"state": "needs_you", "summary": "A real bug"})
+  asyncio.run(routes.independent_review(1, row.id, needs_you, db, reviewer))
+  db.get(models.ChatRun, "registered-review-run").status = "failed"
+  db.commit()
+  assert start_reviewer(db, row, parent)["delegation"]["id"] == child.id
+  assert reviewer_steps(db, row) == [child.id]
 
 
 def owner_run_views(db, row, parent):

@@ -1115,7 +1115,8 @@ async def test_reused_claude_host_keeps_dispatch_names_across_capability_changes
 
   supported = initial_support
 
-  async def supports_effort(data_dir, model):
+  async def supports_effort(data_dir, model, *, provider_id):
+    assert provider_id == "claude"
     return supported
 
   monkeypatch.setattr(providers, "model_supports_effort", supports_effort)
@@ -1157,6 +1158,62 @@ async def test_reused_claude_host_keeps_dispatch_names_across_capability_changes
   assert seen == (["high", None] if initial_support else [None, None])
 
 
+@pytest.mark.asyncio
+async def test_stop_while_claude_helper_host_starts_never_dispatches_the_turn(
+  tmp_path, monkeypatch,
+):
+  """A Stop during host start found no handle; the stale turn must not run unseen."""
+  from contextlib import asynccontextmanager
+  from app import process_groups, providers
+  from app.runner_registry import RunnerKind, registry
+
+  chat_id = "stop-during-helper-host-start"
+  dispatched = []
+  reaped = []
+
+  class Host:
+    session_id = "host-session"
+
+    async def run_turn(self, turn, on_started):
+      dispatched.append(turn.spec)
+      turn.finish("completed")
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    # What Stop does while the host starts and no handle is registered yet.
+    registry.bump_generation(chat_id)
+    yield Host()
+
+  async def supports_effort(data_dir, model, *, provider_id):
+    return True
+
+  monkeypatch.setattr(providers, "model_supports_effort", supports_effort)
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr(
+    process_groups, "terminate_run_processes",
+    lambda marker, **_kw: reaped.append(marker),
+  )
+  run_gen = registry.bump_generation(chat_id)
+  try:
+    result = await claude_host.run_claude_host_turn(
+      user_message="inspect", session_id=None,
+      base_env={"TMPDIR": str(tmp_path), "MOBIUS_RUN_MARKER": "m-stale"},
+      chat_id=chat_id, skill_text="", bc=None, agent_settings=None,
+      skills_enabled=False, run_policy=None, connector_plan=None,
+      helper_host_key=helper_hosts.HostKey("parent", "claude", str(tmp_path), "setup"),
+      data_dir=str(tmp_path), run_generation=run_gen,
+    )
+
+    assert result["prompt_sent"] is False
+    assert result["error"] is None
+    assert dispatched == []
+    assert registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK) is None
+    assert not list(tmp_path.glob(".helper-turn-*.env"))
+    assert reaped == ["m-stale"]
+  finally:
+    registry.forget(chat_id)
+
+
 def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypatch):
   from types import SimpleNamespace
 
@@ -1173,6 +1230,57 @@ def test_codex_host_death_observation_survives_sdk_and_counter_changes(monkeypat
   assert host.exit_evidence is evidence
   assert evidence.was_oom_killed(3)
   assert not evidence.was_oom_killed(4)
+
+
+@pytest.mark.asyncio
+async def test_cold_app_messages_helper_never_discovers_the_owners_claude_catalog(
+  tmp_path, monkeypatch,
+):
+  from contextlib import asynccontextmanager
+  from types import SimpleNamespace
+  from app import providers, process_groups
+
+  provider_id = "app-4242"
+  model = "example/flash"
+  monkeypatch.setitem(providers.PROVIDERS, provider_id, providers.AppModelProvider(4242, {
+    "name": "Example", "protocol": "anthropic_messages",
+    "default_model": model,
+    "models": [{"id": model, "label": "Flash", "effort_levels": ["high"]}],
+  }))
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+
+  async def unexpected_discovery(*args, **kwargs):
+    pytest.fail("an app helper must not discover the owner's native provider catalog")
+
+  monkeypatch.setattr(providers, "_fetch_model_entries", unexpected_discovery)
+  dispatched = []
+
+  class Host:
+    session_id = "host-session"
+
+    async def run_turn(self, turn, on_started):
+      dispatched.append(turn.spec)
+      turn.finish("completed")
+
+  @asynccontextmanager
+  async def lease(key, factory):
+    assert key.provider_id == provider_id
+    yield Host()
+
+  monkeypatch.setattr(helper_hosts.MANAGER, "lease", lease)
+  monkeypatch.setattr(process_groups, "terminate_run_processes", lambda *_a, **_kw: None)
+  result = await claude_host.run_claude_host_turn(
+    user_message="inspect", session_id=None, base_env={"TMPDIR": str(tmp_path)},
+    chat_id="app-effort-test", skill_text="", bc=None, agent_settings=None,
+    skills_enabled=False,
+    run_policy=SimpleNamespace(model=model, effort="high", scope="write"),
+    connector_plan=None,
+    helper_host_key=helper_hosts.HostKey("parent", provider_id, str(tmp_path), "setup"),
+    data_dir=str(tmp_path),
+  )
+  assert result["error"] is None
+  assert dispatched[0]["subagent_type"] == "mobius-helper-high"
+  assert providers._model_registry_cache == {}
 
 
 def test_message_dispatch_uses_required_recipient_not_optional_summary(tmp_path):
@@ -1237,7 +1345,7 @@ async def test_follow_up_dispatch_failure_does_not_invent_session_loss(
 ):
   from contextlib import asynccontextmanager
   from app import providers, process_groups
-  async def supports(*_):
+  async def supports(*_, **__):
     return False
   monkeypatch.setattr(providers, 'model_supports_effort', supports)
   monkeypatch.setattr(process_groups, 'terminate_run_processes', lambda *_a, **_kw: None)

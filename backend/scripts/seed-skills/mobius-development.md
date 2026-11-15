@@ -115,7 +115,10 @@ reason to hide or skip validation. Inside Möbius:
   directly;
 - if the worktree runner says the checkout lock differs from the image runtime,
   treat those results as useful but not dependency-authoritative and use a
-  lock-matched environment or hosted checks for that contract; and
+  lock-matched environment or hosted checks for that contract. When it refuses
+  because the checkout locks different backend Node tools, set
+  `MOBIUS_WT_PYTEST_NODE_DRIFT=1` only for tests that never compile an app, and
+  say so in the PR text; and
 - for concurrency or ordering, persistence, auth or security, migrations,
   provider protocols, dependency/runtime changes, or broad cross-cutting work,
   explicitly recommend opening or updating a **Draft PR** through Contribute,

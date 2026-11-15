@@ -20,8 +20,9 @@ CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict
                 "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                 "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                 "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
-                "owner_confirm": True}
+                "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
+                "pr_machine": True, "owner_confirm": True,
+                "follow_after_send": True, "follow_ask_mode": True}
 
 def test_app_less_routes_advertise_only_available_modes():
   paths = {route.path for route in routes.router.routes}
@@ -354,7 +355,7 @@ def test_real_gh_graphql_nullable_mutation_refusal_is_definite(tmp_path, monkeyp
   fake = fake_bin / "gh"
   fake.write_text("#!/bin/sh\necho '{\"errors\":[{\"type\":\"UNPROCESSABLE\",\"path\":[\"enqueuePullRequest\"],\"message\":\"not queueable\"}],\"data\":{\"enqueuePullRequest\":null}}'\nexit 1\n")
   fake.chmod(0o755)
-  monkeypatch.setattr(transport, "_git_env", lambda _cwd: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
+  monkeypatch.setattr(transport, "_git_env", lambda _cwd, **_k: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
   with pytest.raises(NotDispatched):
     domain.enqueue(transport._gh, tmp_path, TARGET)
 
@@ -455,7 +456,7 @@ def test_real_gh_graphql_5xx_no_data_remains_unknown(tmp_path, monkeypatch):
   fake = fake_bin / "gh"
   fake.write_text("#!/bin/sh\necho '{\"errors\":[{\"type\":\"INTERNAL\",\"message\":\"may be timeout\"}],\"data\":null}'\necho 'gh: HTTP 503: unavailable' >&2\nexit 1\n")
   fake.chmod(0o755)
-  monkeypatch.setattr(transport, "_git_env", lambda _cwd: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
+  monkeypatch.setattr(transport, "_git_env", lambda _cwd, **_k: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
   with pytest.raises(ContributionSubmitError) as uncertain:
     domain.enqueue(transport._gh, tmp_path, TARGET)
   assert classify_dispatch_error(uncertain.value).state == "unknown"

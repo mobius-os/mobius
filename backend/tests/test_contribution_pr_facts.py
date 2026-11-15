@@ -36,7 +36,7 @@ def test_reviews_are_the_writers_standing_opinions_with_ghosts_and_lost_commits_
                               {"by": "ghost", "state": "CHANGES_REQUESTED", "commit": "", "bot": False},
                               {"by": "qa-bot", "state": "APPROVED", "commit": SHA, "bot": True}]
   # A change request whose commit is gone still blocks; a bot's approval never counts.
-  assert machine.action_blocker(found, "merge") == "The approval is for an older version."
+  assert machine.not_ready_to_merge(found) == "The approval is for an older version."
 
 
 def comment(login, commit=SHA, kind="User"):
@@ -69,13 +69,25 @@ def test_comments_are_evidence_never_an_opinion_and_never_my_standing_review():
   found = facts(None, checks=read_with(mine, latestReviews={"nodes": [comment("Me")]}), login="me")
   assert found["myReview"] == {"state": "CHANGES_REQUESTED", "commit": OLD}
   commented = facts(None, checks=read_with([], latestReviews={"nodes": [comment("sam")]}))
-  assert machine.action_blocker(commented, "merge") == "Nobody but the author has approved it yet."
+  assert machine.not_ready_to_merge(commented) == "Nobody but the author has approved it yet."
 
 
 def test_a_missing_or_malformed_comment_read_leaves_no_comments_and_never_makes_the_read_incomplete():
   for latest in ({}, {"latestReviews": None}, {"latestReviews": "no"}, {"latestReviews": {"nodes": None}}):
     found = facts(None, checks=read_with([review("sam", "APPROVED")], **latest))
     assert found["readComplete"] is True and [r["state"] for r in found["reviews"]] == ["APPROVED"]
+
+
+def test_everyone_who_reviewed_is_listed_apart_from_the_writers_opinions_that_decide_merging():
+  newest = [review("Pat", "APPROVED", OLD), review("Kim", "CHANGES_REQUESTED", OLD), review("Sam", "COMMENTED"),
+            review("Lou", "PENDING"), review("qa-bot", "COMMENTED", kind="Bot")]
+  found = facts([], checks=read_with([], latestReviews={"nodes": newest}))
+  assert found["reviews"] == [{"by": "Sam", "state": "COMMENTED", "commit": SHA, "bot": False},
+                              {"by": "qa-bot", "state": "COMMENTED", "commit": SHA, "bot": True}]
+  assert [(r["by"], r["state"]) for r in found["reviewers"]] == [
+    ("Pat", "APPROVED"), ("Kim", "CHANGES_REQUESTED"), ("Sam", "COMMENTED"), ("qa-bot", "COMMENTED")], "a pending draft is nobody's review"
+  assert machine.not_ready_to_merge({**found, "head": SHA}) != "", "a non-writer's approval never makes it ready to merge"
+  assert facts([], checks=read_with([]))["reviewers"] == []
 
 
 def test_the_check_read_asks_for_every_persons_latest_review_but_only_writers_opinions():
@@ -94,14 +106,14 @@ def test_the_check_read_asks_for_every_persons_latest_review_but_only_writers_op
 
 def test_a_change_request_with_no_commit_blocks_and_never_approves():
   found = facts([review("sam", "APPROVED"), {"state": "CHANGES_REQUESTED", "author": {"login": "bob"}, "commit": None}])
-  assert machine.action_blocker(found, "merge") == "bob asked for changes and hasn’t approved since."
+  assert machine.not_ready_to_merge(found) == "bob asked for changes and hasn’t approved since."
   lost = facts([{"state": "APPROVED", "author": {"login": "sam"}, "commit": None}])
-  assert machine.action_blocker(lost, "merge") == "The approval is for an older version."
+  assert machine.not_ready_to_merge(lost) == "The approval is for an older version."
 
 
 def test_the_authors_own_opinion_never_counts():
   found = facts([review("alex", "APPROVED")])
-  assert machine.action_blocker(found, "merge") == "Nobody but the author has approved it yet."
+  assert machine.not_ready_to_merge(found) == "Nobody but the author has approved it yet."
 
 
 def test_role_follows_the_connected_account_id_and_only_a_reviewer_has_my_review():
@@ -246,7 +258,7 @@ def test_an_approval_of_an_older_commit_carries_over_when_the_prs_own_change_is_
   github = ComparingGitHub({OLD: WORK, SHA: WORK})
   found = read_facts(github)
   assert found["reviews"][0]["sameWork"] is True
-  assert machine.action_blocker(found, "merge") == ""
+  assert machine.not_ready_to_merge(found) == ""
   assert github.reads == [f"repos/example/project/compare/{BASE}...{commit}" for commit in (SHA, OLD)]
 
 
@@ -255,7 +267,7 @@ def test_an_approval_of_an_older_commit_that_could_not_be_proved_the_same_stays_
   for compares, proof in (({OLD: WORK, SHA: changed}, False), ({OLD: WORK}, None), ({}, None)):
     found = read_facts(ComparingGitHub(compares))
     assert found["reviews"][0]["sameWork"] is proof
-    assert machine.action_blocker(found, "merge") == "The approval is for an older version."
+    assert machine.not_ready_to_merge(found) == "The approval is for an older version."
 
 
 def test_the_base_tip_comes_from_the_callers_target_or_else_from_the_prs_base_branch():
@@ -313,5 +325,5 @@ def test_an_approval_at_the_head_by_a_bot_or_by_the_author_does_not_stop_an_olde
     github = ComparingGitHub({OLD: WORK, SHA: WORK})
     found = read_facts(github, [review("sam", "APPROVED", OLD), at_head])
     assert found["reviews"][0]["sameWork"] is True
-    assert machine.action_blocker(found, "merge") == ""
+    assert machine.not_ready_to_merge(found) == ""
     assert len(github.reads) == 2

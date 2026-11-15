@@ -7,7 +7,8 @@
 // two overlay branches (especially immersive-solo, which had no multi-pane
 // coverage) are unit-testable without a DOM.
 //
-// Immersive solos its pane over the WHOLE workspace (design §4/§9): the chrome
+// Applied immersive solos its pane over the WHOLE workspace (design §4/§9); it is
+// not applied while side-by-side panes share the screen (lib/immersive.js). The chrome
 // is hidden, the holder app is painted full-bleed over the entire content box,
 // and every sibling — app frames and chat panes alike — is hidden so it stops
 // painting and receives frame-visibility:false. Exit restores the tree exactly
@@ -120,6 +121,33 @@ export function deriveModeSnapshotPlan({ workspace, projection, contentRect }) {
   return Object.keys(offsets).length > 0
     ? { offsets, totalMs: MODE_MOTION.slideMs }
     : null
+}
+
+// Whether side-by-side panes are sharing the screen right now: the tiled
+// builder world with two or more visible panes. A maximized pane or single view
+// has the screen to itself. A phone split is deliberately exempt, and not for a
+// geometric reason: a vertically stacked split in wide or compact mode also
+// spans the width and still counts. The exemption keeps phone behaviour as it
+// was before this check, where a game still goes full screen from a split. Do
+// not "fix" the asymmetry by holding phone requests too without deciding that
+// phone games should stop going full screen.
+export function panesShareScreen({ viewMode, projection, layoutMode }) {
+  return viewMode !== 'single'
+    && projection.visibleLeaves.length >= 2
+    && layoutMode !== 'phone'
+}
+
+// The content box panesShareScreen's layout mode is read from. Applying
+// immersive grows the measured box (the top bar hides, a docked sidebar gives
+// back its margin), so reading the live box would let a phone split climb to
+// compact or wide, withdraw immersive, shrink back to phone and repeat forever.
+// While immersive is applied, the decision instead keeps the box measured with
+// the chrome in place: `latch` is { applied, rect } from the last commit, and
+// its rect was the box this decision read when immersive was granted. A box
+// with no area (before the first measurement) is never held.
+export function screenShareRect(latch, contentRect) {
+  const held = latch?.applied ? latch.rect : null
+  return held && held.w > 0 && held.h > 0 ? held : contentRect
 }
 
 // deriveContentVisibility({ workspace, projection, settingsOverlayOpen,

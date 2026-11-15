@@ -3,6 +3,7 @@
 import { ArrowRotateCw } from '@openai/apps-sdk-ui/components/Icon'
 import MarkerCard from './MarkerCard.jsx'
 import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
+import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 
 export default function ContinuationCard({ msg }) {
   const manual = msg?.continuation_reason === 'manual'
@@ -14,8 +15,9 @@ export default function ContinuationCard({ msg }) {
     manual: 'Interrupted work continued',
     restart: 'Server restarted — continuing automatically',
     usage_limit: 'Retry check due — trying the provider again',
-    memory: 'Memory freed up — continuing automatically',
-    storage: 'Storage freed up — continuing automatically',
+    ...Object.fromEntries(
+      Object.entries(RESOURCE_PAUSE_LABELS).map(([kind, labels]) => [kind, labels.resumed]),
+    ),
     model_capacity: 'Model available again — continuing automatically',
     goal_handoff: 'Continuing toward the Goal',
     helper_answer: 'The parent agent answered this helper’s question — continuing',

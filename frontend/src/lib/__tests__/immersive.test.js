@@ -67,6 +67,15 @@ test('immersive applies only on the canvas view with the holder active', () => {
   assert.equal(isImmersiveActive(request, 'canvas', 3), false)
 })
 
+test('an app sharing the screen with side-by-side panes keeps its pane', () => {
+  const request = { appId: 7, mode: 'full' }
+  // Held, not applied: taking the whole window would cover the owner's other
+  // panes and resize the app, which can make a width-driven app loop.
+  assert.equal(isImmersiveActive(request, 'canvas', 7, { sharesScreen: true }), false)
+  // The same held request applies as soon as the pane has the screen.
+  assert.equal(isImmersiveActive(request, 'canvas', 7, { sharesScreen: false }), true)
+})
+
 test('immersive application tolerates numeric/string id mismatch', () => {
   assert.equal(isImmersiveActive({ appId: '7', mode: 'full' }, 'canvas', 7), true)
 })

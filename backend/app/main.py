@@ -67,6 +67,7 @@ from app.runtime_provenance import (
 )
 from app.response_policy import (
   chat_embed_csp,
+  APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY,
   PLATFORM_CODE_SCOPE_KEY,
   PUBLISHED_SITE_CSP,
   absolute_csp_origin,
@@ -91,6 +92,7 @@ from app.routes import (
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
   chats_router, chats_stream_router,
   secure_inputs_router,
+  model_relay_router,
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
@@ -295,6 +297,13 @@ async def lifespan(app):
   # behind are ended; their helpers' durable turns recover like any other.
   from app import helper_hosts
   helper_hosts.end_orphaned_hosts()
+  # A data volume that is already full gets its recovery reserve back
+  # before database initialization writes anything (see storage_guard).
+  from app.storage_guard import release_reserve_at_boot
+  try:
+    release_reserve_at_boot(settings.data_dir)
+  except Exception:
+    _log.warning("startup recovery-reserve check failed", exc_info=True)
   from app.startup import (
     StartupContext,
     run_startup_plan,
@@ -363,7 +372,10 @@ async def lifespan(app):
     record_memory_checkpoint("shutdown_begin")
     from app.public_app_transport import close_public_fetch_clients
     from app.routes.proxy import close_proxy_clients
-    for close_clients in (close_public_fetch_clients, close_proxy_clients):
+    from app.routes.model_relay import close_model_relay_client
+    for close_clients in (
+      close_public_fetch_clients, close_proxy_clients, close_model_relay_client,
+    ):
       try:
         await close_clients()
       except Exception as exc:
@@ -615,15 +627,19 @@ def _chat_embed_csp_for_scope(scope) -> str:
 
 
 def _app_frame_csp_for_scope(scope) -> str:
-  """Let the loopback test harness exercise the real opaque app frame."""
+  """The opaque app frame's policy, widened only by that app's accepted
+  ``network.direct`` origins, which the frame route records in the scope.
+  Also lets the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
-  if delivery_origin is None:
+  direct_origins = tuple(scope.get(APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY) or ())
+  if delivery_origin is None and not direct_origins:
     return _APP_FRAME_CSP
   return app_frame_csp(
     settings.frontend_origin,
     _SERVICE_GATEWAY_ORIGIN,
     _BROWSER_API_ORIGIN,
-    delivery_origin,
+    delivery_origin or "",
+    direct_origins,
   )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -727,7 +743,9 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = _chat_embed_csp_for_scope(scope)
       elif app_frame:
-        csp = _app_frame_csp_for_scope(scope)
+        # Decided when the response starts: the frame route names the app's
+        # accepted direct origins in the scope while it handles the request.
+        csp = None
       elif artifact_output:
         csp = _ARTIFACT_OUTPUT_CSP
       elif _APP_SERVICE_PATH.match(path):
@@ -750,9 +768,11 @@ class _SecurityHeadersMiddleware:
         if not service_surface:
           # Outside the namespace lanes, the handler that answered decides:
           # platform code runs as the shell, everything else is inert.
-          policy = csp or (
-            _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
-            else _INERT_CONTENT_CSP
+          policy = (
+            _app_frame_csp_for_scope(scope) if app_frame else csp or (
+              _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
+              else _INERT_CONTENT_CSP
+            )
           )
           headers.append((_CONTENT_SECURITY_POLICY, policy.encode("ascii")))
         message["headers"] = headers
@@ -1084,6 +1104,7 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(model_relay_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
 app.include_router(delegations_router)
@@ -1272,8 +1293,9 @@ def ready_agent(response: Response):
 
   Basic `/api/ready` remains the container healthcheck so history can keep
   serving when agent work is resource-degraded. This public facet adds the
-  agent runtime's storage and memory prerequisites while returning stable codes
-  only; account state, exact capacity, paths, and writer details stay private.
+  agent runtime's storage, memory and process prerequisites while returning
+  stable codes only; account state, exact capacity, paths, and writer details
+  stay private.
   """
   response.headers["Cache-Control"] = "no-store"
   from app.agent_readiness import agent_readiness

@@ -166,3 +166,16 @@ test('Esc returns to the draft from anywhere in history', () => {
   assert.equal(box.props.value, 'my draft')
   assert.equal(box.current.escape(), false, 'outside history Esc stays native')
 })
+
+test('Stop editing drops the edit, saves nothing, and frees the row', () => {
+  // The tray's Stop editing runs this same escape.
+  const box = mountComposer({ value: 'my draft' })
+  box.current.open('q2')
+  box.type('Also update the changelog, half edited')
+  assert.equal(box.current.escape(), true)
+  assert.equal(box.props.value, 'my draft')
+  assert.deepEqual(box.saves, [], 'nothing was saved')
+  assert.equal(box.current.queuedKey, null, 'the tray marks no row as open')
+  box.current.open('q2')
+  assert.equal(box.props.value, 'Also update the changelog', 'reopening shows the saved text, not the dropped edit')
+})

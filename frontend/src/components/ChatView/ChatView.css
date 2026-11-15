@@ -105,11 +105,11 @@
   --attach-card: 96px;
   --chat-status-font-size: 12px;
   /* The composer's gap above the bottom edge, shared by the foot, the
-     transcript clearance and the fade. The shell sets --chat-foot-bottom-inset
-     to 0 while fitted above a keyboard (chat-only for now); otherwise this is
-     the platform's share of the device bottom safe area. */
+     transcript clearance and the fade. The shell sets --shell-bottom-inset
+     to 0 while fitted above a keyboard (app frames share it); otherwise this
+     is the platform's share of the device bottom safe area. */
   --chat-foot-safe-bottom: var(
-    --chat-foot-bottom-inset,
+    --shell-bottom-inset,
     calc(env(safe-area-inset-bottom, 0px) * var(--chat-foot-inset-reserve, 1))
   );
   display: flex;
@@ -202,20 +202,30 @@
   padding: 8px 6px calc(var(--composer-h, 80px) + var(--chat-foot-safe-bottom) + 16px);
   display: flex;
   flex-direction: column;
-  gap: 24px;
+  /* The conversation gap between speakers. */
+  --chat-list-gap: 24px;
+  gap: var(--chat-list-gap);
   /* Force content taller than scroll container so iOS
      triggers elastic bounce even when at the bottom. */
   min-height: calc(100% + 1px);
 }
 
-/* ── Empty state ───────────────────────────────────── */
-
+/* Replies and agent activity rows in one stretch (an answered card, a wait or
+   a helper result between them is hidden) read as one response: they sit as
+   close as rows within a reply, not a conversation gap apart. The Thinking
+   row a new turn shows before its reply exists sits where that reply will. */
+.chat__list > :is(.chat__reply, .chat__msg--peer)
+  + :is(.chat__reply, .chat__msg--peer, .chat__msg--pending-reply) {
+  margin-block-start: calc(8px - var(--chat-list-gap));
+}
 /* A reply is one conversation item; source rows keep their anchors and
    compact block spacing without cancelling the surrounding conversation gap. */
 .chat__reply-rows { list-style: none; padding: 0; margin: 0; }
 .chat__reply-rows > .chat__msg + .chat__msg:not(:has(> .chat__markdown-copy-surface:empty)) {
   margin-top: 8px;
 }
+
+/* ── Empty state ───────────────────────────────────── */
 
 .chat__empty {
   display: flex;
@@ -393,6 +403,22 @@
 .chat__msg:focus { outline: none; }
 
 .chat__msg--user { align-items: flex-end; }
+/* A mid-turn message waiting for the agent's next step boundary. The caption
+   holds at zero height and opacity briefly: a fast cut replaces this row with
+   an ordinary one, and must neither flash the caption nor grow and shrink the
+   row at the pinned bottom. The global reduced-motion rule shortens the fade
+   but keeps the delay. */
+.chat__steer-pending-note {
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
+  animation: chat-steer-note-in 0.2s ease-out 0.8s both;
+}
+@keyframes chat-steer-note-in {
+  from { max-height: 0; margin-top: 0; opacity: 0; }
+  to { max-height: 32px; margin-top: 4px; opacity: 1; }
+}
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
@@ -453,28 +479,58 @@
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
-/* A reply's row is its own line under the reply, not an overlay in the
-   conversation gap: it keeps its space while hidden and while the reply is
-   still streaming, so settling, revealing or pinning it never moves the
-   transcript, and it always sits the same distance below the reply's last
-   line (its fixed height comes from .chat__msg-meta). Time and Copy stay
-   together, inset to match the reply's prose. */
+/* The chat's one reply footer, on its last reply, is its own line under the
+   reply, not an overlay in the conversation gap: it keeps its space while
+   the agent works, so settling never moves the transcript, and it always
+   sits the same distance below the reply's last line (its fixed height comes
+   from .chat__msg-meta). Time and Copy stay together, inset to match the
+   reply's prose. */
 .chat__msg-meta--start {
   display: flex;
   width: fit-content;
   align-self: flex-start;
   margin: 6px 0 0;
   padding: 0 8px;
+  gap: 0;
 }
-/* An earlier reply in a stretch has no time: pull Copy back by its own
-   padding so its glyph still lines up with the reply's prose. */
+/* The footer's actions are equal 24px square buttons, icon centred, side by
+   side; the time sits the same distance from Copy's icon as Copy's icon from
+   Branch's. Without a time, Copy is pulled back so its icon lines up with
+   the reply's prose. */
+.chat__msg-meta--start > .chat__ts { margin-right: 5px; }
+.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed) {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
 .chat__msg-meta--start > .chat__msg-copy:first-child { margin-left: -5px; }
-/* Older replies reveal actions only on tap/click; hovering must not expose
-   another reply's Copy above the current answer. ChatView keeps the latest
-   reply's row visible. */
+/* The footer is hidden until wanted, like an owner message's row: a tap on
+   the reply reveals it for a moment (ChatView's tap reveal), keyboard focus
+   on a control in the reply or footer shows it on any device, and with a
+   fine pointer hovering the reply does too. It stays focusable while
+   transparent so a keyboard can reach it. Its line stays reserved, so
+   revealing it moves nothing. */
+.chat__reply > .chat__msg-meta--start { visibility: inherit; }
+.chat__reply:has(:focus-visible) > .chat__msg-meta--start {
+  opacity: 1;
+  pointer-events: auto;
+  transition-delay: 0s;
+}
+@media (hover: hover) and (pointer: fine) and (not (any-pointer: coarse)) {
+  .chat__reply:hover > .chat__msg-meta--start {
+    opacity: 1;
+    pointer-events: auto;
+    transition-delay: 0s;
+  }
+}
+/* A tap or click reveals a row for a moment: an owner message's, and the
+   reply footer's (which a fine pointer also reveals on hover). Reveal by
+   inheriting, never forcing `visible`: a hidden shell view keeps its ChatView
+   mounted behind an app, and a forced `visible` descendant would paint the
+   row over that app. */
 .chat__msg-meta--visible {
   opacity: 1;
-  visibility: visible;
+  visibility: inherit;
   pointer-events: auto;
   transition-delay: 0s;
 }
@@ -487,8 +543,8 @@
 /* ── One-tap message copy ──────────────────────────────
    The explicit mobile affordance: native long-press selection stays fully
    available (this is a plain tap target — never a press/hold interception,
-   see chatUiPolish.test), but a single tap reveals a quiet ghost button
-   below a reply or beside an owner message. */
+   see chatUiPolish.test), but a quiet ghost button sits in the chat's one
+   reply footer, and a single tap reveals one beside an owner message. */
 .chat__msg-copy,
 .chat__msg-branch {
   display: inline-flex;
@@ -2419,8 +2475,7 @@
 .chat__foot .chat__progress-action,
 .chat__foot .chat__progress-clear,
 .chat__foot .chat__goal-plan,
-.chat__foot .chat__wait-summary,
-.chat__foot .chat__wait-cancel,
+.chat__foot .chat__waits,
 .chat__foot .chat__archived-restore,
 .chat__foot .slash-menu,
 .chat__foot .chat__pill,
@@ -2437,6 +2492,7 @@
   flex-direction: column;
   gap: var(--chat-foot-card-gap);
   pointer-events: none;
+  transform: translateY(min(var(--foot-hide, 0px), var(--foot-rows-travel, 0px)));
 }
 
 .chat__floating-transients {
@@ -2486,6 +2542,15 @@
   color: var(--danger, #b42318);
   background: color-mix(in srgb, var(--danger, #b42318) 7%, var(--surface));
   text-align: center;
+}
+
+/* The helper-chat refusal links back to the parent chat. The foot is
+   pointer-transparent, so the link opts back in. */
+.chat__offline-note-link {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  pointer-events: auto;
 }
 
 /* ── Composer history strip (ChatInputBar contract 8) ─────────────────────
@@ -3470,6 +3535,19 @@
   display: block;
 }
 
+/* Extreme-aspect images (see attachmentThumbFit.js), pending and sent alike:
+   a wide strip shows whole because its centre crop can be blank, and a very
+   tall capture crops from its top so its header shows. */
+.chat__attach-card-thumb[data-fit="contain"],
+.chat__attach-thumb[data-fit="contain"] {
+  object-fit: contain;
+}
+
+.chat__attach-card-thumb[data-fit="top"],
+.chat__attach-thumb[data-fit="top"] {
+  object-position: top;
+}
+
 .chat__attach-card-icon {
   width: 30px;
   height: 36px;
@@ -3629,8 +3707,9 @@
 
 .chat__attach-thumb {
   /* Match the composer's attachment card after send — same `--attach-card`
-     token, so the two can't drift. The thumbnail is a consistent square
-     crop; tapping it still opens the full source image. */
+     token, so the two can't drift. The thumbnail is a square centre crop,
+     except for extreme-aspect images (the `data-fit` rules above); tapping
+     it still opens the full source image. */
   width: 100%;
   height: 100%;
   object-fit: cover;
@@ -4215,12 +4294,6 @@
 }
 
 /* Waiting uses the same bordered surface as the Goal panel. */
-.chat__handoff-slot {
-  list-style: none;
-  padding: 0;
-  margin-top: 10px;
-}
-
 .chat__waits {
   max-width: 720px;
   margin: 0 auto var(--chat-foot-rail-gap);
@@ -4304,7 +4377,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 }
 
 .chat__wait-action { padding: 0 12px 10px; }
-.chat__wait-action > button + button { margin-inline-start: 8px; }
 .chat__wait-cancel:disabled { opacity: .55; cursor: default; }
 .chat__wait-error { color: var(--danger); font-size: 12px; margin: 8px 0 0; }
 
@@ -4350,6 +4422,164 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   font-size: 13px;
   font-weight: 650;
   line-height: 1.45;
+}
+
+/* In the foot the handoffs stack above the composer; past ~40% of the
+   visible pane they scroll inside themselves so the composer keeps its room. The
+   foot's ResizeObserver already reserves whatever height they take. */
+.chat__foot .chat__waits {
+  max-height: min(40dvh, calc(var(--composer-room, 100dvh) * 0.4));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* Cards keep their own height; the stack scrolls rather than squashing them. */
+.chat__foot .chat__waits > * {
+  flex-shrink: 0;
+}
+
+/* The handoff stack sits over the scrolling transcript beside the composer,
+   so it is an opaque card like the queue tray: nothing behind may read
+   through it. */
+.chat__handoffs .chat__wait-card {
+  background: var(--surface); /* CONTRACT: opaque card/panel fill, sits on --bg */
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+/* A collapsed wait is one line: what it waits for, then its countdown. */
+.chat__handoffs .chat__wait-summary {
+  flex-wrap: nowrap;
+}
+
+.chat__handoffs .chat__wait-text {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat__handoffs .chat__wait-meta {
+  order: 0;
+  flex: 0 0 auto;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.chat__wait-detail-action {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+/* Many handoffs: one summary line that stays on top while its list scrolls
+   beneath it. The open list is backed by the page colour so nothing in the
+   transcript reads through the gaps between its cards. */
+.chat__handoffs--open {
+  background: var(--bg); /* CONTRACT: opaque page fill behind the open list */
+  border-radius: 12px;
+}
+
+.chat__handoff-summary {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.chat__handoff-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat__handoff-group-label {
+  margin: 4px 0 0 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chat__handoff-notes {
+  padding: 4px 8px 4px 0;
+}
+
+/* A wait's exact command, revealed on request: monospace, wrapped, and
+   scrollable when long. */
+.chat__wait-command-toggle {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent-text, var(--accent));
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat__wait-command-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.chat__wait-command-text {
+  margin: 6px 0 0;
+  max-height: 9em;
+  overflow: auto;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Helper rows reuse the transcript's helper row inside the waiting surface. */
+.chat__helper-list {
+  padding: 5px 8px 5px 12px;
+}
+
+.chat__helper-list .chat__subagents-list {
+  margin: 0;
+}
+
+.chat__helper-list-note {
+  margin: 2px 0 2px 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* On a phone each helper is one compact line: name · engine · status. */
+@media (max-width: 560px) {
+  .chat__helper-list {
+    padding: 3px 8px 3px 12px;
+  }
+
+  .chat__helper-list .chat__subagent {
+    min-height: 30px;
+  }
+
+  .chat__helper-list .chat__subagent-body {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .chat__helper-list .chat__subagent-name {
+    flex: 0 1 auto;
+    max-width: 55%;
+  }
+
+  .chat__helper-list .chat__subagent-sub {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .chat__helper-list .chat__subagent-sub::before {
+    content: "· ";
+  }
 }
 
 /* Archived notice: the waiting-card shell with one Restore action. */
@@ -4720,10 +4950,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   user-select: none;
 }
 
-.queued__hdr:hover {
-  background: var(--surface-2); /* CONTRACT: secondary opaque fill */
-}
-
 .queued__hdr:focus-visible {
   outline: 2px solid var(--accent, currentColor);
   outline-offset: -2px;
@@ -4783,10 +5009,6 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   gap: 0;
   border-radius: 8px;
   transition: background 0.15s;
-}
-
-.queued__row:hover {
-  background: var(--bg); /* CONTRACT: opaque app-wide fill — must hide content beneath */
 }
 
 .queued__toggle {
@@ -4869,26 +5091,39 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   white-space: nowrap;
 }
 
-/* The queued message open in the chat box (ChatInputBar's history strip says
-   "Editing queued message N of M"). The row stays in place, tinted, and its
-   pencil becomes a quiet label so the owner can see where the edit will land. */
+/* The queued message open in the chat box. The row stays in place, tinted, so
+   the owner can see where the edit will land, and its pencil becomes Stop
+   editing, which hands the chat box back to the draft without saving. */
 .queued__row--in-composer {
   background: color-mix(in srgb, var(--accent) 8%, var(--surface)); /* CONTRACT: accent wash on opaque fill */
   box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-.queued__row--in-composer:hover {
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
-}
-
 .queued__in-composer {
   flex-shrink: 0;
-  align-self: center;
-  margin: 0 4px 0 2px;
+  height: 30px;
+  margin: 3px 4px 0 2px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
   font-size: 11.5px;
   line-height: 1.2;
-  color: var(--accent-text, var(--accent)); /* CONTRACT: matches the strip's draft chip */
+  color: var(--accent-text, var(--accent)); /* CONTRACT: accent text on the tinted row */
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.15s, border-color 0.15s;
+}
+.queued__in-composer:disabled {
+  cursor: default;
+}
+.queued__in-composer:not(:disabled):active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: press fill, as the other queued actions give on touch */
+}
+.queued__in-composer:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent); /* CONTRACT: focus ring on the visible well */
 }
 
 /* Compact, evenly spaced send / edit / cancel wells. The button IS the visible
@@ -4920,21 +5155,58 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   display: block;
 }
 
-.queued__action:not(:disabled):hover {
-  color: var(--text);
-}
-
-.queued__steer:not(:disabled):hover {
-  color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
-  border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
-}
-
-.queued__cancel:not(:disabled):hover,
+/* Repeated as :hover inside the fine-pointer block below; one selector list
+   would put hover back on touch. */
 .queued__cancel:not(:disabled):active {
   color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
   background: color-mix(in srgb, var(--danger) 9%, var(--surface));
   border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+}
+
+/* Hover fills belong to fine pointers only. A touch tap leaves :hover on the
+   tapped element until the next tap elsewhere, so an ungated rule kept the
+   header or row lit after every expand/collapse. The row lifts halfway toward
+   --surface-2 rather than sinking to --bg (which read as a hole punched in the
+   tray) or reaching --surface-2 itself, the action wells' own fill, which
+   would erase them. */
+@media (hover: hover) and (pointer: fine) {
+  .queued__hdr:hover {
+    background: var(--surface-2); /* CONTRACT: secondary opaque fill */
+  }
+
+  .queued__row:hover {
+    background: color-mix(in srgb, var(--surface-2) 50%, var(--surface)); /* CONTRACT: opaque lift that stays below the wells' --surface-2 */
+  }
+
+  .queued__row--in-composer:hover {
+    background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  }
+
+  /* Every action lights a fill of its own: a colour change alone left Edit
+     without a highlight, unlike Send now and Cancel, whose own fills follow
+     and win. Stop editing's wash stands clear of its tinted row's. */
+  .queued__action:not(:disabled):hover {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 9%, var(--surface-2)); /* CONTRACT: neutral raised fill on opaque surface */
+    border-color: color-mix(in srgb, var(--text) 22%, var(--border-light));
+  }
+
+  .queued__in-composer:not(:disabled):hover {
+    background: color-mix(in srgb, var(--accent) 20%, var(--surface)); /* CONTRACT: accent wash on opaque fill, clear of the row's own */
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
+  }
+
+  .queued__steer:not(:disabled):hover {
+    color: var(--accent); /* CONTRACT: forwarding stays neutral at rest and reveals its meaning on interaction */
+    background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--accent) 32%, var(--border-light));
+  }
+
+  .queued__cancel:not(:disabled):hover {
+    color: var(--danger); /* CONTRACT: removal becomes destructive only at interaction */
+    background: color-mix(in srgb, var(--danger) 9%, var(--surface));
+    border-color: color-mix(in srgb, var(--danger) 32%, var(--border-light));
+  }
 }
 
 .queued__action:not(:disabled):active {
@@ -5117,3 +5389,26 @@ button.chat__dependency-link:disabled { cursor: default; opacity: .55; }
   outline: 2px solid var(--accent); /* CONTRACT: vivid accent ring for keyboard focus */
   outline-offset: 2px;
 }
+
+
+/* Handoffs exit at the viewport bottom, behind stationary input. The chat's
+   overflow clips the transform; layout and transcript clearance stay fixed. */
+.chat__foot {
+  --foot-hide: 0px;
+  --foot-hide-fraction: 0;
+}
+.chat__foot-handoffs {
+  position: relative;
+  z-index: -1;
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-foot-card-gap);
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto var(--chat-foot-card-gap);
+  transform: translateY(var(--foot-hide));
+}
+.chat__foot-handoffs:empty { display: none; }
+.chat__foot .chat__foot-handoffs > * { width: 100%; margin-bottom: 0; }
+.chat__foot .chat__foot-handoffs[inert],
+.chat__foot .chat__foot-handoffs[inert] * { pointer-events: none; }

@@ -1033,7 +1033,10 @@ def _helper_selection(arguments: dict[str, Any]) -> tuple[str, str | None, str |
     or (capability.get("defaults") or {}).get(provider)
   )
   if isinstance(wanted, str):
-    wanted = _RETIRED_MODELS.get(wanted, wanted)
+    replacements = (capability.get("replacements") or {}).get(provider) or {}
+    wanted = replacements.get(wanted, wanted)
+    if provider == "claude":
+      wanted = _RETIRED_MODELS.get(wanted, wanted)
   models = (capability.get("models") or {}).get(provider) or []
   aliases = (capability.get("aliases") or {}).get(provider) or {}
   if wanted:
@@ -1095,6 +1098,7 @@ def _helper_view(row: dict[str, Any], *, result: bool = False) -> dict[str, Any]
   view = {
     "helper": row.get("task_key"),
     "helper_id": row.get("id"),
+    "title": row.get("title"),
     "provider": row.get("provider"),
     "model": row.get("model"),
     "status": row.get("status"),
@@ -1112,7 +1116,7 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
       "spawn_agent no longer takes access; state any read-only constraint "
       "in the bounded task instead"
     )
-  allowed = {"name", "task", "provider", "model", "effort", "cwd", "plan_task"}
+  allowed = {"name", "title", "task", "provider", "model", "effort", "cwd", "plan_task"}
   if not set(arguments).issubset(allowed):
     raise ValueError("spawn_agent received unknown arguments")
   name, task = arguments.get("name"), arguments.get("task")
@@ -1141,6 +1145,8 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
     body["cwd"] = arguments["cwd"].strip()
   if plan_task is not None:
     body["plan_task"] = plan_task.strip()
+  if isinstance(arguments.get("title"), str) and arguments["title"].strip():
+    body["title"] = arguments["title"].strip()
   row = _agent_api_call("POST", "/api/delegations", body)
   view = _helper_view(row)
   view["note"] = (
@@ -1509,7 +1515,9 @@ _TOOL_DEFINITIONS = {
       "calling turn, unless owner-configured preferences override) and has "
       "the same tools you do, but it does not see this "
       "conversation: write a self-contained task with the files, constraints, "
-      "and what done looks like. Its result arrives in this chat by itself, "
+      "and what done looks like. Give it a title: what the owner reads for "
+      "this helper, a short plain-language phrase in sentence case such as "
+      "\"Fixing the tray's closing conversation\". Its result arrives in this chat by itself, "
       "during a live Codex turn when safe or after the turn settles; Claude "
       "is not interrupted just for a helper result. Stop leaves it owed for "
       "the next owner turn; never poll. "
@@ -1533,6 +1541,10 @@ _TOOL_DEFINITIONS = {
         "cwd": {"type": "string", "description": "Working directory under /data; omit for /data."},
         "plan_task": {"type": "string", "minLength": 1, "maxLength": 128,
                       "description": "Optional Goal task id to file this helper under."},
+        "title": {
+          "type": "string", "maxLength": 256,
+          "description": "What the owner reads for this helper: a short plain-language phrase in sentence case, no jargon, e.g. \"Fixing the tray's closing conversation\". name stays its stable id.",
+        },
       },
       "required": ["name", "task"],
       "additionalProperties": False,
@@ -1801,8 +1813,10 @@ _TOOL_DEFINITIONS = {
       "foreground and instead takes the owner to Settings, focused on section "
       "id ai-providers, "
       "background-agents, github, keys, models, mobius-account (the Möbius "
-      "account page) or mobius-models (Möbius credit and models) (omit id for "
-      "Settings itself); use "
+      "account page), mobius-models (Möbius credit and models) or "
+      "notifications-elsewhere (Slack, Discord and webhook notifications) "
+      "(omit id for Settings "
+      "itself); use "
       "it when they asked to see it or accepted your offer to open it. It only "
       "navigates: signing in, entering credentials and every other change "
       "there stay their own taps. It is live-only and never stored, so pair "
@@ -1839,8 +1853,9 @@ _TOOL_DEFINITIONS = {
       "type": "object", "additionalProperties": False,
       "properties": {
         "preset": {"type": "string", "enum": ["owner_credentials"]},
-        "title": {"type": "string", "minLength": 1, "maxLength": 200},
-        "description": {"type": "string", "maxLength": 1000},
+        # Limits match secure_inputs.validate_request_spec, which rejects more.
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "description": {"type": "string", "maxLength": 240},
         "fields": {
           "type": "array", "minItems": 1, "maxItems": 8,
           "items": {
@@ -1849,7 +1864,7 @@ _TOOL_DEFINITIONS = {
             "properties": {
               "name": {"type": "string"},
               "type": {"type": "string", "enum": ["text", "password"]},
-              "label": {"type": "string"},
+              "label": {"type": "string", "maxLength": 80},
               "autocomplete": {"type": "string"},
             },
           },
@@ -2278,9 +2293,26 @@ def _call_tool(params: Any) -> dict[str, Any]:
     return _call_tool_as_caller(name, arguments)
 
 
+# The turn's tool set is fixed when the turn starts, so a parent that spawns
+# helpers mid-turn still has no peer tools; say so instead of leaving it to
+# discovery calls.
+_PEER_TOOLS_ABSENT_MESSAGE = (
+  "Peer tools are offered only while another agent is live, in a Project, or "
+  "as a delegated helper, and this turn started without one. No peer is "
+  "reachable now; use message_agent for a finished or asking helper, and "
+  "record hand-offs in the chat note."
+)
+
+
+def _unavailable_tool_message(name: Any) -> str:
+  if name in _PLATFORM_TOOLS.PEER_TOOL_NAMES:
+    return _PEER_TOOLS_ABSENT_MESSAGE
+  return "Tool is unavailable for this agent run."
+
+
 def _call_tool_as_caller(name: Any, arguments: dict[str, Any]) -> dict[str, Any]:
   if name not in _available_tool_names():
-    return _tool_result("Tool is unavailable for this agent run.", is_error=True)
+    return _tool_result(_unavailable_tool_message(name), is_error=True)
   handler = _TOOL_HANDLERS.get(name) if isinstance(name, str) else None
   if handler is None:
     return _tool_result("Unknown tool.", is_error=True)

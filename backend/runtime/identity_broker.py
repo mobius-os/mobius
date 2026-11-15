@@ -93,6 +93,8 @@ MANAGED_UPSTREAM_POLICIES = (
 MANAGED_EXACT_ROUTES = frozenset({
   ("GET", "/api/instance/v1/agent"),
   ("POST", "/api/instance/v1/agent/trial"),
+  # The launcher issues this installation its own credits key.
+  ("POST", "/api/instance/v1/credits/key"),
   ("POST", "/api/instance/v1/railway/connect/start"),
   ("POST", "/api/instance/v1/railway/plan/refresh"),
 })
@@ -119,8 +121,9 @@ MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 # 3 = standalone web search endpoint; 4 = flat gateway wire for Codex web.run;
 # 5 = account review routes; 6 = shared access; 7 = recipient invitation response;
 # 8 = native push relay routes; 9 = Railway inventory read options;
-# 10 = community listing sort; 11 = Railway display-only cost read option.
-BROKER_ROUTE_EPOCH = 11
+# 10 = community listing sort; 11 = Railway display-only cost read option;
+# 12 = managed credits key for one-tap credits pairing.
+BROKER_ROUTE_EPOCH = 12
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are

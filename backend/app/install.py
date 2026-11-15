@@ -64,7 +64,7 @@ from app import app_consent, app_cron
 from app.build_admission import BuildLeaseUnavailable
 from app.app_capabilities import contract_and_digest
 from app.app_compile_contract import RolldownStalled
-from app.app_source_check import SourceCheckResult, check_app_source
+from app.app_source_check import SourceCheckResult, check_app_source, direct_hosts_from_manifest
 from app.compiler import (
   CompileError,
   compile_jsx,
@@ -1634,6 +1634,7 @@ def _source_completeness(
     source_files=manifest.get("source_files") or [],
     job=(manifest.get("schedule") or {}).get("job"),
     static_assets=(f"static/{dest}" for dest in static_assets),
+    direct_hosts=direct_hosts_from_manifest(manifest),
   )
 
 
@@ -4791,7 +4792,7 @@ async def _install_candidate(
   # reruns this whole install, post-commit effects included.
   try:
     async with fs_locks.source_dir_lock(app.source_dir):
-      await clear_pending_conflict_update(db, app)
+      await clear_pending_conflict_update(db, app, completed=True)
   except (OSError, subprocess.SubprocessError, SQLAlchemyError):
     db.rollback()
     log.warning("install: could not clear the finished pending update", exc_info=True)

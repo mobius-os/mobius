@@ -21,6 +21,7 @@ fence (contribution_review_runs.require_public_transition_clear).
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 
@@ -87,6 +88,50 @@ def comments(checks: dict | None) -> list[dict]:
   """
   return [_opinion(node) for node in _review_nodes(checks, "latestReviews") or []
           if isinstance(node, dict) and node.get("state") == "COMMENTED"]
+
+
+# A hundred reviewers a page; past this many pages the read is refused rather than guessed.
+APPROVER_PAGES = 10
+_APPROVERS = ('query($id:ID!,$after:String){node(id:$id){... on PullRequest {latestReviews(first:100, after:$after)'
+              '{pageInfo{hasNextPage endCursor} nodes{state author{login} commit{oid}}}}}}')
+
+
+def approvers_at(gh, cwd, target: dict) -> set[str]:
+  """Lowercased logins whose newest review is an approval of exactly target["head_sha"], read to the last page.
+
+  Anyone: a collaborator with read access approves too, which the writers-only opinions of read_facts never show, and
+  those stop at a hundred. Only this read may say who can safely be asked to review again. Raises READ_FAILURES when
+  GitHub cannot answer in full, because a missing approver would be asked a second time.
+  """
+  found, cursor = set(), None
+  for _ in range(APPROVER_PAGES):
+    flags = ["-f", f"query={_APPROVERS}", "-f", f"id={target['pr_id']}"] + (["-f", f"after={cursor}"] if cursor else [])
+    result = json.loads(gh(cwd, "api", "graphql", *flags).stdout)
+    reviewed = ((result.get("data") or {}).get("node") or {}).get("latestReviews") if isinstance(result, dict) else None
+    nodes = reviewed.get("nodes") if isinstance(reviewed, dict) else None
+    paging = reviewed.get("pageInfo") if isinstance(reviewed, dict) else None
+    if not isinstance(result, dict) or result.get("errors") or not isinstance(nodes, list) or not isinstance(paging, dict):
+      raise HTTPException(409, "GitHub could not show who approved this pull request.")
+    found |= {str((node.get("author") or {}).get("login") or "").lower() for node in nodes
+              if isinstance(node, dict) and node.get("state") == "APPROVED"
+              and (node.get("commit") or {}).get("oid") == target["head_sha"]}
+    cursor = paging.get("endCursor")
+    if paging.get("hasNextPage") is not True:
+      return found - {""}
+    if not cursor:
+      break
+  raise HTTPException(409, "GitHub showed too many reviews to tell who approved this pull request.")
+
+
+def everyone_who_reviewed(checks: dict | None) -> list[dict]:
+  """Each person's newest review, whoever they are and whatever it said: who can be asked, never who may merge.
+
+  Merge standing is the writers' opinions alone (`opinions`). A person without write access still reviewed
+  the PR, and GitHub lets anyone be asked, so the two Ask actions read this list instead. A draft they have
+  not submitted (PENDING) is nobody's review. A missing answer is nobody, never a reason to call the PR unread.
+  """
+  return [_opinion(node) for node in _review_nodes(checks, "latestReviews") or []
+          if isinstance(node, dict) and node.get("state") and node["state"] != "PENDING"]
 
 
 def my_review(checks: dict | None, review_list: list[dict], login: str) -> dict | None:
@@ -160,6 +205,7 @@ def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks:
     "lifecycle": lifecycle_of(pull), "checks": checks_of(checks, head),
     "mergeable": mergeable_of(checks, head), "permission": permission_of(repo),
     "reviews": [*(review_list or []), *comments(checks)],
+    "reviewers": everyone_who_reviewed(checks),
     "myReview": None if own else my_review(checks, review_list or [], actor_login),
     "openThreads": 0, "job": job, "result": None, "outbox": None,
     "readComplete": review_list is not None,

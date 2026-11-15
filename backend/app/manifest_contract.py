@@ -31,10 +31,22 @@ BOOLEAN_PERMISSIONS = (
 )
 # What an app's service may pay for from the owner's credits, as
 # ``"<seller handle>/<app>"`` entries naming the creators' priced apps.
-SPEND_CREDITS_TARGET = re.compile(r"[a-z0-9][a-z0-9_-]{0,39}/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}")
+# ``"*/<app>"`` names every creator's app of that name: a marketplace pays
+# whichever creator listed what its buyer chose, so it cannot name them.
+SPEND_CREDITS_TARGET = re.compile(
+  r"(?:\*|[a-z0-9][a-z0-9_-]{0,39})/[A-Za-z0-9][A-Za-z0-9_.-]{0,79}"
+)
 SPEND_CREDITS_MAX = 16
-RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits")
+# The owner's own priced apps whose sales an app's service may check by charge
+# id: read-only, so it is its own permission rather than a spend grant.
+CHECK_CREDITS_CHARGES_APP = re.compile(r"[a-z0-9][a-z0-9._-]{0,79}")
+CHECK_CREDITS_CHARGES_MAX = 16
+RECOGNIZED_CAPABILITIES = (*BOOLEAN_PERMISSIONS, "spend_credits", "check_credits_charges")
 SKILLS_COUNT_MAX = 5
+# Wire protocols an app-secret model provider may declare. `responses` runs on
+# the Codex engine; `anthropic_messages` runs on the Claude engine through the
+# local model relay (see MODEL-PROVIDERS.md).
+MODEL_PROVIDER_PROTOCOLS = ("responses", "anthropic_messages")
 MANIFEST_MAX_BYTES = 64 * 1024
 # The one size bound for an app package: every file its manifest declares
 # (entry, job, source files, static assets, storage seeds, icon), summed per
@@ -671,14 +683,19 @@ def validate_manifest_contract(manifest) -> None:
     if not isinstance(model_provider, Mapping):
       _fail("Manifest `model_provider` must be an object.")
     # The identity_broker transport is inert: the platform owns the Möbius
-    # catalogue (mobius_models.json) and the registry skips this declaration.
+    # service-discovered catalogue and the registry skips this declaration.
     # It stays valid, and reserved to the reviewed `identity` app, so
     # installed copies and the published Möbius · You package keep applying.
     broker = model_provider.get("transport") == "identity_broker"
     expected = {"name", "base_url", "models", "default_model"}
     expected |= {"transport"} if broker else {"secret_name"}
-    if set(model_provider) != expected:
+    # App-secret providers may name their wire protocol; omission means the
+    # original OpenAI Responses contract.
+    optional = set() if broker else {"protocol"}
+    if not expected <= set(model_provider) <= expected | optional:
       _fail("Manifest `model_provider` has invalid fields for its transport.")
+    if model_provider.get("protocol", "responses") not in MODEL_PROVIDER_PROTOCOLS:
+      _fail("Manifest `model_provider.protocol` must be `responses` or `anthropic_messages`.")
     if not isinstance(model_provider["name"], str) or not 1 <= len(model_provider["name"].strip()) <= 80:
       _fail("Manifest `model_provider.name` must be 1–80 characters.")
     url = urlparse(model_provider["base_url"] if isinstance(model_provider["base_url"], str) else "")
@@ -694,6 +711,15 @@ def validate_manifest_contract(manifest) -> None:
       secret_name = model_provider["secret_name"]
       if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
         _fail("Manifest `model_provider.secret_name` must name the key the app asks for.")
+    # A declared effort must survive every launch path on the protocol's
+    # engine: Responses-only values cannot be sent to Claude or dropped by
+    # its helper/compaction dispatchers.
+    messages = model_provider.get("protocol") == "anthropic_messages"
+    allowed_efforts = (
+      {"low", "medium", "high", "max"}
+      if messages
+      else {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+    )
     entries = model_provider["models"]
     if not isinstance(entries, list) or not 1 <= len(entries) <= 32:
       _fail("Manifest `model_provider.models` must contain 1–32 models.")
@@ -708,8 +734,10 @@ def validate_manifest_contract(manifest) -> None:
       if not isinstance(entry["label"], str) or not 1 <= len(entry["label"].strip()) <= 100:
         _fail("Manifest model labels must be 1–100 characters.")
       efforts = entry.get("effort_levels")
-      if efforts is not None and (not isinstance(efforts, list) or not efforts or len(efforts) > 8
-          or not all(isinstance(value, str) and value in {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} for value in efforts)
+      # On the Claude engine an empty list means the model takes no effort,
+      # so the owner's default effort is not sent (Responses has `none`).
+      if efforts is not None and (not isinstance(efforts, list) or (not efforts and not messages) or len(efforts) > 8
+          or not all(isinstance(value, str) and value in allowed_efforts for value in efforts)
           or len(set(efforts)) != len(efforts)):
         _fail("Manifest model effort_levels contains unsupported or duplicate values.")
       window = entry.get("context_window")
@@ -833,7 +861,18 @@ def validate_manifest_contract(manifest) -> None:
   ):
     _fail(
       "Manifest `permissions.spend_credits` must list up to "
-      f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" entries it may pay for."
+      f"{SPEND_CREDITS_MAX} unique \"<seller>/<app>\" or \"*/<app>\" entries it may pay for."
+    )
+  checked_apps = permissions.get("check_credits_charges", [])
+  if (
+    not isinstance(checked_apps, list) or len(checked_apps) > CHECK_CREDITS_CHARGES_MAX
+    or any(not isinstance(app, str) or not CHECK_CREDITS_CHARGES_APP.fullmatch(app)
+           for app in checked_apps)
+    or len(set(checked_apps)) != len(checked_apps)
+  ):
+    _fail(
+      "Manifest `permissions.check_credits_charges` must list up to "
+      f"{CHECK_CREDITS_CHARGES_MAX} unique priced app names whose charges it checks."
     )
   for field in BOOLEAN_PERMISSIONS:
     if field in permissions and not isinstance(permissions[field], bool):

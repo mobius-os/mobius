@@ -488,7 +488,7 @@ export default function ImageLightbox({
           onPointerUp={endPointerPan}
           onPointerCancel={endPointerPan}
           style={{
-            transform: `translate3d(${transform.x}px, ${transform.y}px, 0) scale(${transform.scale})`,
+            transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.scale})`,
             cursor: dragging ? 'grabbing' : transform.scale > 1 ? 'grab' : 'zoom-in',
           }}
           draggable={false}

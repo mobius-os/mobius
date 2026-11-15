@@ -17,8 +17,11 @@
 #   scripts/wt-pytest.sh backend/tests/test_foo.py -q  # repo-relative also works
 #   scripts/wt-pytest.sh -k name -x            # any pytest args
 #
-# Bypass the deps resolution by exporting SECRET_KEY yourself; this script
-# only fills it in when unset.
+# An exported SECRET_KEY is kept; this script only fills it in when unset. It
+# does not skip the Node dependency check: a checkout that locks different
+# rolldown, acorn or eslint-scope versions is refused. For tests that never
+# compile an app, set MOBIUS_WT_PYTEST_NODE_DRIFT=1 to reuse the primary
+# checkout's Node tree with a warning instead.
 set -uo pipefail
 
 # Isolate the database before Python imports anything. A test module outside
@@ -158,9 +161,21 @@ elif NODE_MODULES="$(matching_contrib_node_modules)"; then
   echo "wt-pytest: reusing exact-lock backend-test dependencies from $(dirname "$NODE_MODULES")" >&2
 elif NODE_MODULES="$(backend_lock_matching_node_modules)"; then
   echo "wt-pytest: frontend package-lock.json differs from $(dirname "$NODE_MODULES"), but it locks the backend's Node tools (rolldown, acorn, eslint-scope) identically; reusing them" >&2
+elif [ "${MOBIUS_WT_PYTEST_NODE_DRIFT:-0}" = "1" ]; then
+  # Opt-in only: refusing by default is what stops compiler tests from running
+  # against the wrong bundler (a mass false alarm), but Python-only tests do
+  # not need the locked tools.
+  if ! backend_test_node_deps "$MAIN/frontend"; then
+    echo "wt-pytest: MOBIUS_WT_PYTEST_NODE_DRIFT=1 needs the primary checkout's Node tools, and $MAIN/frontend/node_modules lacks them" >&2
+    echo "  install them with: (cd \"$MAIN/frontend\" && npm ci)" >&2
+    exit 1
+  fi
+  NODE_MODULES="$SHARED_NODE_MODULES"
+  echo "wt-pytest: WARNING — this checkout locks different backend Node tools; tests that compile apps are not dependency-authoritative" >&2
 else
   echo "wt-pytest: no verified backend Node dependencies match this worktree's locked rolldown, acorn, and eslint-scope" >&2
   echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
+  echo "  or, for tests that never compile an app, rerun with MOBIUS_WT_PYTEST_NODE_DRIFT=1" >&2
   exit 1
 fi
 NODE_BIN_DIR="$NODE_MODULES/.bin"

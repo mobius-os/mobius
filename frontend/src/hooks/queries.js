@@ -1,7 +1,8 @@
+import { createContext, useContext } from 'react'
 import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
 import { api, isSharedBrowserAuth } from '../api/client.js'
 import { appTokenRefreshInterval } from '../lib/appToken.js'
-import { chatDetailCacheValue } from '../lib/chatDetailCache.js'
+import { waitingPaymentsRefresh, withoutPayment } from '../lib/creditsPayment.js'
 
 function jsonOrThrow(res, label) {
   if (!res.ok) throw new Error(`${label} ${res.status}`)
@@ -217,17 +218,6 @@ async function fetchChats({ signal, timeoutMs, cache } = {}) {
   return Array.isArray(data) ? data : []
 }
 
-async function fetchChatMessages(chatId, { signal } = {}) {
-  const res = await api.chats.detail(chatId, {
-    limit: 20,
-    compact: true,
-    signal,
-    timeoutMs: 15_000,
-  })
-  const data = await jsonOrThrow(res, 'chat fetch failed:')
-  return chatDetailCacheValue(data)
-}
-
 async function fetchChatCurrentUsage(
   chatId,
   provider,
@@ -341,6 +331,25 @@ function useAppConsentQuery(appId) {
   })
 }
 
+// Whether a new waiting payment reaches this page as a system event: the shell
+// provides true, since its stream invalidates the waiting payments on
+// `credits_charge_requested`, and reads them slowly anyway in case one was
+// lost. Elsewhere (an app on its own page) they are polled faster while the
+// app is on screen (see waitingPaymentsRefresh).
+export const WaitingPaymentsPushedContext = createContext(false)
+
+// The app's credits charges waiting for the owner's Pay or Cancel. `visible`
+// is whether the app is on screen, where its Pay sheet can show.
+function useAppWaitingPaymentsQuery(appId, { enabled = true, visible = true } = {}) {
+  const pushed = useContext(WaitingPaymentsPushedContext)
+  return useQuery({
+    queryKey: ['app-credits-payments', appId],
+    enabled: !!appId && enabled,
+    queryFn: async () => jsonOrThrow(await api.apps.waitingPayments(appId), 'waiting payments fetch failed:'),
+    ...waitingPaymentsRefresh({ pushed, visible }),
+  })
+}
+
 function useAppTokenQuery(appId, { enabled = true } = {}) {
   return useQuery({
     queryKey: ['app-token', appId],
@@ -399,7 +408,11 @@ function markProviderConnected(queryClient, providerId) {
 async function fetchModelRegistry() {
   const res = await api.models.list()
   const data = await jsonOrThrow(res, 'model registry fetch failed:')
-  return data?.providers || {}
+  return {
+    providers: data?.providers || {},
+    defaults: data?.defaults || {},
+    replacements: data?.replacements || {},
+  }
 }
 
 // These are three cheap, read-only attempts after the initial request. The
@@ -435,9 +448,10 @@ async function fetchModelPrefs() {
     try {
       const res = await api.owner.modelPrefs.get()
       const data = await jsonOrThrow(res, 'model prefs fetch failed:')
-      return { hidden_ids: data?.hidden_ids || [] }
+      return { hidden_ids: data?.hidden_ids || [], recent_ids: data?.recent_ids || [],
+        selected_agent: data?.selected_agent || null }
     } catch {
-      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], unavailable: true }
+      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], recent_ids: [], unavailable: true }
     }
   }
 }
@@ -458,7 +472,7 @@ async function sendModelPrefsChanges(changes) {
   try {
     const res = await api.owner.modelPrefs.update(changes, { timeoutMs: MODEL_PREFS_SAVE_TIMEOUT_MS })
     const saved = res.ok ? await res.json() : null
-    return Array.isArray(saved?.hidden_ids) ? saved.hidden_ids : null
+    return Array.isArray(saved?.hidden_ids) ? saved : null
   } catch {
     prefsSaveOutcomeUnknown = true
     return null
@@ -480,23 +494,32 @@ async function saveModelPrefsChanges(queryClient, changes) {
       if (hide) hidden.add(id)
       else hidden.delete(id)
     }
-    return { hidden_ids: [...hidden] }
+    return { ...prev, hidden_ids: [...hidden] }
   })
   const save = latestPrefsSave.then(() => sendModelPrefsChanges(changes))
   latestPrefsSave = save
-  const hiddenIds = await save
+  const saved = await save
   if (latestPrefsSave === save) {
-    if (hiddenIds) queryClient.setQueryData(modelPrefsKey, { hidden_ids: hiddenIds })
-    if (!hiddenIds || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
+    if (saved) queryClient.setQueryData(modelPrefsKey, previous => ({
+      ...previous,
+      hidden_ids: saved.hidden_ids,
+      // A model pick can commit while this visibility request is in flight.
+      // Its newer local recency must not be replaced by an older reply.
+      recent_ids: previous?.recent_ids ?? saved.recent_ids ?? [],
+    }))
+    if (!saved || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
     prefsSaveOutcomeUnknown = false
   }
-  return Boolean(hiddenIds)
+  return Boolean(saved)
 }
 
 function modelPrefsQueryOptions({ enabled = true } = {}) {
   return {
     queryKey: modelPrefsKey,
     queryFn: fetchModelPrefs,
+    // A newly opened job picker must confirm the latest saved agent, not a
+    // still-fresh snapshot from before a chat model or effort change.
+    staleTime: 0,
     enabled,
     retry: false,
   }
@@ -655,6 +678,16 @@ export const appQueries = {
     useQuery: useAppConsentQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-consent', appId] }),
   },
+  creditsPayments: {
+    useQuery: useAppWaitingPaymentsQuery,
+    invalidate: (queryClient, appId) => queryClient.invalidateQueries({
+      predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
+    }),
+    // An answered payment leaves the list before it is read again.
+    remove: (queryClient, appId, paymentId) => queryClient.setQueriesData({
+      predicate: q => q.queryKey[0] === 'app-credits-payments' && String(q.queryKey[1]) === String(appId),
+    }, data => withoutPayment(data, paymentId)),
+  },
   uninstalled: {
     key: uninstalledAppsKey,
     fetch: fetchUninstalledApps,
@@ -772,7 +805,6 @@ export const chatQueries = {
   },
   messages: {
     key: (chatId) => ['chat-messages', chatId],
-    fetch: fetchChatMessages,
     remove: (queryClient, chatId) => queryClient.removeQueries({ queryKey: ['chat-messages', chatId] }),
   },
   usage: {

@@ -7,7 +7,8 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {
@@ -17,7 +18,7 @@ import {
 } from './groupBlocks.js'
 import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
-import { isDurableRestartOffer } from './restartCard.js'
+import { questionCardOpen } from './questionOpen.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -36,6 +37,7 @@ import {
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
+import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyMarkdownSelection } from './markdownClipboard.js'
@@ -60,16 +62,10 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
-  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
-    && block?.type === 'question'
-    && !block.answers
-    && (
-      durableRestart
-      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
-    )
+    && questionCardOpen(block, isLastMsg ? liveQuestionId : null)
   )
 }
 
@@ -101,7 +97,7 @@ function MarkdownCopySurface({ msg, markdownByIndex, children }) {
 
 /** Owner text renders through the same formatter as replies, with the
  * owner-text rules (typed line breaks and tag-like text stay as typed; see
- * BlockRenderer's `configuredMarked`). A `/goal` command keeps its Goal tag. */
+ * markdownParser.js). A `/goal` command keeps its Goal tag. */
 function UserMessageText({ text, onInternalNav, mediaDimensions }) {
   const goalObjective = goalMessageObjectiveFromText(text)
   if (!goalObjective) {
@@ -232,9 +228,9 @@ function MsgContentInner({
   // model picker, or compact into a fresh provider session. Stable references.
   onRefusalModelChoice,
   onRefusalFreshSession,
-  // Only the installation owner may bypass the storage floor; the server
-  // refuses Continue anyway from anyone else, who keeps the plain Resume.
-  canOverrideStorage = false,
+  // Only the installation owner may bypass the storage or process floor; the
+  // server refuses Continue anyway from anyone else, who keeps plain Resume.
+  canContinueAnyway = false,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -619,18 +615,19 @@ function MsgContentInner({
         const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
-        // Resource waits retain automatic retry. A warned storage-only action
-        // can admit one cleanup turn even while that measured pressure remains.
-        // Not while an update restores edits or awaits a restart: the server
-        // reports those for a storage wait as the handoff's reason.
-        const storageOverrideAvailable = recoveryOwner && canOverrideStorage
-          && block.pause?.kind === 'storage'
+        // Resource waits retain automatic retry. A warned storage or process
+        // action can admit one cleanup turn even while that measured pressure
+        // remains. Not while an update restores edits or awaits a restart: the
+        // server reports those for a resource wait as the handoff's reason.
+        const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
+        const continueAnywayAvailable = recoveryOwner && canContinueAnyway
+          && !!continueAnywayCopy
           && ['automatic', 'recovery'].includes(handoff?.kind)
           && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
-          && !storageOverrideAvailable
+          && !continueAnywayAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
         return (
           <ErrorCard
@@ -694,17 +691,14 @@ function MsgContentInner({
                 )}
               </div>
             )}
-            {storageOverrideAvailable && (
-              <span className="chat__recovery-copy">
-                Continue this turn despite low storage—for example, to free space.
-                If the disk fills completely, saving may fail.
-              </span>
+            {continueAnywayAvailable && (
+              <span className="chat__recovery-copy">{continueAnywayCopy}</span>
             )}
-            {(manualResumeAvailable || storageOverrideAvailable) && (
+            {(manualResumeAvailable || continueAnywayAvailable) && (
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={() => onResume({ allowLowStorage: storageOverrideAvailable })}
+                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -714,9 +708,9 @@ function MsgContentInner({
                   : undefined}
               >
                 {resumeState?.pending
-                  ? storageOverrideAvailable ? 'Continuing…' : 'Resuming…'
+                  ? continueAnywayAvailable ? 'Continuing…' : 'Resuming…'
                   : resumeState?.unavailable ? 'Reconnecting…'
-                  : storageOverrideAvailable ? 'Continue anyway'
+                  : continueAnywayAvailable ? 'Continue anyway'
                   : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
@@ -894,7 +888,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onResume === next.onResume
     && prev.onRefusalModelChoice === next.onRefusalModelChoice
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
-    && prev.canOverrideStorage === next.canOverrideStorage
+    && prev.canContinueAnyway === next.canContinueAnyway
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

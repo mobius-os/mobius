@@ -85,6 +85,8 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  require_owner_or_full_access_control,
+  get_current_owner_for_full_access_control,
   get_current_owner_or_app, get_principal, get_principal_or_public_service,
   Principal, revocable_browser_stream,
   get_owner_or_app_with_manage_apps, reject_cross_site,
@@ -554,6 +556,9 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
+  # The app's model engine home (threads, transcripts) is id-keyed too.
+  from app.providers import app_engine_home
+  await asyncio.to_thread(_rmtree_strict, app_engine_home(settings.data_dir, deleted_app_id))
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent
@@ -2054,10 +2059,10 @@ def _check_conflict_resolver_bindings(
 
 
 async def _create_conflict_resolver_chat(
-  db: Session, app_ids: list[int],
+  db: Session, app_ids: list[int], agent: schemas.UpdateAgentChoice | None = None,
 ) -> schemas.AppConflictResolverChatOut:
   """Prepare the exact selected batch, then open its owner-visible resolver."""
-  from app import background_agents
+  from app import update_chat
 
   prepared = []
   sources = []
@@ -2143,10 +2148,8 @@ async def _create_conflict_resolver_chat(
     if existing is not None:
       chat, created, provider = existing, False, existing.provider
     else:
-      # Walk the owner's background-agent choices to the first with quota.
-      choice = background_agents.resolve_background_chat_choice(
-        get_settings().data_dir, db,
-      )
+      # Freeze an explicit selection; only omission uses the background order.
+      choice = update_chat.resolve_update_chat_choice(db, agent)
       provider = choice["provider"]
       chat = chat_writer.create_chat(
         id=str(uuid.uuid4()),
@@ -2154,7 +2157,9 @@ async def _create_conflict_resolver_chat(
         messages=[],
         pending_messages=[],
         provider=provider,
-        agent_settings_json=choice["agent_settings"],
+        agent_settings_json=update_chat.resolver_batch_settings(
+          choice["agent_settings"], [app for app, *_ in prepared],
+        ),
         created_by_app_id=None,
       )
       db.add(chat)
@@ -2196,7 +2201,7 @@ async def create_conflict_resolver_batch_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create one owner-visible resolver turn for all selected app conflicts."""
-  return await _create_conflict_resolver_chat(db, body.app_ids)
+  return await _create_conflict_resolver_chat(db, body.app_ids, body.agent)
 
 
 @router.post(
@@ -2214,7 +2219,7 @@ async def create_conflict_resolver_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create or return the owner-visible resolver chat for an app conflict."""
-  return await _create_conflict_resolver_chat(db, [app_id])
+  return await _create_conflict_resolver_chat(db, [app_id], body.agent if body else None)
 
 
 @router.post(
@@ -2441,6 +2446,7 @@ async def save_store_listing(
   edit = store_listing_source.ListingEdit(
     tagline=body.tagline,
     description=body.description,
+    license=body.license,
     icon=_listing_image(body.icon, "app icon"),
     hero=_listing_image(body.hero, "banner image"),
     screenshots=tuple(
@@ -2658,7 +2664,7 @@ async def resolve_app_update(
       ):
         # Already installed: a retry after a lost response, or a finish that
         # stopped after removing its receipt. Clear any leftover checkout.
-        await pending_update.clear_pending_conflict_update(db, app)
+        await pending_update.clear_pending_conflict_update(db, app, completed=True)
         get_system_broadcast().publish(
           {"type": "app_updated", "appId": str(app.id)}
         )
@@ -2866,7 +2872,7 @@ async def set_app_badge(
 
   The write runs under the app's storage lock; keep it a tiny transition.
   """
-  require_nondelegated_owner_or_app_control(principal)
+  require_owner_or_full_access_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
       status_code=403, detail="App token can only set its own badge.",
@@ -3347,7 +3353,7 @@ async def get_icon(
 async def delete_uninstalled_app_permanently(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ):
   """Erases an uninstalled app now instead of waiting out its 7-day window.
 

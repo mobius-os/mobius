@@ -131,7 +131,7 @@ async def test_one_unconverted_orphan_never_blocks_every_restart_resume(monkeypa
   assert _run(cid)["status"] == "parked"
   registry.reset_for_tests()
   chat_mod.unregister_active_sink(cid, sink)
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoffs.clear()
   chat_mod.draining = False
   with SessionLocal() as db:
     db.add(create_chat(id="sweep-orphan-b", title="b", messages=[{"role": "user", "content": "go", "ts": 1}]))
@@ -160,7 +160,7 @@ async def test_a_failing_orphan_candidate_is_isolated(monkeypatch):
   await chat_mod.drain_all_for_restart(restart_nonce=nonce)
   registry.reset_for_tests()
   chat_mod.unregister_active_sink(cid, sink)
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoffs.clear()
   chat_mod.draining = False
   with SessionLocal() as db:
     db.add(create_chat(id="sweep-bad", title="b", messages=[]))
@@ -237,7 +237,7 @@ async def test_background_conversion_stops_before_turns_are_deferred(monkeypatch
   monkeypatch.setattr(resource_pressure, "resource_status", facts)
   await chat_writer.convert_remaining_transcripts()
   assert chat_writer.transcript_conversion_status["state"] == "blocked"
-  assert agent_admission._deferral(facts()) is None
+  assert agent_admission._deferral(facts(), starting_turns=0) is None
   assert facts()["pressure"]["disk"]["state"] != "critical"
 
 

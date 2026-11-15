@@ -57,8 +57,15 @@ export function immersiveReducer(request, action) {
 // actually looking at. Everything else — chat, settings, another app —
 // keeps normal chrome, which is what makes app-switch restoration
 // automatic: no event needs to fire, the condition just stops holding.
-export function isImmersiveActive(request, activeView, activeAppId) {
+//
+// Side-by-side panes are the owner's choice to look at several things at once,
+// so an app sharing the screen keeps its pane; the request is held, not applied,
+// and takes effect once that pane has the screen (maximized or single view).
+// Applying it would also resize the requester, and an app that decides by its
+// own width would then release and re-request in a loop.
+export function isImmersiveActive(request, activeView, activeAppId, { sharesScreen = false } = {}) {
   return request?.appId != null
+    && !sharesScreen
     && activeView === 'canvas'
     && sameApp(request.appId, activeAppId)
 }
