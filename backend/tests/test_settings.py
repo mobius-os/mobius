@@ -967,18 +967,30 @@ def test_visibility_change_preserves_confirmed_model_recency(client, auth, db):
 
 
 def test_distinct_chat_sends_merge_recent_models_under_owner_lock(client, auth):
-  """Different chat transition locks must not lose owner MRU updates."""
+  """Distinct admitted turns serialize owner MRU with their writer commits."""
+  from app.chat_writer import StartTurn, create_chat, get_writer
   from app.database import SessionLocal
-  from app.routes.chats import _remember_owner_model_use
 
   model_ids = [f"model-{n}" for n in range(8)]
+  with SessionLocal() as session:
+    session.add_all(create_chat(
+      id=f"recent-chat-{n}", title="Recent model test", provider="claude",
+      messages=[], agent_settings_json={"model": model_id},
+    ) for n, model_id in enumerate(model_ids))
+    session.commit()
 
-  def remember(model_id):
-    with SessionLocal() as session:
-      _remember_owner_model_use(session, model_id)
+  def admit(item):
+    n, _model_id = item
+    get_writer().submit(StartTurn(
+      chat_id=f"recent-chat-{n}", run_token=f"recent-run-{n}",
+      user_msg={"role": "user", "content": "hello", "ts": 1,
+                "cid": f"recent-msg-{n}"},
+      title_source="hello", default_provider="claude",
+      remember_owner_model_use=True,
+    )).result(timeout=5)
 
   with ThreadPoolExecutor(max_workers=8) as pool:
-    list(pool.map(remember, model_ids))
+    list(pool.map(admit, enumerate(model_ids)))
   recent = client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"]
   assert set(recent) == set(model_ids)
   assert len(recent) == len(model_ids)
