@@ -28,11 +28,14 @@ An app-secret declaration names its wire protocol with optional `protocol`:
 
 Each provider's engine home (Codex threads, Claude config and transcripts)
 lives with the other engine homes under `cli-auth/app-<id>/`, outside the
-app's own storage, so the app cannot read its transcripts or plant engine
-configuration. Deleting the app deletes that home. Older versions kept it in
-the app's storage; startup deletes those copies rather than moving them,
-since the app could have written to them, so chats on those providers start
-a new engine thread reseeded from the chat.
+app's own storage. The app's storage API and its browser code cannot reach
+it, so they cannot read its transcripts or plant engine configuration. This
+is not a boundary against an app service, which runs with file access to the
+data volume. Deleting the app deletes that home. Older versions kept it in
+the app's storage; a one-time startup sweep deletes those copies for apps
+that declare a model provider rather than moving them, since the app could
+have written to them, so chats on those providers start a new engine thread
+reseeded from the chat.
 
 Both runtimes talk to the loopback model relay
 (`backend/app/routes/model_relay.py`), never to the provider. The agent

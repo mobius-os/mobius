@@ -265,3 +265,40 @@ def test_settled_turn_never_shows_a_helper_still_running():
 
   assert compact["subagent"]["lost"]["status"] == "stopped"
   assert compact["subagent"]["ok"]["status"] == "done"
+
+
+def test_an_app_provider_helper_reads_from_that_provider_engine_home(db, monkeypatch):
+  from app import providers
+  adapter = providers.AppModelProvider(4242, {
+    "name": "Example", "base_url": "https://models.example.com", "secret_name": "api_key",
+    "protocol": "anthropic_messages", "default_model": "example/flash",
+    "models": [{"id": "example/flash", "label": "Flash"}],
+  })
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  db.add(create_chat(id="app-parent", title="App parent", messages=[]))
+  db.add(models.ChatRun(id="app-run", root_run_id="app-run", chat_id="app-parent",
+                        status="completed", provider="app-4242"))
+  db.commit()
+  # The Claude engine records its helpers as 'claude', even on an app provider.
+  _record(db, "app-parent", "app-run", {
+    "type": "task_start", "task_id": "a1app", "description": "Review",
+    "task_type": "local_agent", "provider_session_id": "sess-app",
+  })
+  _jsonl(
+    _home("app-4242") / "claude" / "projects" / "-work" / "sess-app" / "subagents"
+    / "agent-a1app.jsonl",
+    [{"type": "assistant", "message": {"role": "assistant", "content": [
+      {"type": "text", "text": "From the app provider."},
+    ]}}],
+  )
+  # A same-named sidechain in the owner's Claude home is not this helper's.
+  _jsonl(
+    _home("claude") / "projects" / "-work" / "sess-app" / "subagents" / "agent-a1app.jsonl",
+    [{"type": "assistant", "message": {"role": "assistant", "content": [
+      {"type": "text", "text": "Owner home."},
+    ]}}],
+  )
+
+  result = helper_transcripts.read_helper_conversation(db, "app-parent", "a1app")
+
+  assert result["blocks"] == [{"type": "text", "content": "From the app provider."}]

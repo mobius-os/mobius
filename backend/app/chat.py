@@ -6440,8 +6440,11 @@ async def _run_chat_impl_with_db(
     )
   )
 
+  # Held to what the provider offers, whichever layer supplied the choice.
+  agent_settings["model"], agent_settings["effort"] = provider.resolve_selection(
+    agent_settings.get("model"), agent_settings.get("effort"),
+  )
   if provider_id == "mobius":
-    agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
     if not agent_settings["model"] or not provider.declaration["models"]:
       raise ValueError("This Möbius model is unavailable. Refresh models and choose a current model.")
 

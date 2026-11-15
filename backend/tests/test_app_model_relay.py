@@ -124,7 +124,8 @@ async def test_effort_lookup_for_a_removed_provider_says_it_is_not_installed():
     await providers.model_supports_effort("/data", "example/flash", provider_id="app-999999")
 
 
-def test_startup_deletes_engine_homes_left_in_app_storage(tmp_path):
+def test_startup_deletes_engine_homes_left_in_app_storage_once(tmp_path, monkeypatch):
+  from app import storage_io
   old = tmp_path / "apps" / "4242" / "model-runtime"
   (old / "claude" / "projects").mkdir(parents=True)
   (old / "claude" / "settings.json").write_text('{"hooks": {}}')
@@ -132,15 +133,32 @@ def test_startup_deletes_engine_homes_left_in_app_storage(tmp_path):
   outside.mkdir()
   (tmp_path / "apps" / "4243").mkdir()
   (tmp_path / "apps" / "4243" / "model-runtime").symlink_to(outside)
-  kept = tmp_path / "apps" / "4244" / "notes"
-  kept.mkdir(parents=True)
+  # Another app's own data under that name, and a provider app that fails.
+  unrelated = tmp_path / "apps" / "4244" / "model-runtime"
+  unrelated.mkdir(parents=True)
+  stuck = tmp_path / "apps" / "4245" / "model-runtime"
+  stuck.mkdir(parents=True)
+  real_rmtree = storage_io.rmtree_strict
 
-  assert providers.remove_legacy_app_engine_homes(tmp_path) == ["4242", "4243"]
-  # Never moved: anything in app storage may be app-written engine config.
+  def flaky(path):
+    if path == stuck:
+      raise OSError("busy")
+    real_rmtree(path)
+
+  monkeypatch.setattr(storage_io, "rmtree_strict", flaky)
+  provider_apps = [4245, 4242, 4243]
+  # A failure does not stop the sweep and leaves it to run again.
+  assert providers.remove_legacy_app_engine_homes(tmp_path, provider_apps) == ["4242", "4243"]
   assert not old.exists() and not (tmp_path / "cli-auth" / "app-4242").exists()
   assert not (tmp_path / "apps" / "4243" / "model-runtime").is_symlink()
-  assert outside.is_dir() and kept.is_dir()
-  assert providers.remove_legacy_app_engine_homes(tmp_path) == []
+  assert outside.is_dir() and unrelated.is_dir() and stuck.is_dir()
+
+  monkeypatch.setattr(storage_io, "rmtree_strict", real_rmtree)
+  assert providers.remove_legacy_app_engine_homes(tmp_path, provider_apps) == ["4245"]
+  # Swept: later boots never touch app storage again.
+  stuck.mkdir()
+  assert providers.remove_legacy_app_engine_homes(tmp_path, provider_apps) == []
+  assert stuck.is_dir()
 
 
 def test_messages_provider_live_messages_steer_its_claude_turn(monkeypatch):
@@ -209,6 +227,43 @@ def test_count_tokens_side_endpoint_reaches_the_provider(client, monkeypatch):
   assert response.status_code == 200 and response.json() == {"input_tokens": 3}
   assert str(seen[0].url) == "https://models.example.com/v1/messages/count_tokens"
   assert seen[0].headers["x-api-key"] == REAL_KEY
+
+
+@pytest.mark.parametrize("inherited", ["ultracode", "xhigh"])
+def test_claude_only_effort_never_reaches_an_app_messages_chat(tmp_path, monkeypatch, inherited):
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
+  data_dir = str(tmp_path)
+  assert providers.update_agent_settings(data_dir, lambda current: {**current, "effort": inherited})
+
+  assert providers.effective_agent_settings(data_dir, None, provider="app-4242")["effort"] is None
+  snapshot = providers.snapshot_chat_agent_settings(data_dir, "app-4242", model="example/flash")
+  assert snapshot["model"] == "example/flash" and "effort" not in snapshot
+  # The owner's own Claude chats keep it.
+  assert providers.effective_agent_settings(data_dir, None, provider="claude")["effort"] == inherited
+
+
+def test_app_model_is_held_to_its_declared_effort_levels(tmp_path, monkeypatch):
+  adapter = providers.AppModelProvider(4242, _manifest(models=[
+    {"id": "example/flash", "label": "Flash", "effort_levels": ["high"]},
+    {"id": "example/none", "label": "None", "effort_levels": []},
+    {"id": "example/any", "label": "Any"},
+  ])["model_provider"])
+  assert adapter.resolve_selection("example/flash", "high") == ("example/flash", "high")
+  assert adapter.resolve_selection("example/flash", "max") == ("example/flash", None)
+  assert adapter.resolve_selection(None, "max") == (None, None)  # its default model
+  assert adapter.resolve_selection("example/none", "high") == ("example/none", None)
+  # An undeclared scale is the provider's: the union of what its models declare.
+  assert adapter.resolve_selection("example/any", "high") == ("example/any", "high")
+  assert adapter.resolve_selection("example/any", "ultracode") == ("example/any", None)
+
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  data_dir = str(tmp_path)
+  assert providers.update_agent_settings(data_dir, lambda current: {**current, "effort": "max"})
+  assert providers.effective_agent_settings(
+    data_dir, {"model": "example/flash"}, provider="app-4242",
+  )["effort"] is None
 
 
 def test_messages_models_may_declare_no_effort():
@@ -986,14 +1041,35 @@ def test_relay_uses_backend_listener_not_api_origin(
   assert f'model_providers.app_4242.base_url="{expected}/v1"' in responses.codex_config_overrides()
 
 
-@pytest.mark.parametrize("env_port", ["0", "65536", "bad", "-1"])
-def test_relay_rejects_invalid_backend_listener_ports(monkeypatch, env_port):
+@pytest.mark.parametrize("env_port", ["0", "65536"])
+def test_relay_rejects_out_of_range_backend_listener_ports(monkeypatch, env_port):
   import os
 
   monkeypatch.setattr(os, "environ", {"PORT": env_port})
   adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
   with pytest.raises(ValueError, match="API port is invalid"):
     adapter._relay_base_url()
+
+
+@pytest.mark.parametrize("env_port", ["bad", "-1", " 8123"])
+def test_non_numeric_port_is_ignored_for_every_loopback_capability(monkeypatch, env_port):
+  import os
+  from app import connectors
+
+  monkeypatch.setattr(os, "environ", {"PORT": env_port})
+  monkeypatch.setattr(get_settings(), "api_base_url", "http://localhost:8124")
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  assert adapter._relay_base_url() == "http://127.0.0.1:8124/api/model-relay/app-4242"
+  assert connectors._broker_url(7) == "http://127.0.0.1:8124/api/connectors/7/broker"
+
+
+def test_port_wins_over_a_loopback_api_origin_for_every_loopback_capability(monkeypatch):
+  import os
+  from app import connectors
+
+  monkeypatch.setattr(os, "environ", {"PORT": "8123"})
+  monkeypatch.setattr(get_settings(), "api_base_url", "http://localhost:8124")
+  assert connectors._broker_url(7) == "http://127.0.0.1:8123/api/connectors/7/broker"
 
 
 @pytest.mark.parametrize("protocol", ["anthropic_messages", "responses"])

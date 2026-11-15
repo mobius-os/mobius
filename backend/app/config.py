@@ -242,13 +242,14 @@ def loopback_listener_url(path: str) -> str:
   """``path`` on this backend's own listener, reached over direct loopback.
 
   Agents use this for platform capabilities that must not cross a proxy.
-  uvicorn binds ``${PORT:-8000}``; a loopback ``API_BASE_URL`` names the
-  listener when PORT is unset. A public API_BASE_URL is a proxy, never the
+  uvicorn binds ``${PORT:-8000}``, so PORT comes first; a loopback
+  ``API_BASE_URL`` names the listener when PORT is unset. A public API_BASE_URL is a proxy, never the
   listener.
   """
-  env_port = os.environ.get("PORT")
+  env_port = os.environ.get("PORT", "")
   try:
-    if env_port:
+    # Only a numeric PORT is what uvicorn was given; anything else is ignored.
+    if env_port.isdigit():
       port = int(env_port)
     else:
       parsed = urlparse(get_settings().api_base_url)

@@ -504,8 +504,8 @@ def effective_agent_settings(
       if v is None:
         continue
       merged[k] = v
-  if prov == "mobius":
-    merged["model"], merged["effort"] = PROVIDERS["mobius"].resolve_selection(
+  if prov in PROVIDERS:
+    merged["model"], merged["effort"] = PROVIDERS[prov].resolve_selection(
       merged["model"], merged["effort"],
     )
   return merged
@@ -744,6 +744,16 @@ class BaseProvider:
   runtime_kind: Literal["claude_sdk", "codex_sdk"] | None = None
   # Provider-wide switch boundary; model catalogs can advertise narrower scales.
   switch_efforts: frozenset[str] = frozenset()
+
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """The model and effort a turn actually runs with; saved state is unchanged.
+
+    Native providers take the saved choice as is; providers with a declared
+    catalogue hold it to what that catalogue offers.
+    """
+    return model, effort
 
   def engine_home(self, data_dir: str) -> Path:
     """The engine's own home (Claude config dir or CODEX_HOME) for this provider."""
@@ -1424,20 +1434,34 @@ def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
   return Path(data_dir) / "cli-auth" / f"app-{app_id}"
 
 
-def remove_legacy_app_engine_homes(data_dir: str | Path) -> list[str]:
-  """Delete engine homes left in app storage by older versions.
+def remove_legacy_app_engine_homes(data_dir: str | Path, app_ids) -> list[str]:
+  """Once, delete engine homes older versions kept in model-provider apps' storage.
 
-  Their transcripts stay readable by the app until removed. They are not
-  moved: the app could have written engine config there, so nothing in them
-  is trusted. Chats on those providers start a new thread, reseeded from the
-  chat. Returns the removed app ids.
+  ``apps/<id>/model-runtime`` held that provider's Codex threads and Claude
+  config, readable by the app. They are not moved: the app could have written
+  engine config there, so nothing in them is trusted; chats on those
+  providers start a new thread, reseeded from the chat. Only apps that
+  declare a model provider are touched (another app may use that name for
+  its own data), and only until a sweep completes; a failed removal is
+  logged and retried on the next boot. Returns the removed app ids.
   """
-  from app.storage_io import rmtree_strict
-  removed = []
-  for old in sorted((Path(data_dir) / "apps").glob("*/model-runtime")):
-    if old.parent.name.isdigit() and (old.is_symlink() or old.is_dir()):
+  from app.storage_io import atomic_write, rmtree_strict
+  marker = Path(data_dir) / "cli-auth" / ".legacy-app-engine-homes-removed"
+  if marker.exists():
+    return []
+  removed, failed = [], False
+  for app_id in sorted(app_ids):
+    old = Path(data_dir) / "apps" / str(app_id) / "model-runtime"
+    if not (old.is_symlink() or old.is_dir()):
+      continue
+    try:
       rmtree_strict(old)
-      removed.append(old.parent.name)
+      removed.append(str(app_id))
+    except OSError as exc:
+      failed = True
+      _model_registry_log.warning("legacy engine home for app %s not removed: %s", app_id, exc)
+  if not failed:
+    atomic_write(marker, "")
   return removed
 
 
@@ -1495,6 +1519,17 @@ class AppModelProvider(BaseProvider):
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
+
+  def resolve_selection(self, model, effort):
+    # An effort inherited from another provider (Claude's ultracode or xhigh,
+    # a level this model lacks) is not sent: the provider's own default
+    # applies. A model with no declared levels takes the provider's scale.
+    levels = next((
+      row.get("effort_levels") for row in self.declaration["models"]
+      if row["id"] == (model or self.declaration["default_model"])
+    ), None)
+    allowed = self.switch_efforts if levels is None else levels
+    return model, (effort if effort in allowed else None)
 
   def relay_token(self) -> str:
     return model_relay_token(f"app-{self.app_id}", self.consent_scope)

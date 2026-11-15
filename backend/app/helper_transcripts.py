@@ -65,11 +65,16 @@ def read_helper_conversation(
   helper = _recorded_helper(db, chat_id, task_id)
   if helper is None:
     return None
-  # By engine, in the provider's own home: app providers run on either engine.
+  # The event names the engine; the run that owns it names the provider, whose
+  # engine home holds the transcript (an app provider runs either engine).
   from app.providers import PROVIDERS, provider_runtime_kind
   kind = provider_runtime_kind(helper.provider)
-  provider = PROVIDERS.get(helper.provider)
-  home = provider.engine_home(get_settings().data_dir) if provider is not None else None
+  run = db.get(models.ChatRun, helper.chat_run_id) if helper.chat_run_id else None
+  provider = PROVIDERS.get((run.provider if run is not None else None) or helper.provider)
+  home = (
+    provider.engine_home(get_settings().data_dir)
+    if provider is not None and provider_runtime_kind(provider) == kind else None
+  )
   if kind == "claude_sdk" and home is not None:
     path = _claude_sidechain_path(
       helper.provider_session_id, helper.provider_agent_id, home,
