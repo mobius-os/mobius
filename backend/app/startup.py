@@ -257,6 +257,21 @@ def _configure_claude_settings_defaults(context: StartupContext) -> None:
     context.logger.info("set Claude settings defaults: %s", ", ".join(added))
 
 
+def _remove_legacy_app_engine_homes(context: StartupContext) -> None:
+  """Drop app model engine homes older versions kept in app storage."""
+  from app import models
+  from app.providers import remove_legacy_app_engine_homes
+
+  with SessionLocal() as db:
+    app_ids = [
+      app_id for app_id, contract in db.query(models.App.id, models.App.capability_contract)
+      if isinstance(contract, dict) and isinstance(contract.get("model_provider"), dict)
+    ]
+  removed = remove_legacy_app_engine_homes(context.settings.data_dir, app_ids)
+  if removed:
+    context.logger.info("removed legacy app engine homes: %s", ", ".join(removed))
+
+
 def _migrate_theme_surface_token(context: StartupContext) -> None:
   """Rewrite a saved theme.css's legacy --surface2 token to --surface-2.
 
@@ -784,6 +799,7 @@ DATABASE_STARTUP_TASKS = (
   ),
   StartupTask("read restart authorization", _read_restart_authorization),
   StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
+  StartupTask("remove legacy app engine homes", _remove_legacy_app_engine_homes),
   StartupTask(
     "interrupt legacy read helpers",
     _interrupt_legacy_read_helpers,
