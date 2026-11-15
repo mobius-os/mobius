@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { EditorView } from '@codemirror/view'
 import { renderHook } from './react-hook-shim.mjs'
 import useVoiceInput from '../../useVoiceInput.js'
 
@@ -375,6 +376,35 @@ test("another chat starting during a manual-edit pause takes over and the pause 
   } finally {
     globalThis.setTimeout = prevTimeout
     globalThis.clearTimeout = prevClearTimeout
+    delete globalThis.window
+  }
+})
+
+test('dictation and its error notes build on a Markdown editor draft, which has no textarea value', () => {
+  // The editor's text follows what the composer commits, as it does live, so
+  // an error note must build on the dictated words, not the draft at start.
+  let doc = ''
+  const originalFind = EditorView.findFromDOM
+  EditorView.findFromDOM = () => ({ state: { doc: { toString: () => doc } } })
+  const input = { classList: { contains: name => name === 'cm-content' } }
+  try {
+    for (const error of ['not-allowed', 'network', 'service-not-allowed']) {
+      doc = '**keep this draft**'
+      const instances = installSpeechRecognition()
+      const { result } = renderHook(() => useVoiceInput({
+        onTranscript: text => { doc = text },
+        inputRef: { current: input },
+      }))
+      result.current.startVoice()
+      instances[0].onresult(speechResult(' and more'))
+      assert.equal(doc, '**keep this draft** and more')
+
+      instances[0].onerror({ error })
+      assert.equal(result.current.listeningRef.current, false)
+      assert.ok(doc.startsWith('**keep this draft** and more ['), doc)
+    }
+  } finally {
+    EditorView.findFromDOM = originalFind
     delete globalThis.window
   }
 })
