@@ -1043,6 +1043,37 @@ def test_recency_write_failure_rejects_uncommitted_fresh_send(
   assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == []
 
 
+def test_fresh_owner_send_credits_resolved_retired_model_without_changing_selection(
+  client, auth, chat, db, monkeypatch,
+):
+  """The admitted run uses the catalogue successor, not the saved retired ID."""
+  from app import providers
+  from app.mobius_catalogue import parse_catalogue
+  from app.routes import chats_stream
+  from tests.test_mobius_catalogue import contract
+
+  provider = providers.MobiusProvider()
+  provider.declaration = parse_catalogue(contract())
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
+
+  async def no_paid_turn(*_args, **_kwargs):
+    return None
+
+  monkeypatch.setattr(chats_stream, "run_chat", no_paid_turn)
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "retired-vision", "effort": "low"}
+  db.commit()
+
+  sent = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
+    "content": "use my selected model", "cid": "retired-owner-send",
+  })
+  assert sent.status_code == 202, sent.text
+  db.refresh(chat)
+  assert chat.agent_settings_json == {"model": "retired-vision", "effort": "low"}
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"][0] == "new-vision"
+
+
 def test_human_send_in_app_created_chat_counts_model_use(
   client, auth, chat, db, monkeypatch,
 ):

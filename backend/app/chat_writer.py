@@ -4086,9 +4086,18 @@ class ChatWriterActor:
       ),
     ))
     if cmd.remember_owner_model_use:
+      from app import providers
       from app.chat_visibility import coerce_agent_settings
+      from app.config import get_settings
+      # The saved selection may be a retired catalogue ID. Credit the model
+      # this admitted run resolves to, without rewriting the owner's choice.
+      effective = providers.effective_agent_settings(
+        get_settings().data_dir,
+        coerce_agent_settings(chat.agent_settings_json) or None,
+        provider=chat.provider,
+      )
       self._remember_admitted_owner_model_use(
-        db, (coerce_agent_settings(chat.agent_settings_json) or {}).get("model"),
+        db, effective.get("model"),
       )
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
