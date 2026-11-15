@@ -20,6 +20,10 @@ will do what. Avoid paid test calls unless the owner approved them.
   retain its original prompt and policy. If defaults changed, inspect the
   existing helper and pass its original settings explicitly; do not invent a
   new task key merely to bypass a conflict.
+- Give each helper a short `title`: the name the owner reads for it, a
+  plain-language phrase in sentence case free of jargon, such as "Fixing the
+  tray's closing conversation". It is presentation only; `name` stays the
+  helper's identity.
 - Make `task` self-contained: outcome, relevant file paths, exact work scope,
   any read-only or editing constraints, and what verification means. Helpers do
   not see the parent's conversation. They use one trusted execution mode;

@@ -106,13 +106,14 @@ test('the helper list has each helper once: background helpers, then direct Goal
   ] }
   const settled = { id: 'settled', task_key: 'done-already', status: 'completed', children: [] }
   const asking = { id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input', children: [] }
+  const askingItem = { id: 'asking', task_key: 'needs-parent', title: 'Checking the release notes', provider: 'codex', status: 'needs_input' }
   const owned = structuredClone(goal)
   owned.plan.delegations.push(settled, asking)
-  const { rows, unlistedHelpers } = trayHelpers({ ...background, with_goal: { goal_id: owned.id, count: 3, items: [...background.items, asking] } }, owned)
+  const { rows, unlistedHelpers } = trayHelpers({ ...background, with_goal: { goal_id: owned.id, count: 3, items: [...background.items, askingItem] } }, owned)
   // A Goal helper the background list already has is not repeated; a settled
   // Goal helper is history, and a nested helper belongs to its own parent.
   assert.deepEqual(rows.map(row => row.delegation_id), ['parent', 'goal-b-helper', 'asking'])
-  assert.deepEqual(rows[2], { delegation_id: 'asking', task_key: 'needs-parent', provider: 'codex', status: 'needs_input' })
+  assert.deepEqual(rows[2], { delegation_id: 'asking', task_key: 'needs-parent', title: 'Checking the release notes', provider: 'codex', status: 'needs_input' })
   assert.equal(unlistedHelpers, 0)
   assert.deepEqual(trayHelpers(null, null), { rows: [], unlistedHelpers: 0 })
   // Preserve the capped source total without claiming an unseen union count.

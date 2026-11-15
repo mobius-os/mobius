@@ -162,7 +162,7 @@ export default function GoalPlanDetails({ plan, holdReason = null, dependencies 
         <p className="chat__goal-task-meta">Execution history, not additional checklist steps.</p>
         <ul>
           {allHelpers.map(node => <li key={node.id}>
-            <span>{node.title || tasksById.get(node.plan_task)?.title || 'Unassigned helper'}</span>
+            <span>{node.helper_title || node.title || tasksById.get(node.plan_task)?.title || 'Unassigned helper'}</span>
             <span className="chat__goal-task-meta">{delegationMeta(node)}</span>
             {isHelperAwaitingParent(node) && <HelperQuestionRecord question={node.question} />}
           </li>)}

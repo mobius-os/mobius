@@ -25,7 +25,8 @@ export function trayHelpers(backgroundHelpers, goal) {
     ? backgroundHelpers.with_goal : backgroundHelpers
   const rows = (projected?.items || []).map(item => ({
     delegation_id: item.id,
-    task_key: item.task_key || item.title || null,
+    task_key: item.task_key || null,
+    title: item.title || null,
     provider: item.provider || null,
     status: item.status || null,
   }))
