@@ -40,14 +40,26 @@ function logPath() {
   return path.join(directory, `${label}-${checkout}.log`)
 }
 
+// A failing test can throw anything, including values String() refuses
+// (null-prototype objects, cross-realm or throwing toPrimitive). The reporter
+// must still describe them rather than crash and hide the failure.
+function asText(value) {
+  if (typeof value === 'string') return value
+  try {
+    return String(value)
+  } catch {
+    return inspect(value, { depth: 2, breakLength: Infinity })
+  }
+}
+
 function clip(text, limit) {
-  const value = String(text)
+  const value = asText(text)
   if (value.length <= limit) return value
   return `${value.slice(0, limit)} ...[${value.length - limit} more chars in full log]`
 }
 
 function indent(text, prefix = '    ') {
-  return String(text).split('\n').map(line => prefix + line).join('\n')
+  return asText(text).split('\n').map(line => prefix + line).join('\n')
 }
 
 function relativeFile(file) {
@@ -72,10 +84,10 @@ function stackFrames(error) {
 
 function describeError(error, depth = 0) {
   if (error == null) return ['(no error details)']
-  if (typeof error !== 'object') return [clip(String(error), MESSAGE_CHARS)]
+  if (typeof error !== 'object') return [clip(error, MESSAGE_CHARS)]
   const lines = []
-  const name = error.name || error.constructor?.name || 'Error'
-  const code = error.code && error.code !== 'ERR_ASSERTION' ? ` [${error.code}]` : ''
+  const name = asText(error.name || error.constructor?.name || 'Error')
+  const code = error.code && error.code !== 'ERR_ASSERTION' ? ` [${asText(error.code)}]` : ''
   lines.push(`${name}${code}: ${clip(error.message ?? '', MESSAGE_CHARS)}`)
   if ('actual' in error || 'expected' in error) {
     // assert.match/ok messages already quote the actual input; the values are
@@ -104,7 +116,7 @@ function formatFailure(failure, outputByFile) {
   // process that crashed or never loaded; its own output carries the error
   // and has already arrived by the time the file-level result is reported.
   const fileLevelCrash = failure.nesting === 0
-    && String(cause?.message ?? cause) === 'test failed'
+    && asText(cause?.message ?? cause) === 'test failed'
     && failure.file && !failure.entryFile
   if (fileLevelCrash) {
     const output = (outputByFile.get(failure.file) || '').trimEnd().split('\n')
