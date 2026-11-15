@@ -58,8 +58,8 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
       # report that as a plain failure the caller would answer with a new one.
       raise SystemExit(
         f"no reply within 30 seconds; the {method} {path} request may "
-        "already have taken effect. Repeating the identical request in this "
-        "turn is safe: an identical declaration returns the wait it already armed."
+        "already have taken effect, so do not treat it as failed. Retrying an "
+        "identical declare_wait in the same turn returns the wait it already armed."
       )
     raise SystemExit(f"request failed: {reason}")
 
