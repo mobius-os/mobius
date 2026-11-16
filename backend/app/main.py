@@ -1078,6 +1078,63 @@ class _OpaqueOriginCorsMiddleware:
     return await self.app(scope, receive, send_wrapper)
 
 
+class _KeyUsePreflightMiddleware:
+  """Lets an app frame send the site's own headers through a key borrow.
+
+  A borrow (``/api/keys/use/...``) carries whatever headers the third-party
+  site needs (``Notion-Version``, ``anthropic-version``, a custom ``X-...``),
+  and a sandboxed frame preflights every one. CORSMiddleware allows only the
+  platform's fixed list, so those borrows would fail in the browser before
+  reaching the server. For a borrow's preflight from an allowed origin this
+  answers with exactly the token-shaped header names requested; the route
+  itself still drops Möbius credentials, routing and override headers before
+  anything leaves. Every other path keeps CORSMiddleware's fixed list.
+
+  Placed outside CORSMiddleware and inside _OpaqueOriginCorsMiddleware, which
+  rewrites the frame's ``null`` origin to ``*`` here too.
+  """
+
+  _PREFIX = b"/api/keys/use/"
+  _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+  _METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if (
+      scope["type"] != "http" or scope["method"] != "OPTIONS"
+      or not (scope.get("raw_path") or scope["path"].encode()).startswith(self._PREFIX)
+    ):
+      return await self.app(scope, receive, send)
+    headers = {key: value.decode("latin-1") for key, value in scope.get("headers") or ()}
+    origin = headers.get(b"origin")
+    method = headers.get(b"access-control-request-method", "").upper()
+    requested = [
+      name.strip().lower()
+      for name in headers.get(b"access-control-request-headers", "").split(",") if name.strip()
+    ]
+    if (
+      origin not in (settings.frontend_origin, "null")
+      or method not in self._METHODS.split(", ")
+      or not all(self._TOKEN.fullmatch(name) for name in requested)
+    ):
+      return await self.app(scope, receive, send)
+    answer = [
+      (b"access-control-allow-origin", origin.encode("latin-1")),
+      (b"access-control-allow-methods", self._METHODS.encode()),
+      (b"access-control-max-age", b"600"),
+      (b"vary", b"Origin"),
+      (b"content-type", b"text/plain; charset=utf-8"),
+      (b"content-length", b"2"),
+    ]
+    if requested:
+      answer.append((b"access-control-allow-headers", ", ".join(requested).encode()))
+    await send({"type": "http.response.start", "status": 200, "headers": answer})
+    await send({"type": "http.response.body", "body": b"OK"})
+
+
+app.add_middleware(_KeyUsePreflightMiddleware)
 app.add_middleware(_OpaqueOriginCorsMiddleware)
 
 # Security remains outside CORS and request-size enforcement so its headers

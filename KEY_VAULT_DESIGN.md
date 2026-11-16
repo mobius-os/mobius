@@ -80,6 +80,10 @@ Status: draft for review.
    whether it begins the key; a server event can arrive an event or two late.
    An answer the site or vault breaks off ends as a broken response, never as
    a complete one.
+   A sandboxed app frame preflights every header it sends; a borrow's
+   preflight allows whichever header names the app asks for, so a site's own
+   headers (a version header, say) reach it, while every other route keeps
+   the platform's fixed list.
 
 Approving, denying and changing keys is refused to apps, shared-browser
 guests and delegated helpers. An edit carries the revision of the key it was

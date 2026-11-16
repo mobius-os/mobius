@@ -123,3 +123,36 @@ def test_requests_without_an_origin_are_untouched(client, auth):
   r = client.get("/api/apps/", headers=auth)
   assert r.status_code == 200
   assert _origin(r) is None
+
+
+def _preflight(client, path, origin, headers):
+  return client.options(path, headers={
+    "Origin": origin,
+    "Access-Control-Request-Method": "POST",
+    "Access-Control-Request-Headers": headers,
+  })
+
+
+def test_a_key_borrow_from_an_app_frame_may_send_the_sites_own_headers(client):
+  """A site may require its own headers (a version header, a custom key slot);
+  the frame preflights each one, so a borrow must allow what it asks for, or
+  the request dies in the browser as "Failed to fetch"."""
+  r = _preflight(client, "/api/keys/use/notion/api.notion.com/v1/search", "null",
+                 "authorization,content-type,notion-version,x-request-id")
+  assert r.status_code == 200
+  assert _origin(r) == "*"
+  allowed = {h.strip() for h in r.headers.get("access-control-allow-headers", "").split(",")}
+  assert {"authorization", "content-type", "notion-version", "x-request-id"} <= allowed
+
+
+def test_only_a_key_borrow_widens_the_headers_a_frame_may_send(client):
+  r = _preflight(client, "/api/github/status", "null", "authorization,notion-version")
+  assert r.status_code == 400
+  assert "notion-version" not in r.headers.get("access-control-allow-headers", "").lower()
+
+
+def test_a_key_borrow_preflight_from_another_origin_is_still_refused(client):
+  r = _preflight(client, "/api/keys/use/notion/api.notion.com/v1/search",
+                 "https://evil.example", "authorization,notion-version")
+  assert r.status_code == 400
+  assert _origin(r) is None
