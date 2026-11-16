@@ -193,7 +193,10 @@ site.
 `/data/app-secrets/<id>/<name>` move into the vault (`import_legacy_app_secrets`):
 each becomes a key granted to its own app and the owner's agents, sent as a
 bearer token, with no sites until the owner adds them, except that the app's
-model-provider key starts on its provider's site. Each key records its
+model-provider key starts on its provider's site. When a start imports keys
+that have no sites, the owner gets one notification naming their apps, which
+cannot use them until the owner adds sites in Settings › Keys; the ledger
+below keeps a later start from repeating it. Each key records its
 origin (the app and its exact old name), set at creation. The vault
 finds or creates that key in one locked step (`Vault.save_owned`), at the
 first free name scoped to the app (`api.key` → `app<id>-api-key`, then

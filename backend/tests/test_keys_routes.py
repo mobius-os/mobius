@@ -511,6 +511,30 @@ def test_saved_app_secrets_move_into_the_vault_once(client, auth, db, vault):
   assert f"app{first.id}-api_key" not in {k["name"] for k in vault.list_keys()}
 
 
+def test_the_owner_hears_once_which_apps_imported_keys_need_sites(client, auth, db, vault, pushes):
+  """Imported keys start without sites, so their apps break until the owner
+  adds some: the owner is told once which apps, and a provider key that
+  starts on its provider's site does not count."""
+  import asyncio
+  ready = _app(db, "ready", provider_key="api_key")
+  needs = _app(db, "needs")
+  _legacy_secret(ready.id, "api_key", "ready-secret")
+  _legacy_secret(needs.id, "token", "needs-secret")
+
+  asyncio.run(key_vault._import_when_ready())
+  assert len(pushes) == 1
+  [notice] = pushes
+  assert notice["target"] == "/shell/?settings=keys" and notice["source_type"] == "system"
+  assert "Needs" in notice["body"] and "Ready" not in notice["body"]
+  # A later start imports nothing new and says nothing again.
+  asyncio.run(key_vault._import_when_ready())
+  assert len(pushes) == 1
+  # Nor does a start that moves nothing, such as one retrying an unreadable value.
+  (Path(key_vault._legacy_root()) / str(ready.id) / "late").write_bytes(b"not a token")
+  asyncio.run(key_vault._import_when_ready())
+  assert len(pushes) == 1
+
+
 def test_a_purged_apps_unimported_secrets_never_reach_an_app_reusing_its_id(client, auth, db, vault):
   import asyncio
   from app.config import get_settings

@@ -824,9 +824,51 @@ async def _import_when_ready() -> None:
   with SessionLocal() as db:
     live = {row.id for row in db.query(models.App.id).all()}
   try:
-    await import_legacy_app_secrets(live)
+    moved = await import_legacy_app_secrets(live)
   except Exception:
     log.exception("key vault: legacy app-secret import failed; it is retried on the next start")
+    return
+  try:
+    await _tell_owner_which_imported_keys_need_sites(moved)
+  except Exception:
+    log.exception("key vault: could not tell the owner which imported keys need sites")
+
+
+async def _tell_owner_which_imported_keys_need_sites(moved: dict) -> None:
+  """Name the apps whose keys this import (``moved``) left without sites.
+
+  An imported key starts with no sites, except an app's model-provider key
+  on its provider's, so its app cannot use it until the owner adds them in
+  Settings › Keys. The ledger settles each old value once, so a later start
+  never imports, or names, the same key again.
+  """
+  keys = {k["name"]: k for k in (await vault_call("GET", "/keys"))["keys"]} if moved else {}
+  app_ids = set()
+  for entry, name in moved.items():
+    app_id = int(entry.split("/", 1)[0])
+    grant = _grant_of(keys[name], app_id) if name in keys else None
+    if grant is not None and not grant["sites"]:
+      app_ids.add(app_id)
+  if not app_ids:
+    return
+  from app import models, push
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    owner = db.query(models.Owner).first()
+    names = sorted(name for (name,) in db.query(models.App.name).filter(models.App.id.in_(app_ids)))
+    if owner is None or not names:
+      return
+    shown = names if len(names) <= 5 else [*names[:4], f"{len(names) - 4} more apps"]
+    listed = shown[0] if len(shown) == 1 else f"{', '.join(shown[:-1])} and {shown[-1]}"
+    await push.notify_owner_async(
+      db, owner.id,
+      title="Saved app keys need sites",
+      body=(f"Keys saved by {listed} moved into Settings › Keys without sites, "
+            "so those apps cannot use them until you add the sites each key is for."),
+      source_type="system",
+      target="/shell/?settings=keys",
+      tag="key-import-needs-sites",
+    )
 
 
 async def supervise_key_vault() -> None:
