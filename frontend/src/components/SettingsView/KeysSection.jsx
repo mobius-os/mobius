@@ -1,22 +1,22 @@
 /* Settings › Keys: the overview list, app and agent requests, and each key's own page. */
 import { useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { Key, Plus, X } from '@openai/apps-sdk-ui/components/Icon'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
-import { api, jsonOrThrow } from '../../api/client.js'
+import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
   appLabel, relativeTime, savedByApp, replaceWarning, siteLine, sentAs, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageSentence,
   REQUESTS_SHOWN,
 } from '../../lib/keysSettingsText.js'
 import KeyRequest, { BEARER } from './KeyRequest.jsx'
-import { KEYS_QUERY, useAppNames, useKeys } from './keysQueries.js'
+import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
 import './KeysSection.css'
 
 const DEFAULT_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
-// Enough history to know when each app last used the key; the page lists fewer.
-const USAGE_FETCHED = 50
 const ACTIVITY_SHOWN = 8
+// A shared-browser guest never reads the vault (the routes refuse it).
+const GUEST_LINE = 'Only the owner of this Möbius can see and manage keys.'
 
 /** One PUT carrying the key's current record with ``changes`` applied. */
 function recordFor(key, changes = {}) {
@@ -53,7 +53,8 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
   const { names } = useAppNames()
   const queryClient = useQueryClient()
   const [showAll, setShowAll] = useState(false)
-  const data = keysQuery.data
+  const guest = isSharedBrowserAuth()
+  const data = guest ? null : keysQuery.data
   const keys = data?.keys || []
   const pending = (data?.requests || []).filter(request => request.status === 'pending')
   const denied = (data?.requests || []).filter(request => request.status === 'denied')
@@ -81,6 +82,7 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
         )}
       </div>
 
+      {guest && <p className="settings-keys__muted">{GUEST_LINE}</p>}
       {keysQuery.error && <Alert color="danger" variant="soft" description={keysQuery.error.message} />}
       {data && !data.available && (
         <Alert color="warning" variant="soft" description="The key vault isn't running. It starts with Möbius; a restart usually brings it back." />
@@ -150,6 +152,7 @@ function DeniedRequest({ request, names, onAnswered }) {
 /** A key's own page; ``name`` '' is the new-key form. */
 export function KeyPage({ name, onOpenKey, onClose }) {
   const keysQuery = useKeys()
+  if (isSharedBrowserAuth()) return <div className="settings-keys-page"><p className="settings-keys__muted">{GUEST_LINE}</p></div>
   if (name === '') return <NewKey existingNames={(keysQuery.data?.keys || []).map(key => key.name)} onCreated={onOpenKey} />
   const key = (keysQuery.data?.keys || []).find(item => item.name === name)
   if (keysQuery.isPending) return null
@@ -189,11 +192,7 @@ function useSaveKey(name) {
 function KeyDetail({ keyRecord: key, onDeleted }) {
   const { apps, names } = useAppNames()
   const { save, error, busy } = useSaveKey(key.name)
-  const usageQuery = useQuery({
-    queryKey: [...KEYS_QUERY, 'usage', key.name],
-    queryFn: async () => jsonOrThrow(await api.keys.usage(key.name, USAGE_FETCHED), 'Key use'),
-    staleTime: 0,
-  })
+  const usageQuery = useKeyUsage(key.name)
   const usage = usageQuery.data?.usage || []
   const grantedApps = key.grants?.apps || []
   const grantedIds = grantedApps.map(grant => grant.id)

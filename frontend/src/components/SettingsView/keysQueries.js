@@ -5,6 +5,8 @@ import { appQueries } from '../../hooks/queries.js'
 import { distinctAppNames } from '../../lib/keysSettingsText.js'
 
 export const KEYS_QUERY = ['settings', 'keys']
+// Enough history to know when each app last used the key; its page lists fewer.
+const USAGE_FETCHED = 50
 
 /**
  * Keys and requests, owner only: a shared-browser guest never asks (the
@@ -18,6 +20,20 @@ export function useKeys({ enabled = true, ...options } = {}) {
     staleTime: 0,
     ...options,
     enabled: enabled && !isSharedBrowserAuth(),
+  })
+}
+
+/**
+ * One key's recent activity, newest first: traffic and the owner's answers.
+ * Under KEYS_QUERY, so a change to the keys refreshes it too; a new
+ * notification refreshes only the list itself (Shell.jsx).
+ */
+export function useKeyUsage(name, { enabled = true } = {}) {
+  return useQuery({
+    queryKey: [...KEYS_QUERY, 'usage', name],
+    queryFn: async () => jsonOrThrow(await api.keys.usage(name, USAGE_FETCHED), 'Key use'),
+    staleTime: 0,
+    enabled: enabled && Boolean(name) && !isSharedBrowserAuth(),
   })
 }
 

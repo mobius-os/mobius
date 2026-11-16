@@ -78,7 +78,11 @@ Status: draft for review.
    chat, the agent ends its turn with a `mobius-key-request` block naming the
    request, and the owner's answer there is posted to that chat as their own
    message, which resumes the agent), and an app's over the app's window while
-   the owner has it open. The
+   the owner has it open. A chat only answers its own agent's request; an
+   app's shown in a chat is read-only. Every card's answers stay inactive for
+   about a second after it appears and ignore a press that began earlier, as
+   a browser's permission prompt does, so a card appearing under the pointer
+   takes no click meant for what was there. The
    request only proposes: approval applies the sites and slot the owner's
    answer carries (a new key answered without a slot is sent as
    `Authorization: Bearer`). The sites go to that app's own grant. An existing

@@ -15,6 +15,15 @@ import './AppKeyRequestCard.css'
 const putOff = new Set()
 
 /**
+ * Later: hides exactly these requests over their app until the page
+ * reloads. A request that arrives afterwards, or replaces one of them with a
+ * new ticket, still shows.
+ */
+export function putOffAppKeyRequests(requests) {
+  for (const request of requests) putOff.add(requestFormKey(request))
+}
+
+/**
  * Shown only in the owner's own shell, over a visible app (never on a
  * standalone app page or to a shared-browser guest), and only around the
  * card itself, so the app stays usable beside it. Settings › Keys lists the
@@ -37,7 +46,7 @@ export default function AppKeyRequestCard({ appId, visible }) {
   const more = requests.length - 1
 
   function later() {
-    for (const shown of requests) putOff.add(requestFormKey(shown))
+    putOffAppKeyRequests(requests)
     putOffChanged()
   }
 

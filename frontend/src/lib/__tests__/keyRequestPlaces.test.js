@@ -9,8 +9,11 @@ import assert from 'node:assert/strict'
 import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
-const { keyRequestBlockFromToken, chatKeyRequestView, appKeyRequestsToShow, keyAnswerAsk, KEY_REQUEST_FENCE } =
-  await vite.ssrLoadModule('/src/lib/keyRequestPlaces.js')
+const {
+  keyRequestBlockFromToken, chatKeyRequestView, appKeyRequestsToShow, keyAnswerAsk, goneKeyRequestLine, tellAgentKeyAnswer,
+  KEY_REQUEST_FENCE,
+} = await vite.ssrLoadModule('/src/lib/keyRequestPlaces.js')
+const { createAppBlockChat, askCid } = await vite.ssrLoadModule('/src/components/ChatView/markdown/appBlockChat.js')
 const { keyAnswerWords, requestAppPaused, requestFormKey } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -67,7 +70,18 @@ test('a request that names no chat (an app, or stored before chats were kept) fi
 })
 
 test('a viewer who is not the owner never gets the live card', () => {
-  assert.deepEqual(view({ owner: false }), { state: 'guest', request: null })
+  assert.deepEqual(view({ owner: false }), { state: 'guest', request: null, asker: 'agent' })
+})
+
+test("a guest's card for an app's request says an app asked, not their agent", () => {
+  assert.deepEqual(view({ id: '7-maps', owner: false }), { state: 'guest', request: null, asker: 'app' })
+})
+
+test("an app's request in a chat is read-only: a chat answers only its own agent", () => {
+  const appRequest = { ...agentAsk, id: '7-maps', requester: 'app', app: 7, chat_id: null }
+  for (const chatId of ['chat-1', 'chat-2', null]) {
+    assert.deepEqual(view({ id: '7-maps', chatId, keys: keys([appRequest]) }), { state: 'app', request: appRequest })
+  }
 })
 
 test("the card's own answer outlives the request leaving the vault", () => {
@@ -150,3 +164,72 @@ test('the follow-up message has one identity per request, ticket and answer', ()
   assert.notDeepEqual(keyAnswerAsk(agentAsk, 'deny'), same)
   assert.notDeepEqual(keyAnswerAsk({ ...agentAsk, ticket: 't2' }, 'approve'), same)
 })
+
+// -- telling the asking agent ------------------------------------------------
+
+const FINGERPRINT = JSON.stringify([KEY_REQUEST_FENCE, 'agent-maps'])
+
+function chatSending(result) {
+  const sent = []
+  const chat = createAppBlockChat('chat-1', {
+    send: async (message, options) => {
+      sent.push({ message, ...options })
+      if (result instanceof Error) throw result
+      return result
+    },
+  })
+  return { sent, ask: request => chat.ask('mobius-key-request\nagent-maps', {}, request) }
+}
+
+test("answering in the chat posts one owner message naming the key, its websites and the answer", async () => {
+  const { sent, ask } = chatSending(true)
+  assert.equal(await tellAgentKeyAnswer(ask, agentAsk, 'approve', {}), true)
+  const cid = await askCid('chat-1', FINGERPRINT, [{ id: 'agent-maps', code: 'approve', rev: 't1' }])
+  assert.deepEqual(sent, [{ message: 'Allowed: your agent may send maps to tiles.example.com.', cid }])
+  await tellAgentKeyAnswer(ask, agentAsk, 'deny', {})
+  assert.equal(sent[1].message, 'Not now: your agent may not send maps to tiles.example.com.')
+  assert.notEqual(sent[1].cid, cid)
+})
+
+test("the follow-up's message id comes from the request, its ticket and the answer, so a retry posts it once", async () => {
+  const { sent, ask } = chatSending(true)
+  await tellAgentKeyAnswer(ask, agentAsk, 'approve', {})
+  await tellAgentKeyAnswer(ask, { ...agentAsk }, 'approve', {})
+  await tellAgentKeyAnswer(ask, { ...agentAsk, ticket: 't2' }, 'approve', {})
+  assert.equal(sent[0].cid, sent[1].cid)
+  assert.notEqual(sent[2].cid, sent[0].cid)
+})
+
+test("a follow-up the chat could not send reports failure, so the card can say so", async () => {
+  assert.equal(await tellAgentKeyAnswer(chatSending(false).ask, agentAsk, 'approve', {}), false)
+  assert.equal(await tellAgentKeyAnswer(chatSending(new Error('offline')).ask, agentAsk, 'approve', {}), false)
+  // The server already had this id: the agent was told.
+  assert.equal(await tellAgentKeyAnswer(chatSending('duplicate').ask, agentAsk, 'approve', {}), true)
+})
+
+// -- after a reload ----------------------------------------------------------
+
+const mapsKey = { name: 'maps', grants: { agents: true, sites: [TILES, { ...TILES, host: 'api.example.com' }], apps: [] } }
+const at = (outcome, ts, key = 'maps') => ({ key, caller: 'owner', outcome, ts })
+
+test("an allowed request that left the vault still says what the owner allowed, from the key's activity", () => {
+  const usage = [at('used', '2026-11-16T10:05:00Z'), at('granted agents', '2026-11-16T10:00:00Z')]
+  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], usage),
+    'You allowed your agent to send maps to tiles.example.com and api.example.com.')
+})
+
+test('the latest answer wins, and a refusal names no websites', () => {
+  const usage = [at('denied agents', '2026-11-16T11:00:00Z'), at('granted agents', '2026-11-16T10:00:00Z')]
+  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], usage), 'You said no to your agent using maps.')
+})
+
+test('without an answer on record, or for an allowed key since deleted, nothing is claimed', () => {
+  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('used', '2026-11-16T10:05:00Z')]), null)
+  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('granted agents', '2026-11-16T10:00:00Z', 'other')]), null)
+  assert.equal(goneKeyRequestLine('agent-maps', [], [at('granted agents', '2026-11-16T10:00:00Z')]), null)
+  assert.equal(goneKeyRequestLine('agent-maps', undefined, undefined), null)
+  // An app's answer is not the agents'.
+  assert.equal(goneKeyRequestLine('7-maps', [mapsKey], [at('granted app:7', '2026-11-16T10:00:00Z')]), null)
+  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('granted app:7', '2026-11-16T10:00:00Z')]), null)
+})
+

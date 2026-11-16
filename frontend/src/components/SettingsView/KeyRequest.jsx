@@ -1,8 +1,10 @@
 /* One app's or agent's key request card, as Settings › Keys, a chat and an app's window show it. */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
+import { keyAnswerClickCounts, keyAnswerWaitMs } from '../../lib/keyAnswerGuard.js'
 import { requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
+import './settingsButtons.css'
 import './KeysSection.css'
 
 export const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
@@ -13,6 +15,29 @@ function Lead({ segments }) {
       ? <span key={index}>{segment}</span>
       : <strong key={index}>{segment.text}</strong>
   ))
+}
+
+/**
+ * The answers stay inactive for a moment after the card appears, and a click
+ * whose press began before then is ignored (keyAnswerGuard.js). Callers key
+ * each card by ``requestFormKey``, so a replacement request is a new card
+ * and waits again.
+ */
+function useAnswerGuard() {
+  const [shownAt] = useState(() => performance.now())
+  const [active, setActive] = useState(false)
+  const pressAt = useRef(null)
+  useEffect(() => {
+    const timer = setTimeout(() => setActive(true), keyAnswerWaitMs(shownAt, performance.now()))
+    return () => clearTimeout(timer)
+  }, [shownAt])
+  return {
+    active,
+    onPointerDown: event => { pressAt.current = event.timeStamp },
+    counts: event => keyAnswerClickCounts({
+      shownAt, clickAt: event.timeStamp, pressAt: pressAt.current, byPointer: event.detail > 0,
+    }),
+  }
 }
 
 /**
@@ -32,6 +57,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
   // the owner and agents.
   const inject = request.inject || BEARER
   const sites = request.sites || []
+  const guard = useAnswerGuard()
 
   async function answer(kind) {
     setBusy(kind)
@@ -55,8 +81,9 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     <button
       type="button"
       className={`settings__btn settings__btn--sm${words.allowHidden ? '' : ' settings__btn--outline'}`}
-      onClick={() => answer('deny')}
-      disabled={Boolean(busy)}
+      onPointerDown={guard.onPointerDown}
+      onClick={event => { if (guard.counts(event)) answer('deny') }}
+      disabled={!guard.active || Boolean(busy)}
     >
       Not now
     </button>
@@ -65,8 +92,9 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     <button
       type="button"
       className={`settings__btn settings__btn--sm${primary ? '' : ' settings__btn--outline'}`}
-      onClick={() => answer('approve')}
-      disabled={Boolean(busy) || (words.needsValue && !value)}
+      onPointerDown={guard.onPointerDown}
+      onClick={event => { if (guard.counts(event)) answer('approve') }}
+      disabled={!guard.active || Boolean(busy) || (words.needsValue && !value)}
     >
       {busy === 'approve' ? 'Allowing…' : label}
     </button>

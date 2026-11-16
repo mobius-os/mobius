@@ -42,6 +42,7 @@ import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
+import './settingsButtons.css'
 import './SettingsView.css'
 import './SettingsPage.css'
 

@@ -8,7 +8,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-import KeyRequestBlock from '../markdown/KeyRequestBlock.jsx'
+import KeyRequestBlock, { KeyAnswerLine } from '../markdown/KeyRequestBlock.jsx'
+import KeyRequest from '../../SettingsView/KeyRequest.jsx'
 import { BlockToken } from '../markdown/blocks.jsx'
 import { AppBlockChatContext, createAppBlockChat } from '../markdown/appBlockChat.js'
 import { KEYS_QUERY } from '../../SettingsView/keysQueries.js'
@@ -20,10 +21,11 @@ const ask = {
   sites: [TILES], inject: null, status: 'pending', ticket: 't1', chat_id: 'chat-1', key_exists: false, granted: false,
 }
 
-function render(element, { chatId = 'chat-1', requests = [ask] } = {}) {
+function render(element, { chatId = 'chat-1', requests = [ask], keys = [], usage = null } = {}) {
   const client = new QueryClient()
-  client.setQueryData(appQueries.list.key, [])
-  client.setQueryData(KEYS_QUERY, { available: true, keys: [], requests })
+  client.setQueryData(appQueries.list.key, [{ id: 7, name: 'Weather' }])
+  client.setQueryData(KEYS_QUERY, { available: true, keys, requests })
+  if (usage) client.setQueryData([...KEYS_QUERY, 'usage', 'maps'], { usage })
   const inChat = createElement(AppBlockChatContext.Provider, { value: createAppBlockChat(chatId) }, element)
   return renderToStaticMarkup(createElement(QueryClientProvider, { client }, inChat))
 }
@@ -57,3 +59,49 @@ test("only an assistant reply turns the fence into a card; elsewhere it stays co
   assert.doesNotMatch(plain, /key-request-place/)
   assert.match(plain, /agent-maps/)
 })
+
+// -- answering at a glance is not possible -----------------------------------
+
+const existing = { ...ask, key_exists: true }
+
+test('Not now and Allow start inactive on every card, so a card appearing under the pointer takes no click', () => {
+  for (const html of [
+    render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }), { requests: [existing] }),
+    render(createElement(KeyRequest, { request: existing, names: {}, onAnswered() {} })),
+  ]) {
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Not now<\/button>/)
+    assert.match(html, /<button[^>]*disabled=""[^>]*>Allow<\/button>/)
+  }
+})
+
+// -- an app's request in a chat ----------------------------------------------
+
+const appRequest = { ...ask, id: '7-maps', requester: 'app', app: 7, app_name: 'Weather', chat_id: null }
+
+test("an app's request in a chat is shown read-only and points to the app and Settings › Keys", () => {
+  const html = render(createElement(KeyRequestBlock, { block: { id: '7-maps' } }), { requests: [appRequest] })
+  assert.match(html, /<strong>Weather<\/strong>/)
+  assert.doesNotMatch(html, /type="password"|>Allow<|>Not now<|Use .*'s key/)
+  assert.match(html, /Weather asked for this\. Answer it in <a[^>]*href="\/shell\/\?app=7"[^>]*>Weather<\/a>/)
+  assert.match(html, /href="\/shell\/\?settings=keys"[^>]*>Settings › Keys<\/a>/)
+})
+
+// -- after an answer ---------------------------------------------------------
+
+test('an answered card says what the owner decided, and if the agent could not be told, how to carry on', () => {
+  const told = renderToStaticMarkup(createElement(KeyAnswerLine, { request: ask, kind: 'approve', names: {}, toldAgent: true }))
+  assert.match(told, /You allowed your agent to send maps to tiles\.example\.com\./)
+  assert.doesNotMatch(told, /Couldn&#x27;t tell your agent/)
+  const untold = renderToStaticMarkup(createElement(KeyAnswerLine, { request: ask, kind: 'deny', names: {}, toldAgent: false }))
+  assert.match(untold, /You said no to your agent sending maps to tiles\.example\.com\./)
+  assert.match(untold, /Couldn&#x27;t tell your agent\. Send it a message to carry on\./)
+})
+
+test("after a reload an allowed request that left the vault says what was allowed, from the key's activity", () => {
+  const keys = [{ name: 'maps', grants: { agents: true, sites: [TILES], apps: [] } }]
+  const usage = [{ key: 'maps', caller: 'owner', outcome: 'granted agents', ts: '2026-11-16T10:00:00Z' }]
+  const html = render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }), { requests: [], keys, usage })
+  assert.match(html, /You allowed your agent to send maps to tiles\.example\.com\./)
+  assert.doesNotMatch(html, /answered or withdrawn/)
+})
+

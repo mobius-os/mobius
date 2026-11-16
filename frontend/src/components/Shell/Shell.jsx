@@ -3674,10 +3674,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Keeping this behind the notification-center interface prevents the
       // shell event switch from learning preview implementation details.
       onNotificationCreated()
-      // A new key request always notifies, so the cards over apps (and
-      // Settings › Keys) re-read the vault's requests; only mounted, enabled
-      // readers refetch.
-      void queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
+      // A new key request always notifies, so the cards over apps and in
+      // chats (and Settings › Keys) re-read the vault's requests; only
+      // mounted, enabled readers refetch. Exact: an open key page's activity
+      // (under the same prefix) has nothing new from a notification.
+      void queryClient.invalidateQueries({ queryKey: KEYS_QUERY, exact: true })
     }
   }, [
     applyChatRenameEvent,
