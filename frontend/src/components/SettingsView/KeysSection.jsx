@@ -262,7 +262,7 @@ function KeyRequest({ request, names, onAnswered }) {
         <Alert
           color="warning"
           variant="soft"
-          description={`This isn't your key: ${subject.savedBy} saved it for itself and can change its value. Allowing sends ${appName}'s requests with ${subject.savedBy}'s key. To use your own, deny this and add a key of yours instead.`}
+          description={`This isn't your key: ${subject.savedBy} saved it for itself and can change its value. Allowing sends requests from ${appName} with the key ${subject.savedBy} saved. To use your own, deny this and add a key of yours instead.`}
         />
       )}
       {request.reason && <p className="settings-keys__muted">{request.reason}</p>}
