@@ -43,7 +43,9 @@ from app.deps import (
 from app.federation_transport import FederationTransportError, federation_request
 from app.push import notify_owner_async
 from app.routes.identity import _HANDLE_RE, owner_handle, resolve_handle_hosts
-from app.routes.projects import _invite_hash, _issue_project_invite, _live_project
+from app.routes.projects import (
+  _INVITE_TTL, _invite_hash, _issue_project_invite, _live_project,
+)
 from app.timeutil import now_naive_utc
 
 router = APIRouter(prefix="/api/project-invites", tags=["project-invites"])
@@ -53,14 +55,20 @@ Role = Literal["viewer", "editor", "maintainer"]
 SECRET_RE = r"^[A-Za-z0-9_-]{43}$"
 HOST_RE = r"^[a-z0-9]([a-z0-9.-]{0,250})(:\d{1,5})?$"
 # Unanswered invitations one sender may have waiting here, so nobody can
-# crowd out everyone else's.
+# crowd out everyone else's. Counted over the invitation lifetime by arrival,
+# never by the expiry the sender reports.
 MAX_PENDING_PER_SENDER = 10
+# An invitation with less time left than this is refused on arrival.
+MIN_INVITE_LIFETIME = timedelta(hours=1)
 # The receiver makes two bounded outbound calls (directory, then /check)
 # before answering a delivery, so one delivery may take longer than either;
 # all deliveries of one invitation share one overall budget.
 DELIVERY_TIMEOUT_S = 30.0
 DELIVERY_BUDGET_S = 45.0
 PEER_TIMEOUT_S = 12.0
+# federation_request refuses hosts that don't resolve or aren't public with an
+# HTTPException; to callers here that is one more unreachable peer.
+PEER_ERRORS = (FederationTransportError, ValueError, httpx.HTTPError, HTTPException)
 
 # Deliveries arrive from other people's servers through this instance's own
 # proxy, so there is no per-sender address to key on. One bucket caps the
@@ -111,6 +119,7 @@ class CheckedInvite(PeerAnswer):
   project: CheckedProject
   role: Role
   expires_at: datetime
+  invitee: str | None = None
 
 
 class RedeemedProject(PeerAnswer):
@@ -244,28 +253,31 @@ async def send_handle_invite(
   delivered_to = None
   refusal = None
   deadline = time.monotonic() + DELIVERY_BUDGET_S
-  for host in hosts:
-    remaining = deadline - time.monotonic()
-    if remaining <= 1:
-      break
-    try:
-      response = await federation_request(
-        "POST", f"https://{host}/api/project-invites/inbox",
-        json=envelope, timeout_seconds=min(DELIVERY_TIMEOUT_S, remaining),
-      )
-    except (FederationTransportError, ValueError, httpx.HTTPError):
-      continue
-    if response.status_code == 200:
-      delivered_to = host
-      break
-    refusal = _peer_detail(response) or refusal
+  try:
+    for host in hosts:
+      remaining = deadline - time.monotonic()
+      if remaining <= 1:
+        break
+      try:
+        response = await federation_request(
+          "POST", f"https://{host}/api/project-invites/inbox",
+          json=envelope, timeout_seconds=min(DELIVERY_TIMEOUT_S, remaining),
+        )
+      except PEER_ERRORS:
+        continue
+      if response.status_code == 200:
+        delivered_to = host
+        break
+      refusal = _peer_detail(response) or refusal
+  finally:
+    if delivered_to is None:
+      # Undelivered secrets never existed anywhere else; retire the row now
+      # rather than leaving an unusable pending invitation in the panel.
+      row = db.get(models.ProjectInvite, invite["id"])
+      if row is not None:
+        row.revoked_at = now_naive_utc()
+        db.commit()
   if delivered_to is None:
-    # Undelivered secrets never existed anywhere else; retire the row now
-    # rather than leaving an unusable pending invitation in the panel.
-    row = db.get(models.ProjectInvite, invite["id"])
-    if row is not None:
-      row.revoked_at = now_naive_utc()
-      db.commit()
     message = f"Couldn’t deliver the invitation to @{handle}’s Möbius."
     if refusal:
       message += f" It said: {refusal}"
@@ -302,6 +314,8 @@ def check_invite(
     "project": {"name": project.name, "project_type": project.project_type},
     "role": invite.role,
     "expires_at": _iso(invite.expires_at),
+    # Whom the invitation was made for: "@handle" for one sent by handle.
+    "invitee": invite.invitee_name,
   }
 
 
@@ -328,7 +342,7 @@ async def receive_handle_invite(
   pending = db.query(models.ReceivedProjectInvite).filter(
     models.ReceivedProjectInvite.from_handle == handle,
     models.ReceivedProjectInvite.status == "pending",
-    models.ReceivedProjectInvite.expires_at > now,
+    models.ReceivedProjectInvite.received_at > now - _INVITE_TTL,
   ).count()
   if pending >= MAX_PENDING_PER_SENDER:
     raise HTTPException(429, f"@{handle} already has {pending} invitations waiting here.")
@@ -344,7 +358,7 @@ async def receive_handle_invite(
       "POST", f"https://{host}/api/project-invites/check",
       json={"invite": secret}, timeout_seconds=PEER_TIMEOUT_S,
     )
-  except (FederationTransportError, ValueError, httpx.HTTPError) as exc:
+  except PEER_ERRORS as exc:
     raise HTTPException(422, f"Couldn’t confirm the invitation with @{handle}’s Möbius.") from exc
   if checked.status_code != 200:
     raise HTTPException(422, "That invitation is no longer valid.")
@@ -353,15 +367,23 @@ async def receive_handle_invite(
   except ValidationError as exc:
     raise HTTPException(422, "The invitation details could not be read.") from exc
   expires_at = _naive_utc(details.expires_at)
-  if expires_at <= now:
-    raise HTTPException(422, "That invitation is no longer valid.")
+  if expires_at < now + MIN_INVITE_LIFETIME:
+    raise HTTPException(422, "That invitation is about to expire. Ask for a new one.")
+  # Only an invitation made for this person may land in their inbox, not any
+  # live link or invitation the sender issued.
+  try:
+    me = await owner_handle(db, owner)
+  except HTTPException as exc:
+    raise HTTPException(503, "This Möbius can’t check @handles right now.") from exc
+  if me is None or details.invitee != f"@{me}":
+    raise HTTPException(403, "That invitation was made for someone else.")
 
   row = models.ReceivedProjectInvite(
     id=str(uuid.uuid4()), delivery_key=delivery_key, from_handle=handle,
     from_host=host, project_name=details.project.name,
     project_type=details.project.project_type, role=details.role,
     invite_secret_sealed=_seal(secret), received_at=now,
-    expires_at=min(expires_at, now + timedelta(days=30)), status="pending",
+    expires_at=min(expires_at, now + _INVITE_TTL), status="pending",
   )
   db.add(row)
   try:
@@ -407,14 +429,16 @@ async def accept_received_invite(
   if row.expires_at <= now or secret is None:
     raise HTTPException(410, "This invitation has expired. Ask for a new one.")
   handle = await owner_handle(db, owner)
-  display_name = f"@{handle}" if handle else (owner.username or "Möbius guest")[:128]
+  if handle is None:
+    raise HTTPException(409, "Choose your @handle in Möbius · You before accepting.")
+  display_name = f"@{handle}"
   try:
     response = await federation_request(
       "POST", f"https://{row.from_host}/api/projects/invites/redeem",
       json={"invite": secret, "display_name": display_name},
       timeout_seconds=PEER_TIMEOUT_S,
     )
-  except (FederationTransportError, ValueError, httpx.HTTPError) as exc:
+  except PEER_ERRORS as exc:
     raise HTTPException(502, f"Couldn’t reach @{row.from_handle}’s Möbius. Try again soon.") from exc
   if response.status_code == 410:
     row.expires_at = now

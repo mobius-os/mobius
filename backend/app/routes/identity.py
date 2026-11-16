@@ -665,15 +665,14 @@ async def read_identity(
   return _with_member_since(_managed_payload(remote, owner), owner)
 
 
-
 async def owner_handle(db: Session, owner: models.Owner) -> str | None:
-  """This owner's own mobius.you handle, or None when there is none to use."""
-  try:
-    payload = await read_identity(owner=owner, db=db)
-  except HTTPException:
-    return None
+  """This owner's own mobius.you handle, or None when they have none."""
+  payload = await read_identity(owner=owner, db=db)
+  if payload.get("account_unavailable"):
+    raise HTTPException(503, "Your Möbius account can’t be reached right now. Try again in a moment.")
   handle = (payload.get("profile") or {}).get("handle")
   return handle if isinstance(handle, str) and _HANDLE_RE.fullmatch(handle) else None
+
 
 @router.get("/agent")
 async def read_agent_access(

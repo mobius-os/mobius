@@ -104,13 +104,13 @@ export default function ProjectInvitations() {
         <div className="projects-collection--list">
           {shared.map(row => (
             <div className="projects-collection__row" key={row.id}>
-              <button type="button" className="projects-collection__main" disabled={!!busy} onClick={() => void open(row)}>
+              <button type="button" className="projects-collection__main" disabled={!!busy || row.access_expired} onClick={() => void open(row)}>
                 <span className="project-invitations__icon"><ProjectTypeIcon value={row.project_type} size={20} aria-hidden="true" /></span>
                 <span className="projects-collection__copy">
                   <strong>{row.project_name}</strong>
                   <small>{row.access_expired ? `Access expired · ask @${row.from_handle} to invite you again` : `@${row.from_handle}’s project · ${roleLabel(row.role)}`}</small>
                 </span>
-                <ExternalLink className="project-invitations__external" size={15} aria-label="Opens in a new tab" />
+                {!row.access_expired && <ExternalLink className="project-invitations__external" size={15} aria-label="Opens in a new tab" />}
               </button>
               <button
                 type="button"

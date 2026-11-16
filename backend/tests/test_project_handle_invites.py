@@ -24,7 +24,7 @@ def peers(client, monkeypatch):
   """Loop peer HTTPS calls into this app and stub the account directory."""
   monkeypatch.setattr(get_settings(), "frontend_origin", f"https://{HOST}")
   directory = {"ana": [HOST], "bob": [HOST], "mallory": ["mallory.example"]}
-  state = {"me": "ana", "calls": [], "fail_delivery": False}
+  state = {"me": "ana", "calls": [], "fail_delivery": False, "directory": directory, "redeem_answer": None}
 
   async def resolve(_db, _owner_id, handle):
     if handle not in directory:
@@ -37,6 +37,11 @@ def peers(client, monkeypatch):
   async def federation(method, url, *, json=None, timeout_seconds=10.0, **_):
     parts = urlsplit(url)
     state["calls"].append((parts.netloc, parts.path))
+    if parts.netloc == "dead.example":
+      # What federation_request raises for a host that doesn't resolve.
+      raise invites.HTTPException(400, "Cannot resolve host 'dead.example'")
+    if parts.path.endswith("/redeem") and state["redeem_answer"] is not None:
+      return httpx.Response(200, json=state["redeem_answer"])
     if parts.netloc != HOST or (state["fail_delivery"] and parts.path.endswith("/inbox")):
       raise httpx.ConnectError("unreachable")
     if parts.path.endswith("/inbox"):
@@ -202,3 +207,106 @@ def test_one_sender_cannot_crowd_the_inbox(client, auth, db, peers):
   assert refused.status_code == 502
   assert "@ana already has 10 invitations waiting here" in refused.json()["detail"]
   assert db.query(models.ReceivedProjectInvite).count() == invites.MAX_PENDING_PER_SENDER
+
+
+def link_invite(client, auth, project, invitee_name=None):
+  response = client.post(f"/api/projects/{project['id']}/invites", headers=auth, json={
+    "invitee_name": invitee_name, "role": "editor",
+  })
+  assert response.status_code == 200, response.text
+  return response.json()
+
+
+def deliver(client, url, sender="ana"):
+  return client.post("/api/project-invites/inbox", json={
+    "format": "mobius-project-invite-v1", "from_handle": sender, "invite_url": url,
+  })
+
+
+def test_an_unresolvable_host_is_skipped_for_the_next_one(client, auth, db, peers):
+  peers["directory"]["bob"] = ["dead.example", HOST]
+  project = make_project(client, auth)
+  sent = send(client, auth, project)
+  assert sent.status_code == 200, sent.text
+  assert sent.json()["delivered_to"] == HOST
+
+
+def test_an_invite_no_host_accepts_is_revoked_even_when_every_host_is_unresolvable(client, auth, db, peers):
+  peers["directory"]["bob"] = ["dead.example"]
+  project = make_project(client, auth)
+  response = send(client, auth, project)
+  assert response.status_code == 502
+  assert "resolve" not in response.json()["detail"]
+  row = db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one()
+  assert row.revoked_at is not None
+
+
+def test_only_an_invitation_made_for_this_person_reaches_their_inbox(client, auth, db, peers):
+  project = make_project(client, auth)
+  # A private link, or an invitation meant for someone else, may be held by
+  # anyone; pushing it into this inbox must not read as "@ana invited you".
+  for name in (None, "@bob"):
+    response = deliver(client, link_invite(client, auth, project, name)["join_url"])
+    assert response.status_code == 403, response.text
+  assert db.query(models.ReceivedProjectInvite).count() == 0
+  assert db.query(models.Notification).count() == 0
+
+
+def test_repeated_delivery_stores_and_notifies_once(client, auth, db, peers):
+  project = make_project(client, auth)
+  url = link_invite(client, auth, project, "@ana")["join_url"]
+  assert deliver(client, url).status_code == 200
+  assert deliver(client, url).status_code == 200
+  assert db.query(models.ReceivedProjectInvite).count() == 1
+  assert db.query(models.Notification).count() == 1
+
+
+def test_an_invitation_about_to_expire_is_refused(client, auth, db, peers):
+  project = make_project(client, auth)
+  invite = link_invite(client, auth, project, "@ana")
+  db.get(models.ProjectInvite, invite["id"]).expires_at = now_naive_utc() + timedelta(minutes=5)
+  db.commit()
+  response = deliver(client, invite["join_url"])
+  assert response.status_code == 422
+  assert db.query(models.ReceivedProjectInvite).count() == 0
+
+
+def test_check_describes_only_a_live_invitation_and_is_never_cached(client, auth, db, peers):
+  project = make_project(client, auth)
+  invite = link_invite(client, auth, project, "@ana")
+  secret = invite["join_url"].split("#", 1)[1]
+  checked = client.post("/api/project-invites/check", json={"invite": secret})
+  assert checked.status_code == 200
+  assert checked.headers["cache-control"] == "no-store"
+  assert checked.json()["invitee"] == "@ana"
+  db.get(models.ProjectInvite, invite["id"]).revoked_at = now_naive_utc()
+  db.commit()
+  assert client.post("/api/project-invites/check", json={"invite": secret}).status_code == 410
+
+
+def test_accepting_a_withdrawn_invitation_marks_it_expired(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().revoked_at = now_naive_utc()
+  db.commit()
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 410
+  listed = client.get("/api/project-invites", headers=auth).json()[0]
+  assert listed["status"] == "pending" and listed["expired"] is True
+
+
+def test_a_malformed_redeem_answer_leaves_the_invitation_pending(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  peers["redeem_answer"] = {"access_token": "short", "project": {"id": "../x"}}
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  assert db.get(models.ReceivedProjectInvite, invite_id).status == "pending"
+
+
+def test_the_inbox_is_rate_limited(client, peers):
+  url = f"https://{HOST}/project-invite#short"
+  codes = [deliver(client, url).status_code for _ in range(31)]
+  assert codes[:30] == [422] * 30 and codes[30] == 429
