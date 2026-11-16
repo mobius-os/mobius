@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
+import errno
 import hashlib
 import ipaddress
 import json
@@ -43,6 +45,19 @@ DEFAULT_LAUNCHER = "https://www.mobius.you"
 LAUNCHER_FILES = ("identity.json", "pending-enrollment.jwt", "oauth-states.json")
 
 
+def _normalize_launcher(value: str) -> str:
+  """Normalize the case-insensitive scheme and authority of a launcher URL."""
+  value = value.strip().rstrip("/")
+  try:
+    parsed = urllib.parse.urlsplit(value)
+  except ValueError:
+    return value
+  return urllib.parse.urlunsplit((
+    parsed.scheme.lower(), parsed.netloc.lower(), parsed.path,
+    parsed.query, parsed.fragment,
+  ))
+
+
 def launcher_origin(environ: Mapping[str, str]) -> str:
   """Return the launcher this instance links with.
 
@@ -51,7 +66,7 @@ def launcher_origin(environ: Mapping[str, str]) -> str:
   by updating.
   """
   configured = environ.get("MOBIUS_IDENTITY_ISSUER") or DEFAULT_LAUNCHER
-  return configured.strip().rstrip("/")
+  return _normalize_launcher(configured)
 
 
 def launcher_file(private_dir: Path, name: str, launcher: str) -> Path:
@@ -567,9 +582,9 @@ def _reclaim_private_state_after_compat_chown() -> None:
   """Restore root ownership after the broad /data compatibility pass.
 
   Older official entrypoints make a persisted /data tree app-writable before
-  this root broker starts. Adopt only the broker's fixed, already-private state
-  files; reject links, unexpected owners, and permissive modes rather than
-  blessing an attacker-controlled path.
+  this root broker starts. Adopt only the broker's known, already-private state
+  files, including inactive per-launcher files; reject links, unexpected owners,
+  and permissive modes rather than blessing an attacker-controlled path.
 
   Each entry is validated and fixed up through a single descriptor. A
   concurrent app-user process can still swap a directory entry, but it can no
@@ -605,7 +620,7 @@ def _reclaim_private_state_after_compat_chown() -> None:
     ):
       raise RuntimeError("identity broker private directory is unsafe")
 
-    # These are fixed children of PRIVATE_DIR, so opening them by name relative
+    # These are known-name children of PRIVATE_DIR, so opening them relative
     # to the pinned directory keeps a rename of PRIVATE_DIR itself irrelevant.
     # The default launcher's files are reclaimed even while another launcher
     # is active, so its link is never left writable by the application.
@@ -618,6 +633,14 @@ def _reclaim_private_state_after_compat_chown() -> None:
         OAUTH_STATE_PATH,
       )
     } | set(LAUNCHER_FILES)
+    # The boot-wide ownership pass also touches inactive launcher files. They
+    # must be reclaimed before the broker scans them for matching issuers.
+    for name in os.listdir(dir_fd):
+      if any(
+        re.fullmatch(rf"{re.escape(stem)}\.[0-9a-f]{{16}}\.{re.escape(suffix)}", name)
+        for stem, suffix in (item.rsplit(".", 1) for item in LAUNCHER_FILES)
+      ):
+        names.add(name)
     for name in sorted(names):
       try:
         file_fd = os.open(name, open_flags, dir_fd=dir_fd)
@@ -692,29 +715,63 @@ def _recorded_launcher(name: str, path: Path) -> str | None:
   except (ValueError, UnicodeError):
     return None
   recorded = value.get(claim) if isinstance(value, dict) else None
-  return recorded.rstrip("/") if isinstance(recorded, str) else None
+  return _normalize_launcher(recorded) if isinstance(recorded, str) else None
+
+
+def _rename_noreplace(source: Path, destination: Path) -> bool:
+  """Atomically move a file without replacing an existing destination.
+
+  Do not emulate this with link/unlink: a crash between those calls leaves a
+  hard link that the next boot's private-state validation must reject.
+  """
+  libc = ctypes.CDLL(None, use_errno=True)
+  try:
+    rename = libc.renameat2
+  except AttributeError:
+    log.warning("Atomic no-replace rename unavailable; leaving legacy file untouched")
+    return False
+  rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+  rename.restype = ctypes.c_int
+  # Linux AT_FDCWD and RENAME_NOREPLACE. Both files are in the private directory.
+  if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+    return True
+  error = ctypes.get_errno()
+  if error == errno.EEXIST:
+    return False
+  if error in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+    log.warning("Atomic no-replace rename unsupported; leaving legacy file untouched")
+    return False
+  raise OSError(error, os.strerror(error), str(source), str(destination))
 
 
 def _adopt_historical_launcher_files() -> None:
-  """Move a link saved under the historical names to its own launcher's files.
+  """Adopt only an unambiguous matching legacy file, never replacing state.
 
-  Earlier versions saved every launcher's link and pending enrollment under
-  the historical names. An installation already linked with another launcher
-  keeps that link when it updates; a file the default launcher issued, or one
-  that names no launcher, stays where it is. Sign-in attempts name no launcher
-  and last ten minutes, so one begun before the update is simply begun again.
+  Earlier per-launcher filenames hashed the configured URL's exact casing;
+  scan those names as well as the older unsuffixed name. Only identity and
+  receipt files identify their issuer, so OAuth attempts are not moved.
   """
-  if IDENTITY_BASE_URL == DEFAULT_LAUNCHER:
-    return
   for name, own in (
     ("identity.json", STATE_PATH),
     ("pending-enrollment.jwt", PENDING_BOOTSTRAP_PATH),
   ):
-    historical = PRIVATE_DIR / name
-    if _private_file_exists(own) or not _private_file_exists(historical):
+    if _private_file_exists(own):
       continue
-    if _recorded_launcher(name, historical) == IDENTITY_BASE_URL:
-      os.replace(historical, own)
+    stem, _, suffix = name.rpartition(".")
+    hashed_name = re.compile(rf"{re.escape(stem)}\.[0-9a-f]{{16}}\.{re.escape(suffix)}")
+    candidates = []
+    for path in PRIVATE_DIR.iterdir():
+      if path == own or (path.name != name and not hashed_name.fullmatch(path.name)):
+        continue
+      if _private_file_exists(path) and _recorded_launcher(name, path) == IDENTITY_BASE_URL:
+        candidates.append(path)
+    if len(candidates) > 1:
+      log.warning("Multiple matching legacy %s files; leaving them untouched", name)
+      continue
+    if not candidates:
+      continue
+    historical = candidates[0]
+    _rename_noreplace(historical, own)
 
 
 def _prepare_socket_dir() -> None:
@@ -1010,6 +1067,8 @@ class Broker:
       not isinstance(value, dict)
       or value.get("instance_id") != self.instance_id
       or value.get("key_thumbprint") != self.thumbprint()
+      or not isinstance(value.get("issuer"), str)
+      or _normalize_launcher(value["issuer"]) != IDENTITY_BASE_URL
     ):
       return None
     return value

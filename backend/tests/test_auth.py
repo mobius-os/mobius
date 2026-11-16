@@ -1035,6 +1035,17 @@ def test_launcher_deployed_instance_keeps_the_canonical_issuer_by_default(
   assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
 
 
+def test_issuer_pin_accepts_case_only_for_the_deploying_launcher(monkeypatch):
+  from app.routes import auth as auth_routes
+
+  settings = configure_managed_sso(monkeypatch)
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "https://launcher.example")
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", settings.mobius_sso_issuer.upper() + "/")
+  assert auth_routes._mobius_pinned_issuer() == settings.mobius_sso_issuer
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", settings.mobius_sso_issuer + "/unexpected")
+  assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
+
+
 def test_instance_pointed_at_its_deploying_launcher_links_only_with_it(monkeypatch):
   import asyncio
 

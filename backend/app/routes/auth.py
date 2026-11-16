@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from app import app_consent, auth, models, runtime_identity, schemas, setup_code
 from app.broadcast import get_system_broadcast
-from app.config import get_settings
+from app.config import _validated_origin, get_settings
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -1169,7 +1169,14 @@ def _mobius_pinned_issuer() -> str:
   launcher, whose validated origin already receives its managed credential.
   """
   settings = get_settings()
-  configured = os.environ.get("MOBIUS_IDENTITY_ISSUER", "").strip().rstrip("/")
+  configured = os.environ.get("MOBIUS_IDENTITY_ISSUER", "").strip()
+  if settings.mobius_sso_enabled and secrets.compare_digest(configured.rstrip("/"), settings.mobius_sso_issuer):
+    return settings.mobius_sso_issuer
+  if configured:
+    try:
+      configured = _validated_origin(configured, "MOBIUS_IDENTITY_ISSUER")
+    except ValueError:
+      return _MOBIUS_IDENTITY_ISSUER
   if (
     settings.mobius_sso_enabled
     and configured
