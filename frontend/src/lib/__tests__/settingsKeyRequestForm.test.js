@@ -75,6 +75,13 @@ test("an existing key with no app origin is the owner's", () => {
   assert.deepEqual(requestSubject({ ...ask, key_exists: true, key_origin: null }, {}), { kind: 'yours' })
 })
 
+test("an ask for more sites on a key another app saved still names that app, not the owner", () => {
+  const subject = requestSubject(
+    { ...ask, key_exists: true, granted: true, key_origin: { app: 10, name: 'openweather' } }, { 10: 'Modelapp' },
+  )
+  assert.deepEqual(subject, { kind: 'more-sites', savedBy: 'Modelapp' })
+})
+
 test('a new key and an ask for more sites keep their own wording', () => {
   assert.deepEqual(requestSubject({ ...ask, key_exists: false }, {}), { kind: 'new' })
   assert.deepEqual(requestSubject({ ...ask, key_exists: true, granted: true }, {}), { kind: 'more-sites' })

@@ -1016,10 +1016,18 @@ app.add_middleware(
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
-  # X-Vault-Denied tells an app its key request was refused by the vault
-  # rather than by the site it called (/api/keys/use); X-Vault-Location is
-  # where a site's redirect points, never followed for the app.
-  expose_headers=["ETag", "X-Recovery-Notification-Id", "X-Vault-Denied", "X-Vault-Location"],
+  # A key borrow (/api/keys/use) relays the site's download and rate-limit
+  # headers (routes/keys.py _RELAYED_RESPONSE_HEADERS; CORS has no prefixes,
+  # so each family member is named), X-Vault-Denied (the vault, not the site,
+  # refused the request) and X-Vault-Location (where a site's redirect points,
+  # never followed for the app).
+  expose_headers=[
+    "ETag", "X-Recovery-Notification-Id",
+    "Content-Disposition", "Retry-After",
+    "RateLimit", "RateLimit-Policy", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset",
+    "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+    "X-Vault-Denied", "X-Vault-Location",
+  ],
 )
 
 

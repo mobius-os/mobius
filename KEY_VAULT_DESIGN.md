@@ -94,7 +94,9 @@ process and anything it was still doing.
   fields), `vault.lock` (one vault per folder) and `vault.sock` (mode 0600).
   A change is made on copies, written atomically and only then applied, so a
   failed write (a full disk) leaves the vault exactly as it was on disk and
-  answers an error. At start the vault refuses a master key that opens none
+  answers an error. Its audit lines are appended only after it is saved; one
+  that then fails to append is reported in the vault's log, and the change
+  still answers success. At start the vault refuses a master key that opens none
   of the stored keys, and sets aside a damaged `requests.json` rather than
   stopping.
   Every change names its caller; an app caller cannot change keys. There is no TCP port. The vault trusts any
@@ -126,8 +128,11 @@ alignment. The caller's path-override headers (`X-Original-URL`,
 folded header lines are refused. Of the site's answer, only an allowlist of
 headers reaches the app, the site's own `X-Vault-*` headers never do, the
 status line carries the standard reason, and informational `1xx` answers are
-skipped. A borrow ends after 300 seconds, and at most 32 run at once (beyond
-that the vault answers 429). Headers
+skipped. A borrow ends after 300 seconds, however slowly the site sends its
+answer (the vault shuts the site's connection then), and a caller that takes
+60 seconds to accept the next piece is cut off. At most 32 borrows run at
+once, and at most 8 for one caller (an app, one agent's chat); beyond either
+the vault answers 429. Headers
 sites log as metadata (`User-Agent`, `Referer` and similar) cannot carry a
 key. An app without a grant gets the same refusal whether or not a key
 exists. A site slower than the relay is reported as a timeout (504), not as a
@@ -198,12 +203,15 @@ keys the app itself created and still holds: a key the owner made, or merely
 lets the app borrow, can never be replaced through them.
 
 **Restore.** Backups carry the vault only in the encrypted secrets archive.
-A restore without it keeps the current vault, whose grants name this
-install's app ids. `restore-data.py` warns, and, with the vault stopped,
+A restore that brings no vault (a backup without secrets, or with secrets from
+before the vault) keeps the current vault, whose grants name this install's
+app ids. `restore-data.py` warns, and, with the vault stopped,
 withdraws grants and requests for every id the restored database lacks or
 gives to another installation (slug and token nonce), using the vault's own
 purge step; if it cannot open the vault it changes nothing and asks the owner
-to review every grant.
+to review every grant. It runs as root from `/app/scripts`, so the image ships
+the vault program beside it (`/app/vault/keyvault.py`), never loading it from
+the editable checkout.
 
 ## Future work: sandbox for app server code
 

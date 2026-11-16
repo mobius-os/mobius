@@ -205,16 +205,16 @@ function requestAppName(request, names) {
 
 /**
  * What the request asks for, as the card words it. A key another app saved
- * for itself is not the owner's: allowing it would send this app's requests
- * with that app's value, which that app can still change.
+ * for itself is not the owner's (``savedBy`` names that app), also when this
+ * app already uses it and asks for more sites: allowing sends this app's
+ * requests with that app's value, which that app can still change.
  */
 export function requestSubject(request, names) {
-  if (request.granted) return { kind: 'more-sites' }
+  const origin = request.key_exists ? request.key_origin : null
+  const savedBy = origin && origin.app !== request.app ? appLabel(names, origin.app) : null
+  if (request.granted) return savedBy ? { kind: 'more-sites', savedBy } : { kind: 'more-sites' }
   if (!request.key_exists) return { kind: 'new' }
-  const origin = request.key_origin
-  if (origin && origin.app !== request.app) {
-    return { kind: 'saved-by-other', savedBy: appLabel(names, origin.app) }
-  }
+  if (savedBy) return { kind: 'saved-by-other', savedBy }
   return { kind: 'yours' }
 }
 
@@ -251,14 +251,19 @@ function KeyRequest({ request, names, onAnswered }) {
     <div className="settings-keys__request" role="group" aria-label={`${appName} asks to use ${request.key}`}>
       <p className="settings-keys__request-lead">
         <strong>{appName}</strong>{' '}
-        {subject.kind === 'more-sites' && <>wants to use your key <strong>{request.key}</strong> on more sites</>}
+        {subject.kind === 'more-sites' && !subject.savedBy && (
+          <>wants to use your key <strong>{request.key}</strong> on more sites</>
+        )}
+        {subject.kind === 'more-sites' && subject.savedBy && (
+          <>wants to use <strong>{request.key}</strong>, a key <strong>{subject.savedBy}</strong> saved, on more sites</>
+        )}
         {subject.kind === 'new' && <>wants to use a new key <strong>{request.key}</strong></>}
         {subject.kind === 'yours' && <>wants to use your key <strong>{request.key}</strong></>}
         {subject.kind === 'saved-by-other' && (
           <>wants to use <strong>{request.key}</strong>, a key <strong>{subject.savedBy}</strong> saved</>
         )}
       </p>
-      {subject.kind === 'saved-by-other' && (
+      {subject.savedBy && (
         <Alert
           color="warning"
           variant="soft"

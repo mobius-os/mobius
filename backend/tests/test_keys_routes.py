@@ -48,8 +48,15 @@ _HOSTILE_HEADERS = {
   "X-Vault-Denied": "1",
 }
 _KEPT_HEADERS = {
-  "ETag": '"v1"', "Retry-After": "30", "RateLimit-Remaining": "9",
-  "X-RateLimit-Limit": "10", "Content-Language": "en",
+  "ETag": '"v1"', "Retry-After": "30", "Content-Language": "en",
+  "Content-Disposition": 'attachment; filename="report.csv"',
+  "RateLimit": '"default";r=9;t=60', "RateLimit-Policy": '"default";q=10;w=60',
+  "RateLimit-Limit": "10", "RateLimit-Remaining": "9", "RateLimit-Reset": "60",
+  "X-RateLimit-Limit": "10", "X-RateLimit-Remaining": "9", "X-RateLimit-Reset": "60",
+}
+# What CORS lets any origin's script read without the server exposing it.
+_CORS_SAFELISTED = {
+  "cache-control", "content-language", "content-length", "content-type", "expires", "last-modified", "pragma",
 }
 
 
@@ -324,6 +331,14 @@ def test_an_agent_resending_the_same_slot_differently_is_not_a_change(client, au
   same = {"inject": {"type": "header", "name": " X-Api-Key "}, "revision": page["revision"]}
   assert client.put("/api/keys/maps", headers=agent, json=same).status_code == 200
   assert pushes == []
+
+
+def test_stored_slot_compares_slots_as_the_vault_stores_them_and_leaves_refused_ones_as_given():
+  stored = {"type": "header", "name": "X-Api-Key", "prefix": ""}
+  assert key_vault.stored_slot({"type": "header", "name": " X-Api-Key "}) == stored
+  refused = {"type": "header", "name": "Host"}
+  assert key_vault.stored_slot(refused) is refused
+  assert key_vault.stored_slot("not a slot") == "not a slot"
 
 
 def test_an_agent_adding_a_site_tells_the_owner_and_is_logged_as_the_agent(client, auth, db, vault, pushes):
@@ -1500,6 +1515,22 @@ def test_a_sites_answer_never_acts_on_the_mobius_origin(client, auth, db, vault)
   assert used.headers["X-Vault-Key"] == "k"
   assert used.headers["Content-Security-Policy"].startswith("sandbox")
   assert used.headers["X-Content-Type-Options"] == "nosniff" and used.headers["Cache-Control"] == "no-store"
+
+
+def test_an_app_frame_can_read_every_header_a_borrow_relays(client, auth, db, vault):
+  """An app frame is an opaque origin: its code reads a relayed header CORS
+  does not safelist only when the server exposes it by name."""
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  used = client.get("/api/keys/use/k/api.example.com/v1/hostile-headers",
+                    headers={**_app_auth(db, weather), "Origin": "null"})
+  assert used.status_code == 200
+  exposed = {name.strip().lower() for name in used.headers["Access-Control-Expose-Headers"].split(",")}
+  assert "*" not in exposed
+  for name in _KEPT_HEADERS:
+    assert used.headers.get(name) is not None and name.lower() in exposed | _CORS_SAFELISTED, name
+  assert {"x-vault-denied", "x-vault-location"} <= exposed
 
 
 @pytest.mark.parametrize("kind, where", [

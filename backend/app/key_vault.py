@@ -27,7 +27,6 @@ import os
 import re
 import sys
 import tempfile
-import threading
 import urllib.parse
 from pathlib import Path
 
@@ -248,6 +247,17 @@ class GrantWidening:
   apps: tuple[int, ...] = ()  # apps that may newly use the key, or reach more
   agents: bool = False        # the Agents switch turned on
   sites: bool = False         # the owner's and agents' own sites reach more
+
+
+def stored_slot(inject):
+  """A slot as the vault stores it, so one written differently but stored the
+  same (spacing around its name, an absent prefix) compares equal; one the
+  vault would refuse stays as given, for the vault to refuse on save."""
+  rules = _vault_rules()
+  try:
+    return rules.validate_inject(inject)
+  except rules.VaultError:
+    return inject
 
 
 def grant_widening(before: dict | None, grants) -> GrantWidening:
@@ -620,25 +630,24 @@ def _read_ledger(root: Path) -> dict:
     return {}
 
 
-# The importer and the deprecated DELETE route both add entries; each re-reads
-# the ledger under this lock, so neither writes back a copy missing the other's.
-_ledger_lock = threading.Lock()
-
-
 def _record_in_ledger(root: Path, entry: str, outcome) -> bool:
   """Settle one legacy file for good unless it already is; whether this did.
 
   ``outcome`` is the vault name it moved to, ``{"superseded_by": <name>}``
   when the app had saved the secret again before the import reached it, or
   ``{"deleted_by_app": true}``.
+
+  The importer and the deprecated DELETE route both add entries, on the event
+  loop: this re-read and write has no await in between, so neither writes
+  back a copy missing the other's. Which of them settles a file first is
+  decided under that app's lock (``for_live_app``), where both re-check it.
   """
-  with _ledger_lock:
-    ledger = _read_ledger(root)
-    if entry in ledger:
-      return False
-    ledger[entry] = outcome
-    _write_ledger(root / _IMPORT_LEDGER, ledger)
-    return True
+  ledger = _read_ledger(root)
+  if entry in ledger:
+    return False
+  ledger[entry] = outcome
+  _write_ledger(root / _IMPORT_LEDGER, ledger)
+  return True
 
 
 def withdraw_legacy_secret(app_id: int, name: str) -> bool:

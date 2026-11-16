@@ -60,7 +60,10 @@ _RELAYED_RESPONSE_HEADERS = frozenset({
   "last-modified", "expires", "vary", "retry-after",
 })
 # Rate-limit families, and what the vault itself says (it drops the site's
-# own X-Vault-* headers).
+# own X-Vault-* headers). An app frame is an opaque origin, so of everything
+# relayed it reads only the CORS-safelisted headers and those main.py's CORS
+# setup exposes (named one by one: CORS has no prefixes); services and jobs
+# read them all.
 _RELAYED_RESPONSE_PREFIXES = ("ratelimit", "x-ratelimit-", "x-vault-")
 _SHARED_BROWSER_REFUSAL = "Shared browser access cannot use keys."
 
@@ -131,21 +134,12 @@ def _granted_app_ids(grants) -> list[int]:
   ]
 
 
-def _same_slot(inject):
-  """A slot as the vault stores it, so an equivalent one written differently
-  (case, spacing) is no change; one the vault would refuse stays as given."""
-  try:
-    return key_vault._vault_rules().validate_inject(inject)
-  except Exception:  # noqa: BLE001 - the vault refuses it on save anyway
-    return inject
-
-
 def _agent_changes(existing: dict, body: dict, widening: key_vault.GrantWidening) -> list[str]:
   """What an agent's save changes that could redirect or widen a key's use."""
   changes = []
   if body.get("value") is not None:
     changes.append("replaced its value")
-  if body.get("inject") is not None and _same_slot(body["inject"]) != existing["inject"]:
+  if body.get("inject") is not None and key_vault.stored_slot(body["inject"]) != existing["inject"]:
     changes.append("changed how it is sent")
   if widening.sites:
     changes.append("added sites")
