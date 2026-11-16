@@ -97,6 +97,15 @@ export default function MarkdownComposer({ inputRef, value, onChange, onInputInt
       annotations: controlledValue.of(true),
     })
     view.dispatch({ effects: historyRef.current.reconfigure(history()), annotations: controlledValue.of(true) })
+    // An Android keyboard usually still has the last word open (composing)
+    // when Send is tapped. The replacement does not end that composition, so
+    // the next word is merged into stale positions. Reattaching the
+    // EditContext ends it, as refocusing would, without hiding the keyboard.
+    const context = view.contentDOM.editContext
+    if (context && view.compositionStarted) {
+      view.contentDOM.editContext = null
+      view.contentDOM.editContext = context
+    }
   }, [value])
 
   useLayoutEffect(() => {

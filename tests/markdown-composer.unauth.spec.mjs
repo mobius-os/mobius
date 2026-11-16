@@ -194,6 +194,28 @@ test.describe('Android Chrome', () => {
     expect(await text(page)).toBe('older **message**')
     expect(errors).toEqual([])
   })
+
+  test('a word still being composed when the box is cleared does not corrupt the next word', async ({ page }) => {
+    const errors = []
+    page.on('pageerror', error => errors.push(error.message))
+    await open(page, { touch:true })
+    const ime = await page.context().newCDPSession(page)
+    const compose = async word => {
+      for (let i = 1; i <= word.length; i++) await ime.send('Input.imeSetComposition', { text: word.slice(0, i), selectionStart: i, selectionEnd: i })
+    }
+    await compose('hello')
+    await ime.send('Input.insertText', { text: 'hello ' })
+    await compose('world')
+    await expect(page.getByRole('button', { name:'Send' })).toBeVisible()
+    await expect.poll(() => text(page)).toBe('hello world')
+    await page.evaluate(() => window.composerFixture.replace(''))
+    await expect.poll(() => text(page)).toBe('')
+    await compose('next')
+    await ime.send('Input.insertText', { text: 'next' })
+    await expect.poll(() => text(page)).toBe('next')
+    expect(await page.evaluate(() => document.querySelector('.cm-content').editContext.text)).toBe('next')
+    expect(errors).toEqual([])
+  })
 })
 
 test('composition confirmation cannot send a desktop draft', async ({ page }) => {
