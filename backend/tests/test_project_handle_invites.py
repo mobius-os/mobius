@@ -368,10 +368,12 @@ def test_a_lost_redeem_answer_is_recovered_by_trying_again(client, auth, db, pee
   assert received_row(db, invite_id).status == "pending"
   assert db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().consumed_at is not None
 
-  # Even past the local expiry, only the sender can say it was spent.
+  # Even past the local expiry, only the sender can say it was spent, so
+  # the invitation stays actionable rather than offering only Remove.
   row = received_row(db, invite_id)
   row.expires_at = now_naive_utc() - timedelta(minutes=1)
   db.commit()
+  assert client.get("/api/project-invites", headers=auth).json()[0]["expired"] is False
   retried = client.post(f"/api/project-invites/{invite_id}/accept", headers=auth)
   assert retried.status_code == 200, retried.text
   assert retried.json()["status"] == "accepted"
@@ -482,3 +484,48 @@ def test_concurrent_deliveries_cannot_exceed_the_per_sender_limit(client, auth, 
   assert sorted(codes) == [200] * invites.MAX_PENDING_PER_SENDER + [429]
   assert db.query(models.ReceivedProjectInvite).filter_by(from_handle="bob").count() == invites.MAX_PENDING_PER_SENDER
   assert db.query(models.Notification).count() == invites.MAX_PENDING_PER_SENDER
+
+
+def test_the_senders_refusal_settles_an_invitation_in_doubt(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  peers["redeem_unreachable"] = True
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  assert received_row(db, invite_id).redeem_key_sealed is not None
+  peers["redeem_unreachable"] = False
+  db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().revoked_at = now_naive_utc()
+  db.commit()
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 410
+  row = received_row(db, invite_id)
+  assert row.redeem_key_sealed is None and row.invite_secret_sealed is None
+  assert client.get("/api/project-invites", headers=auth).json()[0]["expired"] is True
+
+
+def lost_redeem(client, auth, db, peers):
+  """Accept once with the answer lost; return the invitation secret and redeem key."""
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  secret = invites._unseal(received_row(db, invite_id).invite_secret_sealed)
+  peers["me"] = "bob"
+  peers["lose_answer"]["/redeem"] = 1
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  return secret, invites._unseal(received_row(db, invite_id).redeem_key_sealed)
+
+
+def test_replay_ends_with_the_invitation_lifetime(client, auth, db, peers):
+  secret, key = lost_redeem(client, auth, db, peers)
+  redemption = db.query(models.ProjectInviteRedemption).one()
+  redemption.redeemed_at = now_naive_utc() - timedelta(days=8)
+  db.commit()
+  assert client.post("/api/project-invites/redeem", json={"invite": secret, "redeem_key": key}).status_code == 410
+
+
+def test_replay_ends_when_the_owner_signs_out_everywhere(client, auth, db, peers):
+  secret, key = lost_redeem(client, auth, db, peers)
+  owner = db.query(models.Owner).one()
+  owner.token_epoch += 1
+  db.commit()
+  assert client.post("/api/project-invites/redeem", json={"invite": secret, "redeem_key": key}).status_code == 410

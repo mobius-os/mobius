@@ -1658,7 +1658,7 @@ class ReceivedProjectInvite(Base):
 
 
 class ProjectInviteRedemption(Base):
-  """Who spent a handle invitation, so a lost answer can be repeated.
+  """Who spent an invitation addressed to an @handle, so a lost answer can be repeated.
 
   Written in the same transaction that consumes the invitation. Only the
   invitee's Möbius knows the key, so a retry that presents it gets a fresh
@@ -1677,6 +1677,8 @@ class ProjectInviteRedemption(Base):
     String(64), ForeignKey("project_members.id", ondelete="CASCADE"),
     nullable=False,
   )
+  # The owner's sign-in epoch at redemption: signing out everywhere ends replay.
+  owner_epoch = Column(Integer, nullable=False)
   redeemed_at = Column(DateTime, nullable=False)
 
 

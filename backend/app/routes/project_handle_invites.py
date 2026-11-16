@@ -224,7 +224,11 @@ def _view(row: models.ReceivedProjectInvite, now: datetime) -> dict[str, Any]:
     "received_at": _iso(row.received_at),
     "expires_at": _iso(row.expires_at),
     "responded_at": _iso(row.responded_at),
-    "expired": row.status == "pending" and row.expires_at <= now,
+    # Once an accept attempt may have reached the sender, the invitation
+    # stays actionable: only the sender can say it was spent.
+    "expired": (
+      row.status == "pending" and row.expires_at <= now and row.redeem_key_sealed is None
+    ),
     "access_expired": row.status == "accepted" and (
       row.access_expires_at is not None and row.access_expires_at <= now
     ),
@@ -383,17 +387,28 @@ def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
   """
   now = now_naive_utc()
   key_hash = _invite_hash(body.redeem_key)
-  db.commit()
-  db.execute(text("BEGIN IMMEDIATE"))
-  try:
+
+  def addressed_invite() -> models.ProjectInvite:
+    # Invitations addressed to an @handle; the rest redeem at
+    # /api/projects/invites/redeem.
     invite = db.query(models.ProjectInvite).filter(
       models.ProjectInvite.token_hash == _invite_hash(body.invite),
       models.ProjectInvite.revoked_at.is_(None),
     ).first()
-    # Only invitations sent by handle; link invitations keep /projects/invites/redeem.
     if invite is None or not (invite.invitee_name or "").startswith("@"):
       raise HTTPException(410, GONE)
+    return invite
+
+  # Unknown secrets are refused before taking the database write lock.
+  addressed_invite()
+  db.commit()
+  db.execute(text("BEGIN IMMEDIATE"))
+  try:
+    invite = addressed_invite()
     project = _live_project(db, str(invite.project_id))
+    owner = db.query(models.Owner).first()
+    if owner is None:
+      raise HTTPException(503, "The project owner is unavailable.")
     if invite.consumed_at is None:
       if invite.expires_at <= now:
         raise HTTPException(410, GONE)
@@ -407,15 +422,20 @@ def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
       invite.consumed_at = now
       invite.accepted_member_id = member.id
       db.add(models.ProjectInviteRedemption(
-        invite_id=invite.id, key_hash=key_hash, member_id=member.id, redeemed_at=now,
+        invite_id=invite.id, key_hash=key_hash, member_id=member.id,
+        owner_epoch=owner.token_epoch, redeemed_at=now,
       ))
       redeemed_at = now
     else:
       redemption = db.get(models.ProjectInviteRedemption, invite.id)
       member = db.get(models.ProjectMember, redemption.member_id) if redemption else None
+      # A replay only recovers a lost answer: within the invitation's own
+      # lifetime, and never across the owner signing out everywhere.
       if (
         redemption is None or member is None or member.revoked_at is not None
         or not hmac.compare_digest(redemption.key_hash, key_hash)
+        or redemption.owner_epoch != owner.token_epoch
+        or now >= redemption.redeemed_at + _INVITE_TTL
       ):
         raise HTTPException(410, "This project invitation has already been used.")
       redeemed_at = redemption.redeemed_at
@@ -426,9 +446,6 @@ def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
   except BaseException:
     db.rollback()
     raise
-  owner = db.query(models.Owner).first()
-  if owner is None:
-    raise HTTPException(503, "The project owner is unavailable.")
   token = auth.create_project_collaborator_token(
     owner_username=owner.username, owner_epoch=owner.token_epoch,
     project_id=str(project.id), member_id=member.id,
@@ -597,11 +614,14 @@ async def accept_received_invite(
   except PEER_ERRORS as exc:
     # The sender may have spent it; the saved key makes trying again safe.
     raise HTTPException(502, f"Couldn’t reach @{row.from_handle}’s Möbius. Try again soon.") from exc
-  db.refresh(row)
+  db.expire_all()
+  row = _row(db, invite_id)
   if row.status == "accepted":
     return {**_view(row, now), "open_url": _open_url(row)}
   if response.status_code == 410:
     row.expires_at = now
+    row.invite_secret_sealed = None
+    row.redeem_key_sealed = None
     db.commit()
     raise HTTPException(410, "This invitation was withdrawn or already used. Ask for a new one.")
   if response.status_code != 200:
