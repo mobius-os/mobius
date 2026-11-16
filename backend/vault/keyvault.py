@@ -7,9 +7,11 @@ destination, and the vault adds the key on the way out.
 The vault listens on one Unix socket in its folder (mode 0600). App server
 code still runs as the server's own user, so that mode is not yet a boundary
 against it (see KEY_VAULT_DESIGN.md). The vault trusts whoever can open that
-socket: the Möbius server, and owner tools running as the same user such as
-``store-key.py``. The server authenticates every caller with its own
-platform-issued token and passes the attested identity in ``X-Vault-Caller``:
+socket: the Möbius server, owner tools running as the same user such as
+``store-key.py``, and anything else with that user's rights; any of them can
+state any caller. The server authenticates every caller with its own
+platform-issued token and passes the attested identity in ``X-Vault-Caller``
+(the owner-only rules and notifications are the server routes'):
 
     app:<app-id> | agent:<chat-id> | owner | platform:<purpose>
 

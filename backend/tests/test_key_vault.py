@@ -930,11 +930,49 @@ def test_a_name_an_app_took_first_never_lends_it_the_owners_value(monkeypatch, v
   grants), the app must not be able to borrow the owner's value."""
   name = vault.save_owned(9, "OPENAI_API_KEY", "app-dummy")["name"]
   site = "api.openai.com:POST:/v1/*"
-  assert _run_store_key(monkeypatch, vault, [name, "--site", site], "owners-real-key") == 0
+  assert _run_store_key(monkeypatch, vault, [name, "--site", site, "--replace"], "owners-real-key") == 0
   with pytest.raises(kv.VaultError, match="may not use"):
     vault.authorize(name, ("app", "9"), "POST", "api.openai.com", "/v1/responses")
   _, value = vault.authorize(name, ("agent", "c1"), "POST", "api.openai.com", "/v1/responses")
   assert value == "owners-real-key"
+
+
+def test_store_key_never_replaces_an_existing_key_unless_asked(monkeypatch, vault):
+  """store-key.py writes to the vault socket as the owner, past the server's
+  route checks, so replacing a key is an explicit choice (--replace), and a
+  replacement applies only to the key as it was read."""
+  def value_of(name):
+    return vault.reveal(name, ("owner", ""))
+
+  assert _run_store_key(monkeypatch, vault, ["fresh"], "first-value") == 0
+  assert value_of("fresh") == "first-value"
+  # Exit 3: the key exists and is left exactly as it was.
+  [before] = [k for k in vault.list_keys() if k["name"] == "fresh"]
+  assert _run_store_key(monkeypatch, vault, ["fresh", "--site", "evil.example.com"], "second") == 3
+  assert value_of("fresh") == "first-value"
+  assert [k for k in vault.list_keys() if k["name"] == "fresh"] == [before]
+  assert _run_store_key(monkeypatch, vault, ["fresh", "--replace"], "second-value") == 0
+  assert value_of("fresh") == "second-value"
+
+  listed = vault.list_keys
+
+  def changed_after_listing():
+    keys = listed()
+    vault.put_key("fresh", {"value": "owners-newer-value"})
+    return keys
+  monkeypatch.setattr(vault, "list_keys", changed_after_listing)
+  # A replacement from a stale read never undoes the change made meanwhile.
+  assert _run_store_key(monkeypatch, vault, ["fresh", "--replace"], "stale-value") == 4
+  assert value_of("fresh") == "owners-newer-value"
+
+  def created_after_listing():
+    keys = listed()
+    vault.put_key("late", {"value": "someone-elses", "inject": HEADER_SLOT, "grants": _grants()})
+    return [k for k in keys if k["name"] != "late"]
+  monkeypatch.setattr(vault, "list_keys", created_after_listing)
+  # A key created since the list was read is never overwritten as new.
+  assert _run_store_key(monkeypatch, vault, ["late"], "mine") == 3
+  assert value_of("late") == "someone-elses"
 
 
 def test_an_app_holds_at_most_sixteen_keys_of_its_own(vault):

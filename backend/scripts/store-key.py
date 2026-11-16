@@ -7,14 +7,23 @@ or keeps the value anywhere else. Options describe how apps may use the key;
 on an existing key they replace only what is given.
 
   store-key.py NAME [--header NAME [--prefix TEXT] | --query NAME]
-               [--site HOST[:METHODS[:PATHS]]]... [--no-agents]
+               [--site HOST[:METHODS[:PATHS]]]... [--no-agents] [--replace]
 
   --site api.example.com:GET,POST:/v1/*,/v2/*   (methods default to GET,
   paths to /*). Without --header or --query a new key is sent as
   "Authorization: Bearer <key>". A new key lets agent chats borrow it (so
   they never need to read the value); --no-agents turns that off.
 
-Exit codes: 0 stored, 2 empty or malformed input, 4 could not store.
+  An existing key is never replaced unless --replace is given: without it,
+  a key that already has the name is left exactly as it was (exit 3). A
+  replacement applies only to the key as it was read, so a change someone
+  made meanwhile is never overwritten (exit 4; read it and try again).
+
+This program talks to the vault socket directly, as the owner, so the
+server's route checks and the owner's notifications do not apply to it.
+
+Exit codes: 0 stored, 2 empty or malformed input, 3 the key exists (rerun
+with --replace to replace it), 4 could not store.
 """
 
 from __future__ import annotations
@@ -84,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--site", action="append", default=[])
   parser.add_argument("--agents", action="store_true", help=argparse.SUPPRESS)  # the default
   parser.add_argument("--no-agents", action="store_true")
+  parser.add_argument("--replace", action="store_true")
   args = parser.parse_args(argv)
   try:
     value = _value(json.load(sys.stdin))
@@ -96,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     if status != 200:
       return 4
     existing = next((k for k in listing["keys"] if k["name"] == args.name), None)
+    if existing and not args.replace:
+      return 3
     inject = existing["inject"] if existing else {
       "type": "header", "name": "Authorization", "prefix": "Bearer ",
     }
@@ -112,10 +124,16 @@ def main(argv: list[str] | None = None) -> int:
       grants["agents"] = False
     body = {"value": value, "inject": inject, "grants": grants}
     if existing:
+      # Only the key as it was read: never a change made since.
       body["revision"] = existing.get("revision", 0)
+    else:
+      # Never a key someone else created since the list was read.
+      body["create_only"] = True
     status, _ = _call("PUT", f"/keys/{args.name}", body)
   except OSError:
     return 4
+  if status == 409 and not existing:
+    return 3
   return 0 if status == 200 else 4
 
 

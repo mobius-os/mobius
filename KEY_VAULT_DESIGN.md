@@ -15,14 +15,24 @@ Status: draft for review.
 - **The owner and the owner's top-level agents may read a key**, unless its
   Agents switch is off; only the owner's own input turns that switch on.
   Delegated helpers may borrow a key but never read its value. Every read and
-  change is logged with its real caller and without its value. An agent that
-  replaces a value, changes how a key is sent or adds sites notifies the
-  owner. A save names only what it changes: on an existing key, an omitted
-  `inject` or `grants` keeps the current one, so replacing a value never
-  touches who may use it. An agent's edit always carries the revision it was
+  change is logged, without its value, under the caller it was made for. An
+  agent that replaces a value, changes how a key is sent or adds sites
+  through the server notifies the owner. A save names only what it changes:
+  on an existing key, an omitted `inject` or `grants` keeps the current one,
+  so replacing a value never touches who may use it. An agent's edit always carries the revision it was
   made from, so it cannot undo a change the owner made meanwhile.
 - **Apps never receive a value**, in their browser frame, service or job. They
   borrow keys through a handshake (below).
+- **The server's HTTP routes enforce who may do what.** The owner-only gate
+  (approving requests, letting an app use a key or reach more sites, turning
+  the Agents switch on), the owner's notification of an agent's change, and
+  logging each read and change under its real caller hold only for calls
+  through the server, which attests the caller from its token. The vault
+  trusts any local process that can open its socket, and such a process can
+  act as any caller: owner tools such as `store-key.py`, and anything with
+  the server user's rights or sudo, which agents have. The peer check under
+  *Future work* keeps sandboxed app code off the socket; agents stay
+  trusted.
 - Everything runs in one container, and the agent keeps sudo.
 
 ## The handshake
@@ -53,8 +63,9 @@ Status: draft for review.
    (the vault lists the key's `key_origin`): allowing would send this app's
    requests with that app's value, which that app can still change. Approve
    and deny both carry the request's ticket, so a card left open never answers
-   a newer request under the same id; the vault itself also refuses an
-   approval from anyone but the owner.
+   a newer request under the same id. The vault also refuses an approval not
+   made as `owner`, which keeps the server's agent callers out, but not a
+   local process on its socket (see *Contract*).
 3. **Borrow.** The app sends an ordinary request to
    `/api/keys/use/<key>/<host>/<path>?<query>` with its app token. The server
    attests the caller as `app:<id>`, drops Möbius credentials and routing
@@ -102,11 +113,13 @@ before the borrow starts.
   still answers success. At start the vault refuses a master key that opens none
   of the stored keys, and sets aside a damaged `requests.json` rather than
   stopping.
-  Every change names its caller; an app caller cannot change keys. There is no TCP port. The vault trusts any
-  process that can open the socket: the server, which states the attested
-  caller in `X-Vault-Caller` (`app:<id>`, `agent:<chat>`, `owner`,
-  `platform:<purpose>`), and owner tools running as the same user, such as
-  `store-key.py`. The peer check under *Future work* narrows that.
+  Every change names its caller; an app caller cannot change keys. There is
+  no TCP port. The vault trusts any process that can open the socket: the
+  server, which states the attested caller in `X-Vault-Caller` (`app:<id>`,
+  `agent:<chat>`, `owner`, `platform:<purpose>`), and every other local
+  process that can open it, which can state any caller and meets none of the
+  routes' rules (see *Contract*). The peer check under *Future work* narrows
+  that.
 - `backend/app/key_vault.py`: supervises the vault (task `key-vault`,
   restarts with backoff; the vault exits when the server is no longer its
   parent; output in `/data/logs/key-vault.log`) and is the server's client.
@@ -114,7 +127,10 @@ before the borrow starts.
   the use relay.
 - `frontend/src/components/SettingsView/KeysSection.jsx`: Settings › Keys.
 - `backend/scripts/store-key.py`: a sealed-card consumer that saves an
-  owner-provided key straight into the vault.
+  owner-provided key straight into the vault, as `owner` and without
+  notifying anyone. It creates a new key only if the name is free and
+  replaces an existing one only with `--replace`, and then only the revision
+  it read.
 
 The vault's use path keeps its earlier rules: HTTPS on port 443 only, one
 injection slot (a header with an optional prefix, or a query parameter),

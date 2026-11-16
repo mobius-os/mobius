@@ -129,11 +129,11 @@ Keys live encrypted in the key vault (`/data/.vault/`), managed in
 **Settings › Keys**. The owner and the owner's top-level agents may read a key
 unless its Agents switch is off, and only the owner's own input turns that
 switch back on; delegated helpers may borrow a key but never read its value.
-Every read and change is logged with its real caller and without its value,
-and an agent replacing a value, changing how a key is sent or adding sites
-notifies the owner. Only the owner's own input can let an app use a key or
-widen where it may send it; each app's sites belong to its own grant, so
-approving one app never widens another. Apps never receive a value: an app
+Every read and change is logged without its value, under the caller it was
+made for, and an agent replacing a value, changing how a key is sent or adding
+sites through the server notifies the owner. Only the owner's own input can
+let an app use a key or widen where it may send it; each app's sites belong to
+its own grant, so approving one app never widens another. Apps never receive a value: an app
 asks once for a key by name, the owner approves it, and the app then sends
 requests through `/api/keys/use/…`, where the server identifies the app from
 its own platform-issued token and the vault adds the key on the way out
@@ -142,12 +142,19 @@ headers dropped and paths a site could decode differently refused;
 public-address pinning; no redirects; echoed values redacted in their common
 encodings, also when streamed, with a fixed hold-back so timing never hints at
 the key; only an allowlist of the site's answer headers, sandboxed). The vault
-listens only on a mode-0600 socket and trusts any process that can open it
-(the server, and owner tools running as the same user); it applies a change
-only once it is safely on disk. Approving requests and changing grants is
-refused to apps, shared-browser guests (including app tokens a guest's session
-minted, which cannot borrow or ask either) and delegated helpers; approving a
-request is refused to agents as well, by the server and by the vault itself.
+listens only on a mode-0600 socket and applies a change only once it is
+safely on disk. Approving requests and changing grants is refused to apps,
+shared-browser guests (including app tokens a guest's session minted, which
+cannot borrow or ask either) and delegated helpers; approving a request is
+refused to agents as well. These rules, the owner's notifications and the
+caller a change is logged under are enforced by the server's HTTP routes,
+which attest each caller from its token. The vault trusts any local process
+that can open its socket, and such a process can act as any caller: owner
+tools such as `store-key.py` (which replaces an existing key only when given
+`--replace`, and notifies no one), and anything running with the server
+user's rights or sudo, which agents have. A planned peer check
+(KEY_VAULT_DESIGN.md, *Future work*) keeps sandboxed app code off the socket;
+agents stay trusted.
 A key an app saves for itself gets a name scoped to that app, so it can never
 answer another app's request for a plain name, and a request card names the
 app that saved an existing key. Such a key obeys its grant's sites too,

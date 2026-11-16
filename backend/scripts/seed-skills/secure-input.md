@@ -66,7 +66,11 @@ instead of writing your own: `["python3",
 "/data/platform/backend/scripts/store-key.py", "NAME", "--site",
 "api.example.com:GET,POST:/v1/*"]` (add `--header NAME [--prefix TEXT]` or
 `--query NAME` when the service does not take `Authorization: Bearer`). The
-owner then sees and manages it in Settings › Keys.
+owner then sees and manages it in Settings › Keys. It never replaces a key
+that already has that name: it leaves that key as it was and exits with code
+3. Add `--replace` only when the owner asked to replace that key's value. It
+writes to the vault directly, so the owner gets no notification of the
+replacement: tell them yourself.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and
