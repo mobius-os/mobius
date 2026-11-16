@@ -1121,6 +1121,38 @@ def test_a_change_spanning_two_files_keeps_memory_equal_to_disk(vault, full_disk
   assert _as_reloaded(vault)
 
 
+def test_a_nested_change_is_audited_only_once_the_outer_change_is_saved(vault, full_disk):
+  """save_owned creates its key through put_key inside its own change: the
+  inner change's audit line must wait for the outer save, which fails here."""
+  full_disk.add("keys.json")
+  with pytest.raises(OSError):
+    vault.save_owned(WEATHER, "api.key", DUMMY)
+  assert [k["name"] for k in vault.list_keys()] == ["echo"]
+  assert [e for e in vault.usage(limit=None) if e["outcome"] == "added" and e["key"] != "echo"] == []
+  full_disk.clear()
+  saved = vault.save_owned(WEATHER, "api.key", DUMMY)
+  assert [e["outcome"] for e in vault.usage(key=saved["name"])] == ["added"]
+
+
+def test_a_saved_change_whose_audit_fails_still_reports_success(vault, monkeypatch, capsys):
+  """The store write is what makes a change take effect; an audit line that
+  fails afterwards is reported on stderr, never as a failed change."""
+  real = vault._append
+
+  def append(path, rotate_bytes, fields):
+    if path == vault.audit_path:
+      raise OSError(28, "No space left on device")
+    return real(path, rotate_bytes, fields)
+
+  monkeypatch.setattr(vault, "_append", append)
+  with _vault_socket(vault, None) as client:
+    answer = client.put("/keys/second", headers={"X-Vault-Caller": "owner"},
+                        json={"value": DUMMY, "inject": HEADER_SLOT})
+  assert answer.status_code == 200 and answer.json() == {"name": "second", "created": True}
+  assert [k["name"] for k in kv.Vault(vault.dir).list_keys()] == ["echo", "second"]
+  assert "saved, but could not audit 'added' on 'second' by 'owner'" in capsys.readouterr().err
+
+
 def test_a_failed_write_answers_a_json_error_over_the_socket(vault, full_disk):
   full_disk.add("keys.json")
   with _vault_socket(vault, None) as client:
@@ -1324,6 +1356,95 @@ def test_a_borrow_ends_at_its_deadline_however_steadily_the_site_trickles(vault,
   assert not answer.endswith(b"0\r\n\r\n")
   entry = vault.usage(key="echo")[0]
   assert entry["outcome"] == "failed" and "longer than 1 seconds" in entry["reason"]
+
+
+@pytest.mark.parametrize("trickle", ["header lines", "a chunk-size line"])
+def test_a_site_trickling_its_framing_is_cut_off_at_the_deadline(vault, monkeypatch, trickle):
+  """Each read on the site gets a fresh timeout, so only cutting the
+  connection at the deadline stops a site that sends its head, or a chunk's
+  size, a few bytes at a time."""
+  import time
+  monkeypatch.setattr(kv, "BORROW_DEADLINE_SECS", 1)
+
+  def reply(conn):
+    if trickle == "header lines":
+      conn.sendall(b"HTTP/1.1 200 OK\r\n")
+      for i in range(12):
+        conn.sendall(b"X-Slow-%d: y\r\n" % i)
+        time.sleep(0.3)
+      conn.sendall(b"Content-Length: 2\r\n\r\nok")
+    else:
+      conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+      for _ in range(12):
+        conn.sendall(b"0")
+        time.sleep(0.3)
+      conn.sendall(b"1\r\nx\r\n0\r\n\r\n")
+
+  started = time.monotonic()
+  with _raw_site(reply) as (connect, _), _vault_server(vault, connect) as path:
+    answer = _raw_exchange(path, _borrow())
+  assert time.monotonic() - started < 2.5
+  assert not answer.endswith(b"0\r\n\r\n")
+  if trickle == "header lines":
+    assert answer.startswith(b"HTTP/1.1 504")
+  entry = vault.usage(key="echo")[0]
+  assert entry["outcome"] == "failed" and "longer than 1 seconds" in entry["reason"]
+
+
+def test_a_caller_that_stops_reading_is_cut_off_and_frees_its_slot(vault, monkeypatch):
+  import time
+  monkeypatch.setattr(kv, "MAX_CONCURRENT_BORROWS", 1)
+  monkeypatch.setattr(kv, "CALLER_SEND_TIMEOUT_SECS", 1)
+
+  answered = []
+
+  def firehose(conn):
+    answered.append(conn)
+    if len(answered) > 1:
+      conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+      return
+    conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    piece = b"%x\r\n" % 65536 + b"x" * 65536 + b"\r\n"
+    for _ in range(300):
+      conn.sendall(piece)
+    conn.sendall(b"0\r\n\r\n")
+
+  with _raw_site(firehose) as (connect, _), _vault_server(vault, connect) as path:
+    with socket.socket(socket.AF_UNIX) as stalled:
+      stalled.connect(str(path))
+      stalled.sendall(_borrow())
+      assert stalled.recv(12) == b"HTTP/1.1 200"
+      time.sleep(2.5)  # reads nothing more; the deadline is still minutes away
+      after = _raw_exchange(path, _borrow(), timeout=30)
+  assert after.startswith(b"HTTP/1.1 200")
+  reasons = [entry.get("reason") for entry in vault.usage(key="echo")]
+  assert "The caller stopped reading the answer." in reasons
+
+
+def test_one_caller_beyond_its_own_cap_is_busy_while_others_still_borrow(vault, monkeypatch):
+  monkeypatch.setattr(kv, "MAX_BORROWS_PER_CALLER", 1)
+  release = threading.Event()
+
+  def hold(conn):
+    release.wait(10)
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+  with _raw_site(hold) as (connect, heads), _vault_server(vault, connect) as path:
+    first = []
+    holder = threading.Thread(target=lambda: first.append(_raw_exchange(path, _borrow())))
+    holder.start()
+    while not heads:
+      threading.Event().wait(0.02)
+    same_app = _raw_exchange(path, _borrow())
+    other = []
+    agent = threading.Thread(target=lambda: other.append(_raw_exchange(path, _borrow(caller="agent:chat-1"))))
+    agent.start()
+    agent.join(0.3)  # waits at the site (served one at a time) unless refused
+    release.set()
+    holder.join(10)
+    agent.join(10)
+  assert same_app.startswith(b"HTTP/1.1 429") and b"This caller already has 1" in same_app
+  assert first[0].startswith(b"HTTP/1.1 200") and other[0].startswith(b"HTTP/1.1 200")
 
 
 def test_borrows_beyond_the_cap_are_answered_busy(vault, monkeypatch):

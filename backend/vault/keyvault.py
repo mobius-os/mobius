@@ -96,6 +96,12 @@ BORROW_DEADLINE_SECS = 300
 # Borrows beyond this many at once are answered 429 instead of each holding a
 # thread and a buffered body.
 MAX_CONCURRENT_BORROWS = 32
+# One caller (an app, an agent's chat, the owner) beyond this many borrows at
+# once is answered 429 itself, so it cannot take every slot from the others.
+MAX_BORROWS_PER_CALLER = 8
+# A caller that takes this long to accept the next piece of an answer is cut
+# off, so one that stops reading cannot hold its slot until the deadline.
+CALLER_SEND_TIMEOUT_SECS = 60
 # Synthesizes IPv6 addresses for IPv4 hosts; the embedded IPv4 is the real
 # destination, so it must be public too.
 NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
@@ -779,6 +785,7 @@ class Vault:
     self.requests_path = data_dir / "requests.json"
     self._lock = threading.RLock()
     self._changing = False
+    self._audit_after_save: list[dict] | None = None  # a list while a change runs
     self._last_stamp_ms = 0
     self._prepare_folder()
     self._aead = AESGCM(self._load_master_key())
@@ -882,6 +889,11 @@ class Vault:
     goes to the caller, so retrying the change really saves it. A refusal
     raised by the body discards the whole change. A change made inside
     another joins it.
+
+    The body audits itself with ``_audit_change``; those lines are appended
+    only once the outermost change is saved, so a failed write never leaves a
+    line for a change that did not happen. A line that then fails to append
+    is reported on stderr: the change did take effect, and the caller hears so.
     """
     with self._lock:
       if self._changing:
@@ -891,6 +903,7 @@ class Vault:
       for attr, state in before.items():
         setattr(self, attr, copy.deepcopy(state))
       self._changing = True
+      self._audit_after_save = audit = []
       try:
         try:
           yield
@@ -911,6 +924,17 @@ class Vault:
             raise
       finally:
         self._changing = False
+        self._audit_after_save = None
+      for fields in audit:
+        try:
+          self._append(self.audit_path, AUDIT_ROTATE_BYTES, fields)
+        except OSError as exc:
+          print(f"key vault: saved, but could not audit {fields['outcome']!r} on {fields['key']!r} "
+                f"by {fields['caller']!r} ({type(exc).__name__})", file=sys.stderr, flush=True)
+
+  def _audit_change(self, key: str, caller: str, outcome: str, *, reason: str | None = None) -> None:
+    """Audit what the running ``_change`` does, once it is saved."""
+    self._audit_after_save.append(_audit_fields(key, caller, outcome, reason=reason))
 
   def _seal(self, name: str, value: str) -> dict:
     nonce = secrets.token_bytes(12)
@@ -1032,7 +1056,7 @@ class Vault:
       for rid in [rid for rid, item in self._requests.items()
                   if item["key"] == name and _sites_covered(app_grant(grants, item["app"]), item["sites"])]:
         del self._requests[rid]
-    self.log_event(name, actor, "added" if existing is None else "updated")
+      self._audit_change(name, actor, "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
 
   def _owned_name(self, origin: dict) -> str | None:
@@ -1096,7 +1120,7 @@ class Vault:
       if name is None:
         return None
       deleted = self._release_locked(name, app_id)
-    self.log_event(name, caller_text(("app", str(app_id))), "revoked" if deleted else "released")
+      self._audit_change(name, caller_text(("app", str(app_id))), "revoked" if deleted else "released")
     return {"name": name, "deleted": deleted}
 
   @staticmethod
@@ -1148,9 +1172,9 @@ class Vault:
       owned = [n for n, r in self._records.items()
                if (r.get("origin") or {}).get("app") == app_id and app_id in app_ids(r["grants"])]
       deleted = [name for name in owned if self._release_locked(name, app_id)]
-    for name in owned:
-      self.log_event(name, "platform", "revoked" if name in deleted else "released",
-                     reason=f"app:{app_id} data erased")
+      for name in owned:
+        self._audit_change(name, "platform", "revoked" if name in deleted else "released",
+                           reason=f"app:{app_id} data erased")
     return deleted
 
   def revoke_key(self, name: str, *, actor: str = "owner") -> bool:
@@ -1159,7 +1183,7 @@ class Vault:
       if self._records.pop(name, None) is None:
         return False
       self._stats.pop(name, None)
-    self.log_event(name, actor, "revoked")
+      self._audit_change(name, actor, "revoked")
     return True
 
   def reveal(self, name: str, caller: tuple[str, str]) -> str:
@@ -1244,7 +1268,7 @@ class Vault:
         "key": name, "reason": reason, "sites": sites, "inject": inject,
         "status": "pending", "created_at": _now(), "ticket": secrets.token_hex(8),
       }
-    self.log_event(name, f"app:{app_id}", "requested")
+      self._audit_change(name, f"app:{app_id}", "requested")
     if grant is not None:
       return {**answer, "sites_request": "pending", "created": True}
     return {"status": "pending", "key": name, "id": request_id, "created": True}
@@ -1312,7 +1336,7 @@ class Vault:
         put["value"] = body.get("value")
       result = self.put_key(name, put, actor=actor)
       self._requests.pop(request_id, None)
-    self.log_event(name, actor, f"granted app:{request['app']}")
+      self._audit_change(name, actor, f"granted app:{request['app']}")
     return {**result, "granted": request["app"]}
 
   def deny_request(self, request_id: str, body: dict | None = None, *, actor: str = "owner") -> dict:
@@ -1327,7 +1351,7 @@ class Vault:
         raise VaultError(409, "That request changed since it was shown; review it again.")
       request["status"] = "denied"
       request["answered_at"] = _now()
-    self.log_event(request["key"], actor, f"denied app:{request['app']}")
+      self._audit_change(request["key"], actor, f"denied app:{request['app']}")
     return {"denied": request_id}
 
   def forget_app(self, app_id: int, *, actor: str = "platform") -> dict:
@@ -1347,8 +1371,8 @@ class Vault:
       requests = [rid for rid, item in self._requests.items() if item["app"] == app_id]
       for rid in requests:
         del self._requests[rid]
-    for name in keys:
-      self.log_event(name, actor, f"revoked app:{app_id} (app purged)")
+      for name in keys:
+        self._audit_change(name, actor, f"revoked app:{app_id} (app purged)")
     return {"keys": keys, "deleted": deleted, "requests": len(requests)}
 
   def forget_request(self, request_id: str, *, actor: str = "owner") -> bool:
@@ -1356,7 +1380,7 @@ class Vault:
       request = self._requests.pop(request_id, None)
       if request is None:
         return False
-    self.log_event(request["key"], actor, f"forgot request app:{request['app']}")
+      self._audit_change(request["key"], actor, f"forgot request app:{request['app']}")
     return True
 
   # -- use -----------------------------------------------------------------
@@ -1436,11 +1460,8 @@ class Vault:
     self, key: str, caller: str, outcome: str,
     *, status: int | None = None, reason: str | None = None,
   ) -> None:
-    """A read, change, grant or request, kept apart from use traffic."""
-    self._append(self.audit_path, AUDIT_ROTATE_BYTES, {
-      "key": key, "caller": caller, "method": "-", "host": "-", "path": "-",
-      "outcome": outcome, "status": status, "reason": reason,
-    })
+    """A read or a refusal, kept apart from use traffic (changes use ``_audit_change``)."""
+    self._append(self.audit_path, AUDIT_ROTATE_BYTES, _audit_fields(key, caller, outcome, status=status, reason=reason))
 
   def usage(self, *, key: str | None = None, limit: int | None = 100) -> list[dict]:
     """Newest first, traffic and audit together."""
@@ -1462,6 +1483,12 @@ class Vault:
           entries.append(entry)
     entries.sort(key=lambda entry: str(entry.get("ts", "")), reverse=True)
     return entries if limit is None else entries[:max(1, min(limit, 500))]
+
+
+def _audit_fields(key: str, caller: str, outcome: str, *, status: int | None = None,
+                  reason: str | None = None) -> dict:
+  return {"key": key, "caller": caller, "method": "-", "host": "-", "path": "-",
+          "outcome": outcome, "status": status, "reason": reason}
 
 
 def _empty_stats() -> dict:
@@ -1545,12 +1572,79 @@ class FinalAnswer(http.client.HTTPResponse):
     raise http.client.HTTPException("The site sent too many interim answers.")
 
 
-def _time_left(deadline: float) -> float:
-  """The read timeout for the next wait on the site, within the borrow's deadline."""
-  left = deadline - time.monotonic()
-  if left <= 0:
-    raise VaultError(504, f"The site took longer than {BORROW_DEADLINE_SECS} seconds to answer.")
-  return min(UPSTREAM_TIMEOUT_SECS, left)
+class BorrowDeadline:
+  """When a borrow must end, enforced on the site's connection.
+
+  Each wait gets its own timeout (``time_left``), which alone would let a site
+  that trickles header or chunk-size lines keep a borrow, and a purge waiting
+  for it, open long past the deadline: ``watch`` shuts the site's connection
+  down when the deadline passes, and ``stop`` cancels that.
+  """
+
+  def __init__(self, started: float) -> None:
+    self.at = started + BORROW_DEADLINE_SECS
+    self._cut = threading.Event()
+    self._timer: threading.Timer | None = None
+
+  @property
+  def passed(self) -> bool:
+    return self._cut.is_set() or time.monotonic() >= self.at
+
+  def raise_if_passed(self) -> None:
+    if self.passed:
+      raise self._overrun()
+
+  def time_left(self, limit: float) -> float:
+    """The timeout for the next wait, at most ``limit``; 504 once the deadline passed."""
+    left = self.at - time.monotonic()
+    if self._cut.is_set() or left <= 0:
+      raise self._overrun()
+    return min(limit, left)
+
+  @staticmethod
+  def _overrun() -> VaultError:
+    return VaultError(504, f"The site took longer than {BORROW_DEADLINE_SECS} seconds to answer.")
+
+  def watch(self, sock: socket.socket) -> None:
+    def cut() -> None:
+      self._cut.set()
+      # The plain socket's shutdown: an SSL socket's own would drop its TLS
+      # state under the thread reading from it. Reads then end at once.
+      with contextlib.suppress(OSError):
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+    self._timer = threading.Timer(max(0.0, self.at - time.monotonic()), cut)
+    self._timer.daemon = True
+    self._timer.start()
+
+  def stop(self) -> None:
+    if self._timer is not None:
+      self._timer.cancel()
+
+
+class BorrowSlots:
+  """Borrows running at once: at most ``per_caller`` for one caller (``app:<id>``,
+  ``agent:<chat>``, ``owner``) and ``total`` in all; beyond either, 429."""
+
+  def __init__(self, total: int, per_caller: int) -> None:
+    self._lock = threading.Lock()
+    self._total = total
+    self._per_caller = per_caller
+    self._held: dict[str, int] = {}
+
+  def take(self, caller: str) -> None:
+    with self._lock:
+      if self._held.get(caller, 0) >= self._per_caller:
+        raise VaultError(429, f"This caller already has {self._per_caller} requests running through the key vault; try again shortly.")
+      if sum(self._held.values()) >= self._total:
+        raise VaultError(429, "The key vault is busy with other requests; try again shortly.")
+      self._held[caller] = self._held.get(caller, 0) + 1
+
+  def give_back(self, caller: str) -> None:
+    with self._lock:
+      self._held[caller] -= 1
+      if not self._held[caller]:
+        del self._held[caller]
 
 
 class VaultHandler(BaseHTTPRequestHandler):
@@ -1710,14 +1804,14 @@ class VaultHandler(BaseHTTPRequestHandler):
     method = self.command
     caller_label = "unknown"
     started = time.monotonic()
-    deadline = started + BORROW_DEADLINE_SECS
-    borrowing = self.server.borrows.acquire(blocking=False)
+    deadline = BorrowDeadline(started)
+    borrowing = False
     try:
       try:
         caller = parse_caller(self.headers.get("X-Vault-Caller"))
         caller_label = caller_text(caller)
-        if not borrowing:
-          raise VaultError(429, "The key vault is busy with other requests; try again shortly.")
+        self.server.borrows.take(caller_label)
+        borrowing = True
         if not HOST_RE.fullmatch(host) or host.startswith("*."):
           raise VaultError(400, "The destination must be a site name like api.example.com (HTTPS, port 443).")
         path = normalized_request_path(raw_path)
@@ -1737,10 +1831,11 @@ class VaultHandler(BaseHTTPRequestHandler):
         return
       self._relay(logged_name, caller_label, request, body, secret_echoes(value), started, deadline)
     finally:
+      deadline.stop()
       if borrowing:
-        self.server.borrows.release()
+        self.server.borrows.give_back(caller_label)
 
-  def _relay(self, name, caller_label, request: UpstreamRequest, body, echoes, started, deadline) -> None:
+  def _relay(self, name, caller_label, request: UpstreamRequest, body, echoes, started, deadline: BorrowDeadline) -> None:
     method, host, raw_path = request.method, request.host, request.target.split("?", 1)[0]
     connection = None
     try:
@@ -1773,7 +1868,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     finally:
       connection.close()
 
-  def _stream_answer(self, name, response, inflater: Inflater, echoes, record, sock, deadline) -> None:
+  def _stream_answer(self, name, response, inflater: Inflater, echoes, record, sock, deadline: BorrowDeadline) -> None:
     """Relay the site's answer as it arrives, recording how it ended.
 
     Server events and streamed model output reach the caller as the site sends
@@ -1789,6 +1884,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     """
     has_body = self.command != "HEAD" and response.status not in (204, 304) and response.status >= 200
     self._answer_started = True
+    self.connection.settimeout(CALLER_SEND_TIMEOUT_SECS)
     self.send_response(response.status)
     for header, header_value in inflater.headers:
       lowered = header.lower()
@@ -1808,26 +1904,32 @@ class VaultHandler(BaseHTTPRequestHandler):
 
     def send(data: bytes) -> None:
       if data:
-        self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
-        self.wfile.flush()
+        self.connection.settimeout(deadline.time_left(CALLER_SEND_TIMEOUT_SECS))
+        try:
+          self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+          self.wfile.flush()
+        except TimeoutError:
+          raise VaultError(504, "The caller stopped reading the answer.") from None
 
     try:
       # http.client closes the socket itself once a sized answer is complete.
       while not response.isclosed():
-        sock.settimeout(_time_left(deadline))
+        sock.settimeout(deadline.time_left(UPSTREAM_TIMEOUT_SECS))
         piece = response.read1(64 * 1024)
         if not piece:
           break
         send(redactor.feed(inflater.feed(piece)))
       if response.length:
         raise http.client.IncompleteRead(b"", response.length)
+      # A site cut off at the deadline reads as an answer that simply ended.
+      deadline.raise_if_passed()
       send(redactor.feed(inflater.finish()))
       send(redactor.finish())
     except VaultError as exc:
       record(exc.reason)
       return
     except (OSError, http.client.HTTPException) as exc:
-      late = time.monotonic() >= deadline
+      late = deadline.passed
       record(f"The answer took longer than {BORROW_DEADLINE_SECS} seconds" if late
              else f"The answer broke off ({type(exc).__name__})")
       return
@@ -1848,12 +1950,14 @@ class VaultHandler(BaseHTTPRequestHandler):
       raise VaultError(413, "The request body is too large.")
     return self.rfile.read(size)
 
-  def _open_upstream(self, request: UpstreamRequest, body: bytes | None, deadline: float):
+  def _open_upstream(self, request: UpstreamRequest, body: bytes | None, deadline: BorrowDeadline):
     """Send the request; return the open connection, its socket and the answer's head."""
     connection = None
     try:
-      connection = self.connect(request.host, _time_left(deadline))
+      connection = self.connect(request.host, deadline.time_left(UPSTREAM_TIMEOUT_SECS))
       connection.response_class = FinalAnswer
+      connection.connect()
+      deadline.watch(connection.sock)
       connection.putrequest(request.method, request.target, skip_host=True, skip_accept_encoding=True)
       for header, header_value in request.headers:
         connection.putheader(header, header_value)
@@ -1865,7 +1969,10 @@ class VaultHandler(BaseHTTPRequestHandler):
       sock = connection.sock
       # http.client never follows redirects; a 3xx goes back to the caller
       # without the key ever travelling to the new location.
-      return connection, sock, connection.getresponse()
+      response = connection.getresponse()
+      # A head cut off at the deadline may parse as a complete one.
+      deadline.raise_if_passed()
+      return connection, sock, response
     except VaultError:
       if connection is not None:
         connection.close()
@@ -1873,6 +1980,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     except (OSError, http.client.HTTPException) as exc:
       if connection is not None:
         connection.close()
+      deadline.raise_if_passed()
       raise VaultError(502, f"{request.host} could not be reached ({type(exc).__name__})")
     except ValueError:
       # Text HTTP can't carry (a non-ASCII query, a header value outside
@@ -1889,7 +1997,7 @@ class VaultServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 
   def __init__(self, *args, **kwargs) -> None:
     super().__init__(*args, **kwargs)
-    self.borrows = threading.BoundedSemaphore(MAX_CONCURRENT_BORROWS)
+    self.borrows = BorrowSlots(MAX_CONCURRENT_BORROWS, MAX_BORROWS_PER_CALLER)
 
 
 def hold_single_instance_lock(data_dir: Path) -> int:
