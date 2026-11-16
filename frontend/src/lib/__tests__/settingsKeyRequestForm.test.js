@@ -17,7 +17,9 @@ import assert from 'node:assert/strict'
 import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
-const { requestFormKey, savedByApp, replaceWarning } = await vite.ssrLoadModule('/src/components/SettingsView/KeysSection.jsx')
+const {
+  requestFormKey, savedByApp, replaceWarning, requestSubject, siteLine, shownRequests, distinctAppNames,
+} = await vite.ssrLoadModule('/src/components/SettingsView/KeysSection.jsx')
 after(() => vite.close())
 
 const request = ticket => ({ id: '5-weather_api', app: 5, key: 'weather_api', status: 'pending', ticket })
@@ -57,4 +59,39 @@ test('replacing an app-saved key warns that the app loses access', () => {
   const warning = replaceWarning(appSaved, names)
   assert.match(warning, /^Weather saved this key\./)
   assert.match(warning, /Weather stops using it/)
+})
+
+// A key another app saved for itself is that app's credential: the card must
+// never call it the owner's, or Allow would quietly sign one app's requests
+// with another app's account.
+const ask = { id: '8-openweather', app: 8, key: 'openweather', status: 'pending', ticket: 't' }
+
+test("a key another app saved is named as that app's, not the owner's", () => {
+  const subject = requestSubject({ ...ask, key_exists: true, key_origin: { app: 10, name: 'openweather' } }, { 10: 'Modelapp' })
+  assert.deepEqual(subject, { kind: 'saved-by-other', savedBy: 'Modelapp' })
+})
+
+test("an existing key with no app origin is the owner's", () => {
+  assert.deepEqual(requestSubject({ ...ask, key_exists: true, key_origin: null }, {}), { kind: 'yours' })
+})
+
+test('a new key and an ask for more sites keep their own wording', () => {
+  assert.deepEqual(requestSubject({ ...ask, key_exists: false }, {}), { kind: 'new' })
+  assert.deepEqual(requestSubject({ ...ask, key_exists: true, granted: true }, {}), { kind: 'more-sites' })
+})
+
+test('a site open on every path says so instead of hiding the wildcard', () => {
+  assert.equal(siteLine({ host: 'api.example.com', paths: ['/*'], methods: ['GET'] }), 'api.example.com (all paths) · GET')
+  assert.equal(siteLine({ host: 'api.example.com', paths: ['/v1/*'], methods: ['GET', 'POST'] }), 'api.example.com /v1/* · GET, POST')
+})
+
+test('a burst of requests shows three until the owner asks for the rest', () => {
+  const pending = Array.from({ length: 10 }, (_, i) => ({ ...ask, id: `8-k${i}` }))
+  assert.equal(shownRequests(pending, false).length, 3)
+  assert.equal(shownRequests(pending, true).length, 10)
+})
+
+test('apps sharing a name are told apart by their number', () => {
+  const apps = distinctAppNames([{ id: 3, name: 'Notes' }, { id: 4, name: 'Notes' }, { id: 5, name: 'Weather' }])
+  assert.deepEqual(apps.map(app => app.name), ['Notes (#3)', 'Notes (#4)', 'Weather'])
 })

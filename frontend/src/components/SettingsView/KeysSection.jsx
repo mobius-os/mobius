@@ -24,12 +24,22 @@ function useKeys() {
 /** Installed apps by numeric id: names and slugs can be reused. */
 function useAppNames() {
   const appsQuery = appQueries.list.useQuery()
-  const apps = (appsQuery.data || [])
+  const apps = distinctAppNames((appsQuery.data || [])
     .filter(app => Number.isInteger(app.id))
     // The installation, because a removed app's id can be reused.
-    .map(app => ({ id: app.id, name: app.name || app.slug || `App ${app.id}`, installation: app.storage_generation }))
+    .map(app => ({ id: app.id, name: app.name || app.slug || `App ${app.id}`, installation: app.storage_generation })))
     .sort((a, b) => a.name.localeCompare(b.name))
   return { apps, names: Object.fromEntries(apps.map(app => [app.id, app.name])) }
+}
+
+/**
+ * Two installed apps may share a name; a grant or request must still say
+ * which one it is, so a shared name carries the app's number.
+ */
+export function distinctAppNames(apps) {
+  const counts = {}
+  for (const app of apps) counts[app.name] = (counts[app.name] || 0) + 1
+  return apps.map(app => (counts[app.name] > 1 ? { ...app, name: `${app.name} (#${app.id})` } : app))
 }
 
 function appLabel(names, id) {
@@ -67,8 +77,9 @@ function usersLine(key, names) {
   return users.length ? users.join(', ') : 'Not shared yet'
 }
 
-function siteLine(site) {
-  const paths = site.paths.length === 1 && site.paths[0] === '/*' ? '' : ` ${site.paths.join(', ')}`
+/** A site as the owner reads it; `*` matches across `/`, so `/*` is every path. */
+export function siteLine(site) {
+  const paths = site.paths.includes('/*') ? ' (all paths)' : ` ${site.paths.join(', ')}`
   return `${site.host}${paths} · ${site.methods.join(', ')}`
 }
 
@@ -97,6 +108,7 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
   const keysQuery = useKeys()
   const { names } = useAppNames()
   const queryClient = useQueryClient()
+  const [showAll, setShowAll] = useState(false)
   const data = keysQuery.data
   const keys = data?.keys || []
   const pending = (data?.requests || []).filter(request => request.status === 'pending')
@@ -130,7 +142,7 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
         <Alert color="warning" variant="soft" description="The key vault isn't running. It starts with Möbius; a restart usually brings it back." />
       )}
 
-      {pending.map(request => (
+      {shownRequests(pending, showAll).map(request => (
         <KeyRequest
           key={requestFormKey(request)}
           request={request}
@@ -138,6 +150,11 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
           onAnswered={refresh}
         />
       ))}
+      {!showAll && pending.length > REQUESTS_SHOWN && (
+        <button type="button" className="settings-keys__link settings-keys__more" onClick={() => setShowAll(true)}>
+          Show {pending.length - REQUESTS_SHOWN} more {pending.length - REQUESTS_SHOWN === 1 ? 'request' : 'requests'}
+        </button>
+      )}
 
       {data?.available && (
         <div className="settings-list">
@@ -174,8 +191,31 @@ export function requestFormKey(request) {
   return `${request.id}:${request.ticket}`
 }
 
+// A burst of asks (one app may hold ten) must not bury the keys themselves.
+const REQUESTS_SHOWN = 3
+
+export function shownRequests(pending, showAll) {
+  return showAll ? pending : pending.slice(0, REQUESTS_SHOWN)
+}
+
+/** The installed app's name (told apart from a namesake) before the name it asked under. */
 function requestAppName(request, names) {
-  return request.app_name || appLabel(names, request.app)
+  return names[request.app] || request.app_name || `App ${request.app}`
+}
+
+/**
+ * What the request asks for, as the card words it. A key another app saved
+ * for itself is not the owner's: allowing it would send this app's requests
+ * with that app's value, which that app can still change.
+ */
+export function requestSubject(request, names) {
+  if (request.granted) return { kind: 'more-sites' }
+  if (!request.key_exists) return { kind: 'new' }
+  const origin = request.key_origin
+  if (origin && origin.app !== request.app) {
+    return { kind: 'saved-by-other', savedBy: appLabel(names, origin.app) }
+  }
+  return { kind: 'yours' }
 }
 
 function KeyRequest({ request, names, onAnswered }) {
@@ -184,6 +224,7 @@ function KeyRequest({ request, names, onAnswered }) {
   const [error, setError] = useState('')
   const isNew = !request.key_exists
   const appName = requestAppName(request, names)
+  const subject = requestSubject(request, names)
   // The app only proposes: Allow grants exactly what this card shows, and the
   // sites go to this app's own grant, never to another app or the agents.
   const inject = request.inject || BEARER
@@ -197,7 +238,7 @@ function KeyRequest({ request, names, onAnswered }) {
         ? await api.keys.approve(request.id, {
           ticket: request.ticket, sites, ...(isNew ? { value, inject } : {}),
         })
-        : await api.keys.deny(request.id)
+        : await api.keys.deny(request.id, request.ticket)
       await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Deny')
       onAnswered()
     } catch (err) {
@@ -210,10 +251,20 @@ function KeyRequest({ request, names, onAnswered }) {
     <div className="settings-keys__request" role="group" aria-label={`${appName} asks to use ${request.key}`}>
       <p className="settings-keys__request-lead">
         <strong>{appName}</strong>{' '}
-        {request.granted
-          ? <>wants to use your key <strong>{request.key}</strong> on more sites</>
-          : <>wants to use {isNew ? 'a new key' : 'your key'} <strong>{request.key}</strong></>}
+        {subject.kind === 'more-sites' && <>wants to use your key <strong>{request.key}</strong> on more sites</>}
+        {subject.kind === 'new' && <>wants to use a new key <strong>{request.key}</strong></>}
+        {subject.kind === 'yours' && <>wants to use your key <strong>{request.key}</strong></>}
+        {subject.kind === 'saved-by-other' && (
+          <>wants to use <strong>{request.key}</strong>, a key <strong>{subject.savedBy}</strong> saved</>
+        )}
       </p>
+      {subject.kind === 'saved-by-other' && (
+        <Alert
+          color="warning"
+          variant="soft"
+          description={`This isn't your key: ${subject.savedBy} saved it for itself and can change its value. Allowing sends ${appName}'s requests with ${subject.savedBy}'s key. To use your own, deny this and add a key of yours instead.`}
+        />
+      )}
       {request.reason && <p className="settings-keys__muted">{request.reason}</p>}
       <p className="settings-keys__muted">
         {sites.length > 0

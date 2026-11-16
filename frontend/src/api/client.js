@@ -1160,7 +1160,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-    deny: (requestId) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/deny`, { method: 'POST' }),
+    // The ticket names the exact request the owner saw, so a card left open
+    // never answers a newer request that reuses the same id.
+    deny: (requestId, ticket) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ticket ? { ticket } : {}),
+    }),
     forgetRequest: (requestId) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}`, { method: 'DELETE' }),
     usage: (name, limit = 8) => apiFetch(
       `/keys/usage?${new URLSearchParams({ key: name, limit: String(limit) })}`,
