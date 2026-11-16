@@ -7,7 +7,8 @@ provider and presents its agent key. For each request the gateway:
 2. removes every *provider-run* tool the app did not declare, wherever the
    request carries it (Codex nests tools inside ``input``), and server-side
    execution fields such as hosted MCP servers. Tools the agent runs itself
-   are left alone: they run in the room, which limits them;
+   are left alone: they run in the room, which limits them. Content the
+   provider would fetch from a web address is refused;
 3. adds the owner's real login to the outgoing request only, and streams the
    reply back with a fixed short list of headers.
 
@@ -151,6 +152,39 @@ def _filter_tools(tools: Any, web: bool, removed: list[str]) -> Any:
   return kept
 
 
+def _fetched_url(block: dict) -> Any:
+  """The web address a content block asks the provider to fetch, if any."""
+  kind = block.get("type")
+  if kind in ("image", "document"):  # Anthropic
+    source = block.get("source")
+    return (
+      source.get("url")
+      if isinstance(source, dict) and source.get("type") == "url"
+      else None
+    )
+  url = block.get({"input_image": "image_url", "input_file": "file_url"}.get(kind, ""))
+  url = url.get("url") if isinstance(url, dict) else url
+  return None if isinstance(url, str) and url.startswith("data:") else url
+
+
+def _refuse_provider_fetches(body: dict) -> None:
+  """Content the provider would fetch itself would carry app data to any
+  address, outside the room. Inline content is kept; pages are opened through
+  Möbius (``open_page``), where each one is recorded."""
+  stack: list[Any] = [body]
+  while stack:
+    value = stack.pop()
+    if isinstance(value, dict):
+      if _fetched_url(value):
+        raise GatewayError(
+          403,
+          "Content from a web address must be inline; the provider does not fetch it.",
+        )
+      stack.extend(value.values())
+    elif isinstance(value, list):
+      stack.extend(value)
+
+
 def prepare_body(key: AgentKey, raw: bytes) -> tuple[bytes, list[str]]:
   """The request body with undeclared provider-run tools removed."""
   try:
@@ -159,6 +193,7 @@ def prepare_body(key: AgentKey, raw: bytes) -> tuple[bytes, list[str]]:
     raise GatewayError(400, "The request body is not JSON.") from exc
   if not isinstance(body, dict):
     raise GatewayError(400, "The request body must be a JSON object.")
+  _refuse_provider_fetches(body)
   web = _web(key)
   removed = [field for field in _SERVER_FIELDS if body.pop(field, None) is not None]
   if "tools" in body:
@@ -233,7 +268,8 @@ async def upstream(
     if tokens.get("account_id"):
       out["chatgpt-account-id"] = tokens["account_id"]
     return Upstream(
-      f"https://chatgpt.com/backend-api/codex/{path.removeprefix('v1/')}{suffix}", out
+      f"https://chatgpt.com/backend-api/codex/{path.removeprefix('v1/')}{suffix}",
+      out,
     )
   if (
     isinstance(auth, dict) and auth.get("OPENAI_API_KEY") and path not in WEB_ENDPOINTS

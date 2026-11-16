@@ -277,7 +277,10 @@ def test_the_gateway_drops_provider_run_tools_the_app_did_not_declare():
     input=[
       {
         "type": "message",
-        "additional_tools": [{"type": "image_generation"}, {"type": "function"}],
+        "additional_tools": [
+          {"type": "image_generation"},
+          {"type": "function"},
+        ],
       }
     ],
   )
@@ -305,6 +308,37 @@ def test_a_request_forcing_a_removed_tool_fails_instead_of_inventing_a_result():
   with pytest.raises(agent_gateway.GatewayError) as refused:
     agent_gateway.prepare_body(_key("viewer"), raw)
   assert refused.value.status == 403
+
+
+_REMOTE = "https://elsewhere.test/FAKE-APP-DATA"
+
+
+@pytest.mark.parametrize(
+  "block",
+  [
+    {"type": "image", "source": {"type": "url", "url": _REMOTE}},
+    {"type": "document", "source": {"type": "url", "url": _REMOTE}},
+    {"type": "input_image", "image_url": _REMOTE},
+    {"type": "input_image", "image_url": {"url": _REMOTE}},
+    {"type": "input_file", "file_url": _REMOTE},
+  ],
+)
+def test_the_provider_never_fetches_a_web_address_for_the_agent(block):
+  nested = {"type": "tool_result", "content": [block]}
+  for key in (_key("viewer"), _key("viewer", "web")):
+    with pytest.raises(agent_gateway.GatewayError) as refused:
+      agent_gateway.prepare_body(key, _body(messages=[{"content": [nested]}]))
+    assert refused.value.status == 403
+
+
+def test_inline_content_still_reaches_the_model():
+  inline = [
+    {"type": "image", "source": {"type": "base64", "data": "AAAA"}},
+    {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+    {"type": "tool_use", "input": {"url": _REMOTE, "image_url": _REMOTE}},
+  ]
+  body, _ = agent_gateway.prepare_body(_key("viewer"), _body(input=inline))
+  assert json.loads(body)["input"] == inline
 
 
 @pytest.mark.parametrize(
@@ -408,6 +442,39 @@ def test_the_confined_prompt_states_the_rooms_reach(tmp_path):
   )
 
 
+# TCP Fast Open connects inside a send call, which neither Landlock's connect
+# rule nor the connect() guard sees; every send call that can carry it must be
+# refused. Then every socket other than TCP over IPv4/IPv6 and route netlink.
+_FAST_OPEN_PROBE = (
+  "import ctypes\n"
+  "FO, libc = 0x20000000, ctypes.CDLL(None, use_errno=True)\n"
+  "class Iov(ctypes.Structure):\n"
+  "  _fields_ = [('base', ctypes.c_char_p), ('len', ctypes.c_size_t)]\n"
+  "class Msg(ctypes.Structure):\n"
+  "  _fields_ = [('name', ctypes.c_void_p), ('namelen', ctypes.c_uint),\n"
+  "    ('iov', ctypes.POINTER(Iov)), ('iovlen', ctypes.c_size_t),\n"
+  "    ('control', ctypes.c_void_p), ('controllen', ctypes.c_size_t),\n"
+  "    ('flags', ctypes.c_int), ('sent', ctypes.c_uint)]\n"
+  "def mmsg():\n"
+  "  s = socket.socket()\n"
+  "  addr = ctypes.create_string_buffer(\n"
+  "    b'\\x02\\x00' + int(q).to_bytes(2, 'big') + bytes([127, 0, 0, 1]) + bytes(8))\n"
+  "  iov = Iov(b'FAKE-APP-DATA', 13)\n"
+  "  msg = Msg(ctypes.addressof(addr), 16, ctypes.pointer(iov), 1, None, 0, 0, 0)\n"
+  "  if libc.sendmmsg(s.fileno(), ctypes.byref(msg), 1, FO) < 0:\n"
+  "    raise OSError(ctypes.get_errno(), 'sendmmsg')\n"
+  "print(attempt(lambda: socket.socket().sendto(b'x', FO, ('127.0.0.1', int(q)))),\n"
+  "      attempt(lambda: socket.socket().sendmsg([b'x'], [], FO, ('127.0.0.1', int(q)))),\n"
+  "      attempt(mmsg),\n"
+  "      attempt(lambda: socket.socket(socket.AF_UNIX)),\n"
+  "      attempt(lambda: socket.socket(socket.AF_NETLINK, socket.SOCK_RAW, 4)),\n"
+  "      attempt(lambda: socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)),\n"
+  "      attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_SEQPACKET)),\n"
+  "      attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_STREAM, 132)),\n"
+  "      attempt(lambda: socket.socket(socket.AF_NETLINK, socket.SOCK_RAW).close()))\n"
+)
+
+
 def _room_available():
   return subprocess.run(
     [sys.executable, str(FENCE), "--check"], capture_output=True, text=True
@@ -440,7 +507,7 @@ def test_the_room_refuses_everything_outside_its_walls_and_door(tmp_path):
     "      attempt(lambda: socket.create_connection(('127.0.0.1', int(p)), 2).close()),\n"
     "      attempt(lambda: socket.create_connection(('127.0.0.1', int(q)), 2).close()),\n"
     "      attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM)),\n"
-    "      os.environ.get('LEAKED', 'absent'))\n"
+    "      os.environ.get('LEAKED', 'absent'))\n" + _FAST_OPEN_PROBE
   )
   result = subprocess.run(
     [
@@ -468,10 +535,14 @@ def test_the_room_refuses_everything_outside_its_walls_and_door(tmp_path):
     timeout=60,
     env={"PATH": "/usr/bin:/bin", "LEAKED": "yes"},
   )
+  other.setblocking(False)
+  with pytest.raises(BlockingIOError):  # nothing reached the closed address
+    other.accept()
   door.close()
   other.close()
   assert result.returncode == 0, result.stderr
-  assert result.stdout.split() == [
+  first, second = result.stdout.splitlines()
+  assert first.split() == [
     "ok",
     "PermissionError",
     "PermissionError",
@@ -480,6 +551,7 @@ def test_the_room_refuses_everything_outside_its_walls_and_door(tmp_path):
     "PermissionError",
     "absent",
   ]
+  assert second.split() == ["PermissionError"] * 8 + ["ok"], second
 
 
 # --- control tools -------------------------------------------------------------
@@ -794,25 +866,25 @@ async def test_only_runs_whose_grant_changed_are_stopped(owner_token, db, monkey
 
 @contextmanager
 def running_writer(chat_id, tmp_path, storage_dir=None):
-  home = tmp_path / 'home'
+  home = tmp_path / "home"
   home.mkdir()
-  data = storage_dir or tmp_path / 'data'
+  data = storage_dir or tmp_path / "data"
   data.mkdir(parents=True, exist_ok=True)
-  after = data / 'after-change.txt'
+  after = data / "after-change.txt"
   code = 'import sys,pathlib; print("ready",flush=True); sys.stdin.readline(); pathlib.Path(sys.argv[1]).write_text("write-after-change")'
   proc = subprocess.Popen(
     [
       sys.executable,
-      '-I',
+      "-I",
       str(agent_roles.FENCE_SCRIPT),
-      '--home',
+      "--home",
       str(home),
-      '--rw',
+      "--rw",
       str(data),
-      '--',
+      "--",
       sys.executable,
-      '-I',
-      '-c',
+      "-I",
+      "-c",
       code,
       str(after),
     ],
@@ -839,7 +911,7 @@ def running_writer(chat_id, tmp_path, storage_dir=None):
   handle.chat_id = chat_id
   registry.register(handle)
   try:
-    assert proc.stdout.readline().strip() == 'ready'
+    assert proc.stdout.readline().strip() == "ready"
     yield proc, after
   finally:
     registry.unregister(chat_id, RunnerKind.CODEX_SDK)
@@ -853,33 +925,33 @@ def test_applying_a_narrower_role_stops_a_running_agent(
 ):
   from tests.test_app_apply import _source, _apply
 
-  source = _source('review-narrow-running')
-  manifest = json.loads((source / 'mobius.json').read_text())
-  manifest['agent_role'] = _role('editor')
-  (source / 'mobius.json').write_text(json.dumps(manifest))
-  owner = {'Authorization': f'Bearer {owner_token}'}
+  source = _source("review-narrow-running")
+  manifest = json.loads((source / "mobius.json").read_text())
+  manifest["agent_role"] = _role("editor")
+  (source / "mobius.json").write_text(json.dumps(manifest))
+  owner = {"Authorization": f"Bearer {owner_token}"}
   initial = _apply(client, owner, source)
   assert initial.status_code == 200, initial.text
-  app = db.get(models.App, int(initial.json()['app']['id']))
-  _key, run = _agent_key_for(db, app, role='editor')
+  app = db.get(models.App, int(initial.json()["app"]["id"]))
+  _key, run = _agent_key_for(db, app, role="editor")
   from app.config import get_settings
 
-  storage_dir = Path(get_settings().data_dir) / 'apps' / str(app.id)
+  storage_dir = Path(get_settings().data_dir) / "apps" / str(app.id)
   with running_writer(run.chat_id, tmp_path, storage_dir) as (proc, after):
-    manifest['agent_role'] = _role('viewer')
-    (source / 'mobius.json').write_text(json.dumps(manifest))
+    manifest["agent_role"] = _role("viewer")
+    (source / "mobius.json").write_text(json.dumps(manifest))
     changed = _apply(client, owner, source)
     assert changed.status_code == 200, changed.text
     if proc.poll() is None:
-      proc.communicate('continue\n', timeout=10)
-    assert not after.exists(), 'Editor process kept writing after the app became Viewer'
+      proc.communicate("continue\n", timeout=10)
+    assert not after.exists(), "Editor process kept writing after the app became Viewer"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-  'provider_id,provider_name', [('claude', 'Claude Code'), ('codex', 'Codex')]
+  "provider_id,provider_name", [("claude", "Claude Code"), ("codex", "Codex")]
 )
-@pytest.mark.parametrize('role', ['viewer', 'editor', 'explorer'])
+@pytest.mark.parametrize("role", ["viewer", "editor", "explorer"])
 async def test_a_confined_agent_never_inherits_history_from_another_grant(
   db, owner_token, monkeypatch, provider_id, provider_name, role
 ):
@@ -888,18 +960,18 @@ async def test_a_confined_agent_never_inherits_history_from_another_grant(
   from app.chat_writer import StartTurn, get_writer
   from tests.test_retired_provider_sessions import _Provider
 
-  app = _local_app(db, 'review-history', _role('owner'))
-  chat_id = f'review-history-{provider_id}-{role}'
-  marker = 'FAKE-SECRET-FROM-UNRELATED-APP'
+  app = _local_app(db, "review-history", _role("owner"))
+  chat_id = f"review-history-{provider_id}-{role}"
+  marker = "FAKE-SECRET-FROM-UNRELATED-APP"
   chat = chat_writer.create_chat(
     id=chat_id,
-    title='former owner chat',
+    title="former owner chat",
     created_by_app_id=app.id,
     provider=provider_id,
-    session_id='old-owner-session',
+    session_id="old-owner-session",
     messages=[
-      {'role': 'user', 'content': 'Read another app.', 'ts': 1},
-      {'role': 'assistant', 'content': marker, 'ts': 2},
+      {"role": "user", "content": "Read another app.", "ts": 1},
+      {"role": "assistant", "content": marker, "ts": 2},
     ],
   )
   db.add(chat)
@@ -910,58 +982,62 @@ async def test_a_confined_agent_never_inherits_history_from_another_grant(
 
   async def fake_runner(**kwargs):
     calls.append(kwargs)
-    return {'session_id': 'fresh-restricted-session', 'cost_usd': 0.0, 'error': None}
+    return {
+      "session_id": "fresh-restricted-session",
+      "cost_usd": 0.0,
+      "error": None,
+    }
 
   async def fake_complete(**kwargs):
-    kwargs['db'].close()
+    kwargs["db"].close()
     return chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
 
   async def fake_metrics(**kwargs):
     return None
 
   monkeypatch.setattr(
-    chat_module, 'registered_provider', lambda _: _Provider(provider_name)
+    chat_module, "registered_provider", lambda _: _Provider(provider_name)
   )
-  monkeypatch.setattr(chat_module, '_complete_turn', fake_complete)
-  monkeypatch.setattr(chat_module, '_record_run_metrics', fake_metrics)
-  if provider_id == 'claude':
+  monkeypatch.setattr(chat_module, "_complete_turn", fake_complete)
+  monkeypatch.setattr(chat_module, "_record_run_metrics", fake_metrics)
+  if provider_id == "claude":
     from app import claude_sdk_runner
 
-    monkeypatch.setattr(claude_sdk_runner, 'run_claude_sdk_turn', fake_runner)
-    monkeypatch.setattr(claude_sdk_runner, '_resumable', lambda *a, **kw: False)
+    monkeypatch.setattr(claude_sdk_runner, "run_claude_sdk_turn", fake_runner)
+    monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *a, **kw: False)
   else:
     from app import codex_sdk_runner
 
-    monkeypatch.setattr(codex_sdk_runner, 'run_codex_sdk_turn', fake_runner)
-  run_id = f'run-{chat_id}'
+    monkeypatch.setattr(codex_sdk_runner, "run_codex_sdk_turn", fake_runner)
+  run_id = f"run-{chat_id}"
   get_writer().submit(
     StartTurn(
       chat_id=chat_id,
       run_token=run_id,
       user_msg={
-        'role': 'user',
-        'content': 'Continue safely.',
-        'ts': 3,
-        'cid': f'm-{chat_id}',
+        "role": "user",
+        "content": "Continue safely.",
+        "ts": 3,
+        "cid": f"m-{chat_id}",
       },
-      title_source='Continue safely.',
+      title_source="Continue safely.",
       default_provider=provider_id,
     )
   ).result(timeout=5)
   create_broadcast(chat_id)
   try:
     await chat_module._run_chat_impl(
-      messages=[schemas.ChatMessage(role='user', content='Continue safely.')],
+      messages=[schemas.ChatMessage(role="user", content="Continue safely.")],
       chat_id=chat_id,
-      session_id='old-owner-session',
+      session_id="old-owner-session",
       provider_id=provider_id,
       run_token=run_id,
     )
   finally:
     remove_broadcast(chat_id)
   assert len(calls) == 1
-  prompt = str(calls[0].get('user_message', '')) + str(
-    calls[0].get('resumed_context', '')
+  prompt = str(calls[0].get("user_message", "")) + str(
+    calls[0].get("resumed_context", "")
   )
   assert marker not in prompt
 
@@ -1162,6 +1238,58 @@ def test_a_confined_agent_starts_helpers_only_under_its_own_chat_on_a_room_runti
   assert client.post("/api/delegations", json=body, headers=bearer).status_code == 422
 
 
+def test_a_confined_agent_with_helpers_starts_one_under_its_own_chat(
+  client, owner_token, db, monkeypatch
+):
+  from app.chat_writer import StartTurn, get_writer
+
+  starts = []
+
+  async def fake_start(**kwargs):
+    starts.append(kwargs)
+    return True
+
+  monkeypatch.setattr("app.routes.delegations.start_programmatic_chat_turn", fake_start)
+  app = _local_app(db, "notes", _role("viewer", "helpers"))
+  key, run = _agent_key_for(db, app, role="viewer", tools=("helpers",))
+  chat_id, run_id = run.chat_id, run.id
+  db.delete(run)  # the writer's own turn takes the run's place
+  db.commit()
+  get_writer().submit(
+    StartTurn(
+      chat_id=chat_id,
+      run_token=run_id,
+      user_msg={"role": "user", "content": "Look.", "ts": 1},
+    )
+  ).result(timeout=5)
+  body = {
+    "parent_chat_id": chat_id,
+    "task_key": "look",
+    "prompt": "Look.",
+    "provider": "claude",
+  }
+  bearer = {"Authorization": f"Bearer {key}"}
+  created = client.post("/api/delegations", json=body, headers=bearer)
+  assert created.status_code == 201, created.text
+  row = db.query(models.Delegation).filter_by(parent_chat_id=chat_id).one()
+  child = db.get(models.Chat, row.child_chat_id)
+  assert (row.app_id, child.created_by_app_id, len(starts)) == (app.id, app.id, 1)
+  owner = db.query(models.Owner).first()
+  ordinary = auth.create_app_token(
+    app.id,
+    owner.username,
+    owner.token_epoch,
+    app_nonce=app.token_nonce,
+    consent=app_consent.session_id(app),
+  )
+  refused = client.post(
+    "/api/delegations",
+    json=body | {"app_id": app.id, "task_key": "other"},
+    headers={"Authorization": f"Bearer {ordinary}"},
+  )
+  assert refused.status_code in (401, 403), refused.text
+
+
 def _helper_of(db, app, parent_chat_id, provider="claude"):
   import hashlib
 
@@ -1241,7 +1369,12 @@ async def test_a_helper_of_a_confined_app_runs_in_a_room_with_the_same_role(
     StartTurn(
       chat_id=child.id,
       run_token=run_id,
-      user_msg={"role": "user", "content": "Look.", "ts": 1, "cid": f"m-{child.id}"},
+      user_msg={
+        "role": "user",
+        "content": "Look.",
+        "ts": 1,
+        "cid": f"m-{child.id}",
+      },
       title_source="Look.",
       default_provider="claude",
     )
@@ -1290,10 +1423,69 @@ def test_screenshot_shows_only_the_apps_own_page_and_counts_as_private_data(
   assert route.read_text() == "/apps/notes/"
   plain, _ = _agent_key_for(db, app, role="viewer")
   refused = client.post(
-    "/api/app-agent/screenshot", json={}, headers={"Authorization": f"Bearer {plain}"}
+    "/api/app-agent/screenshot",
+    json={},
+    headers={"Authorization": f"Bearer {plain}"},
   )
   assert refused.status_code in (401, 403)
   assert (
     _agent_row(_role("explorer", "screenshot", "web"))["tools"][1]["warning"] is True
   )
   assert seen[0].pixelRatio == 3.75
+
+
+def test_a_confined_approval_claims_only_inside_its_own_app_and_chat(
+  client, owner_token, db
+):
+  from app.agent_work_claims import claim_work
+  from app.broadcast import create_broadcast, remove_broadcast
+  from app.chat_writer import StartTurn, get_writer
+  from app.chat_event_sink import (
+    ChatEventSink,
+    register_active_sink,
+    unregister_active_sink,
+  )
+
+  app = _local_app(db, "notes", _role("viewer", "ask"))
+  key, run = _agent_key_for(db, app, role="viewer", tools=("ask",))
+  chat_id, run_id = run.chat_id, run.id
+  db.delete(run)  # the writer's own turn takes the run's place
+  db.commit()
+  get_writer().submit(
+    StartTurn(
+      chat_id=chat_id,
+      run_token=run_id,
+      user_msg={"role": "user", "content": "Check.", "ts": 1},
+    )
+  ).result(timeout=5)
+  sink = ChatEventSink(create_broadcast(chat_id), chat_id, run_token=run_id)
+  register_active_sink(chat_id, sink)
+  merge = "github:mobius-os/mobius:pr:1:abc:merge"
+  try:
+    saved = client.post(
+      f"/api/chats/{chat_id}/approval",
+      json={
+        "question": "Merge it?",
+        "work_key": merge,
+        "options": [
+          {"label": "Yes", "description": "Merge."},
+          {"label": "Not now", "description": "Leave it."},
+        ],
+      },
+      headers={"Authorization": f"Bearer {key}"},
+    )
+  finally:
+    unregister_active_sink(chat_id, sink)
+    remove_broadcast(chat_id)
+  assert saved.status_code == 200, saved.text
+  assert saved.json()["state"] == "waiting_for_owner"
+  owner = db.query(models.Owner).first()
+  other = claim_work(
+    db,
+    owner_id=owner.id,
+    chat_id="owner-chat",
+    run_id="owner-run",
+    work_key=merge,
+    summary="Merge the PR",
+  )
+  assert other["owner_chat_id"] == "owner-chat"

@@ -795,7 +795,8 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
 - **The room.** A Viewer, Editor or Explorer agent runs whole in a room built
   before it starts: Landlock walls (system folders read-only, the app's storage
   directory read-only or writable by role with ordinary files only, nothing
-  else), a seccomp connect guard that admits only the Möbius API address, and
+  else), a seccomp connect guard that admits only the Möbius API address (only
+  TCP sockets, plus route netlink to list interfaces; no TCP Fast Open), and
   `no_new_privs`, with signals scoped to the room. Each grant (role and tools)
   has its own durable home in the chat's folder, holding its sessions, and
   Möbius never writes into it: what it hands the runtime sits in a read-only
@@ -813,14 +814,16 @@ shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
   provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
   tools the app did not declare (including any tool the provider would run in
   its own container) and hosted MCP servers, refuses a request that forces a
-  removed tool, and adds the owner's login outside the room.
+  removed tool or asks the provider to fetch content from a web address, and
+  adds the owner's login outside the room.
 - **Tools.** An agent's own tools (shell, file edits, planning) always work,
   inside its room. `tools` adds Möbius tools that reach beyond it. `web` is
   provider-hosted search through the gateway plus `open_page` through the
   guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
   activity. `notify` is `notify_owner`. `ask` is `request_question` and
   `request_approval` for the run's own chat (a confined key is an agent run of
-  that chat; Codex ends the turn through the owner-card hook inside the room).
+  that chat; an approval's work claim is namespaced to the app and chat; Codex
+  ends the turn through the owner-card hook inside the room).
   `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
   page outside the room, with a sign-in bound to the run. That capture browser
   is signed in as the owner, so the app's page could navigate it; the popup's

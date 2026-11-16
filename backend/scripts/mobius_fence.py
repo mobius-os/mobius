@@ -21,8 +21,8 @@ inherits it and can only narrow it further:
   only to an exact ``--door`` address. Landlock alone matches ports, not
   hosts, so a supervisor *outside* the room checks each connect() and performs
   it itself on the program's own socket: the checked address is the one used.
-  Unix sockets, UDP, io_uring and TCP Fast Open (ways around the doors) are
-  refused. If the supervisor dies, every connect() fails.
+  Only TCP sockets (and route netlink, to list interfaces) can be made;
+  io_uring and TCP Fast Open (ways around the doors) are refused. If the supervisor dies, every connect() fails.
 
 The environment is an allow-list: a few basics plus the ``--keep-env`` names.
 Exit status 125 means the room could not be built and the program never ran.
@@ -312,7 +312,7 @@ def _apply_seccomp() -> int:
   if lib is None:
     raise RoomUnavailable("libseccomp is not installed")
   resolve = lambda name: lib.seccomp_syscall_resolve_name(name.encode())  # noqa: E731
-  deny, eq, masked_eq = 0x00050000 | errno.EPERM, 4, 7
+  deny, ne, eq, gt, masked_eq = 0x00050000 | errno.EPERM, 1, 4, 6, 7
   ctx = lib.seccomp_init(0x7FFF0000)
 
   def rule(name: str, *conds: _ArgCmp) -> None:
@@ -320,11 +320,23 @@ def _apply_seccomp() -> int:
     if lib.seccomp_rule_add_array(ctx, deny, resolve(name), len(conds), arr) != 0:
       raise RoomUnavailable(f"seccomp rule {name} failed")
 
-  rule("socket", _ArgCmp(0, eq, socket.AF_UNIX, 0))
+  # socket() is an allow-list: TCP over IPv4/IPv6, plus route netlink (local
+  # and read-only here), which programs use to list network interfaces. One
+  # rule cannot compare an argument twice, so it is written as refusals of the
+  # rest; anything above the highest allowed value, stray high bits included,
+  # is refused.
+  families = {socket.AF_INET, socket.AF_INET6, socket.AF_NETLINK}
+  rule("socket", _ArgCmp(0, gt, max(families), 0))
+  for family in set(range(max(families))) - families:
+    rule("socket", _ArgCmp(0, eq, family, 0))
+  rule("socket", _ArgCmp(0, eq, socket.AF_NETLINK, 0), _ArgCmp(2, ne, 0, 0))
   for family in (socket.AF_INET, socket.AF_INET6):
-    rule(
-      "socket", _ArgCmp(0, eq, family, 0), _ArgCmp(1, masked_eq, 0xF, socket.SOCK_DGRAM)
-    )
+    ip = _ArgCmp(0, eq, family, 0)
+    for kind in set(range(16)) - {socket.SOCK_STREAM}:  # the type, minus flags
+      rule("socket", ip, _ArgCmp(1, masked_eq, 0xF, kind))
+    rule("socket", ip, _ArgCmp(2, gt, socket.IPPROTO_TCP, 0))
+    for protocol in range(1, socket.IPPROTO_TCP):
+      rule("socket", ip, _ArgCmp(2, eq, protocol, 0))
   for name in (
     "ptrace",
     "process_vm_readv",
@@ -334,7 +346,7 @@ def _apply_seccomp() -> int:
     "io_uring_register",
   ):
     rule(name)
-  for name, arg in (("sendto", 3), ("sendmsg", 2)):
+  for name, arg in (("sendto", 3), ("sendmsg", 2), ("sendmmsg", 3)):
     rule(name, _ArgCmp(arg, masked_eq, _MSG_FASTOPEN, _MSG_FASTOPEN))
   if lib.seccomp_load(ctx) != 0:
     raise RoomUnavailable("seccomp_load failed")
@@ -453,7 +465,10 @@ def run_in_room(
       os.chdir(os.path.realpath(cwd) if cwd else home)
       os.execvpe(command[0], command, room_environment(home, tmp, list(keep_env)))
     except (RoomUnavailable, OSError) as exc:
-      print(f"mobius-fence: refused to run, room unavailable: {exc}", file=sys.stderr)
+      print(
+        f"mobius-fence: refused to run, room unavailable: {exc}",
+        file=sys.stderr,
+      )
     os._exit(EXIT_ROOM_UNAVAILABLE)
   child_end.close()
   try:
