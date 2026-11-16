@@ -78,7 +78,10 @@ borrow the app started has been answered, even one whose caller gave up: the
 vault knows the app only by its id, so a borrow still on its way could
 otherwise use the grant of an app that reuses the id. A borrow whose answer
 never came back keeps the app until the server restarts, which ends the vault
-process and anything it was still doing.
+process and anything it was still doing; one that failed before it was sent
+releases the app at once. A header the relay cannot carry (a name that is not
+an HTTP token, a value that is not printable ASCII) is refused with 400
+before the borrow starts.
 
 ## Where it lives
 

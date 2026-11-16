@@ -146,6 +146,11 @@ async def vault_use(
   (``close_use``). The vault answers refusals itself (``X-Vault-Denied``), so
   any response is returned unchanged; only an unreachable or silent vault
   raises.
+
+  Once sending has begun, every failure is ``VaultTimeout`` or
+  ``VaultUnavailable`` (``may_have_reached_vault`` unless it never
+  connected); anything else was raised before a byte left, such as a header
+  value httpx cannot encode. ``borrow`` relies on this.
   """
   client = httpx.AsyncClient(
     transport=httpx.AsyncHTTPTransport(uds=str(vault_socket())),
@@ -159,6 +164,10 @@ async def vault_use(
     # rules refuse encoded slashes and dot segments that normalising here
     # would hide.
     request.url = request.url.copy_with(raw_path=target.encode("ascii"))
+  except BaseException:
+    await client.aclose()
+    raise
+  try:
     return await client.send(request, stream=True), client
   except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
     await client.aclose()
@@ -167,7 +176,7 @@ async def vault_use(
     await client.aclose()
     # The vault itself answers at once; a timeout here is the site being slow.
     raise VaultTimeout("The site took too long to answer through the key vault.") from exc
-  except (httpx.TransportError, OSError) as exc:
+  except Exception as exc:
     await client.aclose()
     # The request may already be with the vault, which acts on it whether or
     # not anyone is still waiting for the answer.
@@ -415,11 +424,12 @@ async def for_live_app(app_id: int, expected_nonce: str | None = None):
 _borrows_in_flight: dict[int, int] = {}
 
 
-def _vault_has_answered(error: BaseException | None) -> bool:
-  """Whether a finished relay leaves nothing the vault could still act on."""
-  if error is None:
+def _may_still_be_with_vault(error: BaseException) -> bool:
+  """Whether a relay that failed with ``error`` may have left its request
+  with the vault: only a failure after sending began (``vault_use``) does."""
+  if isinstance(error, VaultTimeout):
     return True
-  return isinstance(error, VaultUnavailable) and not error.may_have_reached_vault
+  return isinstance(error, VaultUnavailable) and error.may_have_reached_vault
 
 
 async def borrow(
@@ -442,19 +452,22 @@ async def borrow(
   may have reached the vault, the vault could still act on it, so the borrow
   stays out for the rest of this process. The vault process ends with the
   server, and a new one cannot start until it has, so the next process starts
-  with no such request left.
+  with no such request left. Any failure before the request was sent
+  releases the borrow at once.
   """
   if not installation:
     raise AppGone(app_id)
   app_id = int(app_id)
   async with for_live_app(app_id, installation):
     _borrows_in_flight[app_id] = _borrows_in_flight.get(app_id, 0) + 1
-  answered = False
+  # Stays out only when the relay was itself cancelled or may still be with
+  # the vault.
+  released = False
 
   def after_cancel(task: asyncio.Future) -> None:
-    nonlocal answered
+    nonlocal released
     error = None if task.cancelled() else task.exception()
-    answered = not task.cancelled() and _vault_has_answered(error)
+    released = not task.cancelled() and not (error is not None and _may_still_be_with_vault(error))
     if error is not None:
       settled.log_abandoned_failure(task, "Key borrow")
     elif not task.cancelled():
@@ -466,16 +479,19 @@ async def borrow(
       vault_use(method, target, caller=caller, headers=headers, body=body),
       what="Key borrow", abandoned=after_cancel,
     )
-  except VaultUnavailable as exc:
-    answered = _vault_has_answered(exc)
+  except asyncio.CancelledError:
+    # ``after_cancel`` has judged the relay that ran on without its caller.
+    raise
+  except BaseException as exc:
+    released = not _may_still_be_with_vault(exc)
     raise
   else:
     # The vault has authorized and answered; what remains is the site's body
     # streaming through, which the caller reads and closes (``close_use``).
-    answered = True
+    released = True
     return answer
   finally:
-    if answered:
+    if released:
       left = _borrows_in_flight.pop(app_id) - 1
       if left:
         _borrows_in_flight[app_id] = left

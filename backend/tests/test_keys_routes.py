@@ -1205,6 +1205,65 @@ def test_a_borrow_the_vault_may_still_act_on_keeps_the_app_unpurged(
   assert allowed is purge_allowed
 
 
+def test_a_header_the_relay_cannot_carry_is_a_bad_request_and_never_pins_the_app(
+  client, auth, db, vault, monkeypatch,
+):
+  """A raw UTF-8 header value passes the HTTP server but cannot be sent on to
+  the vault. It is refused before the borrow starts, so the app is not held
+  back from a purge by a request that never left the server."""
+  import asyncio
+  from fastapi import HTTPException
+  from app import fs_locks
+  from app.routes import keys as keys_routes
+  monkeypatch.setattr(key_vault, "_borrows_in_flight", {})
+  vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
+                           "grants": {"apps": [], "agents": False, "sites": [SITE]}})
+  app = _app(db, "visitor")
+  path = b"/api/keys/use/shared/api.example.com/v1/x"
+  for header in [(b"x-a", "café".encode()), (b"x-a", b"one\x00two"), (b"x\xc3\xa9", b"1")]:
+    with pytest.raises(HTTPException) as refused:
+      asyncio.run(keys_routes.use_key("shared", "api.example.com", "v1/x",
+                                      _use_request(path, headers=[header]),
+                                      principal=_app_principal(db, app)))
+    assert refused.value.status_code == 400, header
+    assert key_vault._borrows_in_flight == {}
+
+  async def purge():
+    async with fs_locks.app_storage_lock(app.id):
+      await key_vault.forget_app(app.id)
+  asyncio.run(purge())
+  # A header the relay drops anyway is never a reason to refuse.
+  monkeypatch.setattr(key_vault, "_borrows_in_flight", {})
+  live = _app(db, "browser")
+  vault.put_key("shared", {"inject": ASK["inject"], "grants": {
+    "apps": [{"id": live.id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
+  sent = asyncio.run(keys_routes.use_key(
+    "shared", "api.example.com", "v1/x",
+    _use_request(path, headers=[(b"referer", "https://example.com/café".encode())]),
+    principal=_app_principal(db, live),
+  ))
+  assert sent.status_code == 200
+  assert key_vault._borrows_in_flight == {}
+
+
+def test_a_borrow_that_fails_before_reaching_the_vault_releases_the_app(
+  client, auth, db, monkeypatch,
+):
+  """Only a relay that may have left its request with the vault keeps the app
+  from a purge. Any failure before the request was written releases it, even
+  one the relay did not anticipate."""
+  import asyncio
+  monkeypatch.setattr(key_vault, "_borrows_in_flight", {})
+  app = _app(db, "leaving")
+  with pytest.raises(UnicodeEncodeError):
+    asyncio.run(key_vault.borrow(
+      app.id, app.token_nonce, "GET", "/use/shared/api.example.com/v1/x",
+      caller=f"app:{app.id}", headers=[("X-A", "café")], body=None,
+    ))
+  assert key_vault._borrows_in_flight == {}
+  key_vault.refuse_purge_while_borrowing(app.id)
+
+
 def test_approving_one_apps_sites_never_widens_another_app_or_the_agents(client, auth, db, vault):
   """K lets A use api.example.com; B asks for K on another site. Allow gives
   B exactly the sites the owner's answer carries, and A and the agents gain

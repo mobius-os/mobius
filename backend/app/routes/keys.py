@@ -19,6 +19,7 @@ and relays.
 from __future__ import annotations
 
 import contextlib
+import re
 from urllib.parse import quote, urlencode, urljoin
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
@@ -66,6 +67,8 @@ _RELAYED_RESPONSE_HEADERS = frozenset({
 # read them all.
 _RELAYED_RESPONSE_PREFIXES = ("ratelimit", "x-ratelimit-", "x-vault-")
 _SHARED_BROWSER_REFUSAL = "Shared browser access cannot use keys."
+# An HTTP header name (RFC 9110 token).
+_HEADER_NAME = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
 
 @contextlib.contextmanager
@@ -338,12 +341,8 @@ async def use_key(
   if any(not 0x21 <= byte <= 0x7E for byte in rest + query):
     raise HTTPException(400, "Percent-encode spaces and non-ASCII characters in the path and query.")
   target = "/use/" + rest.decode("ascii") + ("?" + query.decode("ascii") if query else "")
+  headers = _relayed_request_headers(request)
   body = await _bounded_body(request)
-  headers = [
-    (k, v) for k, v in request.headers.items()
-    if k.lower() not in _DROPPED_REQUEST_HEADERS
-    and not k.lower().startswith(("x-vault-", "x-forwarded-", "x-mobius-", "sec-"))
-  ]
   # The vault knows apps by their reusable id. An app's borrow is checked once
   # its body has arrived, for the installation its token names, and the app
   # cannot be purged (freeing the id) while the vault could still act on it.
@@ -391,6 +390,33 @@ async def use_key(
       await key_vault.close_use(answer)
 
   return StreamingResponse(pieces(), status_code=upstream.status_code, headers=response_headers)
+
+
+def _relayed_request_headers(request: Request) -> list[tuple[str, str]]:
+  """The caller's headers that travel on to the site, refused (400) when
+  one cannot be carried there.
+
+  The relay to the vault encodes header text as ASCII, and the vault refuses
+  a value spanning lines, so a name must be an HTTP token and a value
+  printable ASCII (tabs allowed), as the destination's path and query must
+  be. Refused here, before a borrow starts, such a request is a caller's
+  mistake, never a failed relay. Dropped headers (a browser's ``Referer``)
+  never count.
+  """
+  headers = []
+  for raw_name, raw_value in request.headers.raw:
+    name = raw_name.decode("latin-1")
+    lowered = name.lower()
+    if lowered in _DROPPED_REQUEST_HEADERS or lowered.startswith(("x-vault-", "x-forwarded-", "x-mobius-", "sec-")):
+      continue
+    if not _HEADER_NAME.fullmatch(raw_name):
+      raise HTTPException(400, "A header name has characters HTTP can't carry.")
+    if any(not (0x20 <= byte <= 0x7E or byte == 0x09) for byte in raw_value):
+      raise HTTPException(
+        400, f"The {name} header has characters HTTP can't carry; send it as plain ASCII.",
+      )
+    headers.append((name, raw_value.decode("ascii")))
+  return headers
 
 
 async def _bounded_body(request: Request) -> bytes:
