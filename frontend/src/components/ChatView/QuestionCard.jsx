@@ -39,6 +39,7 @@ import {
 } from './restartCard.js'
 import { questionActionCompleted } from './questionOpen.js'
 import { KEY_ALLOW } from './keyRequestCardState.js'
+import { EARLY_ANSWER_HINT } from '../SettingsView/useKeyAnswerGuard.js'
 import KeyRequestDetails, { KeyPasteField } from './KeyRequestDetails.jsx'
 
 
@@ -709,6 +710,9 @@ export default function QuestionCard({
           )}
           {submitHint && (
             <div className="qcard__submit-hint" id={submitHintId}>{submitHint}</div>
+          )}
+          {keyCard?.guard.early && !answered && (
+            <div className="qcard__submit-hint" role="status">{EARLY_ANSWER_HINT}</div>
           )}
           <button
             type="button"

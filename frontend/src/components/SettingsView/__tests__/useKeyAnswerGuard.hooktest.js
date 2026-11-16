@@ -46,3 +46,16 @@ test('a keyboard answer counts only once the card has been quiet for a second', 
   assert.equal(guard().counts(keyClick(shown + 1_500)), true)
   hook.unmount()
 })
+
+test('an ignored click says why for a moment; a counted one says nothing', () => {
+  const { hook, shown, guard } = guardShownAt()
+  guard().onPressCapture(press(shown + 10))
+  assert.equal(guard().counts(click(shown + 20)), false)
+  assert.equal(guard().early, true)
+  hook.unmount()
+  const again = guardShownAt()
+  again.guard().onPressCapture(press(again.shown + 1_100))
+  assert.equal(again.guard().counts(click(again.shown + 1_150)), true)
+  assert.equal(again.guard().early, false)
+  again.hook.unmount()
+})

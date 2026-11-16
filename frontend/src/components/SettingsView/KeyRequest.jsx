@@ -2,7 +2,7 @@
 import { useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
-import useKeyAnswerGuard from './useKeyAnswerGuard.js'
+import useKeyAnswerGuard, { EARLY_ANSWER_HINT } from './useKeyAnswerGuard.js'
 import { requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
@@ -108,6 +108,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
         />
         <p className="settings-keys__muted">{words.pasteNote}</p>
         {error && <Alert color="danger" variant="soft" description={error} />}
+        {guard.early && <p className="settings-keys__muted" role="status">{EARLY_ANSWER_HINT}</p>}
         <div className="settings-keys__actions">
           <button
             type="button"
@@ -161,6 +162,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
         </details>
       )}
       {error && <Alert color="danger" variant="soft" description={error} />}
+      {guard.early && !readOnly && <p className="settings-keys__muted" role="status">{EARLY_ANSWER_HINT}</p>}
       {!readOnly && (
         <div className="settings-keys__actions">
           {denyButton}
