@@ -6,9 +6,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
-import useKeyAnswerGuard from '../useKeyAnswerGuard.js'
+import useKeyAnswerGuard, { earlyAnswerHint } from '../useKeyAnswerGuard.js'
 
-const answer = { pressed: {} }
+const answer = { pressed: {}, textContent: ' Not now ' }
 answer.contains = target => target === answer.pressed
 const press = at => ({ timeStamp: at, target: answer.pressed })
 const click = at => ({ timeStamp: at, detail: 1, currentTarget: answer })
@@ -47,15 +47,16 @@ test('a keyboard answer counts only once the card has been quiet for a second', 
   hook.unmount()
 })
 
-test('an ignored click says why for a moment; a counted one says nothing', () => {
+test('an ignored click says why and which button to tap again; a counted one says nothing', () => {
   const { hook, shown, guard } = guardShownAt()
   guard().onPressCapture(press(shown + 10))
   assert.equal(guard().counts(click(shown + 20)), false)
-  assert.equal(guard().early, true)
+  assert.equal(guard().early, 'Not now')
+  assert.equal(earlyAnswerHint(guard().early), 'Wait a second, then tap “Not now” again.')
   hook.unmount()
   const again = guardShownAt()
   again.guard().onPressCapture(press(again.shown + 1_100))
   assert.equal(again.guard().counts(click(again.shown + 1_150)), true)
-  assert.equal(again.guard().early, false)
+  assert.equal(again.guard().early, null)
   again.hook.unmount()
 })

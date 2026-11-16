@@ -13,10 +13,14 @@ import {
  * each press, so a card pushed or slid into place under the pointer waits
  * again; scrolling the card yourself does too. Callers key each card by
  * ``requestFormKey``, so a replacement request is a new card and waits again.
- * ``early`` is true for a moment after a click the guard ignored, so the card
- * can say why nothing happened (EARLY_ANSWER_HINT) instead of looking broken.
+ * ``early`` names the button of a click the guard just ignored (null
+ * otherwise), so for a moment the card can say why nothing happened and which
+ * button to tap (earlyAnswerHint) instead of looking broken.
  */
-export const EARLY_ANSWER_HINT = 'One moment, then tap again.'
+/** What the card says after an early tap on the button labelled ``label``. */
+export function earlyAnswerHint(label) {
+  return label ? `Wait a second, then tap “${label}” again.` : 'Wait a second, then tap again.'
+}
 const EARLY_HINT_MS = 2000
 
 export default function useKeyAnswerGuard({ enabled }) {
@@ -26,7 +30,7 @@ export default function useKeyAnswerGuard({ enabled }) {
   const state = useRef(keyAnswerShown(shownAt))
   const [activeAt, setActiveAt] = useState(() => keyAnswerActiveAt(keyAnswerShown(shownAt)))
   const [active, setActive] = useState(false)
-  const [early, setEarly] = useState(false)
+  const [early, setEarly] = useState(null)
   const earlyTimer = useRef(null)
 
   useEffect(() => () => clearTimeout(earlyTimer.current), [])
@@ -80,9 +84,9 @@ export default function useKeyAnswerGuard({ enabled }) {
       const counted = keyAnswerClickCounts(state.current, event)
       if (!counted) {
         // The wait itself is unchanged; the card only says why nothing happened.
-        setEarly(true)
+        setEarly(event.currentTarget?.textContent?.trim() || '')
         clearTimeout(earlyTimer.current)
-        earlyTimer.current = setTimeout(() => setEarly(false), EARLY_HINT_MS)
+        earlyTimer.current = setTimeout(() => setEarly(null), EARLY_HINT_MS)
       }
       return counted
     },
