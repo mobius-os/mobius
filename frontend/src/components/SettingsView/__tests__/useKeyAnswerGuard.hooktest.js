@@ -15,8 +15,10 @@ const click = at => ({ timeStamp: at, detail: 1, currentTarget: answer })
 const keyClick = at => ({ timeStamp: at, detail: 0, currentTarget: answer })
 
 function guardShownAt() {
-  const shown = performance.now()
   const hook = renderHook(() => useKeyAnswerGuard({ enabled: true }))
+  // Read after the first render: the card's wait starts during it, so a slow
+  // render can never push the real start past the times the tests use.
+  const shown = performance.now()
   return { hook, shown, guard: () => hook.result.current }
 }
 
