@@ -314,6 +314,18 @@ def test_stage_refuses_a_commit_without_the_coauthor_trailer(staging):
   assert response.json()["detail"]["code"] == "missing_coauthor"
 
 
+def test_stage_names_a_branch_that_shares_no_history_with_upstream(staging):
+  empty_tree = _git(staging["source"], "hash-object", "-t", "tree", "/dev/null")
+  staging["upstream"]["sha"] = _git(
+    staging["source"], "commit-tree", empty_tree, "-m", "Rewritten upstream",
+  )
+  response = staging["new_record"]()
+  assert response.status_code == 409
+  detail = response.json()["detail"]
+  assert detail["code"] == "unrelated_history"
+  assert "shares no history with upstream main" in detail["message"]
+
+
 def test_stage_refuses_uncommitted_review_work(staging):
   (staging["worktree"] / "greet.py").write_text(REVISED)
   response = staging["new_record"]()
