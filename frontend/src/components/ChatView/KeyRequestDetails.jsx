@@ -54,7 +54,6 @@ export function KeyPasteField({ card, disabled }) {
           autoComplete="new-password"
           spellCheck={false}
           disabled={disabled}
-          autoFocus
         />
       </span>
       <small className="qcard__key-muted">{words.pasteNote}</small>
