@@ -11,15 +11,22 @@ Receiver:  ``/inbox`` trusts nothing in the envelope. It resolves the claimed
            one of that handle's deployments, then asks that host (``/check``)
            to confirm the secret names a live invitation and to describe it.
            Only then does it store the invite and notify its owner.
-Accepting: the receiver redeems the secret with the sender's Möbius as
-           ``@handle`` and keeps the returned project-only access token, so
+Accepting: the receiver redeems the secret with the sender's Möbius
+           (``/redeem``) and keeps the returned project-only access token, so
            the Projects list can reopen the shared workspace later.
+
+A lost answer never proves the peer did nothing. Delivery is idempotent and
+retried; an invitation whose delivery can't be confirmed stays live for its
+owner to revoke. Redemption carries a key the receiver saved before trying,
+so a retry gets the same membership back instead of a spent invitation.
 """
 from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import re
+import secrets
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -31,10 +38,11 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from slowapi import Limiter
+from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import models
+from app import auth, models
 from app.config import get_settings
 from app.database import get_db
 from app.deps import (
@@ -45,6 +53,7 @@ from app.push import notify_owner_async
 from app.routes.identity import _HANDLE_RE, owner_handle, resolve_handle_hosts
 from app.routes.projects import (
   _INVITE_TTL, _invite_hash, _issue_project_invite, _live_project,
+  _project_response,
 )
 from app.timeutil import now_naive_utc
 
@@ -69,6 +78,10 @@ PEER_TIMEOUT_S = 12.0
 # federation_request refuses hosts that don't resolve or aren't public with an
 # HTTPException; to callers here that is one more unreachable peer.
 PEER_ERRORS = (FederationTransportError, ValueError, httpx.HTTPError, HTTPException)
+# Failures that prove a request never reached the peer, so it changed nothing
+# there. Any other failure, or a 5xx, may have come after the peer acted.
+NOT_SENT = (ValueError, HTTPException, httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+GONE = "This project invitation is invalid or has expired."
 
 # Deliveries arrive from other people's servers through this instance's own
 # proxy, so there is no per-sender address to key on. One bucket caps the
@@ -94,6 +107,11 @@ class HandleInviteSend(StrictBody):
 
 class InviteSecret(StrictBody):
   invite: str = Field(pattern=SECRET_RE)
+
+
+class HandleRedeem(StrictBody):
+  invite: str = Field(pattern=SECRET_RE)
+  redeem_key: str = Field(pattern=SECRET_RE)
 
 
 class InboxEnvelope(StrictBody):
@@ -225,6 +243,7 @@ def _row(db: Session, invite_id: str) -> models.ReceivedProjectInvite:
 @router.post("/send", dependencies=[Depends(reject_cross_site)])
 async def send_handle_invite(
   body: HandleInviteSend,
+  response: Response,
   owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
@@ -251,38 +270,41 @@ async def send_handle_invite(
   invite = _issue_project_invite(db, project, f"@{handle}", body.role)
   envelope = {"format": FORMAT, "from_handle": sender, "invite_url": invite["join_url"]}
   delivered_to = None
+  # A host that may hold the invitation although it never said so: one whose
+  # answer was lost, or one still being asked if this request is cancelled.
+  unconfirmed = None
+  in_flight = None
   refusal = None
   deadline = time.monotonic() + DELIVERY_BUDGET_S
   try:
     for host in hosts:
-      remaining = deadline - time.monotonic()
-      if remaining <= 1:
-        break
-      try:
-        response = await federation_request(
-          "POST", f"https://{host}/api/project-invites/inbox",
-          json=envelope, timeout_seconds=min(DELIVERY_TIMEOUT_S, remaining),
-        )
-      except PEER_ERRORS:
-        continue
-      if response.status_code == 200:
+      # /inbox stores each invitation once, so asking again after a lost
+      # answer is safe and settles whether the first delivery landed.
+      outcome = None
+      for _attempt in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 1:
+          break
+        in_flight = host
+        outcome, detail = await _deliver(host, envelope, min(DELIVERY_TIMEOUT_S, remaining))
+        in_flight = None
+        if outcome != "unknown":
+          break
+        unconfirmed = unconfirmed or host
+      if outcome == "delivered":
         delivered_to = host
         break
-      refusal = _peer_detail(response) or refusal
+      if outcome == "refused":
+        refusal = detail or refusal
   finally:
-    if delivered_to is None:
-      # Undelivered secrets never existed anywhere else; retire the row now
+    if delivered_to is None and unconfirmed is None and in_flight is None:
+      # The secret provably never reached anyone else; retire the row now
       # rather than leaving an unusable pending invitation in the panel.
       row = db.get(models.ProjectInvite, invite["id"])
       if row is not None:
         row.revoked_at = now_naive_utc()
         db.commit()
-  if delivered_to is None:
-    message = f"Couldn’t deliver the invitation to @{handle}’s Möbius."
-    if refusal:
-      message += f" It said: {refusal}"
-    raise HTTPException(502, message)
-  return {
+  result = {
     "id": invite["id"],
     "handle": handle,
     "invitee_name": invite["invitee_name"],
@@ -290,7 +312,37 @@ async def send_handle_invite(
     "created_at": invite["created_at"],
     "expires_at": invite["expires_at"],
     "delivered_to": delivered_to,
+    "delivery": "delivered" if delivered_to else "unconfirmed",
   }
+  if delivered_to is None and unconfirmed is not None:
+    # It may be waiting in their Projects. It stays among this project's
+    # pending invitations, where the owner can revoke it.
+    response.status_code = 202
+    return result
+  if delivered_to is None:
+    message = f"Couldn’t deliver the invitation to @{handle}’s Möbius."
+    if refusal:
+      message += f" It said: {refusal}"
+    raise HTTPException(502, message)
+  return result
+
+
+async def _deliver(host: str, envelope: dict[str, str], timeout: float) -> tuple[str, str | None]:
+  """POST one delivery: ``delivered``, ``refused``, ``not_sent`` or ``unknown``."""
+  try:
+    response = await federation_request(
+      "POST", f"https://{host}/api/project-invites/inbox",
+      json=envelope, timeout_seconds=timeout,
+    )
+  except NOT_SENT:
+    return "not_sent", None
+  except PEER_ERRORS:
+    return "unknown", None
+  if response.status_code == 200:
+    return "delivered", None
+  if response.status_code >= 500:
+    return "unknown", None
+  return "refused", _peer_detail(response)
 
 
 @router.post("/check")
@@ -319,7 +371,90 @@ def check_invite(
   }
 
 
+@router.post("/redeem", dependencies=[Depends(reject_cross_site)])
+def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
+  """Spend a handle invitation once; repeat the answer to whoever spent it.
+
+  The invitee's Möbius saves ``redeem_key`` before its first attempt and
+  sends the same key on every retry. The first redemption stores the key's
+  digest with the new membership in one transaction. If that answer is lost,
+  a retry with the same key gets a fresh pass for the same membership, with
+  the same expiry, rather than a 410 for an invitation it already spent.
+  """
+  now = now_naive_utc()
+  key_hash = _invite_hash(body.redeem_key)
+  db.commit()
+  db.execute(text("BEGIN IMMEDIATE"))
+  try:
+    invite = db.query(models.ProjectInvite).filter(
+      models.ProjectInvite.token_hash == _invite_hash(body.invite),
+      models.ProjectInvite.revoked_at.is_(None),
+    ).first()
+    # Only invitations sent by handle; link invitations keep /projects/invites/redeem.
+    if invite is None or not (invite.invitee_name or "").startswith("@"):
+      raise HTTPException(410, GONE)
+    project = _live_project(db, str(invite.project_id))
+    if invite.consumed_at is None:
+      if invite.expires_at <= now:
+        raise HTTPException(410, GONE)
+      member = models.ProjectMember(
+        id=str(uuid.uuid4()), project_id=project.id,
+        display_name=invite.invitee_name, role=invite.role,
+        token_epoch=0, joined_at=now,
+      )
+      db.add(member)
+      db.flush()
+      invite.consumed_at = now
+      invite.accepted_member_id = member.id
+      db.add(models.ProjectInviteRedemption(
+        invite_id=invite.id, key_hash=key_hash, member_id=member.id, redeemed_at=now,
+      ))
+      redeemed_at = now
+    else:
+      redemption = db.get(models.ProjectInviteRedemption, invite.id)
+      member = db.get(models.ProjectMember, redemption.member_id) if redemption else None
+      if (
+        redemption is None or member is None or member.revoked_at is not None
+        or not hmac.compare_digest(redemption.key_hash, key_hash)
+      ):
+        raise HTTPException(410, "This project invitation has already been used.")
+      redeemed_at = redemption.redeemed_at
+    expires_at = redeemed_at + auth.PROJECT_COLLABORATOR_TTL
+    if expires_at <= now:
+      raise HTTPException(410, GONE)
+    db.commit()
+  except BaseException:
+    db.rollback()
+    raise
+  owner = db.query(models.Owner).first()
+  if owner is None:
+    raise HTTPException(503, "The project owner is unavailable.")
+  token = auth.create_project_collaborator_token(
+    owner_username=owner.username, owner_epoch=owner.token_epoch,
+    project_id=str(project.id), member_id=member.id,
+    member_epoch=member.token_epoch, expires_delta=expires_at - now,
+  )
+  return {
+    "access_token": token,
+    "token_type": "bearer",
+    "project": _project_response(project, []),
+    "role": member.role,
+    "member_id": member.id,
+    "expires_at": expires_at.replace(tzinfo=UTC),
+  }
+
+
 # -- receiver --------------------------------------------------------------
+
+def _admit_sender(db: Session, handle: str, now: datetime) -> None:
+  pending = db.query(models.ReceivedProjectInvite).filter(
+    models.ReceivedProjectInvite.from_handle == handle,
+    models.ReceivedProjectInvite.status == "pending",
+    models.ReceivedProjectInvite.received_at > now - _INVITE_TTL,
+  ).count()
+  if pending >= MAX_PENDING_PER_SENDER:
+    raise HTTPException(429, f"@{handle} already has {pending} invitations waiting here.")
+
 
 @router.post("/inbox")
 @inbox_limiter.limit("30/minute")
@@ -339,13 +474,9 @@ async def receive_handle_invite(
   if db.query(models.ReceivedProjectInvite).filter_by(delivery_key=delivery_key).first():
     return {"status": "received"}
   now = now_naive_utc()
-  pending = db.query(models.ReceivedProjectInvite).filter(
-    models.ReceivedProjectInvite.from_handle == handle,
-    models.ReceivedProjectInvite.status == "pending",
-    models.ReceivedProjectInvite.received_at > now - _INVITE_TTL,
-  ).count()
-  if pending >= MAX_PENDING_PER_SENDER:
-    raise HTTPException(429, f"@{handle} already has {pending} invitations waiting here.")
+  # Cheap early refusal before any outbound call; the binding check is
+  # repeated at admission below.
+  _admit_sender(db, handle, now)
 
   hosts = await resolve_handle_hosts(db, owner.id, handle)
   if hosts is None:
@@ -385,12 +516,25 @@ async def receive_handle_invite(
     invite_secret_sealed=_seal(secret), received_at=now,
     expires_at=min(expires_at, now + _INVITE_TTL), status="pending",
   )
-  db.add(row)
+  # Deliveries that passed the early check together may all have been
+  # waiting on the directory and /check. Count and insert under the database
+  # write lock so the per-sender limit holds however they interleave. Nothing
+  # in this section awaits.
+  db.commit()
+  db.execute(text("BEGIN IMMEDIATE"))
   try:
+    if db.query(models.ReceivedProjectInvite).filter_by(delivery_key=delivery_key).first():
+      db.rollback()
+      return {"status": "received"}
+    _admit_sender(db, handle, now)
+    db.add(row)
     db.commit()
   except IntegrityError:
     db.rollback()
     return {"status": "received"}
+  except BaseException:
+    db.rollback()
+    raise
   await notify_owner_async(
     db, owner.id,
     title=f"@{handle} invited you to a project",
@@ -416,7 +560,7 @@ def list_received_invites(
 @router.post("/{invite_id}/accept", dependencies=[Depends(reject_cross_site)])
 async def accept_received_invite(
   invite_id: str,
-  owner: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
   row = _row(db, invite_id)
@@ -426,20 +570,36 @@ async def accept_received_invite(
   if row.status != "pending":
     raise HTTPException(409, "This invitation was declined.")
   secret = _unseal(row.invite_secret_sealed)
-  if row.expires_at <= now or secret is None:
+  # After an attempt that may have reached the sender, only the sender can
+  # say whether the invitation was spent, so local expiry no longer decides.
+  if secret is None or (row.expires_at <= now and row.redeem_key_sealed is None):
     raise HTTPException(410, "This invitation has expired. Ask for a new one.")
-  handle = await owner_handle(db, owner)
-  if handle is None:
-    raise HTTPException(409, "Choose your @handle in Möbius · You before accepting.")
-  display_name = f"@{handle}"
+  if row.redeem_key_sealed is None:
+    # One key per invitation, saved before the first attempt: a concurrent
+    # accept must reuse it, never replace it.
+    db.query(models.ReceivedProjectInvite).filter(
+      models.ReceivedProjectInvite.id == row.id,
+      models.ReceivedProjectInvite.redeem_key_sealed.is_(None),
+    ).update({
+      models.ReceivedProjectInvite.redeem_key_sealed: _seal(secrets.token_urlsafe(32)),
+    }, synchronize_session=False)
+    db.commit()
+    db.refresh(row)
+  redeem_key = _unseal(row.redeem_key_sealed)
+  if redeem_key is None:
+    raise HTTPException(410, "This invitation has expired. Ask for a new one.")
   try:
     response = await federation_request(
-      "POST", f"https://{row.from_host}/api/projects/invites/redeem",
-      json={"invite": secret, "display_name": display_name},
+      "POST", f"https://{row.from_host}/api/project-invites/redeem",
+      json={"invite": secret, "redeem_key": redeem_key},
       timeout_seconds=PEER_TIMEOUT_S,
     )
   except PEER_ERRORS as exc:
+    # The sender may have spent it; the saved key makes trying again safe.
     raise HTTPException(502, f"Couldn’t reach @{row.from_handle}’s Möbius. Try again soon.") from exc
+  db.refresh(row)
+  if row.status == "accepted":
+    return {**_view(row, now), "open_url": _open_url(row)}
   if response.status_code == 410:
     row.expires_at = now
     db.commit()
@@ -458,6 +618,7 @@ async def accept_received_invite(
   row.access_token_sealed = _seal(access.access_token)
   row.access_expires_at = _naive_utc(access.expires_at)
   row.invite_secret_sealed = None
+  row.redeem_key_sealed = None
   db.commit()
   return {**_view(row, now), "open_url": _open_url(row)}
 
@@ -494,6 +655,7 @@ def decline_received_invite(
   row.status = "declined"
   row.responded_at = now_naive_utc()
   row.invite_secret_sealed = None
+  row.redeem_key_sealed = None
   db.commit()
   return _view(row, now_naive_utc())
 

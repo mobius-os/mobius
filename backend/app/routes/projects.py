@@ -12,7 +12,7 @@ import secrets
 import shutil
 import subprocess
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1567,7 +1567,6 @@ def redeem_project_invite(
     "project": _project_response(project, []),
     "role": member.role,
     "member_id": member.id,
-    "expires_at": (now + auth.PROJECT_COLLABORATOR_TTL).replace(tzinfo=UTC),
   }
 
 

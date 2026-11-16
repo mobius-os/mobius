@@ -1644,6 +1644,9 @@ class ReceivedProjectInvite(Base):
   project_type = Column(String(128), nullable=True)
   role = Column(String(16), nullable=False)
   invite_secret_sealed = Column(Text, nullable=True)
+  # Saved before the first accept attempt and sent with every retry, so the
+  # sender can repeat its answer if the first one was lost in transit.
+  redeem_key_sealed = Column(Text, nullable=True)
   received_at = Column(DateTime, nullable=False, default=now_naive_utc)
   expires_at = Column(DateTime, nullable=False)
   # pending -> accepted | declined. Removal deletes the row.
@@ -1652,6 +1655,29 @@ class ReceivedProjectInvite(Base):
   remote_project_id = Column(String(64), nullable=True)
   access_token_sealed = Column(Text, nullable=True)
   access_expires_at = Column(DateTime, nullable=True)
+
+
+class ProjectInviteRedemption(Base):
+  """Who spent a handle invitation, so a lost answer can be repeated.
+
+  Written in the same transaction that consumes the invitation. Only the
+  invitee's Möbius knows the key, so a retry that presents it gets a fresh
+  pass for the membership it already created, while a leaked secret alone
+  still finds the invitation spent.
+  """
+
+  __tablename__ = "project_invite_redemptions"
+
+  invite_id = Column(
+    String(64), ForeignKey("project_invites.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  key_hash = Column(String(64), nullable=False)
+  member_id = Column(
+    String(64), ForeignKey("project_members.id", ondelete="CASCADE"),
+    nullable=False,
+  )
+  redeemed_at = Column(DateTime, nullable=False)
 
 
 class SharedAppInstance(Base):

@@ -4,6 +4,7 @@ Both Möbius instances are this one test server: every outbound peer request is
 looped back into the same app, so the sender, the receiver's verification, and
 the acceptance all run their real endpoints.
 """
+import asyncio
 import uuid
 from datetime import timedelta
 from urllib.parse import urlsplit
@@ -13,6 +14,7 @@ import pytest
 
 from app import models
 from app.config import get_settings
+from app.main import app as api
 from app.routes import project_handle_invites as invites
 from app.timeutil import now_naive_utc
 
@@ -24,7 +26,12 @@ def peers(client, monkeypatch):
   """Loop peer HTTPS calls into this app and stub the account directory."""
   monkeypatch.setattr(get_settings(), "frontend_origin", f"https://{HOST}")
   directory = {"ana": [HOST], "bob": [HOST], "mallory": ["mallory.example"]}
-  state = {"me": "ana", "calls": [], "fail_delivery": False, "directory": directory, "redeem_answer": None}
+  state = {
+    "me": "ana", "calls": [], "fail_delivery": False, "directory": directory,
+    "redeem_answer": None,
+    # Path suffix -> how many answers to drop after the peer has acted.
+    "lose_answer": {},
+  }
 
   async def resolve(_db, _owner_id, handle):
     if handle not in directory:
@@ -50,10 +57,15 @@ def peers(client, monkeypatch):
       # The receiver answers as the invitee.
       state["me"] = "bob"
     try:
-      return client.request(method, parts.path, json=json)
+      response = client.request(method, parts.path, json=json)
     finally:
       if parts.path.endswith("/inbox"):
         state["me"] = "ana"
+    suffix = "/" + parts.path.rsplit("/", 1)[1]
+    if state["lose_answer"].get(suffix, 0) > 0:
+      state["lose_answer"][suffix] -= 1
+      raise httpx.ReadTimeout("the answer was lost")
+    return response
 
   monkeypatch.setattr(invites, "resolve_handle_hosts", resolve)
   monkeypatch.setattr(invites, "owner_handle", own_handle)
@@ -336,3 +348,137 @@ def test_opening_after_access_expired_is_refused(client, auth, db, peers):
   db.commit()
   assert client.post(f"/api/project-invites/{invite_id}/open", headers=auth).status_code == 410
   assert client.get("/api/project-invites", headers=auth).json()[0]["access_expired"] is True
+
+
+def received_row(db, invite_id):
+  row = db.get(models.ReceivedProjectInvite, invite_id)
+  db.refresh(row)
+  return row
+
+
+def test_a_lost_redeem_answer_is_recovered_by_trying_again(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  # The sender creates the membership and spends the invitation, but its
+  # answer never arrives.
+  peers["lose_answer"]["/redeem"] = 1
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  assert received_row(db, invite_id).status == "pending"
+  assert db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().consumed_at is not None
+
+  # Even past the local expiry, only the sender can say it was spent.
+  row = received_row(db, invite_id)
+  row.expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+  retried = client.post(f"/api/project-invites/{invite_id}/accept", headers=auth)
+  assert retried.status_code == 200, retried.text
+  assert retried.json()["status"] == "accepted"
+  member = db.query(models.ProjectMember).filter_by(project_id=project["id"]).one()
+  assert member.display_name == "@bob"
+  row = received_row(db, invite_id)
+  assert row.redeem_key_sealed is None and row.invite_secret_sealed is None
+  token = client.post(f"/api/project-invites/{invite_id}/open", headers=auth).json()["url"].split("#access=", 1)[1]
+  detail = client.get(f"/api/projects/{project['id']}", headers={"Authorization": f"Bearer {token}"})
+  assert detail.status_code == 200, detail.text
+
+
+def test_a_spent_invitation_answers_only_its_own_redeemer(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  secret = invites._unseal(received_row(db, invite_id).invite_secret_sealed)
+  peers["me"] = "bob"
+  peers["lose_answer"]["/redeem"] = 1
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  key = invites._unseal(received_row(db, invite_id).redeem_key_sealed)
+
+  # A leaked secret alone finds the invitation spent.
+  other = client.post("/api/project-invites/redeem", json={"invite": secret, "redeem_key": "z" * 43})
+  assert other.status_code == 410
+  replay = client.post("/api/project-invites/redeem", json={"invite": secret, "redeem_key": key})
+  assert replay.status_code == 200, replay.text
+  # A removed member's key no longer opens anything.
+  member = db.query(models.ProjectMember).filter_by(project_id=project["id"]).one()
+  member.revoked_at = now_naive_utc()
+  db.commit()
+  assert client.post("/api/project-invites/redeem", json={"invite": secret, "redeem_key": key}).status_code == 410
+  assert db.query(models.ProjectMember).filter_by(project_id=project["id"]).count() == 1
+
+  # Link invitations keep their own single-use redeem.
+  link_secret = link_invite(client, auth, project)["join_url"].split("#", 1)[1]
+  assert client.post("/api/project-invites/redeem", json={"invite": link_secret, "redeem_key": key}).status_code == 410
+
+
+def test_a_lost_delivery_answer_is_settled_by_delivering_again(client, auth, db, peers):
+  project = make_project(client, auth)
+  peers["lose_answer"]["/inbox"] = 1
+  sent = send(client, auth, project)
+  assert sent.status_code == 200, sent.text
+  assert sent.json()["delivered_to"] == HOST and sent.json()["delivery"] == "delivered"
+  assert db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().revoked_at is None
+  assert db.query(models.ReceivedProjectInvite).count() == 1
+  assert db.query(models.Notification).count() == 1
+
+
+def test_an_unconfirmed_delivery_keeps_the_invitation_for_its_owner(client, auth, db, peers):
+  project = make_project(client, auth)
+  peers["lose_answer"]["/inbox"] = 2
+  sent = send(client, auth, project)
+  assert sent.status_code == 202, sent.text
+  assert sent.json()["delivery"] == "unconfirmed" and sent.json()["delivered_to"] is None
+  # It did arrive, so it must still work, and its owner can still revoke it.
+  assert db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().revoked_at is None
+  collaboration = client.get(f"/api/projects/{project['id']}/collaboration", headers=auth).json()
+  assert [item["invitee_name"] for item in collaboration["invites"]] == ["@bob"]
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 200
+
+
+def test_a_server_error_from_the_inbox_is_not_proof_of_non_delivery(client, auth, db, peers, monkeypatch):
+  project = make_project(client, auth)
+
+  async def failing(method, url, **_):
+    return httpx.Response(503, json={"detail": "busy"})
+
+  monkeypatch.setattr(invites, "federation_request", failing)
+  assert send(client, auth, project).status_code == 202
+  assert db.query(models.ProjectInvite).filter_by(project_id=project["id"]).one().revoked_at is None
+
+
+def test_concurrent_deliveries_cannot_exceed_the_per_sender_limit(client, auth, db, peers, monkeypatch):
+  count = invites.MAX_PENDING_PER_SENDER + 1
+  expires = (now_naive_utc() + timedelta(days=3)).isoformat() + "Z"
+
+  async def run():
+    arrived = []
+    release = asyncio.Event()
+
+    async def federation(method, url, *, json=None, **_):
+      # Every delivery is held at /check until all of them have passed the
+      # early limit check.
+      arrived.append(url)
+      await release.wait()
+      return httpx.Response(200, json={
+        "format": "mobius-project-invite-v1", "project": {"name": "Waiting"},
+        "role": "editor", "expires_at": expires, "invitee": "@ana",
+      })
+
+    monkeypatch.setattr(invites, "federation_request", federation)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=api), base_url="http://test") as peer:
+      tasks = [asyncio.create_task(peer.post("/api/project-invites/inbox", json={
+        "format": "mobius-project-invite-v1", "from_handle": "bob",
+        "invite_url": f"https://{HOST}/project-invite#{index:043d}",
+      })) for index in range(count)]
+      async with asyncio.timeout(10):
+        while len(arrived) < count:
+          await asyncio.sleep(0.01)
+      release.set()
+      return [(await task).status_code for task in tasks]
+
+  codes = asyncio.run(run())
+  assert sorted(codes) == [200] * invites.MAX_PENDING_PER_SENDER + [429]
+  assert db.query(models.ReceivedProjectInvite).filter_by(from_handle="bob").count() == invites.MAX_PENDING_PER_SENDER
+  assert db.query(models.Notification).count() == invites.MAX_PENDING_PER_SENDER

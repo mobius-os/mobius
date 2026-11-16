@@ -177,7 +177,9 @@ function ProjectLiveCollaboration({ project }) {
             </form>}
 
             {sentInvite && <div className="project-collab__invite-result" role="status">
-              <strong>Invitation sent to @{sentInvite.handle}</strong><p>It’s waiting in their Möbius notifications and Projects. They’ll appear under People when they accept.</p>
+              {sentInvite.delivery === 'unconfirmed'
+                ? <><strong>Couldn’t confirm @{sentInvite.handle} received it</strong><p>Their Möbius didn’t answer, so the invitation may still have arrived. It stays under Pending invitations; revoke it there if they don’t see it.</p></>
+                : <><strong>Invitation sent to @{sentInvite.handle}</strong><p>It’s waiting in their Möbius notifications and Projects. They’ll appear under People when they accept.</p></>}
             </div>}
 
             {createdInvite && <div className="project-collab__invite-result" role="status">
