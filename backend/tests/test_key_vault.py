@@ -389,13 +389,13 @@ def test_public_destination_is_pinned_to_the_resolved_address(monkeypatch):
 
 
 def test_redaction_covers_common_echo_encodings():
-  forms = kv.secret_forms(DUMMY)
+  echoes = kv.secret_echoes(DUMMY)
   import base64, urllib.parse
   for encoded in (
     DUMMY, urllib.parse.quote(DUMMY, safe=""), json.dumps(DUMMY)[1:-1],
     base64.b64encode(DUMMY.encode()).decode(),
   ):
-    assert encoded.encode() not in kv.redact(f"x{encoded}y".encode(), forms)
+    assert encoded.encode() not in kv.redact(f"x{encoded}y".encode(), echoes)
 
 
 @pytest.mark.parametrize("body, message", [
@@ -446,7 +446,8 @@ class _Echo(BaseHTTPRequestHandler):
 
 
 @contextlib.contextmanager
-def _vault_socket(vault, connect):
+def _vault_server(vault, connect):
+  """A vault answering on a socket path, its sites reached through ``connect``."""
   # Unix socket paths are limited to ~108 bytes; pytest's tmp_path can exceed it.
   short_dir = Path(tempfile.mkdtemp(prefix="kv-"))
   socket_path = short_dir / kv.SOCKET_NAME
@@ -454,14 +455,70 @@ def _vault_socket(vault, connect):
   server = kv.VaultServer(str(socket_path), handler)
   threading.Thread(target=server.serve_forever, daemon=True).start()
   try:
-    with httpx.Client(
-      transport=httpx.HTTPTransport(uds=str(socket_path)), base_url="http://vault",
-    ) as client:
-      yield client
+    yield socket_path
   finally:
     server.shutdown()
     server.server_close()
     shutil.rmtree(short_dir, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def _vault_socket(vault, connect):
+  with _vault_server(vault, connect) as socket_path, httpx.Client(
+    transport=httpx.HTTPTransport(uds=str(socket_path)), base_url="http://vault",
+  ) as client:
+    yield client
+
+
+def _raw_exchange(socket_path, request: bytes, timeout: float = 10) -> bytes:
+  """Send exact bytes to the vault and read its answer until it closes."""
+  with socket.socket(socket.AF_UNIX) as conn:
+    conn.settimeout(timeout)
+    conn.connect(str(socket_path))
+    conn.sendall(request)
+    answer = b""
+    while chunk := conn.recv(65536):
+      answer += chunk
+  return answer
+
+
+@contextlib.contextmanager
+def _raw_site(reply):
+  """A site that answers every request by running ``reply(connection)``.
+
+  Yields the ``connect`` the vault uses to reach it, and the request heads it
+  received.
+  """
+  listener = socket.socket()
+  listener.bind(("127.0.0.1", 0))
+  listener.listen(8)
+  heads = []
+
+  def serve():
+    while True:
+      try:
+        conn, _ = listener.accept()
+      except OSError:
+        return
+      with conn:
+        head = b""
+        while b"\r\n\r\n" not in head and (chunk := conn.recv(65536)):
+          head += chunk
+        heads.append(head)
+        with contextlib.suppress(OSError):
+          reply(conn)
+
+  threading.Thread(target=serve, daemon=True).start()
+  port = listener.getsockname()[1]
+  try:
+    yield (lambda host, timeout: http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)), heads
+  finally:
+    listener.close()
+
+
+def _borrow(path="/anything/x", caller="app:7", extra=b"") -> bytes:
+  return (f"GET /use/echo/echo.example.com{path} HTTP/1.1\r\nHost: vault\r\n"
+          f"X-Vault-Caller: {caller}\r\n").encode("latin-1") + extra + b"\r\n"
 
 
 @pytest.fixture
@@ -578,11 +635,14 @@ def test_owner_operations_and_handshake_over_the_socket(client):
   assert asked["status"] == "pending"
   assert [r["id"] for r in client.get("/requests").json()["requests"]] == [asked["id"]]
   [listed] = client.get("/requests").json()["requests"]
-  approved = client.post(f"/requests/{asked['id']}/approve", headers={"X-Vault-Caller": "agent:c1"},
-                         json={"value": "maps-dummy-key", "ticket": listed["ticket"]})
+  answer = {"value": "maps-dummy-key", "ticket": listed["ticket"]}
+  # Letting an app use a key is the owner's own decision, at the vault too.
+  assert client.post(f"/requests/{asked['id']}/approve", headers={"X-Vault-Caller": "agent:c1"},
+                     json=answer).status_code == 403
+  approved = client.post(f"/requests/{asked['id']}/approve", headers=owner, json=answer)
   assert approved.json()["granted"] == 9
   assert [(e["caller"], e["outcome"]) for e in client.get("/usage?key=maps").json()["usage"][:2]] == [
-    ("agent:c1", "granted app:9"), ("agent:c1", "added"),
+    ("owner", "granted app:9"), ("owner", "added"),
   ]
   assert client.delete("/keys/second", headers=owner).status_code == 200
   assert client.delete("/keys/second", headers=owner).status_code == 404
@@ -637,12 +697,15 @@ def test_decoding_is_bounded_and_strips_the_encoding(monkeypatch):
 
 @pytest.mark.parametrize("piece", [1, 2, 5, 13, 1000])
 def test_an_echo_split_across_pieces_is_still_redacted(piece):
-  forms = kv.secret_forms(DUMMY)
-  body = b'{"a":"' + DUMMY.encode() + b'","b":"' + forms[0] + b'","tail":"ok"}'
-  redactor = kv.StreamRedactor(forms)
+  import base64
+  echoes = kv.secret_echoes(DUMMY)
+  escaped = "".join(f"\\u{ord(ch):04x}" for ch in DUMMY).encode()  # the longest echo
+  body = (b'{"a":"' + DUMMY.encode() + b'","b":"' + escaped + b'","c":"'
+          + base64.b64encode(b"Bearer " + DUMMY.encode()) + b'","tail":"ok"}')
+  redactor = kv.StreamRedactor(echoes)
   out = b"".join(redactor.feed(body[i:i + piece]) for i in range(0, len(body), piece)) + redactor.finish()
-  assert out == kv.redact(body, forms)
-  assert DUMMY.encode() not in out
+  assert out == kv.redact(body, echoes)
+  assert DUMMY.encode() not in out and escaped not in out
 
 
 @pytest.mark.parametrize("echo", [
@@ -653,8 +716,8 @@ def test_an_echo_split_across_pieces_is_still_redacted(piece):
   "fake\\u002fKey\\u002bwith\\u002fslash0123\\u003d\\u003d",  # JSON unicode escapes
 ])
 def test_redaction_covers_how_sites_escape_an_echoed_key(echo):
-  forms = kv.secret_forms("fake/Key+with/slash0123==")
-  assert kv.redact(b'{"echo":"' + echo.encode() + b'"}', forms) == b'{"echo":"' + kv.REDACTED + b'"}'
+  echoes = kv.secret_echoes("fake/Key+with/slash0123==")
+  assert kv.redact(b'{"echo":"' + echo.encode() + b'"}', echoes) == b'{"echo":"' + kv.REDACTED + b'"}'
 
 
 def test_create_only_refuses_an_occupied_name_and_an_update_never_moves_origin(vault):
@@ -676,28 +739,42 @@ def test_create_only_refuses_an_occupied_name_and_an_update_never_moves_origin(v
 
 def test_an_owner_value_ends_the_apps_ownership_of_the_key(vault):
   saved = vault.save_owned(9, "OPENAI_API_KEY", "app-dummy")
-  assert saved == {"name": "OPENAI_API_KEY", "created": True}
-  [record] = [k for k in vault.list_keys() if k["name"] == "OPENAI_API_KEY"]
-  # The owner (or an agent's store-key.py) fills in the real value, keeping
-  # the key's current grants as the Settings page and store-key.py do.
-  vault.put_key("OPENAI_API_KEY", {"value": "owners-real-key", "inject": record["inject"],
-                                   "grants": record["grants"]})
-  [record] = [k for k in vault.list_keys() if k["name"] == "OPENAI_API_KEY"]
+  assert saved == {"name": "app9-OPENAI_API_KEY", "created": True}
+  [record] = [k for k in vault.list_keys() if k["name"] == saved["name"]]
+  # The owner (or an agent's store-key.py) fills in the real value; the
+  # grants it does not mention stay as they are.
+  vault.put_key(saved["name"], {"value": "owners-real-key"})
+  [record] = [k for k in vault.list_keys() if k["name"] == saved["name"]]
   assert record["origin"] is None and _ids(record["grants"]) == []
   # The app can neither delete nor replace it; its next save is a key of its own.
   assert vault.release_owned(9, "OPENAI_API_KEY") is None
   assert vault.save_owned(9, "OPENAI_API_KEY", "app-chosen") == {
-    "name": "app9-OPENAI_API_KEY", "created": True,
+    "name": "app9-OPENAI_API_KEY-2", "created": True,
   }
-  assert vault.reveal("OPENAI_API_KEY", ("owner", "")) == "owners-real-key"
-  assert vault.erase_owned(9) == ["app9-OPENAI_API_KEY"]
-  assert vault.reveal("OPENAI_API_KEY", ("owner", "")) == "owners-real-key"
+  assert vault.reveal(saved["name"], ("owner", "")) == "owners-real-key"
+  assert vault.erase_owned(9) == ["app9-OPENAI_API_KEY-2"]
+  assert vault.reveal(saved["name"], ("owner", "")) == "owners-real-key"
 
 
 def test_the_apps_own_save_keeps_its_ownership(vault):
   vault.save_owned(9, "api.key", "first")
-  assert vault.save_owned(9, "api.key", "second") == {"name": "api-key", "created": False}
-  assert {k["name"]: k["origin"] for k in vault.list_keys()}["api-key"] == {"app": 9, "name": "api.key"}
+  assert vault.save_owned(9, "api.key", "second") == {"name": "app9-api-key", "created": False}
+  assert {k["name"]: k["origin"] for k in vault.list_keys()}["app9-api-key"] == {"app": 9, "name": "api.key"}
+
+
+def test_an_apps_own_save_never_takes_a_plain_name_another_app_may_ask_for(vault):
+  """A plain name would let an app plant a value under the name another app
+  asks for, and the owner's approval would lend the planter's value."""
+  assert vault.save_owned(9, "maps", DUMMY) == {"name": "app9-maps", "created": True}
+  assert "maps" not in {k["name"] for k in vault.list_keys()}
+  # A key that already exists under the asked name shows who saved it.
+  vault.save_owned(9, "weather", DUMMY)
+  vault.request_access(10, {**ASK, "key": "app9-weather"})
+  vault.request_access(10, ASK)
+  cards = {r["key"]: r for r in vault.list_requests()}
+  assert cards["app9-weather"]["key_exists"] is True
+  assert cards["app9-weather"]["key_origin"] == {"app": 9, "name": "weather"}
+  assert cards["maps"]["key_exists"] is False and cards["maps"]["key_origin"] is None
 
 
 PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/responses"]}
@@ -705,14 +782,14 @@ PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/
 
 def test_a_new_own_key_starts_on_the_sites_the_server_names_and_a_resave_keeps_the_owners(vault):
   created = vault.save_owned(9, "api_key", DUMMY, sites=[PROVIDER_SITE])
-  assert created == {"name": "api_key", "created": True}
-  record = next(k for k in vault.list_keys() if k["name"] == "api_key")
+  assert created == {"name": "app9-api_key", "created": True}
+  record = next(k for k in vault.list_keys() if k["name"] == "app9-api_key")
   assert record["grants"]["sites"] == [PROVIDER_SITE]
   narrowed = {"host": "safe.example.com", "methods": ["POST"], "paths": ["/v1/*"]}
-  vault.put_key("api_key", {"inject": record["inject"],
-                            "grants": {**record["grants"], "sites": [narrowed]}})
+  vault.put_key("app9-api_key", {"inject": record["inject"],
+                                 "grants": {**record["grants"], "sites": [narrowed]}})
   vault.save_owned(9, "api_key", "rotated-dummy", sites=[PROVIDER_SITE])
-  record = next(k for k in vault.list_keys() if k["name"] == "api_key")
+  record = next(k for k in vault.list_keys() if k["name"] == "app9-api_key")
   assert record["grants"]["sites"] == [narrowed]
 
 
@@ -726,10 +803,10 @@ def test_save_owned_finds_or_creates_by_origin_under_one_lock(vault):
     thread.start()
   for thread in threads:
     thread.join()
-  assert {r["name"] for r in results} == {"api-key"}
+  assert {r["name"] for r in results} == {"app9-api-key"}
   assert sum(r["created"] for r in results) == 1
   owned = [k for k in vault.list_keys() if k["origin"] == {"app": 9, "name": "api.key"}]
-  assert [k["name"] for k in owned] == ["api-key"]
+  assert [k["name"] for k in owned] == ["app9-api-key"]
 
 
 def test_releasing_an_owned_key_keeps_the_owners_current_sharing(vault):
@@ -851,12 +928,12 @@ def test_a_name_an_app_took_first_never_lends_it_the_owners_value(monkeypatch, v
   """An app saves a dummy under the name the owner will use; when an agent
   later stores the owner's real key there (store-key.py keeps the existing
   grants), the app must not be able to borrow the owner's value."""
-  vault.save_owned(9, "OPENAI_API_KEY", "app-dummy")
+  name = vault.save_owned(9, "OPENAI_API_KEY", "app-dummy")["name"]
   site = "api.openai.com:POST:/v1/*"
-  assert _run_store_key(monkeypatch, vault, ["OPENAI_API_KEY", "--site", site], "owners-real-key") == 0
+  assert _run_store_key(monkeypatch, vault, [name, "--site", site], "owners-real-key") == 0
   with pytest.raises(kv.VaultError, match="may not use"):
-    vault.authorize("OPENAI_API_KEY", ("app", "9"), "POST", "api.openai.com", "/v1/responses")
-  _, value = vault.authorize("OPENAI_API_KEY", ("agent", "c1"), "POST", "api.openai.com", "/v1/responses")
+    vault.authorize(name, ("app", "9"), "POST", "api.openai.com", "/v1/responses")
+  _, value = vault.authorize(name, ("agent", "c1"), "POST", "api.openai.com", "/v1/responses")
   assert value == "owners-real-key"
 
 
@@ -923,7 +1000,9 @@ class _Slow(BaseHTTPRequestHandler):
     self.send_header("Content-Type", "text/event-stream")
     self.send_header("Transfer-Encoding", "chunked")
     self.end_headers()
-    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n"
+    # Followed by more than redaction's fixed tail, so the event itself goes out.
+    padding = b": " + b"." * kv.secret_echoes(DUMMY).longest + b"\n\n"
+    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n" + padding
     self.wfile.write(b"%x\r\n%s\r\n" % (len(first), first))
     self.wfile.flush()
     type(self).release.wait(20)
@@ -947,7 +1026,8 @@ def test_answers_stream_back_as_they_arrive_with_the_key_hidden(vault):
         first = next(pieces)
         # The first event arrived while the site is still holding the rest.
         assert not _Slow.release.is_set()
-        assert first.startswith(b"data: first") and DUMMY.encode() not in first
+        assert first.startswith(b"data: first Bearer " + kv.REDACTED + b"\n\n")
+        assert DUMMY.encode() not in first
         _Slow.release.set()
         rest = b"".join(pieces)
       assert b"data: last" in first + rest and DUMMY.encode() not in first + rest
@@ -955,3 +1035,441 @@ def test_answers_stream_back_as_they_arrive_with_the_key_hidden(vault):
     _Slow.release.set()
     upstream.shutdown()
   assert vault.usage(key="echo")[0]["outcome"] == "used"
+
+
+# -- an update changes only what it names --------------------------------------
+
+def test_replacing_only_the_value_keeps_who_may_use_the_key_and_how_it_is_sent(vault):
+  [before] = vault.list_keys()
+  # An agent rotating the value sends nothing else, as store-key.py may.
+  vault.put_key("echo", {"value": "rotated-dummy"}, actor="agent:c1")
+  [after] = vault.list_keys()
+  assert after["grants"] == before["grants"] and after["inject"] == before["inject"]
+  _, value = vault.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
+  assert value == "rotated-dummy"
+  # Changing only how it is sent keeps the grants too.
+  vault.put_key("echo", {"inject": {"type": "query", "name": "key"}})
+  assert vault.list_keys()[0]["grants"] == before["grants"]
+
+
+def test_a_new_key_needs_a_value_and_where_it_is_sent(tmp_path):
+  v = kv.Vault(tmp_path / "vault")
+  with pytest.raises(kv.VaultError, match="needs a value"):
+    v.put_key("fresh", {"inject": HEADER_SLOT})
+  with pytest.raises(kv.VaultError, match="needs where it is sent") as refused:
+    v.put_key("fresh", {"value": DUMMY})
+  assert refused.value.status == 400 and v.list_keys() == []
+
+
+# -- a change takes effect only once it is on disk -------------------------------
+
+@pytest.fixture
+def full_disk(monkeypatch):
+  """Make writes of the named store files fail as on a full disk."""
+  real = kv._atomic_write
+  failing = set()
+
+  def write(path, data):
+    if path.name in failing:
+      raise OSError(28, "No space left on device")
+    return real(path, data)
+
+  monkeypatch.setattr(kv, "_atomic_write", write)
+  return failing
+
+
+def _as_reloaded(vault):
+  reloaded = kv.Vault(vault.dir)
+  return (reloaded.list_keys(), reloaded.list_requests()) == (vault.list_keys(), vault.list_requests())
+
+
+def test_a_change_whose_write_fails_never_takes_effect(vault, full_disk):
+  full_disk.add("keys.json")
+  with pytest.raises(OSError):
+    vault.put_key("echo", {"grants": _grants(apps=[WEATHER, 9])})
+  with pytest.raises(kv.VaultError, match="may not use"):
+    vault.authorize("echo", ("app", "9"), "GET", "echo.example.com", "/anything/x")
+  with pytest.raises(OSError):
+    vault.revoke_key("echo")
+  assert [k["name"] for k in vault.list_keys()] == ["echo"]
+  full_disk.clear()
+  full_disk.add("requests.json")
+  with pytest.raises(OSError):
+    vault.request_access(9, ASK)
+  assert vault.list_requests() == []
+  assert _as_reloaded(vault)
+
+
+def test_a_retried_purge_after_a_failed_write_is_saved(vault, full_disk):
+  full_disk.add("keys.json")
+  with pytest.raises(OSError):
+    vault.forget_app(WEATHER)
+  # Still granted, exactly as on disk, so the purge is not mistaken for done.
+  vault.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
+  full_disk.clear()
+  assert vault.forget_app(WEATHER)["keys"] == ["echo"]
+  assert _ids(kv.Vault(vault.dir).list_keys()[0]["grants"]) == []
+
+
+def test_a_change_spanning_two_files_keeps_memory_equal_to_disk(vault, full_disk):
+  request = vault.request_access(9, {**ASK, "key": "echo"})
+  full_disk.add("requests.json")
+  with pytest.raises(OSError):
+    vault.approve_request(request["id"], {"sites": ASK["sites"], "ticket": _ticket(vault, request["id"])})
+  # The grant was saved, the settled request was not: both stay as on disk.
+  assert 9 in _ids(vault.list_keys()[0]["grants"])
+  assert _as_reloaded(vault)
+
+
+def test_a_failed_write_answers_a_json_error_over_the_socket(vault, full_disk):
+  full_disk.add("keys.json")
+  with _vault_socket(vault, None) as client:
+    answer = client.put("/keys/second", headers={"X-Vault-Caller": "owner"},
+                        json={"value": DUMMY, "inject": HEADER_SLOT})
+  assert answer.status_code == 500 and "could not write" in answer.json()["error"]
+  assert [k["name"] for k in vault.list_keys()] == ["echo"]
+
+
+# -- redaction ------------------------------------------------------------------
+
+def test_redaction_holds_back_the_same_tail_whether_or_not_it_begins_the_key():
+  """When text arrives must never tell a caller whether its echo begins the key."""
+  key = "sk-live-FAKE0123456789abcdef"
+  echoes = kv.secret_echoes(key)
+  hold = echoes.longest - 1
+  for guess in (b"sk-live-FAKE0", b"sk-live-FAKE1"):   # a prefix of the key, and not
+    redactor = kv.StreamRedactor(echoes)
+    tail = b"echo:" + guess
+    # Whatever the tail is, exactly the bytes before it go out now ...
+    assert redactor.feed(b"x" * hold + tail) == b"x" * len(tail)
+    assert redactor.feed(b"") == b""
+    # ... and the tail itself with the next piece or at the end.
+    assert redactor.finish() == b"x" * (hold - len(tail)) + tail
+
+
+KEY_WITH_PUNCTUATION = "sk-Ab+c/d&e<f>g=h1234567890"
+
+
+def _go_json(text):
+  return json.dumps(text)[1:-1].replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+
+
+def _b64(prefix, urlsafe=False):
+  import base64
+  encode = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+  return lambda k: encode(prefix + k.encode())
+
+
+@pytest.mark.parametrize("encode, kept", [
+  # ``kept``: what may stay readable around the redaction, at most the
+  # encoded neighbouring bytes and the characters base64 shares with them.
+  pytest.param(lambda k: _go_json(k).encode(), 0, id="go-json-escapes"),
+  pytest.param(lambda k: __import__("urllib.parse").parse.quote(k).encode(), 0, id="percent-keeping-slash"),
+  pytest.param(lambda k: k.replace("+", "%2b").replace("/", "\\/").replace("&", "&amp;").replace("<", "&#60;").encode(),
+               0, id="mixed-escapes"),
+  pytest.param(lambda k: k.upper().encode(), 0, id="upper-cased"),
+  pytest.param(lambda k: k.encode().hex().encode(), 0, id="hex"),
+  pytest.param(lambda k: k.encode().hex().upper().encode(), 0, id="hex-upper"),
+  pytest.param(lambda k: k.encode("utf-16-le"), 0, id="utf-16-le"),
+  pytest.param(lambda k: k.encode("utf-16-be"), 0, id="utf-16-be"),
+  pytest.param(_b64(b""), 4, id="base64-aligned"),
+  pytest.param(_b64(b"Bearer "), 10 + 4, id="base64-offset-1"),
+  pytest.param(_b64(b"ab"), 3 + 4, id="base64-offset-2"),
+  pytest.param(_b64(b"x:", urlsafe=True), 3 + 4, id="base64url-offset-2"),
+])
+def test_redaction_covers_mixed_escapes_and_whole_reencodings(encode, kept):
+  echo = encode(KEY_WITH_PUNCTUATION)
+  out = kv.redact(b"<" + echo + b">", kv.secret_echoes(KEY_WITH_PUNCTUATION))
+  assert kv.REDACTED in out
+  assert len(out) - len(kv.REDACTED) - 2 <= kept
+
+
+def test_redaction_of_a_long_value_stays_fast():
+  import secrets as _secrets
+  import string
+  import time
+  value = "".join(_secrets.choice(string.punctuation + string.ascii_letters) for _ in range(kv.MAX_VALUE_LENGTH))
+  started = time.monotonic()
+  redactor = kv.StreamRedactor(kv.secret_echoes(value))
+  for _ in range(20):
+    redactor.feed(b"x" * 65535 + value[:1].encode())
+  assert time.monotonic() - started < 10
+
+
+# -- what may be sent ------------------------------------------------------------
+
+def test_a_value_a_header_cannot_carry_is_refused_cleanly(vault):
+  vault.put_key("echo", {"value": "pässwört€-dummy"})
+  with pytest.raises(kv.VaultError, match="characters a header can't carry") as refused:
+    vault.authorize("echo", ("app", str(WEATHER)), "GET", "echo.example.com", "/anything/x")
+  assert refused.value.status == 400
+  with _raw_site(lambda conn: conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")) as (connect, heads):
+    with _vault_server(vault, connect) as path:
+      answer = _raw_exchange(path, _borrow())
+  assert answer.startswith(b"HTTP/1.1 400") and b"can't carry" in answer and heads == []
+
+
+def test_text_http_cannot_carry_is_refused_not_crashed(vault):
+  with _raw_site(lambda conn: conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")) as (connect, heads):
+    with _vault_server(vault, connect) as path:
+      answer = _raw_exchange(path, _borrow("/anything/x?q=\xe9"))
+  assert answer.startswith(b"HTTP/1.1 400") and b"percent-encode" in answer
+  assert vault.usage(key="echo")[0]["outcome"] == "denied"
+
+
+@pytest.mark.parametrize("header", ["X-Original-URL", "X-Rewrite-URL", "x-override-url"])
+def test_a_header_naming_another_path_never_reaches_the_site(header):
+  request = kv.build_upstream_request(
+    method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
+    caller_headers=[(header, "/admin/delete-all"), ("X-Trace", "1")], inject=HEADER_SLOT, value=DUMMY,
+  )
+  assert [k for k, _ in request.headers if k.lower() == header.lower()] == []
+  assert ("X-Trace", "1") in request.headers
+
+
+def test_a_folded_header_line_is_refused_before_reaching_the_site(vault):
+  with pytest.raises(kv.VaultError, match="folded"):
+    kv.build_upstream_request(
+      method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
+      caller_headers=[("X-Foo", "a\r\n Transfer-Encoding: chunked")], inject=HEADER_SLOT, value=DUMMY,
+    )
+  with _raw_site(lambda conn: conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")) as (connect, heads):
+    with _vault_server(vault, connect) as path:
+      answer = _raw_exchange(path, _borrow(extra=b"X-Foo: a\r\n Transfer-Encoding: chunked\r\n"))
+  assert answer.startswith(b"HTTP/1.1 400") and heads == []
+
+
+@pytest.mark.parametrize("path", [
+  "/anything/..;/admin", "/anything/.;x/y", "/anything/%2e%2e;/admin",
+  "/anything/%252e%252e/admin", "/anything/x%25", "/anything/%C0%AE%C0%AE/admin", "/anything/%ff",
+])
+def test_paths_a_site_could_decode_further_than_the_rule_are_refused(path):
+  with pytest.raises(kv.VaultError):
+    kv.normalized_request_path(path)
+
+
+def test_path_parameters_and_valid_utf8_still_pass_the_path_rule():
+  assert kv.normalized_request_path("/anything/x;v=1") == "/anything/x;v=1"
+  assert kv.normalized_request_path("/anything/caf%C3%A9") == "/anything/café"
+
+
+# -- the site's answer -------------------------------------------------------------
+
+def test_an_unsupported_transfer_coding_is_refused():
+  for value in ("gzip, chunked", "gzip", "chunked, chunked"):
+    with pytest.raises(kv.VaultError, match="transfer encoding") as refused:
+      kv.Inflater([("Transfer-Encoding", value)])
+    assert refused.value.status == 502
+  assert kv.Inflater([("Transfer-Encoding", "Chunked")]).encoding is None
+
+
+def test_raw_deflate_whose_first_piece_is_one_byte_still_decodes():
+  import zlib as _zlib
+  raw = _zlib.compressobj(wbits=-15)
+  blob = raw.compress(b'{"hello":"world"}') + raw.flush()
+  assert _inflate([("Content-Encoding", "deflate")], blob, piece=1)[1] == b'{"hello":"world"}'
+  zlib_framed = _zlib.compress(b"framed")
+  assert _inflate([("Content-Encoding", "deflate")], zlib_framed, piece=1)[1] == b"framed"
+
+
+def test_a_compressed_answer_that_stops_short_is_an_error():
+  import gzip as _gzip
+  blob = _gzip.compress(b"a whole answer" * 50)
+  with pytest.raises(kv.VaultError, match="ended early"):
+    _inflate([("Content-Encoding", "gzip")], blob[:len(blob) // 2])
+
+
+def test_the_sites_status_text_and_vault_headers_never_speak_for_the_vault(vault):
+  def reply(conn):
+    conn.sendall(b"HTTP/1.1 103 Early Hints\r\nLink: </a.css>; rel=preload\r\n\r\n"
+                 b"HTTP/1.1 401 bad key " + DUMMY.encode() + b"\r\nX-Vault-Denied: 1\r\n"
+                 b"X-Vault-Key: other\r\nContent-Length: 2\r\n\r\nno")
+  with _raw_site(reply) as (connect, _), _vault_server(vault, connect) as path:
+    answer = _raw_exchange(path, _borrow())
+  head, _, body = answer.partition(b"\r\n\r\n")
+  lines = head.split(b"\r\n")
+  # The interim 103 was skipped; the final answer went out with its standard phrase.
+  assert lines[0] == b"HTTP/1.1 401 Unauthorized"
+  assert not any(line.lower().startswith(b"x-vault-denied") for line in lines)
+  assert [line for line in lines if line.lower().startswith(b"x-vault-key")] == [b"X-Vault-Key: echo"]
+  assert body == b"2\r\nno\r\n0\r\n\r\n" and DUMMY.encode() not in answer
+  assert vault.usage(key="echo")[0]["status"] == 401
+
+
+def test_an_answer_that_stops_short_of_its_length_ends_as_an_error(vault):
+  def reply(conn):
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n" + b"x" * 10)
+  with _raw_site(reply) as (connect, _), _vault_server(vault, connect) as path:
+    answer = _raw_exchange(path, _borrow())
+  assert answer.startswith(b"HTTP/1.1 200") and not answer.endswith(b"0\r\n\r\n")
+  entry = vault.usage(key="echo")[0]
+  assert entry["outcome"] == "failed" and "broke off" in entry["reason"]
+
+
+def test_a_borrow_ends_at_its_deadline_however_steadily_the_site_trickles(vault, monkeypatch):
+  import time
+  monkeypatch.setattr(kv, "BORROW_DEADLINE_SECS", 1)
+
+  def trickle(conn):
+    conn.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+    for _ in range(20):
+      conn.sendall(b"1\r\nx\r\n")
+      time.sleep(0.2)
+    conn.sendall(b"0\r\n\r\n")
+
+  started = time.monotonic()
+  with _raw_site(trickle) as (connect, _), _vault_server(vault, connect) as path:
+    answer = _raw_exchange(path, _borrow())
+  assert time.monotonic() - started < 3
+  assert not answer.endswith(b"0\r\n\r\n")
+  entry = vault.usage(key="echo")[0]
+  assert entry["outcome"] == "failed" and "longer than 1 seconds" in entry["reason"]
+
+
+def test_borrows_beyond_the_cap_are_answered_busy(vault, monkeypatch):
+  monkeypatch.setattr(kv, "MAX_CONCURRENT_BORROWS", 1)
+  release = threading.Event()
+
+  def hold(conn):
+    release.wait(10)
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+  with _raw_site(hold) as (connect, heads), _vault_server(vault, connect) as path:
+    first = []
+    holder = threading.Thread(target=lambda: first.append(_raw_exchange(path, _borrow())))
+    holder.start()
+    while not heads:
+      threading.Event().wait(0.02)
+    busy = _raw_exchange(path, _borrow())
+    release.set()
+    holder.join(10)
+    after = _raw_exchange(path, _borrow())
+  assert busy.startswith(b"HTTP/1.1 429") and b"busy" in busy
+  assert first[0].startswith(b"HTTP/1.1 200") and after.startswith(b"HTTP/1.1 200")
+
+
+# -- the store at start and when damaged ----------------------------------------------
+
+def test_a_master_key_that_opens_no_stored_key_refuses_to_start(vault):
+  (vault.dir / "master.key").write_bytes(os.urandom(32))
+  with pytest.raises(SystemExit, match="opens none of the stored keys"):
+    kv.Vault(vault.dir)
+
+
+def test_a_key_that_cannot_be_decrypted_answers_a_clean_error(vault):
+  vault.put_key("other", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  vault._records["echo"]["sealed"] = vault._records["other"]["sealed"]  # sealed for another name
+  with pytest.raises(kv.VaultError, match="can't be decrypted") as refused:
+    vault.reveal("echo", ("owner", ""))
+  assert refused.value.status == 500
+  with _vault_socket(vault, None) as client:
+    answer = client.get("/keys/echo/value", headers={"X-Vault-Caller": "owner"})
+    used = client.get("/use/echo/echo.example.com/anything/x", headers={"X-Vault-Caller": "app:7"})
+  assert answer.status_code == 500 and answer.json() == {"error": "This key can't be decrypted."}
+  assert used.status_code == 500 and vault.usage(key="echo")[0]["outcome"] == "failed"
+
+
+def test_a_damaged_requests_file_is_set_aside_and_the_vault_starts(vault):
+  vault.request_access(9, ASK)
+  vault.requests_path.write_text('{"requests": {"9-maps": "half a reque')
+  reloaded = kv.Vault(vault.dir)
+  assert reloaded.list_requests() == [] and not reloaded.requests_path.exists()
+  [aside] = vault.dir.glob("requests.json.damaged-*")
+  assert "half a reque" in aside.read_text()
+  assert reloaded.request_access(9, ASK)["status"] == "pending"
+
+
+def test_a_version_one_store_merges_duplicates_and_drops_what_no_longer_holds(tmp_path):
+  folder = tmp_path / "old"
+  v = kv.Vault(folder)
+  v.put_key("dupes", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  v.put_key("nosites", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  v.put_key("orphan", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
+  payload = json.loads(v.store_path.read_text())
+  keys = payload["keys"]
+  keys["dupes"]["grants"]["apps"] = [3, 3]
+  keys["nosites"]["grants"] = {"apps": [3], "agents": True}
+  keys["orphan"]["grants"]["apps"] = []
+  keys["orphan"]["origin"] = {"app": 9, "name": "x"}
+  payload["version"] = 1
+  v.store_path.write_text(json.dumps(payload))
+  migrated = {k["name"]: k for k in kv.Vault(folder).list_keys()}
+  assert migrated["dupes"]["grants"]["apps"] == [{"id": 3, "sites": [ECHO_SITE]}]
+  assert migrated["nosites"]["grants"]["apps"] == [{"id": 3, "sites": []}]
+  assert migrated["nosites"]["grants"]["sites"] == []
+  assert migrated["orphan"]["origin"] is None
+
+
+# -- the owner's decisions --------------------------------------------------------
+
+def test_an_agent_cannot_switch_agents_on_or_widen_an_app_but_can_narrow(vault):
+  vault.put_key("echo", {"grants": _grants(agents=False)})
+  with pytest.raises(kv.VaultError, match="Only you can let agents") as refused:
+    vault.put_key("echo", {"grants": _grants(agents=True)}, actor="agent:c1")
+  assert refused.value.status == 403
+  wider = {**ECHO_SITE, "paths": ["/*"]}
+  for grants in (_grants(agents=False, apps=[WEATHER, 9]), _grants(agents=False, apps=_apps(WEATHER, sites=[wider]))):
+    with pytest.raises(kv.VaultError, match="Only you can let an app"):
+      vault.put_key("echo", {"grants": grants}, actor="agent:c1")
+  # Narrowing, or listing the same reach in another order, only takes access away.
+  narrow = {**ECHO_SITE, "paths": ["/anything/public/*"]}
+  vault.put_key("echo", {"grants": _grants(agents=False, apps=_apps(WEATHER, sites=[narrow]))}, actor="agent:c1")
+  vault.put_key("echo", {"grants": _grants(agents=False, apps=[])}, actor="agent")
+  # The owner's own input is unchanged.
+  vault.put_key("echo", {"grants": _grants(agents=True, apps=[WEATHER, 9])}, actor="owner")
+  assert _ids(vault.list_keys()[0]["grants"]) == [WEATHER, 9]
+
+
+def test_only_the_owner_approves_a_request_at_the_vault(vault):
+  request = vault.request_access(9, ASK)
+  answer = {"value": DUMMY, "ticket": _ticket(vault, request["id"])}
+  for actor in ("agent:c1", "agent", "platform:import"):
+    with pytest.raises(kv.VaultError, match="Only the owner") as refused:
+      vault.approve_request(request["id"], answer, actor=actor)
+    assert refused.value.status == 403
+  assert vault.approve_request(request["id"], answer, actor="owner")["granted"] == 9
+
+
+def test_a_deny_checks_the_requests_ticket_when_given(vault):
+  request = vault.request_access(9, ASK)
+  with pytest.raises(kv.VaultError, match="changed since") as refused:
+    vault.deny_request(request["id"], {"ticket": "from-an-old-card"})
+  assert refused.value.status == 409 and vault.list_requests()[0]["status"] == "pending"
+  vault.deny_request(request["id"], {"ticket": _ticket(vault, request["id"])})
+  assert vault.list_requests()[0]["status"] == "denied"
+  with _vault_socket(vault, None) as client:
+    again = vault.request_access(10, ASK)
+    stale = client.post(f"/requests/{again['id']}/deny", headers={"X-Vault-Caller": "owner"},
+                        json={"ticket": "stale"})
+  assert stale.status_code == 409
+
+
+def test_one_ask_cannot_fill_the_requests_file(vault):
+  site = lambda i: {"host": f"h{i}.example.com", "methods": ["GET"],  # noqa: E731
+                    "paths": [f"/{i:03d}/{j:02d}/" + "a" * 190 for j in range(20)]}
+  with pytest.raises(kv.VaultError, match="fewer sites") as refused:
+    vault.request_access(9, {"key": "big", "reason": "r" * 300, "sites": [site(i) for i in range(50)]})
+  assert refused.value.status == 400
+  modest = [{"host": f"h{i}.example.com", "methods": ["GET"], "paths": ["/v1/*"]} for i in range(20)]
+  for n in range(kv.MAX_REQUESTS_PER_APP):
+    vault.request_access(9, {"key": f"k{n}", "reason": "r" * 1000, "sites": modest})
+  assert vault.requests_path.stat().st_size < 100_000
+
+
+# -- the socket's own input -------------------------------------------------------
+
+@pytest.mark.parametrize("length", [b"-1", b"abc", b"1e3"])
+def test_an_admin_request_with_a_bad_content_length_is_refused_at_once(vault, length):
+  with _vault_server(vault, None) as path:
+    answer = _raw_exchange(path, b"PUT /keys/K2 HTTP/1.1\r\nHost: v\r\nX-Vault-Caller: owner\r\n"
+                                 b"Content-Length: " + length + b"\r\n\r\n" + b" " * 4096, timeout=3)
+  assert answer.startswith(b"HTTP/1.1 400") and b"Content-Length" in answer
+
+
+def test_an_invalid_key_name_is_logged_as_invalid_not_as_its_text(vault, client):
+  for caller, status in (("app:7", 403), ("agent:c1", 404)):
+    answer = client.get("/use/bad%20name%7B%7D/echo.example.com/anything/x", headers={"X-Vault-Caller": caller})
+    assert answer.status_code == status and "bad name" not in answer.text
+  logged = [e for e in vault.usage(limit=None) if e.get("method") == "GET"]
+  assert {e["key"] for e in logged} == {"(invalid name)"}
+  assert "bad name" not in vault.usage_path.read_text()

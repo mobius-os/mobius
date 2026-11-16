@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
+import contextlib
+import copy
 import fcntl
 import fnmatch
-import html
 import http.client
 import ipaddress
 import json
@@ -57,6 +59,7 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
@@ -84,7 +87,15 @@ MAX_REQUESTS = 200
 # One app may not crowd out the others' requests or flood the owner with asks.
 MAX_REQUESTS_PER_APP = 10
 MAX_REASON = 300
+# The sites one ask may list, as stored: ten asks from one app stay small.
+MAX_ASK_SITES_BYTES = 8 * 1024
 UPSTREAM_TIMEOUT_SECS = 60
+# A borrow ends after this long however steadily the site trickles its answer,
+# so a purge waiting for the app's borrows always finishes.
+BORROW_DEADLINE_SECS = 300
+# Borrows beyond this many at once are answered 429 instead of each holding a
+# thread and a buffered body.
+MAX_CONCURRENT_BORROWS = 32
 # Synthesizes IPv6 addresses for IPv4 hosts; the embedded IPv4 is the real
 # destination, so it must be public too.
 NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
@@ -114,6 +125,10 @@ HOP_BY_HOP = frozenset({
 METHOD_OVERRIDE_HEADERS = frozenset({
   "x-http-method-override", "x-http-method", "x-method-override",
 })
+# Headers some servers and proxies (IIS, Symfony, Zend) read as the real
+# path. The path rule checks the request line, so these would let a grant on
+# one path run another with the key.
+URL_OVERRIDE_HEADERS = frozenset({"x-original-url", "x-rewrite-url", "x-override-url"})
 
 
 class VaultError(Exception):
@@ -215,12 +230,13 @@ def validate_origin(raw) -> dict:
 
 
 def owned_name_candidates(app_id: int, secret_name: str):
-  """Vault names to try for a new app-owned key, most readable first."""
+  """Vault names to try for a new app-owned key: always scoped to the app.
+
+  A plain name would let an app plant a key under the name another app later
+  asks for, so the owner's approval card would offer the planter's value as
+  if it were the owner's own key.
+  """
   plain = re.sub(r"[^A-Za-z0-9_-]", "-", secret_name)
-  if not plain[:1].isalpha():
-    plain = f"k{plain}"
-  plain = plain[:64]
-  yield plain
   scoped = f"app{int(app_id)}-{plain}"
   yield scoped[:64]
   for n in range(2, 100):
@@ -276,6 +292,20 @@ def without_app(grants: dict, app_id: int) -> list[dict]:
   return [grant for grant in grants.get("apps") or [] if grant["id"] != app_id]
 
 
+def widened_apps(before: dict | None, after: dict) -> list[int]:
+  """Apps ``after`` lets use the key, or use it somewhere ``before`` did not.
+
+  Compared by what the sites allow, not their text, so removing, narrowing or
+  reordering sites never counts as widening.
+  """
+  widened = []
+  for grant in after.get("apps") or []:
+    old = app_grant(before, grant["id"]) if before else None
+    if old is None or sites_outside(old["sites"], grant["sites"]):
+      widened.append(grant["id"])
+  return widened
+
+
 # ---------------------------------------------------------------------------
 # Rules: caller, site, method and path (default deny)
 # ---------------------------------------------------------------------------
@@ -321,16 +351,27 @@ def normalized_request_path(raw_path: str) -> str:
 
   Dot segments, encoded slashes and backslashes are refused outright: a path
   that means one thing to the rule and another to the server would let a
-  narrow grant reach a different endpoint.
+  narrow grant reach a different endpoint. So are the forms some servers
+  decode further than the rule does: a dot segment with path parameters
+  (``..;``, which Java servers treat as ``..``), an encoded ``%`` (a second
+  decoding pass would reveal ``%2e%2e``) and encoded bytes that are not valid
+  UTF-8 (overlong ``%C0%AE`` is a dot to lenient decoders).
   """
   if not raw_path.startswith("/"):
     raise VaultError(400, "The destination path must start with /.")
+  if any(not "\x21" <= ch <= "\x7e" for ch in raw_path):
+    raise VaultError(400, "Percent-encode spaces and non-ASCII characters in the path.")
   lowered = raw_path.lower()
   if "%2f" in lowered or "%5c" in lowered or "\\" in raw_path or "%00" in lowered:
     raise VaultError(403, "Encoded slashes are not allowed in key requests.")
-  decoded = urllib.parse.unquote(raw_path)
+  if "%25" in lowered:
+    raise VaultError(403, "Encoded percent signs are not allowed in key requests.")
+  try:
+    decoded = urllib.parse.unquote(raw_path, errors="strict")
+  except UnicodeDecodeError:
+    raise VaultError(403, "Encoded bytes in the path must be valid UTF-8.")
   for segment in decoded.split("/"):
-    if segment in (".", ".."):
+    if segment.split(";", 1)[0] in (".", ".."):
       raise VaultError(403, "Dot segments are not allowed in key requests.")
   if "//" in decoded:
     raise VaultError(403, "Empty path segments are not allowed in key requests.")
@@ -441,37 +482,127 @@ def open_pinned_connection(host: str, timeout: float) -> http.client.HTTPConnect
   return PinnedHTTPSConnection(host, resolve_public_address(host), timeout)
 
 
-_PLAIN_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.~-")
+# JSON's short escapes and the named HTML entities sites commonly emit.
+_JSON_SHORT_ESCAPES = {
+  '"': '\\"', "\\": "\\\\", "/": "\\/",
+  "\b": "\\b", "\f": "\\f", "\n": "\\n", "\r": "\\r", "\t": "\\t",
+}
+_NAMED_ENTITIES = {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;"}
+# Encoded forms shorter than this (base64, hex) would hide unrelated text.
+MIN_ENCODED_FORM = 8
 
 
-def _escape_each(value: str, form: str) -> str:
-  return "".join(ch if ch in _PLAIN_CHARS else form.format(ord(ch)) for ch in value)
-
-
-def secret_forms(value: str) -> list[bytes]:
-  """The encodings in which an echoed key commonly reappears, longest first.
-
-  Sites echo with their own escaping: JSON encoders that escape ``/``, HTML
-  entities, and percent-encoding in either hex case.
-  """
-  as_json = json.dumps(value)[1:-1]
-  percent = {urllib.parse.quote(value, safe=""), urllib.parse.quote_plus(value)}
+def _char_echoes(ch: str) -> list[bytes]:
+  """Every way an escaping encoder writes one character, longest first."""
+  raw = ch.encode()
+  units = ch.encode("utf-16-be")
   forms = {
-    value,
-    *percent,
-    *(re.sub(r"%[0-9A-F]{2}", lambda m: m.group().lower(), form) for form in percent),
-    as_json,
-    as_json.replace("/", "\\/"),
-    _escape_each(value, "\\u{:04x}"),
-    _escape_each(value, "\\u{:04X}"),
-    html.escape(value),
-    _escape_each(value, "&#x{:x};"),
-    _escape_each(value, "&#x{:X};"),
-    _escape_each(value, "&#{:d};"),
-    base64.b64encode(value.encode()).decode(),
-    base64.urlsafe_b64encode(value.encode()).decode().rstrip("="),
+    raw,
+    "".join(f"%{byte:02x}" for byte in raw).encode(),
+    "".join(f"\\u{int.from_bytes(units[i:i + 2], 'big'):04x}" for i in range(0, len(units), 2)).encode(),
+    f"&#{ord(ch)};".encode(),
+    f"&#x{ord(ch):x};".encode(),
   }
-  return sorted((f.encode() for f in forms if f), key=len, reverse=True)
+  if ch == " ":
+    forms.add(b"+")
+  if ch in _JSON_SHORT_ESCAPES:
+    forms.add(_JSON_SHORT_ESCAPES[ch].encode())
+  if ch in _NAMED_ENTITIES:
+    forms.add(_NAMED_ENTITIES[ch].encode())
+  return sorted(forms, key=len, reverse=True)
+
+
+def _base64_cores(data: bytes) -> set[bytes]:
+  """The base64 text ``data`` encodes to wherever it starts in a larger blob.
+
+  Each of the three byte alignments gives different text; the characters that
+  also carry neighbouring bytes' bits are left out, so the core is the same
+  whatever surrounds the key (``Basic`` credentials, JSON, a token).
+  """
+  cores = set()
+  for offset in range(3):
+    encoded = base64.b64encode(b"\0" * offset + data + b"\0\0")
+    core = encoded[-(-8 * offset // 6):8 * (offset + len(data)) // 6]
+    cores |= {core, core.translate(bytes.maketrans(b"+/", b"-_"))}
+  return {core for core in cores if len(core) >= MIN_ENCODED_FORM}
+
+
+@dataclass(frozen=True)
+class SecretEchoes:
+  """What an echo of one key can look like, and how long such an echo can be."""
+  pattern: re.Pattern
+  longest: int
+
+
+def secret_echoes(value: str) -> SecretEchoes:
+  """Match the key wherever a site echoes it, however the site escaped it.
+
+  Escaping is matched per character, so mixed and partial escaping is caught
+  too: raw, percent-encoding, JSON ``\\u`` and short escapes, HTML numeric and
+  named entities, ``+`` for a space. Letters match in either case, which also
+  catches hex digits written either way and an upper-cased echo. Hex, UTF-16
+  (either byte order) and base64 at every alignment cover a key the site
+  re-encoded whole.
+  """
+  per_char, longest, groups = [], 0, {}
+  for ch in value:
+    if ch not in groups:
+      forms = _char_echoes(ch)
+      groups[ch] = (b"(?:" + b"|".join(re.escape(form) for form in forms) + b")", len(forms[0]))
+    group, size = groups[ch]
+    per_char.append(group)
+    longest += size
+  data = value.encode()
+  whole = [data.hex().encode(), value.encode("utf-16-le"), value.encode("utf-16-be")]
+  whole = [form for form in whole if len(form) >= MIN_ENCODED_FORM]
+  cores = _base64_cores(data)
+  alternatives = [b"(?i:" + b"".join(per_char) + b")", *(b"(?i:" + re.escape(form) + b")" for form in whole),
+                  *(re.escape(core) for core in sorted(cores, key=len, reverse=True))]
+  longest = max([longest, *map(len, whole), *map(len, cores)])
+  return SecretEchoes(re.compile(b"|".join(alternatives)), longest)
+
+
+def redact(data: bytes, echoes: SecretEchoes) -> bytes:
+  return echoes.pattern.sub(REDACTED, data)
+
+
+class StreamRedactor:
+  """Redacts a body that arrives in pieces, exactly as ``redact`` would whole.
+
+  An echo can straddle two pieces, so the last ``longest - 1`` bytes of what
+  has arrived always wait for the next piece (or the end), whatever they
+  contain: holding back only text that could begin the key would let a site
+  echoing a caller's guesses reveal, by when each guess arrives, which ones
+  begin the key. Everything before that tail is final and goes out at once.
+  """
+
+  def __init__(self, echoes: SecretEchoes) -> None:
+    self.echoes = echoes
+    self.hold = max(echoes.longest - 1, 0)
+    self.pending = b""
+
+  def feed(self, data: bytes) -> bytes:
+    data = self.pending + data
+    cut = len(data) - self.hold
+    if cut <= 0:
+      self.pending = data
+      return b""
+    # From any start before ``cut`` the longest echo fits in what has arrived,
+    # so these matches are the ones whole-body redaction would find.
+    out, position = [], 0
+    for match in self.echoes.pattern.finditer(data):
+      if match.start() >= cut:
+        break
+      out += [data[position:match.start()], REDACTED]
+      position = match.end()
+    end = max(position, cut)
+    out.append(data[position:end])
+    self.pending = data[end:]
+    return b"".join(out)
+
+  def finish(self) -> bytes:
+    out, self.pending = redact(self.pending, self.echoes), b""
+    return out
 
 
 class Inflater:
@@ -480,10 +611,15 @@ class Inflater:
   The vault asks for identity encoding, but a site may compress anyway, and a
   compressed echo of the key would slip past redaction only to be inflated by
   the caller. gzip and deflate are decoded (bounded like any response); any
-  other encoding is refused before the answer starts.
+  other encoding is refused before the answer starts, and so is any transfer
+  coding but plain ``chunked``, which the HTTP client would otherwise pass on
+  undecoded.
   """
 
   def __init__(self, headers: list[tuple[str, str]]) -> None:
+    transfer = [value.strip().lower() for name, value in headers if name.lower() == "transfer-encoding"]
+    if transfer and transfer != ["chunked"]:
+      raise VaultError(502, f"The site answered with an unsupported transfer encoding ({', '.join(transfer)}).")
     encodings = [
       token.strip().lower()
       for name, value in headers if name.lower() == "content-encoding"
@@ -495,6 +631,7 @@ class Inflater:
     self.encoding = encodings[0] if encodings else None
     self.headers = [(name, value) for name, value in headers if name.lower() != "content-encoding"]
     self._inflater = None
+    self._head = b""
     self._total = 0
 
   def _bounded(self, data: bytes) -> bytes:
@@ -503,86 +640,45 @@ class Inflater:
       raise VaultError(502, "The response is too large for the key vault.")
     return data
 
-  def feed(self, data: bytes) -> bytes:
-    if self.encoding is None or not data:
-      return self._bounded(data)
-    if self._inflater is None:
-      # wbits 47 accepts gzip or zlib framing; deflate may also arrive raw (-15).
-      for wbits in ((47,) if self.encoding != "deflate" else (15, -15)):
-        candidate = zlib.decompressobj(wbits)
-        try:
-          out = candidate.decompress(data, MAX_RESPONSE_BYTES - self._total + 1)
-        except zlib.error:
-          continue
-        self._inflater = candidate
-        break
-      else:
-        raise VaultError(502, "The site sent a response that could not be decompressed.")
-    else:
-      try:
-        out = self._inflater.decompress(data, MAX_RESPONSE_BYTES - self._total + 1)
-      except zlib.error:
-        raise VaultError(502, "The site sent a response that could not be decompressed.")
+  def _start(self, data: bytes):
+    if self.encoding != "deflate":
+      return zlib.decompressobj(47)  # gzip or zlib framing
+    # "deflate" arrives zlib-framed or raw; a zlib header is two bytes whose
+    # value is a multiple of 31 and names method 8.
+    zlib_framed = len(data) >= 2 and data[0] & 0x0F == 8 and (data[0] * 256 + data[1]) % 31 == 0
+    return zlib.decompressobj(15 if zlib_framed else -15)
+
+  def _inflate(self, data: bytes) -> bytes:
+    try:
+      out = self._inflater.decompress(data, MAX_RESPONSE_BYTES - self._total + 1)
+    except zlib.error:
+      raise VaultError(502, "The site sent a response that could not be decompressed.")
     if self._inflater.unconsumed_tail:
       raise VaultError(502, "The response is too large for the key vault.")
     return self._bounded(out)
 
-  def finish(self) -> bytes:
-    return self._bounded(self._inflater.flush()) if self._inflater is not None else b""
-
-
-def _forms_pattern(forms: list[bytes]) -> re.Pattern | None:
-  # Alternation tries longest first (secret_forms' order), so where one form
-  # begins another, the longer is hidden whole.
-  return re.compile(b"|".join(re.escape(form) for form in forms)) if forms else None
-
-
-def redact(data: bytes, forms: list[bytes]) -> bytes:
-  pattern = _forms_pattern(forms)
-  return pattern.sub(REDACTED, data) if pattern else data
-
-
-class StreamRedactor:
-  """Redacts a body that arrives in pieces, exactly as ``redact`` would whole.
-
-  An echo can straddle two pieces, so the end of what has arrived waits for
-  more only while it could still be the start of a form; everything before
-  it is final and goes out at once, so streamed events are not delayed.
-  """
-
-  def __init__(self, forms: list[bytes]) -> None:
-    self.forms = forms
-    self.pattern = _forms_pattern(forms)
-    self.longest = max((len(form) for form in forms), default=0)
-    self.pending = b""
-
-  def _undecided(self, data: bytes) -> int:
-    """Length of the longest tail of ``data`` that could begin a form."""
-    for size in range(min(len(data), self.longest - 1), 0, -1):
-      tail = data[-size:]
-      if any(form.startswith(tail) for form in self.forms):
-        return size
-    return 0
-
   def feed(self, data: bytes) -> bytes:
-    data = self.pending + data
-    if self.pattern is None:
-      self.pending = b""
-      return data
-    cut = len(data) - self._undecided(data)
-    out, position = [], 0
-    for match in self.pattern.finditer(data):
-      if match.start() >= cut:
-        break
-      out += [data[position:match.start()], REDACTED]
-      position = match.end()
-    end = max(position, cut)
-    out.append(data[position:end])
-    self.pending = data[end:]
-    return b"".join(out)
+    if self.encoding is None or not data:
+      return self._bounded(data)
+    if self._inflater is None:
+      self._head += data
+      if len(self._head) < 2:
+        return b""
+      data, self._head = self._head, b""
+      self._inflater = self._start(data)
+    return self._inflate(data)
 
   def finish(self) -> bytes:
-    out, self.pending = redact(self.pending, self.forms), b""
+    """The rest of the body; a compressed body that stops short is an error."""
+    out = b""
+    if self._inflater is None:
+      if not self._head:
+        return b""
+      self._inflater = self._start(self._head)
+      out = self._inflate(self._head)
+    out += self._bounded(self._inflater.flush())
+    if not self._inflater.eof:
+      raise VaultError(502, "The site's compressed answer ended early.")
     return out
 
 
@@ -603,8 +699,12 @@ def build_upstream_request(
   headers = []
   for name, header_value in caller_headers:
     lowered = name.lower()
+    # An obsolete folded line reaches here as a value spanning lines; sent
+    # on, the site could read its continuation as a header of its own.
+    if "\r" in header_value or "\n" in header_value:
+      raise VaultError(400, f"The {name} header is folded over several lines; send it on one line.")
     if (
-      lowered in HOP_BY_HOP or lowered in METHOD_OVERRIDE_HEADERS
+      lowered in HOP_BY_HOP or lowered in METHOD_OVERRIDE_HEADERS or lowered in URL_OVERRIDE_HEADERS
       # A ranged answer could carry an echoed key in slices that redaction,
       # which matches the whole value, would never recognise.
       or lowered in ("host", "content-length", "accept-encoding", "range", "if-range")
@@ -663,6 +763,10 @@ class Vault:
   reads, changes, grants and requests (only trusted callers or capped asks
   make those). Counters live in ``stats.json`` so they never depend on how
   much log is left.
+
+  Every change goes through ``_change``: it takes effect only once written,
+  so the vault never acts on a grant, a deletion or a purge it would lose at
+  restart.
   """
 
   def __init__(self, data_dir: Path) -> None:
@@ -674,16 +778,19 @@ class Vault:
     self.stats_path = data_dir / "stats.json"
     self.requests_path = data_dir / "requests.json"
     self._lock = threading.RLock()
+    self._changing = False
     self._last_stamp_ms = 0
     self._prepare_folder()
     self._aead = AESGCM(self._load_master_key())
-    self._records, migrated = self._load_records()
+    records, migrated = self._load_records()
     if migrated:
-      self._save()
+      self._write_store(records)
+    self._records = records
+    self._refuse_a_master_key_that_opens_nothing()
     self._requests = self._load_requests()
     self._stats = self._load_stats()
     if not self.stats_path.exists():
-      self._save_stats()
+      self._write_stats(self._stats)
 
   def _prepare_folder(self) -> None:
     # Reasserted at every start instead of trusting what is found.
@@ -710,6 +817,11 @@ class Vault:
     _atomic_write(self.master_path, key)
     return key
 
+  def _refuse_a_master_key_that_opens_nothing(self) -> None:
+    """A master key from another store would start cleanly, then fail every read and borrow."""
+    if self._records and not any(self._opens(name, record) for name, record in self._records.items()):
+      raise SystemExit("key vault: the master key opens none of the stored keys; refusing to start")
+
   def _load_records(self) -> tuple[dict, bool]:
     """The stored keys, and whether an older store was migrated."""
     if not self.store_path.exists():
@@ -717,28 +829,28 @@ class Vault:
     payload = json.loads(self.store_path.read_text())
     records = payload.get("keys") or {}
     if payload.get("version") == 1:
-      for record in records.values():
-        grants = record["grants"]
-        # Each app keeps exactly the sites it could reach before.
-        grants["apps"] = [{"id": app_id, "sites": json.loads(json.dumps(grants["sites"]))}
-                          for app_id in grants["apps"]]
-      return records, True
+      return {name: _migrated_from_version_one(name, record) for name, record in records.items()}, True
     if payload.get("version") != STORE_VERSION:
       raise SystemExit("key vault: unknown store version; refusing to start")
     return records, False
 
-  def _save(self) -> None:
-    payload = {"version": STORE_VERSION, "keys": self._records}
-    _atomic_write(self.store_path, json.dumps(payload, indent=1, sort_keys=True).encode())
-
   def _load_requests(self) -> dict:
+    """Open requests. A damaged file is set aside rather than stopping the vault:
+    losing pending asks only means their apps ask again."""
     if not self.requests_path.exists():
       return {}
-    return json.loads(self.requests_path.read_text()).get("requests") or {}
-
-  def _save_requests(self) -> None:
-    payload = json.dumps({"requests": self._requests}, indent=1, sort_keys=True).encode()
-    _atomic_write(self.requests_path, payload)
+    try:
+      payload = json.loads(self.requests_path.read_text())
+      requests = (payload.get("requests") or {}) if isinstance(payload, dict) else None
+      if not isinstance(requests, dict) or not all(map(_is_stored_request, requests.values())):
+        raise ValueError("unexpected shape")
+    except ValueError as exc:
+      aside = self.requests_path.with_name(f"{self.requests_path.name}.damaged-{int(time.time())}")
+      os.replace(self.requests_path, aside)
+      print(f"key vault: {self.requests_path.name} is damaged ({type(exc).__name__}); moved it to "
+            f"{aside.name} and started with no open requests", file=sys.stderr, flush=True)
+      return {}
+    return requests
 
   def _load_stats(self) -> dict:
     if self.stats_path.exists():
@@ -750,8 +862,55 @@ class Vault:
         _count(stats.setdefault(entry["key"], _empty_stats()), entry["outcome"], entry["ts"])
     return stats
 
-  def _save_stats(self) -> None:
-    _atomic_write(self.stats_path, json.dumps({"keys": self._stats}, sort_keys=True).encode())
+  def _write_store(self, records: dict) -> None:
+    payload = {"version": STORE_VERSION, "keys": records}
+    _atomic_write(self.store_path, json.dumps(payload, indent=1, sort_keys=True).encode())
+
+  def _write_requests(self, requests: dict) -> None:
+    _atomic_write(self.requests_path, json.dumps({"requests": requests}, indent=1, sort_keys=True).encode())
+
+  def _write_stats(self, stats: dict) -> None:
+    _atomic_write(self.stats_path, json.dumps({"keys": stats}, sort_keys=True).encode())
+
+  @contextlib.contextmanager
+  def _change(self):
+    """Change keys, requests and counters; the change takes effect once written.
+
+    The body edits copies under the lock (no reader sees them before then).
+    Each file whose part changed is then written atomically; a part whose
+    write fails (a full disk) is put back as it is on disk, and the error
+    goes to the caller, so retrying the change really saves it. A refusal
+    raised by the body discards the whole change. A change made inside
+    another joins it.
+    """
+    with self._lock:
+      if self._changing:
+        yield
+        return
+      before = {"_records": self._records, "_requests": self._requests, "_stats": self._stats}
+      for attr, state in before.items():
+        setattr(self, attr, copy.deepcopy(state))
+      self._changing = True
+      try:
+        try:
+          yield
+        except BaseException:
+          for attr, state in before.items():
+            setattr(self, attr, state)
+          raise
+        parts = (("_records", self._write_store), ("_requests", self._write_requests),
+                 ("_stats", self._write_stats))
+        for index, (attr, write) in enumerate(parts):
+          if getattr(self, attr) == before[attr]:
+            continue
+          try:
+            write(getattr(self, attr))
+          except BaseException:
+            for unwritten, _ in parts[index:]:
+              setattr(self, unwritten, before[unwritten])
+            raise
+      finally:
+        self._changing = False
 
   def _seal(self, name: str, value: str) -> dict:
     nonce = secrets.token_bytes(12)
@@ -759,9 +918,19 @@ class Vault:
     return {"nonce": base64.b64encode(nonce).decode(), "sealed": base64.b64encode(sealed).decode()}
 
   def _open(self, name: str, record: dict) -> str:
-    nonce = base64.b64decode(record["nonce"])
-    sealed = base64.b64decode(record["sealed"])
-    return self._aead.decrypt(nonce, sealed, name.encode()).decode()
+    try:
+      nonce = base64.b64decode(record["nonce"])
+      sealed = base64.b64decode(record["sealed"])
+      return self._aead.decrypt(nonce, sealed, name.encode()).decode()
+    except (InvalidTag, binascii.Error, KeyError, TypeError, ValueError):
+      raise VaultError(500, "This key can't be decrypted.")
+
+  def _opens(self, name: str, record: dict) -> bool:
+    try:
+      self._open(name, record)
+    except VaultError:
+      return False
+    return True
 
   # -- owner operations ----------------------------------------------------
 
@@ -787,6 +956,10 @@ class Vault:
   def put_key(self, name: str, body: dict, *, actor: str = "owner") -> dict:
     """Create or update a key.
 
+    An update changes only what it names: an omitted ``inject`` or ``grants``
+    keeps the key's current one, so replacing a value never withdraws who may
+    use it. A new key needs a value and where it is sent.
+
     ``create_only`` refuses an occupied name atomically, so a caller choosing a
     free name can never overwrite another key. ``revision``, when given, must
     equal the key's current revision (bumped by every change), so an edit
@@ -801,13 +974,13 @@ class Vault:
     the key is the owner's, and the app uses it only if the owner grants it.
 
     ``actor`` is who made the change, as the server attested it, for the audit
-    log.
+    log. An agent may set keys up and take access away, but switching agent
+    use back on and letting an app use a key, or reach more sites, are the
+    owner's own decisions; the server refuses them too.
     """
     validate_name(name)
-    inject = validate_inject(body.get("inject"))
-    grants = validate_grants(body.get("grants"))
     origin = validate_origin(body["origin"]) if body.get("origin") is not None else None
-    with self._lock:
+    with self._change():
       existing = self._records.get(name)
       if existing is not None and body.get("create_only"):
         raise VaultError(409, f"A key named {name} already exists.")
@@ -826,6 +999,18 @@ class Vault:
                   "multiline": bool(existing.get("multiline"))}
       else:
         raise VaultError(400, "A new key needs a value.")
+      if body.get("inject") is not None:
+        inject = validate_inject(body["inject"])
+      elif existing is not None:
+        inject = existing["inject"]
+      else:
+        raise VaultError(400, "A new key needs where it is sent: a header or a query parameter.")
+      if body.get("grants") is not None:
+        grants = validate_grants(body["grants"])
+      else:
+        grants = copy.deepcopy(existing["grants"]) if existing else validate_grants(None)
+      if actor.split(":", 1)[0] == "agent":
+        _refuse_an_agent_widening(existing, grants)
       kept_origin = existing.get("origin") if existing else origin
       if existing is not None and body.get("value") is not None and origin != kept_origin:
         if kept_origin:
@@ -843,14 +1028,10 @@ class Vault:
       if kept_origin:
         self._records[name]["origin"] = kept_origin
         self._drop_orphaned_origin(self._records[name])
-      self._save()
       # A request is settled once its app may reach every site it asked for.
-      granted = [rid for rid, item in self._requests.items()
-                 if item["key"] == name and _sites_covered(app_grant(grants, item["app"]), item["sites"])]
-      for rid in granted:
+      for rid in [rid for rid, item in self._requests.items()
+                  if item["key"] == name and _sites_covered(app_grant(grants, item["app"]), item["sites"])]:
         del self._requests[rid]
-      if granted:
-        self._save_requests()
     self.log_event(name, actor, "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
 
@@ -867,16 +1048,16 @@ class Vault:
 
     The key ``app_id`` created for ``secret_name`` and still holds is
     replaced, keeping the owner's choices; otherwise a new key is created at
-    the first free name (plain, then app-scoped, then numbered), granted to
+    the first free app-scoped name (``app<id>-<name>``, then numbered), granted to
     the app and the owner's agents, sent as a bearer token, on ``sites`` (none
     unless the server names the app's model-provider site). An app holds at
     most ``MAX_OWNED_PER_APP`` such keys, as in the per-app store. Doing both
-    under the vault's lock means simultaneous saves can never leave two keys
-    for one app secret.
+    in one change means simultaneous saves can never leave two keys for one
+    app secret.
     """
     origin = validate_origin({"app": app_id, "name": secret_name})
     value = validate_value(value)
-    with self._lock:
+    with self._change():
       name = self._owned_name(origin)
       if name is not None:
         record = self._records[name]
@@ -910,12 +1091,11 @@ class Vault:
     Returns None when the app owns no such key.
     """
     origin = validate_origin({"app": app_id, "name": secret_name})
-    with self._lock:
+    with self._change():
       name = self._owned_name(origin)
       if name is None:
         return None
       deleted = self._release_locked(name, app_id)
-      self._save()
     self.log_event(name, caller_text(("app", str(app_id))), "revoked" if deleted else "released")
     return {"name": name, "deleted": deleted}
 
@@ -940,7 +1120,7 @@ class Vault:
   def _release_locked(self, name: str, app_id: int) -> bool:
     """Withdraw ``app_id`` from its own key; delete the key unless shared.
 
-    The caller holds the lock and saves. Returns whether the key was deleted.
+    The caller holds a change open. Returns whether the key was deleted.
     """
     record = self._records[name]
     others = without_app(record["grants"], app_id)
@@ -950,8 +1130,7 @@ class Vault:
       self._touch(record)
     else:
       del self._records[name]
-      if self._stats.pop(name, None) is not None:
-        self._save_stats()
+      self._stats.pop(name, None)
     return not others
 
   def erase_owned(self, app_id: int) -> list[str]:
@@ -965,12 +1144,10 @@ class Vault:
     """
     if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
       raise VaultError(400, "Invalid app id.")
-    with self._lock:
+    with self._change():
       owned = [n for n, r in self._records.items()
                if (r.get("origin") or {}).get("app") == app_id and app_id in app_ids(r["grants"])]
       deleted = [name for name in owned if self._release_locked(name, app_id)]
-      if owned:
-        self._save()
     for name in owned:
       self.log_event(name, "platform", "revoked" if name in deleted else "released",
                      reason=f"app:{app_id} data erased")
@@ -978,12 +1155,10 @@ class Vault:
 
   def revoke_key(self, name: str, *, actor: str = "owner") -> bool:
     validate_name(name)
-    with self._lock:
+    with self._change():
       if self._records.pop(name, None) is None:
         return False
-      self._save()
-      if self._stats.pop(name, None) is not None:
-        self._save_stats()
+      self._stats.pop(name, None)
     self.log_event(name, actor, "revoked")
     return True
 
@@ -1041,17 +1216,18 @@ class Vault:
         400, f"Ask for exact sites such as api.example.com, not {wildcard}; "
         "only the owner can allow every subdomain, on the key's page.",
       )
+    if len(json.dumps(sites)) > MAX_ASK_SITES_BYTES:
+      raise VaultError(400, "Ask for fewer sites or paths at once.")
     inject = validate_inject(body["inject"]) if body.get("inject") is not None else None
     request_id = f"{app_id}-{name}"
-    with self._lock:
+    with self._change():
       record = self._records.get(name)
       grant = app_grant(record["grants"], app_id) if record is not None else None
       existing = self._requests.get(request_id)
       if grant is not None:
         missing = sites_outside(grant["sites"], sites)
         if not missing:
-          if self._requests.pop(request_id, None) is not None:
-            self._save_requests()
+          self._requests.pop(request_id, None)
           return {"status": "granted", "key": name}
         answer = {"status": "granted", "key": name, "id": request_id, "sites_not_allowed": missing}
         if existing is not None:
@@ -1068,19 +1244,23 @@ class Vault:
         "key": name, "reason": reason, "sites": sites, "inject": inject,
         "status": "pending", "created_at": _now(), "ticket": secrets.token_hex(8),
       }
-      self._save_requests()
     self.log_event(name, f"app:{app_id}", "requested")
     if grant is not None:
       return {**answer, "sites_request": "pending", "created": True}
     return {"status": "pending", "key": name, "id": request_id, "created": True}
 
   def list_requests(self) -> list[dict]:
-    """Open requests; ``granted`` marks an app asking for more sites on a key it has."""
+    """Open requests; ``granted`` marks an app asking for more sites on a key it has.
+
+    ``key_origin`` names the app that saved an existing key for itself, so the
+    owner never mistakes an app's planted value for a key of their own.
+    """
     with self._lock:
       requests = [dict(item) for item in self._requests.values()]
       for item in requests:
         record = self._records.get(item["key"])
         item["key_exists"] = record is not None
+        item["key_origin"] = dict(record["origin"]) if record is not None and record.get("origin") else None
         item["granted"] = record is not None and app_grant(record["grants"], item["app"]) is not None
     return sorted(requests, key=lambda item: item["created_at"], reverse=True)
 
@@ -1096,8 +1276,13 @@ class Vault:
     The answer names the request's ``ticket``: a request id is the app id and
     key name, so a request card left open while its app was purged would
     otherwise approve the same ask from an unrelated app that reused the id.
+
+    Only the owner's own answer approves (``actor`` ``owner``); the server
+    refuses everyone else too.
     """
-    with self._lock:
+    if actor != "owner":
+      raise VaultError(403, "Only the owner can let an app use a key, from Settings › Keys.")
+    with self._change():
       request = self._requests.get(request_id)
       if request is None:
         raise VaultError(404, "That request is gone.")
@@ -1127,18 +1312,21 @@ class Vault:
         put["value"] = body.get("value")
       result = self.put_key(name, put, actor=actor)
       self._requests.pop(request_id, None)
-      self._save_requests()
     self.log_event(name, actor, f"granted app:{request['app']}")
     return {**result, "granted": request["app"]}
 
-  def deny_request(self, request_id: str, *, actor: str = "owner") -> dict:
-    with self._lock:
+  def deny_request(self, request_id: str, body: dict | None = None, *, actor: str = "owner") -> dict:
+    """Refuse an ask. A ``ticket`` in ``body`` must be the request's, as when
+    approving, so a card left open across an id reuse can't deny the new ask."""
+    ticket = (body or {}).get("ticket")
+    with self._change():
       request = self._requests.get(request_id)
       if request is None:
         raise VaultError(404, "That request is gone.")
+      if ticket is not None and ticket != request.get("ticket"):
+        raise VaultError(409, "That request changed since it was shown; review it again.")
       request["status"] = "denied"
       request["answered_at"] = _now()
-      self._save_requests()
     self.log_event(request["key"], actor, f"denied app:{request['app']}")
     return {"denied": request_id}
 
@@ -1148,7 +1336,7 @@ class Vault:
     App ids can be reused once an app is purged, so a grant must never outlive
     the app it was given to.
     """
-    with self._lock:
+    with self._change():
       deleted = self.erase_owned(app_id)
       keys = [n for n, r in self._records.items() if app_grant(r["grants"], app_id)]
       for name in keys:
@@ -1159,20 +1347,15 @@ class Vault:
       requests = [rid for rid, item in self._requests.items() if item["app"] == app_id]
       for rid in requests:
         del self._requests[rid]
-      if keys:
-        self._save()
-      if requests:
-        self._save_requests()
     for name in keys:
       self.log_event(name, actor, f"revoked app:{app_id} (app purged)")
     return {"keys": keys, "deleted": deleted, "requests": len(requests)}
 
   def forget_request(self, request_id: str, *, actor: str = "owner") -> bool:
-    with self._lock:
+    with self._change():
       request = self._requests.pop(request_id, None)
       if request is None:
         return False
-      self._save_requests()
     self.log_event(request["key"], actor, f"forgot request app:{request['app']}")
     return True
 
@@ -1186,15 +1369,20 @@ class Vault:
         # An app without a grant learns nothing, including whether the name exists.
         if caller[0] == "app":
           raise VaultError(403, f"{caller_text(caller)} may not use this key")
-        raise VaultError(404, f"No key named {name}")
+        raise VaultError(404, f"No key named {name}" if NAME_RE.fullmatch(name) else "No key by that name")
       if not caller_allowed(record["grants"], *caller):
         raise VaultError(403, f"{caller_text(caller)} may not use this key")
       reason = site_allows(caller_sites(record["grants"], *caller), host, method, path)
       if reason:
         raise VaultError(403, reason)
       value = self._open(name, record)
-      if record["inject"]["type"] == "header" and any(ch in value for ch in "\r\n"):
-        raise VaultError(400, f"{name} has line breaks, so it can't be sent in a header.")
+      if record["inject"]["type"] == "header":
+        if any(ch in value for ch in "\r\n"):
+          raise VaultError(400, f"{name} has line breaks, so it can't be sent in a header.")
+        try:
+          (record["inject"].get("prefix", "") + value).encode("latin-1")
+        except UnicodeEncodeError:
+          raise VaultError(400, f"{name} has characters a header can't carry, so it can't be sent in a header.")
       return dict(record["inject"]), value
 
   # -- logs and counters (never values) ----------------------------------------
@@ -1237,8 +1425,12 @@ class Vault:
     with self._lock:
       if key not in self._records or outcome not in ("used", "denied"):
         return
-      _count(self._stats.setdefault(key, _empty_stats()), outcome, entry["ts"])
-      self._save_stats()
+      # Counted on a copy and kept only once written, like every change
+      # (``_change`` would copy the whole store for one counter).
+      stats = {**self._stats, key: dict(self._stats.get(key) or _empty_stats())}
+      _count(stats[key], outcome, entry["ts"])
+      self._write_stats(stats)
+      self._stats = stats
 
   def log_event(
     self, key: str, caller: str, outcome: str,
@@ -1289,12 +1481,76 @@ def _sites_covered(grant: dict | None, wanted: list[dict]) -> bool:
   return grant is not None and not sites_outside(grant["sites"], wanted)
 
 
+def _refuse_an_agent_widening(existing: dict | None, grants: dict) -> None:
+  """Agents may take access away, but giving it is the owner's own decision."""
+  if existing is not None and grants["agents"] and not existing["grants"].get("agents"):
+    raise VaultError(403, "Only you can let agents use this key, from Settings › Keys.")
+  if widened_apps(existing["grants"] if existing else None, grants):
+    raise VaultError(403, "Only you can let an app use a key or reach more sites, from Settings › Keys.")
+
+
+def _migrated_from_version_one(name: str, record: dict) -> dict:
+  """A version 1 record with each app keeping exactly the sites it could reach.
+
+  Validated like any new grant (duplicate app ids merge, a missing ``sites``
+  is no sites), and an origin whose app no longer holds a grant is dropped,
+  as every later change would.
+  """
+  grants = record.get("grants") or {}
+  sites = grants.get("sites") or []
+  try:
+    migrated = {**record, "grants": validate_grants({
+      "apps": [{"id": app_id, "sites": sites} for app_id in grants.get("apps") or []],
+      "agents": grants.get("agents"),
+      "sites": sites,
+    })}
+  except VaultError as exc:
+    raise SystemExit(f"key vault: version 1 key {name} can't be migrated ({exc.reason}); refusing to start")
+  Vault._drop_orphaned_origin(migrated)
+  return migrated
+
+
+def _is_stored_request(item) -> bool:
+  return (
+    isinstance(item, dict) and isinstance(item.get("app"), int) and isinstance(item.get("key"), str)
+    and isinstance(item.get("sites"), list) and isinstance(item.get("status"), str)
+    and isinstance(item.get("created_at"), str)
+  )
+
+
 # ---------------------------------------------------------------------------
 # The vault socket: one HTTP server on a mode-0600 Unix socket, spoken to by
 # the Möbius server, which attests every caller, and same-user owner tools.
 # ---------------------------------------------------------------------------
 
 USE_PATH_RE = re.compile(r"^/use/([^/]+)/([^/]+)(/.*)?$")
+
+
+class FinalAnswer(http.client.HTTPResponse):
+  """A site's final answer: interim 1xx answers (103 Early Hints) are skipped.
+
+  http.client skips only 100 Continue itself and would hand a 103 back as the
+  answer, leaving the real one unread. This relies on ``_read_status``, which
+  ``begin`` calls for each status line.
+  """
+
+  MAX_INTERIM = 16
+
+  def _read_status(self):
+    for _ in range(self.MAX_INTERIM):
+      version, status, reason = super()._read_status()
+      if not 100 < status < 200 or status == 101:
+        return version, status, reason
+      http.client.parse_headers(self.fp)
+    raise http.client.HTTPException("The site sent too many interim answers.")
+
+
+def _time_left(deadline: float) -> float:
+  """The read timeout for the next wait on the site, within the borrow's deadline."""
+  left = deadline - time.monotonic()
+  if left <= 0:
+    raise VaultError(504, f"The site took longer than {BORROW_DEADLINE_SECS} seconds to answer.")
+  return min(UPSTREAM_TIMEOUT_SECS, left)
 
 
 class VaultHandler(BaseHTTPRequestHandler):
@@ -1311,6 +1567,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     pass
 
   def _send_json(self, status: int, payload, *, denied: bool = False) -> None:
+    self._answer_started = True
     body = json.dumps(payload).encode()
     self.send_response(status)
     self.send_header("Content-Type", "application/json")
@@ -1326,10 +1583,23 @@ class VaultHandler(BaseHTTPRequestHandler):
     # One exchange per connection: a refusal can leave a body unread, which
     # must never be parsed as the next request.
     self.close_connection = True
+    self._answer_started = False
     split = urllib.parse.urlsplit(self.path)
-    if split.path.startswith("/use/"):
-      self._use(split)
-      return
+    try:
+      if split.path.startswith("/use/"):
+        self._use(split)
+      else:
+        self._admin_answer(split)
+    except OSError as exc:
+      # The store or a log could not be written (a full disk): the change did
+      # not take effect, and the caller hears so rather than an empty reply.
+      if not self._answer_started:
+        with contextlib.suppress(OSError):
+          self._send_json(500, {"error": f"The key vault could not write its files ({type(exc).__name__})."})
+
+  # -- owner and handshake operations ----------------------------------------
+
+  def _admin_answer(self, split) -> None:
     try:
       self._admin(split)
     except VaultError as exc:
@@ -1337,10 +1607,16 @@ class VaultHandler(BaseHTTPRequestHandler):
     except ValueError:
       self._send_json(400, {"error": "Invalid request."})
 
-  # -- owner and handshake operations ----------------------------------------
+  def _content_length(self) -> int | None:
+    raw = self.headers.get("Content-Length")
+    if not raw:
+      return None
+    if not re.fullmatch(r"[0-9]{1,15}", raw.strip()):
+      raise VaultError(400, "Invalid Content-Length.")
+    return int(raw)
 
   def _json_body(self) -> dict:
-    size = int(self.headers.get("Content-Length") or 0)
+    size = self._content_length() or 0
     if size > MAX_ADMIN_BYTES:
       raise VaultError(413, "Request too large.")
     try:
@@ -1392,7 +1668,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     elif method == "POST" and len(parts) == 3 and parts[0] == "requests" and parts[2] == "approve":
       self._send_json(200, vault.approve_request(parts[1], self._json_body(), actor=self._manager()))
     elif method == "POST" and len(parts) == 3 and parts[0] == "requests" and parts[2] == "deny":
-      self._send_json(200, vault.deny_request(parts[1], actor=self._manager()))
+      self._send_json(200, vault.deny_request(parts[1], self._json_body(), actor=self._manager()))
     elif method == "POST" and parts == ["owned"]:
       body = self._json_body()
       if not isinstance(body.get("app"), int) or not isinstance(body.get("name"), str):
@@ -1427,49 +1703,62 @@ class VaultHandler(BaseHTTPRequestHandler):
       self._send_json(404, {"error": "Use /use/<key>/<host>/<path>."})
       return
     name = urllib.parse.unquote(match.group(1))
+    # The log names a key only by a valid key name, never by the caller's text.
+    logged_name = name if NAME_RE.fullmatch(name) else "(invalid name)"
     host = match.group(2).lower()
     raw_path = match.group(3) or "/"
     method = self.command
     caller_label = "unknown"
     started = time.monotonic()
+    deadline = started + BORROW_DEADLINE_SECS
+    borrowing = self.server.borrows.acquire(blocking=False)
     try:
-      caller = parse_caller(self.headers.get("X-Vault-Caller"))
-      caller_label = caller_text(caller)
-      if not HOST_RE.fullmatch(host) or host.startswith("*."):
-        raise VaultError(400, "The destination must be a site name like api.example.com (HTTPS, port 443).")
-      path = normalized_request_path(raw_path)
-      body = self._read_body()
-      inject, value = self.vault.authorize(name, caller, method, host, path)
-    except VaultError as exc:
-      self.vault.log_traffic(
-        name, caller_label, method, host, raw_path, "denied",
-        status=exc.status, reason=exc.reason,
-      )
-      self._send_json(exc.status, {"error": "denied", "reason": exc.reason}, denied=True)
-      return
+      try:
+        caller = parse_caller(self.headers.get("X-Vault-Caller"))
+        caller_label = caller_text(caller)
+        if not borrowing:
+          raise VaultError(429, "The key vault is busy with other requests; try again shortly.")
+        if not HOST_RE.fullmatch(host) or host.startswith("*."):
+          raise VaultError(400, "The destination must be a site name like api.example.com (HTTPS, port 443).")
+        path = normalized_request_path(raw_path)
+        body = self._read_body()
+        inject, value = self.vault.authorize(name, caller, method, host, path)
+        request = build_upstream_request(
+          method=method, host=host, raw_path=raw_path, raw_query=split.query,
+          caller_headers=list(self.headers.items()), inject=inject, value=value,
+        )
+      except VaultError as exc:
+        refused = exc.status < 500 and exc.status != 429
+        self.vault.log_traffic(
+          logged_name, caller_label, method, host, raw_path, "denied" if refused else "failed",
+          status=exc.status, reason=exc.reason,
+        )
+        self._send_json(exc.status, {"error": "denied", "reason": exc.reason}, denied=True)
+        return
+      self._relay(logged_name, caller_label, request, body, secret_echoes(value), started, deadline)
+    finally:
+      if borrowing:
+        self.server.borrows.release()
 
-    request = build_upstream_request(
-      method=method, host=host, raw_path=raw_path, raw_query=split.query,
-      caller_headers=list(self.headers.items()), inject=inject, value=value,
-    )
-    forms = secret_forms(value)
+  def _relay(self, name, caller_label, request: UpstreamRequest, body, echoes, started, deadline) -> None:
+    method, host, raw_path = request.method, request.host, request.target.split("?", 1)[0]
     connection = None
     try:
-      connection, response = self._open_upstream(request, body)
+      connection, sock, response = self._open_upstream(request, body, deadline)
       inflater = Inflater(response.getheaders())
     except VaultError as exc:
       if connection is not None:
         connection.close()
-      # A 403 here is the destination check (non-public address), a refusal
-      # like any other; anything else is the site failing to answer.
-      outcome = "denied" if exc.status == 403 else "failed"
+      # A 403 here is the destination check (non-public address) and a 400 a
+      # request HTTP can't carry, refusals like any other; anything else is
+      # the site failing to answer.
+      refused = exc.status in (400, 403)
       self.vault.log_traffic(
-        name, caller_label, method, host, raw_path, outcome,
+        name, caller_label, method, host, raw_path, "denied" if refused else "failed",
         status=exc.status, reason=exc.reason,
         ms=int((time.monotonic() - started) * 1000),
       )
-      error = "denied" if exc.status == 403 else "upstream"
-      self._send_json(exc.status, {"error": error, "reason": exc.reason}, denied=True)
+      self._send_json(exc.status, {"error": "denied" if refused else "upstream", "reason": exc.reason}, denied=True)
       return
 
     def record(failure: str | None) -> None:
@@ -1480,11 +1769,11 @@ class VaultHandler(BaseHTTPRequestHandler):
       )
 
     try:
-      self._stream_answer(name, response, inflater, forms, record)
+      self._stream_answer(name, response, inflater, echoes, record, sock, deadline)
     finally:
       connection.close()
 
-  def _stream_answer(self, name, response, inflater: Inflater, forms, record) -> None:
+  def _stream_answer(self, name, response, inflater: Inflater, echoes, record, sock, deadline) -> None:
     """Relay the site's answer as it arrives, recording how it ended.
 
     Server events and streamed model output reach the caller as the site sends
@@ -1492,14 +1781,20 @@ class VaultHandler(BaseHTTPRequestHandler):
     has the whole answer can already find it. Once the status is sent a
     failure can no longer become an error answer, so the vault ends the
     connection without the closing chunk and the caller sees an incomplete
-    body rather than a complete-looking one.
+    body rather than a complete-looking one: so does an answer that stops
+    short of its Content-Length, or outlasts the borrow's deadline.
+
+    The status goes out with its standard reason phrase and the site's
+    ``X-Vault-*`` headers are dropped: neither may speak for the vault.
     """
     has_body = self.command != "HEAD" and response.status not in (204, 304) and response.status >= 200
-    self.send_response(response.status, response.reason)
+    self._answer_started = True
+    self.send_response(response.status)
     for header, header_value in inflater.headers:
-      if header.lower() in HOP_BY_HOP or header.lower() == "content-length":
+      lowered = header.lower()
+      if lowered in HOP_BY_HOP or lowered == "content-length" or lowered.startswith("x-vault-"):
         continue
-      cleaned = redact(header_value.encode("latin-1", "replace"), forms).decode("latin-1")
+      cleaned = redact(header_value.encode("latin-1", "replace"), echoes).decode("latin-1")
       self.send_header(header, cleaned)
     self.send_header("Transfer-Encoding" if has_body else "Content-Length", "chunked" if has_body else "0")
     self.send_header("Connection", "close")
@@ -1509,7 +1804,7 @@ class VaultHandler(BaseHTTPRequestHandler):
       self.end_headers()
       return
     self.end_headers()
-    redactor = StreamRedactor(forms)
+    redactor = StreamRedactor(echoes)
 
     def send(data: bytes) -> None:
       if data:
@@ -1517,18 +1812,24 @@ class VaultHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     try:
-      while True:
+      # http.client closes the socket itself once a sized answer is complete.
+      while not response.isclosed():
+        sock.settimeout(_time_left(deadline))
         piece = response.read1(64 * 1024)
         if not piece:
           break
         send(redactor.feed(inflater.feed(piece)))
+      if response.length:
+        raise http.client.IncompleteRead(b"", response.length)
       send(redactor.feed(inflater.finish()))
       send(redactor.finish())
     except VaultError as exc:
       record(exc.reason)
       return
     except (OSError, http.client.HTTPException) as exc:
-      record(f"The answer broke off ({type(exc).__name__})")
+      late = time.monotonic() >= deadline
+      record(f"The answer took longer than {BORROW_DEADLINE_SECS} seconds" if late
+             else f"The answer broke off ({type(exc).__name__})")
       return
     record(None)
     try:
@@ -1540,31 +1841,31 @@ class VaultHandler(BaseHTTPRequestHandler):
   def _read_body(self) -> bytes | None:
     if self.headers.get("Transfer-Encoding"):
       raise VaultError(411, "Send a Content-Length; chunked bodies are not supported.")
-    length = self.headers.get("Content-Length")
-    if not length:
+    size = self._content_length()
+    if size is None:
       return None
-    try:
-      size = int(length)
-    except ValueError:
-      raise VaultError(400, "Invalid Content-Length.")
-    if size < 0 or size > MAX_REQUEST_BYTES:
+    if size > MAX_REQUEST_BYTES:
       raise VaultError(413, "The request body is too large.")
     return self.rfile.read(size)
 
-  def _open_upstream(self, request: UpstreamRequest, body: bytes | None):
-    """Send the request; return the open connection and the response head."""
+  def _open_upstream(self, request: UpstreamRequest, body: bytes | None, deadline: float):
+    """Send the request; return the open connection, its socket and the answer's head."""
     connection = None
     try:
-      connection = self.connect(request.host, UPSTREAM_TIMEOUT_SECS)
+      connection = self.connect(request.host, _time_left(deadline))
+      connection.response_class = FinalAnswer
       connection.putrequest(request.method, request.target, skip_host=True, skip_accept_encoding=True)
       for header, header_value in request.headers:
         connection.putheader(header, header_value)
       if body is not None:
         connection.putheader("Content-Length", str(len(body)))
       connection.endheaders(body)
+      # Kept for read timeouts: http.client lets go of it once the answer
+      # owns the connection.
+      sock = connection.sock
       # http.client never follows redirects; a 3xx goes back to the caller
       # without the key ever travelling to the new location.
-      return connection, connection.getresponse()
+      return connection, sock, connection.getresponse()
     except VaultError:
       if connection is not None:
         connection.close()
@@ -1573,12 +1874,22 @@ class VaultHandler(BaseHTTPRequestHandler):
       if connection is not None:
         connection.close()
       raise VaultError(502, f"{request.host} could not be reached ({type(exc).__name__})")
+    except ValueError:
+      # Text HTTP can't carry (a non-ASCII query, a header value outside
+      # Latin-1) is refused by http.client before anything is sent.
+      if connection is not None:
+        connection.close()
+      raise VaultError(400, "The request has characters HTTP can't carry; percent-encode them.")
 
   do_GET = do_HEAD = do_POST = do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _handle
 
 
 class VaultServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
   daemon_threads = True
+
+  def __init__(self, *args, **kwargs) -> None:
+    super().__init__(*args, **kwargs)
+    self.borrows = threading.BoundedSemaphore(MAX_CONCURRENT_BORROWS)
 
 
 def hold_single_instance_lock(data_dir: Path) -> int:
