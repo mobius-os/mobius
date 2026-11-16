@@ -1,4 +1,4 @@
-/* Settings › Keys: overview list in the AI-providers style, app requests, and a key's own page. */
+/* Settings › Keys: overview list in the AI-providers style, app and agent requests, and a key's own page. */
 /* Layout comes from the shared Settings blocks (SettingsPage.css: settings-group,
    settings-list, settings-item); this file styles only what is key-specific.
    Settings' own stylesheet loads after this one, so overrides of shared
@@ -45,11 +45,38 @@
 }
 .settings-keys__request-lead { margin: 0; font-size: 14px; line-height: 1.45; color: var(--text); }
 .settings-keys__request-lead strong { font-weight: 600; overflow-wrap: anywhere; }
+.settings-keys__reason { font-style: italic; }
+
+/* "Details" and "Use <app>'s key anyway": the technical or risky part, one tap away. */
+.settings-keys__details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-keys__details-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.settings-keys__details-list code { font-family: inherit; }
+.settings-keys__details-body { display: grid; gap: 8px; margin-top: 6px; }
+.settings-keys__actions.settings-keys__actions--start { justify-content: flex-start; }
 
 /* -- shared bits ---------------------------------------------------------- */
 .settings-keys__muted { margin: 0; font-size: 13px; line-height: 1.45; color: var(--muted); }
 .settings-keys__refused { color: var(--danger); }
 .settings-keys__error { display: block; padding: 0 16px 10px; color: var(--danger); font-size: 12.5px; }
+.settings-keys__error-inline { color: var(--danger); font-size: 12.5px; }
+.settings-keys__hint { font-size: 12.5px; color: var(--muted); }
+.settings-keys__hint strong { color: var(--text); font-weight: 600; }
 
 .settings-keys__actions {
   display: flex;
@@ -111,6 +138,31 @@
 
 .settings-group__title.settings-keys-page__heading { margin: 24px 2px 10px; }
 .settings-keys-page__note { margin: 2px 2px 12px; }
+.settings-keys-page__summary { margin: 0 2px 4px; }
+
+/* A "Used by" row's mark: the app's initial, or the agents' sparkle. */
+.settings-item__icon.settings-keys-usedby__icon { width: 30px; height: 30px; font-size: 13px; font-weight: 600; }
+
+/* Advanced: site lists, how it's sent, granting another app and Delete. */
+.settings-keys-disclosure {
+  margin-top: 24px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.settings-keys-disclosure > summary {
+  display: flex;
+  align-items: center;
+  min-height: 50px;
+  padding: 9px 16px;
+  font-size: 14px;
+  cursor: pointer;
+}
+.settings-keys-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
+.settings-keys-disclosure__body { display: grid; gap: 8px; padding: 4px 16px 16px; }
+.settings-keys-disclosure__heading { margin: 14px 0 2px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.settings-keys-disclosure .settings-keys-sent { margin-top: 0; }
+.settings-keys-card__row.settings-keys-card__row--plain { padding: 6px 0; min-height: 0; }
 
 .settings-keys-card__row {
   display: flex;
