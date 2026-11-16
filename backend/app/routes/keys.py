@@ -330,7 +330,8 @@ async def request_key(
              else f"{app.name} asks to use a key"),
       body=f"Review “{answer['key']}” in Settings › Keys.",
       source_type="system",
-      target="/shell/?settings=keys",
+      # The card waits over the app while it is open (and in Settings › Keys).
+      target=f"/shell/?{urlencode({'app': app.id})}",
       tag=f"key-request-{app.id}-{answer['key']}",
     )
   return answer
@@ -356,7 +357,10 @@ async def _agent_asks(payload: dict, principal: Principal, db: Session) -> dict:
              else "Your agent asks for a key"),
       body=f"Review “{answer['key']}” in Settings › Keys.",
       source_type="system",
-      target="/shell/?settings=keys",
+      # The asking agent puts the card in its own chat (a mobius-key-request
+      # block); without a chat it waits only in Settings › Keys.
+      target=(f"/shell/?{urlencode({'chat': principal.chat_id})}" if principal.chat_id
+              else "/shell/?settings=keys"),
       tag=f"key-request-agent-{answer['key']}",
     )
   return answer

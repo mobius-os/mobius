@@ -1953,6 +1953,17 @@ def test_a_top_level_agent_asks_by_card_and_the_owner_is_told_once(client, auth,
   assert client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent).status_code == 200
 
 
+def test_a_key_request_notification_opens_where_its_card_waits(client, auth, db, vault, pushes):
+  """An agent's card waits in the chat that asked, an app's over the app."""
+  ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
+  client.post("/api/keys/requests", headers=_agent_auth(db), json=ask)
+  weather = _app(db, "weather")
+  client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK)
+  assert [p["target"] for p in pushes] == ["/shell/?chat=chat-keys", f"/shell/?app={weather.id}"]
+  chats = {r["id"]: r["chat_id"] for r in client.get("/api/keys", headers=auth).json()["requests"]}
+  assert chats == {"agent-maps": "chat-keys", f"{weather.id}-weather_api": None}
+
+
 def test_an_agents_partial_ask_names_the_missing_site_to_the_owner(client, auth, db, vault, pushes):
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [], "agents": True, "sites": [SITE]}})

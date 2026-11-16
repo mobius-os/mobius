@@ -1270,9 +1270,14 @@ class Vault:
     so one request per key (``agent-<key>``) speaks for all of them, and it
     is ``granted`` once the switch is on and those sites cover the ask.
     Approving it adds the sites there and switches agents on (or creates the
-    key, as for an app). ``actor`` is the agent that asked, for the audit log.
+    key, as for an app). ``actor`` is the agent that asked, for the audit log;
+    its chat (``agent:<chat>``) is kept as the request's ``chat``, so the
+    card can be answered in the chat that asked (another chat asking for the
+    same key joins this card and does not move it).
     """
-    asker = {"requester": "agent", "app": None, "app_name": "Your agent"}
+    kind, _, chat = actor.partition(":")
+    asker = {"requester": "agent", "app": None, "app_name": "Your agent",
+             "chat": chat if kind == "agent" else ""}
     return self._ask(body, asker, id_prefix="agent", caller=actor)
 
   def _ask(self, body: dict, asker: dict, *, id_prefix: str, caller: str) -> dict:
@@ -1330,13 +1335,17 @@ class Vault:
     """Open requests; ``granted`` marks an asker wanting more sites on a key it may use.
 
     ``requester`` is ``app`` (with its ``app`` id) or ``agent`` (``app``
-    None). ``key_origin`` names the app that saved an existing key for
+    None). ``chat_id`` is the chat whose agent asked, or None (an app's
+    request, an agent without a chat, or one stored before chats were kept).
+    ``key_origin`` names the app that saved an existing key for
     itself, so the owner never mistakes an app's planted value for a key of
     their own.
     """
     with self._lock:
       requests = [dict(item) for item in self._requests.values()]
       for item in requests:
+        chat = item.pop("chat", None)
+        item["chat_id"] = chat if isinstance(chat, str) and chat else None
         record = self._records.get(item["key"])
         item["key_exists"] = record is not None
         item["key_origin"] = dict(record["origin"]) if record is not None and record.get("origin") else None

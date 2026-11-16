@@ -1866,6 +1866,24 @@ def test_an_agents_request_survives_a_restart_and_older_requests_load_as_apps(va
   assert [r["id"] for r in reloaded.list_requests()] == ["agent-echo"]
 
 
+def test_an_agents_request_names_the_chat_that_asked_and_another_chat_does_not_move_it(vault):
+  """The card is answered in the chat whose agent asked, so the request
+  keeps that chat; a second chat asking for the same key joins the card."""
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-1")
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-2")
+  vault.request_for_agents(_agent_ask(key="tiles"), actor="agent")
+  vault.request_access(9, ASK)
+  chats = {r["id"]: r["chat_id"] for r in vault.list_requests()}
+  assert chats == {"agent-echo": "chat-1", "agent-tiles": None, "9-maps": None}
+  assert all("chat" not in r for r in vault.list_requests())
+  # It survives a restart, and a request stored before chats were kept has none.
+  payload = json.loads(vault.requests_path.read_text())
+  del payload["requests"]["agent-tiles"]["chat"]
+  vault.requests_path.write_text(json.dumps(payload))
+  reloaded = kv.Vault(vault.dir)
+  assert {r["id"]: r["chat_id"] for r in reloaded.list_requests()} == chats
+
+
 def test_an_agent_asks_for_sites_over_the_socket(vault, client):
   agent = {"X-Vault-Caller": "agent:c1"}
   asked = client.post("/requests", json=_agent_ask(), headers=agent)
