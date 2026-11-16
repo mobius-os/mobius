@@ -1,6 +1,6 @@
 /** Controlled Markdown editor; the source stays plain Markdown while its presentation follows the caret. */
 import { useLayoutEffect, useRef } from 'react'
-import { EditorState, Prec, Compartment } from '@codemirror/state'
+import { Annotation, EditorState, Prec, Compartment } from '@codemirror/state'
 import { EditorView, keymap, placeholder } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown'
@@ -8,11 +8,16 @@ import { composerMarkdown } from './composerMarkdown.js'
 import { syncComposerTallState } from './composerTextareaSizing.js'
 import './MarkdownComposer.css'
 
+// Marks a value set from outside (send, history, restored draft, voice) so
+// it is not reported back as typing.
+const controlledValue = Annotation.define()
+
 export default function MarkdownComposer({ inputRef, value, onChange, onInputIntent, onKeyDown, onKeyUp,
   onPaste, onFocus, onBlur, spellCheck, ...attributes }) {
   const hostRef = useRef(null)
   const viewRef = useRef(null)
   const attributesRef = useRef(new Compartment())
+  const historyRef = useRef(new Compartment())
   const props = useRef(null)
   props.current = { value, onChange, onInputIntent, onKeyDown, onKeyUp, onPaste, onFocus, onBlur }
   const makeAttributes = () => ({
@@ -33,18 +38,19 @@ export default function MarkdownComposer({ inputRef, value, onChange, onInputInt
     }
     const extensions = [
       markdown({ base: markdownLanguage, addKeymap: false }),
-      history(), keymap.of([...historyKeymap, ...defaultKeymap]),
+      historyRef.current.of(history()), keymap.of([...historyKeymap, ...defaultKeymap]),
       EditorView.lineWrapping, placeholder('Message Möbius…'), composerMarkdown,
       Prec.highest(EditorView.domEventHandlers(handlers)),
       attributesRef.current.of(EditorView.contentAttributes.of(JSON.parse(contentAttributes))),
     ]
-    const createState = text => EditorState.create({ doc: text, selection: { anchor: text.length }, extensions })
+    const initial = props.current.value
     const view = new EditorView({
-      state: createState(props.current.value), parent: hostRef.current,
+      state: EditorState.create({ doc: initial, selection: { anchor: initial.length }, extensions }),
+      parent: hostRef.current,
       dispatchTransactions(transactions, editor) {
         // Paste/formatting/undo can be editor transactions without a DOM input
         // event. Renew follow-bottom before their layout reaches the footer.
-        if (transactions.some(transaction => transaction.docChanged)) {
+        if (transactions.some(transaction => transaction.docChanged && !transaction.annotation(controlledValue))) {
           // Commit the controlled draft (including the voice baseline) before
           // handing scroll ownership over, and before the editor's DOM grows.
           props.current.onChange?.(transactions.at(-1).state.doc.toString())
@@ -59,7 +65,7 @@ export default function MarkdownComposer({ inputRef, value, onChange, onInputInt
         }
       },
     })
-    viewRef.current = { view, createState }
+    viewRef.current = view
     inputRef.current = view.contentDOM
     const observer = typeof ResizeObserver === 'undefined' ? null
       : new ResizeObserver(() => syncComposerTallState(view.contentDOM, view.dom.offsetHeight))
@@ -75,16 +81,26 @@ export default function MarkdownComposer({ inputRef, value, onChange, onInputInt
   }, [inputRef])
 
   useLayoutEffect(() => {
-    const current = viewRef.current
-    if (!current || current.view.state.doc.toString() === value) return
+    const view = viewRef.current
+    if (!view || view.state.doc.toString() === value) return
     // A send, history entry, restored draft, or voice replacement is a new
-    // editing context. Old undo entries must never resurrect a sent message.
-    current.view.setState(current.createState(value))
-    current.view.dispatch({ effects: attributesRef.current.reconfigure(EditorView.contentAttributes.of(JSON.parse(contentAttributes))) })
-  }, [value, contentAttributes])
+    // editing context. Old undo entries must never resurrect a sent message,
+    // so the edit lands with undo history switched off and then a fresh one.
+    // It must be an ordinary transaction, never EditorView.setState: Android
+    // Chrome types through an EditContext that only transactions keep in
+    // sync, and after setState every keystroke targets the old text and is
+    // dropped until the box is refocused.
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: value },
+      selection: { anchor: value.length },
+      effects: historyRef.current.reconfigure([]),
+      annotations: controlledValue.of(true),
+    })
+    view.dispatch({ effects: historyRef.current.reconfigure(history()), annotations: controlledValue.of(true) })
+  }, [value])
 
   useLayoutEffect(() => {
-    viewRef.current?.view.dispatch({ effects: attributesRef.current.reconfigure(EditorView.contentAttributes.of(JSON.parse(contentAttributes))) })
+    viewRef.current?.dispatch({ effects: attributesRef.current.reconfigure(EditorView.contentAttributes.of(JSON.parse(contentAttributes))) })
   }, [contentAttributes])
 
   return <div ref={hostRef} className="chat__input chat__markdown-input" spellCheck={spellCheck} />
