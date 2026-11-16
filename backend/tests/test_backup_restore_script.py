@@ -598,6 +598,11 @@ def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_pa
   # Since the backup: weather was purged and its id reused by chess; maps is new.
   _set_apps(data, {1: "notes", 2: "chess", 3: "maps"})
   _vault_granting(data, kv, [1, 2, 3])
+  # The agents' card names no app, so no restore withdraws it.
+  kv.Vault(data / ".vault").request_for_agents(
+    {"key": "shared", "reason": "x", "sites": [{"host": "api.example.com", "methods": ["GET"], "paths": ["/*"]}]},
+    actor="agent:c1",
+  )
 
   restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
   assert "was KEPT" in restored.stdout and "Settings › Keys" in restored.stdout
@@ -605,7 +610,7 @@ def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_pa
   vault = kv.Vault(data / ".vault")
   [key] = vault.list_keys()
   assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
-  assert vault.list_requests() == []
+  assert [r["id"] for r in vault.list_requests()] == ["agent-shared"]
   assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
 
 

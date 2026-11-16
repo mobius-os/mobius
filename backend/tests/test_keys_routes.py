@@ -311,8 +311,8 @@ def test_unavailable_vault_is_reported_not_crashed(client, auth, monkeypatch):
 def test_an_agent_replacing_a_saved_key_tells_the_owner(client, auth, db, vault, pushes):
   agent = _agent_auth(db)
   body = {"value": DUMMY, "inject": ASK["inject"], "grants": {"sites": [SITE]}}
-  # Setting a key up for the first time is ordinary agent work: no alert.
-  assert client.put("/api/keys/fresh", headers=agent, json=body).status_code == 200
+  # Setting a key up for the first time (without sites) is ordinary agent work: no alert.
+  assert client.put("/api/keys/fresh", headers=agent, json={**body, "grants": {}}).status_code == 200
   # The owner replacing their own key is not news to them.
   assert client.put("/api/keys/fresh", headers=auth, json={**body, "value": "second-dummy-key"}).status_code == 200
   assert pushes == []
@@ -341,17 +341,32 @@ def test_stored_slot_compares_slots_as_the_vault_stores_them_and_leaves_refused_
   assert key_vault.stored_slot("not a slot") == "not a slot"
 
 
-def test_an_agent_adding_a_site_tells_the_owner_and_is_logged_as_the_agent(client, auth, db, vault, pushes):
+def test_an_agent_adding_a_site_is_refused_and_pointed_to_asking_the_owner(client, auth, db, vault, pushes, monkeypatch):
+  """Where a key may go is the owner's decision: an agent asks by card instead
+  of widening the key itself, whether it edits a key or creates one."""
   agent = _agent_auth(db)
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [], "agents": True, "sites": [SITE]}})
   [page] = client.get("/api/keys", headers=auth).json()["keys"]
-  wider = {"inject": ASK["inject"], "revision": page["revision"], "grants": {"apps": [], "agents": True, "sites": [
-    SITE, {"host": "other.example.net", "methods": ["POST"], "paths": ["/*"]}]}}
-  assert client.put("/api/keys/maps", headers=agent, json=wider).status_code == 200
-  [notice] = pushes
-  assert "added sites" in notice["body"] and "replaced" not in notice["body"]
-  assert vault.usage(key="maps")[0]["caller"] == "agent:chat-keys"
+  writes = []
+  real_call = key_vault.vault_call
+
+  async def record_writes(method, path, payload=None, **kwargs):
+    if method != "GET":
+      writes.append(path)
+    return await real_call(method, path, payload, **kwargs)
+  monkeypatch.setattr(key_vault, "vault_call", record_writes)
+  other = {"host": "other.example.net", "methods": ["POST"], "paths": ["/*"]}
+  wider = {"inject": ASK["inject"], "revision": page["revision"],
+           "grants": {"apps": [], "agents": True, "sites": [SITE, other]}}
+  created = {"value": DUMMY, "inject": ASK["inject"], "grants": {"agents": True, "sites": [other]}}
+  for name, body in (("maps", wider), ("fresh", created)):
+    refused = client.put(f"/api/keys/{name}", headers=agent, json=body)
+    assert refused.status_code == 403 and "POST /api/keys/requests" in refused.json()["detail"]
+  assert writes == [] and pushes == []
+  assert [k["grants"]["sites"] for k in vault.list_keys()] == [[kv.validate_site(SITE)]]
+  # The owner adds the site themselves.
+  assert client.put("/api/keys/maps", headers=auth, json=wider).status_code == 200
 
 
 def test_only_the_owners_own_input_lets_an_app_use_a_key(client, auth, db, vault):
@@ -371,7 +386,9 @@ def test_only_the_owners_own_input_lets_an_app_use_a_key(client, auth, db, vault
   assert vault.list_keys()[0]["grants"]["apps"] == []
   assert client.post(f"/api/keys/requests/{asked['id']}/approve", headers=auth,
                      json={"sites": [SITE], "ticket": card["ticket"]}).status_code == 200
-  assert vault.list_keys()[0]["grants"]["apps"] == [{"id": weather.id, "sites": [kv.validate_site(SITE)]}]
+  assert vault.list_keys()[0]["grants"]["apps"] == [
+    {"id": weather.id, "sites": [kv.validate_site(SITE)], "paused": False},
+  ]
   # Narrowing an app's sites or taking it off a key only takes access away.
   narrowed = {"inject": ASK["inject"], "grants": {"apps": [{"id": weather.id, "sites": []}], "agents": True, "sites": [SITE]}}
   assert client.put("/api/keys/maps", headers=agent, json=narrowed).status_code == 200
@@ -1443,13 +1460,12 @@ def test_an_agent_may_narrow_reorder_or_recase_sites_without_widening(client, au
     "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": True, "sites": [narrowed]},
   })
   assert refused.status_code == 403 and "reach more sites" in refused.text
-  # Adding a site for the owner and agents goes through, and the owner hears of it.
+  # So is adding a site for the owner and agents: the agent asks instead.
   added = client.put("/api/keys/maps", headers=agent, json={
     "grants": {"apps": [{"id": weather.id, "sites": [narrowed]}], "agents": True, "sites": [narrowed, tiles]},
   })
-  assert added.status_code == 200
-  [notice] = pushes
-  assert "added sites" in notice["body"] and "replaced" not in notice["body"]
+  assert added.status_code == 403 and "POST /api/keys/requests" in added.text
+  assert pushes == []
 
 
 def test_an_agents_value_only_save_keeps_every_grant(client, auth, db, vault, pushes):
@@ -1461,7 +1477,7 @@ def test_an_agents_value_only_save_keeps_every_grant(client, auth, db, vault, pu
   [record] = vault.list_keys()
   assert record["grants"] == kv.validate_grants(grants) and record["inject"] == ASK["inject"]
   [notice] = pushes
-  assert "replaced its value" in notice["body"] and "added sites" not in notice["body"]
+  assert "replaced its value" in notice["body"]
 
 
 def test_an_agent_save_never_undoes_a_change_the_owner_made_meanwhile(client, auth, db, vault, pushes, monkeypatch):
@@ -1494,7 +1510,7 @@ def test_an_agent_save_never_undoes_a_change_the_owner_made_meanwhile(client, au
   assert record["grants"]["sites"] == [kv.validate_site(SITE)]
   assert vault.reveal("maps", ("owner", "")) == DUMMY
   created = client.put("/api/keys/fresh", headers=agent, json={
-    "value": "agents-new-key", "inject": ASK["inject"], "grants": {"agents": True, "sites": [SITE]},
+    "value": "agents-new-key", "inject": ASK["inject"], "grants": {"agents": True},
   })
   assert created.status_code == 409
   assert vault.reveal("fresh", ("owner", "")) == "owners-new-key"
@@ -1761,7 +1777,7 @@ def test_a_provider_key_is_checked_on_the_paths_its_protocol_calls(
                     json={"value": DUMMY}).status_code == 204
   [record] = vault.list_keys()
   site = {"host": "models.example.net", "methods": ["POST"], "paths": real_paths}
-  assert record["grants"]["apps"] == [{"id": app.id, "sites": [site]}]
+  assert record["grants"]["apps"] == [{"id": app.id, "sites": [site], "paused": False}]
   destination = {"protocol": protocol}
   reveal = key_vault.reveal_model_provider_key
   for endpoint in key_vault.PROVIDER_ENDPOINTS[protocol]:
@@ -1846,3 +1862,125 @@ def test_a_secret_deleted_after_the_import_stays_deleted(client, auth, db, vault
   assert client.delete(f"/api/apps/{app.id}/secrets/gone", headers=_app_auth(db, app)).status_code == 204
   assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
   assert vault.list_keys() == []
+
+
+# -- pausing an app on a key ---------------------------------------------------
+
+def _set_paused(client, headers, app_id, paused):
+  [page] = client.get("/api/keys", headers=headers).json()["keys"]
+  apps = [{**grant, "paused": paused} if grant["id"] == app_id else grant for grant in page["grants"]["apps"]]
+  return client.put(f"/api/keys/{page['name']}", headers=headers, json={
+    "revision": page["revision"], "grants": {**page["grants"], "apps": apps},
+  })
+
+
+def test_a_paused_app_cannot_borrow_and_hears_paused_when_it_asks(client, auth, db, vault, pushes):
+  weather = _app(db, "weather")
+  app_auth = _app_auth(db, weather)
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  assert _set_paused(client, auth, weather.id, True).status_code == 200
+  [page] = client.get("/api/keys", headers=auth).json()["keys"]
+  assert page["grants"]["apps"] == [{"id": weather.id, "sites": [kv.validate_site(SITE)], "paused": True}]
+  used = client.get("/api/keys/use/maps/api.example.com/v1/x", headers=app_auth)
+  unknown = client.get("/api/keys/use/other/api.example.com/v1/x", headers=app_auth)
+  assert used.status_code == unknown.status_code == 403 and used.json() == unknown.json()
+  assert "paused" in vault.usage(key="maps", limit=1)[0]["reason"]
+  asked = client.post("/api/keys/requests", headers=app_auth, json={**ASK, "key": "maps"})
+  assert asked.json() == {"status": "paused", "key": "maps"}
+  assert pushes == [] and client.get("/api/keys", headers=auth).json()["requests"] == []
+  # Switching it back on needs no new request.
+  assert _set_paused(client, auth, weather.id, False).status_code == 200
+  assert client.get("/api/keys/use/maps/api.example.com/v1/x", headers=app_auth).status_code == 200
+
+
+def test_an_agent_may_pause_an_app_but_only_the_owner_switches_it_back_on(client, auth, db, vault, pushes):
+  weather = _app(db, "weather")
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": True, "sites": []}})
+  agent = _agent_auth(db)
+  assert _set_paused(client, agent, weather.id, True).status_code == 200
+  refused = _set_paused(client, agent, weather.id, False)
+  assert refused.status_code == 403 and "switch back on" in refused.json()["detail"]
+  assert vault.list_keys()[0]["grants"]["apps"][0]["paused"] is True
+  assert pushes == []
+  assert _set_paused(client, auth, weather.id, False).status_code == 200
+
+
+def test_a_paused_apps_model_provider_gets_no_key(client, auth, db, vault):
+  app = _app(db, "router")
+  vault.put_key("provider", {"value": DUMMY, "inject": ASK["inject"], "grants": {
+    "apps": [{"id": app.id, "sites": [SITE]}], "agents": False, "sites": [],
+  }})
+  base_url = "https://api.example.com/v1"
+  assert key_vault.reveal_model_provider_key(app.id, "provider", base_url) == DUMMY
+  assert _set_paused(client, auth, app.id, True).status_code == 200
+  assert key_vault.model_provider_key_sync(app.id, "provider", base_url) is None
+  assert key_vault.reveal_model_provider_key(app.id, "provider", base_url) is None
+  assert _set_paused(client, auth, app.id, False).status_code == 200
+  assert key_vault.reveal_model_provider_key(app.id, "provider", base_url) == DUMMY
+
+
+# -- agents ask for a key on a new site, by card ---------------------------------
+
+TILES = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
+
+
+def test_a_top_level_agent_asks_by_card_and_the_owner_is_told_once(client, auth, db, vault, pushes):
+  """Approving the card adds the site for the owner and agents and switches
+  agents on."""
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [], "agents": False, "sites": [SITE]}})
+  agent = _agent_auth(db)
+  refused = client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent)
+  assert refused.status_code == 403 and refused.json()["ask"] == "POST /api/keys/requests"
+  ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
+  first = client.post("/api/keys/requests", headers=agent, json=ask)
+  assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps"}, first.text
+  assert client.post("/api/keys/requests", headers=agent, json=ask).json()["status"] == "pending"
+  [notice] = pushes
+  assert notice["title"] == "Your agent asks to send a key to tiles.example.com"
+  assert "maps" in notice["body"] and notice["tag"] == "key-request-agent-maps"
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert (card["requester"], card["app"], card["app_name"]) == ("agent", None, "Your agent")
+  # Answering is the owner's own decision.
+  assert client.post("/api/keys/requests/agent-maps/approve", headers=agent,
+                     json={"ticket": card["ticket"], "sites": card["sites"]}).status_code == 403
+  approved = client.post("/api/keys/requests/agent-maps/approve", headers=auth,
+                         json={"ticket": card["ticket"], "sites": card["sites"]})
+  assert approved.status_code == 200, approved.text
+  assert client.post("/api/keys/requests", headers=agent, json=ask).json() == {"status": "granted", "key": "maps"}
+  assert client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent).status_code == 200
+
+
+def test_an_agents_partial_ask_names_the_missing_site_to_the_owner(client, auth, db, vault, pushes):
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [], "agents": True, "sites": [SITE]}})
+  answer = client.post("/api/keys/requests", headers=_agent_auth(db),
+                       json={"key": "maps", "reason": "Tiles too", "sites": [SITE, TILES]}).json()
+  assert answer["status"] == "granted" and answer["sites_request"] == "pending"
+  assert answer["sites_not_allowed"] == [TILES]
+  assert [p["title"] for p in pushes] == ["Your agent asks to send a key to tiles.example.com"]
+
+
+def test_only_top_level_agents_and_apps_ask_by_card(client, auth, db, vault, pushes):
+  from app.browser_access import BrowserLineage
+  from app.deps import Principal, get_principal
+  from app.main import app as server
+  ask = {"key": "maps", "reason": "x", "sites": [TILES]}
+  helper = client.post("/api/keys/requests", headers=_helper_auth(db), json=ask)
+  assert helper.status_code == 403 and "Delegated helpers" in helper.text
+  owner = client.post("/api/keys/requests", headers=auth, json=ask)
+  assert owner.status_code == 403 and "Settings › Keys" in owner.text
+  db_owner = db.query(models.Owner).first()
+  server.dependency_overrides[get_principal] = lambda: Principal(
+    owner=db_owner, app_id=None, chat_id="guest-chat", browser=BrowserLineage("g" * 32, "s" * 32))
+  try:
+    guest = client.post("/api/keys/requests", json=ask)
+  finally:
+    server.dependency_overrides.pop(get_principal, None)
+  assert guest.status_code == 403
+  assert vault.list_requests() == [] and pushes == []
+  # An app's card says it came from the app.
+  client.post("/api/keys/requests", headers=_app_auth(db, _app(db, "weather")), json=ask)
+  assert [r["requester"] for r in client.get("/api/keys", headers=auth).json()["requests"]] == ["app"]

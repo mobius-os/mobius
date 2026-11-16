@@ -1,9 +1,10 @@
 """Keys: the owner's vault, the agent's reveal, and the app handshake.
 
 - The owner and the owner's top-level agents manage keys in Settings › Keys.
-  Only the owner's own input lets an app use a key or reach more sites
-  (approving its request, adding it to a key, widening its sites), so an
-  agent can never widen what an app may borrow.
+  Only the owner's own input lets an app use a key, reach more sites or
+  switch back on after a pause (approving its request, adding it to a key,
+  widening its sites), or lets the owner and agents send a key to more
+  sites, so an agent can never widen where a key goes.
 - The owner and the owner's top-level agents may read a key's value, unless
   the key's Agents switch is off. Delegated helpers only borrow.
 - An app never receives a value. It asks once for a key by name
@@ -11,6 +12,8 @@
   through ``/api/keys/use/<key>/<host>/<path>`` with its own app token, and
   the vault adds the key on the way out. This route attests which app is
   calling from that token, so an app cannot borrow another app's grant.
+- A top-level agent that needs a key on a new site asks the same way, and
+  the owner answers the card.
 
 Validation and storage belong to the vault; this module authenticates callers
 and relays.
@@ -67,6 +70,10 @@ _RELAYED_RESPONSE_HEADERS = frozenset({
 # read them all.
 _RELAYED_RESPONSE_PREFIXES = ("ratelimit", "x-ratelimit-", "x-vault-")
 _SHARED_BROWSER_REFUSAL = "Shared browser access cannot use keys."
+_ASK_FOR_SITES = (
+  "Only the owner adds sites a key is sent to. Ask with POST /api/keys/requests "
+  "({key, reason, sites}); the owner answers in Settings › Keys."
+)
 # An HTTP header name (RFC 9110 token).
 _HEADER_NAME = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 
@@ -137,15 +144,17 @@ def _granted_app_ids(grants) -> list[int]:
   ]
 
 
-def _agent_changes(existing: dict, body: dict, widening: key_vault.GrantWidening) -> list[str]:
-  """What an agent's save changes that could redirect or widen a key's use."""
+def _agent_changes(existing: dict, body: dict) -> list[str]:
+  """What an agent's save changes that could redirect a key's use.
+
+  Agents never widen a key's grants (``put_key`` refuses that), so only the
+  value and how it is sent are left to tell the owner about.
+  """
   changes = []
   if body.get("value") is not None:
     changes.append("replaced its value")
   if body.get("inject") is not None and key_vault.stored_slot(body["inject"]) != existing["inject"]:
     changes.append("changed how it is sent")
-  if widening.sites:
-    changes.append("added sites")
   return changes
 
 
@@ -193,7 +202,11 @@ async def put_key(
     if widening.agents:
       raise HTTPException(403, "Only you can let agents use this key, from Settings › Keys.")
     if widening.apps:
-      raise HTTPException(403, "Only you can let an app use a key or reach more sites, from Settings › Keys.")
+      raise HTTPException(
+        403, "Only you can let an app use a key, reach more sites or switch back on, from Settings › Keys.",
+      )
+    if widening.sites:
+      raise HTTPException(403, _ASK_FOR_SITES)
     # Saved only onto the key just checked: a narrowing the owner makes
     # meanwhile is refused here (409), never undone by this save.
     if existing is None:
@@ -214,7 +227,7 @@ async def put_key(
       409, f"App {gone.args[0]} is not the installation you chose; it may have been "
       "removed or replaced. Reload and choose it again.",
     ) from None
-  changes = _agent_changes(existing, allowed, widening) if existing and _is_agent(principal) else []
+  changes = _agent_changes(existing, allowed) if existing and _is_agent(principal) else []
   if changes:
     # Agents may set keys up, but a silent change could point every grantee
     # at another account or another site, so the owner hears about each one.
@@ -282,22 +295,24 @@ async def request_key(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> dict:
-  """An app asks to use a key; asking again reports the current answer.
+  """An app, or a top-level agent, asks to use a key; asking again reports
+  the current answer.
 
-  The answer is ``granted``, ``pending`` or ``denied``. A granted app asking
-  for sites it lacks gets ``sites_not_allowed`` and ``sites_request`` (the
-  state of its ask for those sites). The owner is told once, when an ask is new.
+  The answer is ``granted``, ``paused`` (an app the owner switched off on the
+  key), ``pending`` or ``denied``. A granted asker wanting sites it lacks
+  gets ``sites_not_allowed`` and ``sites_request`` (the state of its ask for
+  those sites). The owner is told once, when an ask is new.
   """
   if principal.browser is not None:
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
+  payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   if principal.app_id is None:
-    raise HTTPException(403, "Only apps ask for keys; you and your agents manage them in Settings › Keys.")
+    return await _agent_asks(payload, principal, db)
   app = db.query(models.App).filter(
     models.App.id == principal.app_id, models.App.deleted_at.is_(None),
   ).first()
   if app is None:
     raise HTTPException(404, "App not found.")
-  payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   payload["app_name"] = app.name
   # Queued under the app's lock, for the installation the token names: a
   # request left behind by a removed app would otherwise grant its key to an
@@ -319,6 +334,40 @@ async def request_key(
       tag=f"key-request-{app.id}-{answer['key']}",
     )
   return answer
+
+
+async def _agent_asks(payload: dict, principal: Principal, db: Session) -> dict:
+  """A top-level agent asks the owner to send a key to sites; the owner
+  answers the card. Delegated helpers ask the agent that started them."""
+  if principal.delegation_id is not None:
+    raise HTTPException(403, "Delegated helpers cannot ask for keys; the agent that started you can.")
+  # Never work a shared-browser guest started: the ask would act for the owner.
+  require_installation_owner_control(principal)
+  if is_owner_input_principal(principal):
+    raise HTTPException(403, "Only apps and your agents ask for keys; you manage them in Settings › Keys.")
+  answer = await _relay("POST", "/requests", payload, caller=_caller(principal))
+  if answer.pop("created", False):
+    activity.log_event("key_requested", chat_id=principal.chat_id, key=answer["key"])
+    asked = answer.get("sites_not_allowed") or payload.get("sites") or []
+    hosts = sorted({str(site["host"]).strip().lower().rstrip(".") for site in asked})
+    await push.notify_owner_async(
+      db, principal.owner.id,
+      title=(f"Your agent asks to send a key to {_listed(hosts)}" if hosts
+             else "Your agent asks for a key"),
+      body=f"Review “{answer['key']}” in Settings › Keys.",
+      source_type="system",
+      target="/shell/?settings=keys",
+      tag=f"key-request-agent-{answer['key']}",
+    )
+  return answer
+
+
+def _listed(hosts: list[str]) -> str:
+  if len(hosts) == 1:
+    return hosts[0]
+  if len(hosts) == 2:
+    return f"{hosts[0]} and {hosts[1]}"
+  return f"{hosts[0]} and {len(hosts) - 1} more sites"
 
 
 @router.api_route(

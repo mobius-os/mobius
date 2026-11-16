@@ -253,7 +253,7 @@ def _vault_rules():
 class GrantWidening:
   """What a save's grants allow that the key's current grants do not."""
 
-  apps: tuple[int, ...] = ()  # apps that may newly use the key, or reach more
+  apps: tuple[int, ...] = ()  # apps that may newly use the key, reach more or are unpaused
   agents: bool = False        # the Agents switch turned on
   sites: bool = False         # the owner's and agents' own sites reach more
 
@@ -276,8 +276,8 @@ def grant_widening(before: dict | None, grants) -> GrantWidening:
 
   ``grants`` None is an update that keeps the current grants: no change.
   Malformed grants count as no change too; the vault refuses them. A new key
-  widens only by the apps it names: setting a key up is not widening the
-  owner's or agents' use of it.
+  widens by the apps it names and the sites it starts with: an agent sets up
+  a key without sites, and asks for them (``POST /api/keys/requests``).
   """
   rules = _vault_rules()
   if grants is None:
@@ -289,7 +289,7 @@ def grant_widening(before: dict | None, grants) -> GrantWidening:
   return GrantWidening(
     apps=tuple(rules.widened_apps(before, after)),
     agents=before is not None and after["agents"] and not before.get("agents"),
-    sites=before is not None and bool(rules.sites_outside(before["sites"], after["sites"])),
+    sites=bool(rules.sites_outside(before["sites"] if before else [], after["sites"])),
   )
 
 
@@ -343,7 +343,8 @@ def model_provider_key_in(
   app, so the app's own grant on the key, whether the app created it or the
   owner lets it borrow one, must allow that destination by the same site rule
   a use through the vault meets. An app's own key starts with the protocol's
-  site (``store_app_key``). A key with line breaks is never sent.
+  site (``store_app_key``). A key with line breaks, or one the owner paused
+  for this app, is never sent.
   """
   endpoints = PROVIDER_ENDPOINTS.get(protocol, ())
   endpoint = endpoint if endpoint is not None else next(iter(endpoints), None)
@@ -352,10 +353,11 @@ def model_provider_key_in(
   if key is None or site is None or endpoint not in endpoints:
     return None
   record = next(k for k in keys if k["name"] == key)
-  if record.get("multiline"):
+  grant = _grant_of(record, app_id)
+  if record.get("multiline") or grant.get("paused"):
     return None
   allowed = _vault_rules().site_allows(
-    _grant_of(record, app_id)["sites"], site["host"], "POST",
+    grant["sites"], site["host"], "POST",
     site["paths"][endpoints.index(endpoint)],
   ) is None
   return key if allowed else None

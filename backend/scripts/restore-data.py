@@ -287,7 +287,8 @@ def withdraw_grants_of_other_apps(vault_dir, before, after):
   except SystemExit as exc:  # the vault refuses to open: running, or damaged
     raise RuntimeError(str(exc)) from None
   try:
-    named = {r["app"] for r in vault.list_requests()}
+    # The agents' requests name no app.
+    named = {r["app"] for r in vault.list_requests() if r["app"] is not None}
     for key in vault.list_keys():
       named.update(grant["id"] for grant in key["grants"]["apps"])
     stale = sorted(

@@ -17,7 +17,7 @@ platform-issued token and passes the attested identity in ``X-Vault-Caller``
 
     METHOD /use/<key>/<host>/<path>?<query>    use a key (apps, agents, owner)
     GET    /keys/<key>/value                   reveal (never for app callers)
-    POST   /requests                           an app asks to use a key
+    POST   /requests                           an app or an agent asks to use a key
     POST   /requests/<id>/approve | /deny      the owner answers
 
 For a use, the vault checks the caller and the destination against the key's
@@ -65,8 +65,9 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
-# 2: each app grant carries its own sites ({"id", "sites"}); version 1 stores
-# are migrated at load, each app keeping the key's sites it could reach then.
+# 2: each app grant carries its own sites ({"id", "sites", "paused"}); version 1
+# stores are migrated at load, each app keeping the key's sites it could reach
+# then. ``paused`` arrived later within version 2: a grant without it is live.
 STORE_VERSION = 2
 SOCKET_NAME = "vault.sock"
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -86,8 +87,11 @@ MAX_REQUEST_BYTES = 10 * 1024 * 1024
 MAX_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_ADMIN_BYTES = 256 * 1024
 MAX_REQUESTS = 200
-# One app may not crowd out the others' requests or flood the owner with asks.
+# One app may not crowd out the others' requests or flood the owner with asks;
+# the owner's agents together are held to the same number.
 MAX_REQUESTS_PER_APP = 10
+# Where an agent refused a key, or a site for it, asks the owner instead.
+AGENT_ASK = "POST /api/keys/requests"
 MAX_REASON = 300
 # The sites one ask may list, as stored: ten asks from one app stay small.
 MAX_ASK_SITES_BYTES = 8 * 1024
@@ -147,6 +151,18 @@ class VaultError(Exception):
     super().__init__(reason)
     self.status = status
     self.reason = reason
+
+
+class GrantRefusal(VaultError):
+  """A use the key's grants refuse: no such key, caller or site.
+
+  ``logged`` is the reason the owner's usage log records, when the caller is
+  told less: a paused app hears what an app without a grant hears.
+  """
+
+  def __init__(self, status: int, reason: str, *, logged: str | None = None) -> None:
+    super().__init__(status, reason)
+    self.logged = logged or reason
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +282,8 @@ def validate_grants(raw) -> dict:
 
   ``sites`` are where the owner and agents may send it; each app grant has
   its own ``sites``, so approving sites for one app never widens another app
-  or the agents.
+  or the agents. A ``paused`` app keeps its grant and sites but may not use
+  the key until it is switched back on.
   """
   if raw is None:
     raw = {}
@@ -281,7 +298,12 @@ def validate_grants(raw) -> dict:
     # Apps are granted by numeric id: names and slugs can be reused.
     if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
       raise VaultError(400, f"'{app_id if isinstance(grant, dict) else grant}' is not an app id.")
-    clean_apps[app_id] = {"id": app_id, "sites": validate_sites(grant.get("sites"), "An app")}
+    paused = grant.get("paused")
+    if paused is not None and not isinstance(paused, bool):
+      raise VaultError(400, f"App {app_id} is paused or not: true or false.")
+    clean_apps[app_id] = {
+      "id": app_id, "sites": validate_sites(grant.get("sites"), "An app"), "paused": bool(paused),
+    }
   return {
     "apps": [clean_apps[app_id] for app_id in sorted(clean_apps)],
     "agents": bool(raw.get("agents")),
@@ -305,12 +327,14 @@ def widened_apps(before: dict | None, after: dict) -> list[int]:
   """Apps ``after`` lets use the key, or use it somewhere ``before`` did not.
 
   Compared by what the sites allow, not their text, so removing, narrowing or
-  reordering sites never counts as widening.
+  reordering sites never counts as widening. Switching a paused app back on
+  does; pausing one only takes use away.
   """
   widened = []
   for grant in after.get("apps") or []:
     old = app_grant(before, grant["id"]) if before else None
-    if old is None or sites_outside(old["sites"], grant["sites"]):
+    if (old is None or sites_outside(old["sites"], grant["sites"])
+        or (old.get("paused") and not grant.get("paused"))):
       widened.append(grant["id"])
   return widened
 
@@ -343,7 +367,8 @@ def caller_allowed(grants: dict, kind: str, ident: str) -> bool:
   if kind == "agent":
     return bool(grants.get("agents"))
   if kind == "app":
-    return app_grant(grants, int(ident)) is not None
+    grant = app_grant(grants, int(ident))
+    return grant is not None and not grant.get("paused")
   return False
 
 
@@ -842,6 +867,9 @@ class Vault:
       return {name: _migrated_from_version_one(name, record) for name, record in records.items()}, True
     if payload.get("version") != STORE_VERSION:
       raise SystemExit("key vault: unknown store version; refusing to start")
+    for record in records.values():
+      for grant in (record.get("grants") or {}).get("apps") or []:
+        grant.setdefault("paused", False)
     return records, False
 
   def _load_requests(self) -> dict:
@@ -854,6 +882,8 @@ class Vault:
       requests = (payload.get("requests") or {}) if isinstance(payload, dict) else None
       if not isinstance(requests, dict) or not all(map(_is_stored_request, requests.values())):
         raise ValueError("unexpected shape")
+      for item in requests.values():
+        item.setdefault("requester", "app")  # stored before agents could ask
     except ValueError as exc:
       aside = self.requests_path.with_name(f"{self.requests_path.name}.damaged-{int(time.time())}")
       os.replace(self.requests_path, aside)
@@ -1055,9 +1085,9 @@ class Vault:
       if kept_origin:
         self._records[name]["origin"] = kept_origin
         self._drop_orphaned_origin(self._records[name])
-      # A request is settled once its app may reach every site it asked for.
+      # A request is settled once its asker may reach every site it asked for.
       for rid in [rid for rid, item in self._requests.items()
-                  if item["key"] == name and _sites_covered(app_grant(grants, item["app"]), item["sites"])]:
+                  if item["key"] == name and _sites_covered(asker_grant(grants, item), item["sites"])]:
         del self._requests[rid]
       self._audit_change(name, actor, "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
@@ -1214,20 +1244,38 @@ class Vault:
     self.log_event(name, caller_text(caller), "revealed")
     return value
 
-  # -- app access requests (the handshake) -----------------------------------
+  # -- access requests (the handshake) ---------------------------------------
 
   def request_access(self, app_id: int, body: dict) -> dict:
-    """An app asks to use a key; answer granted, pending or denied.
+    """An app asks to use a key; answer granted, paused, pending or denied.
 
     Asking is idempotent, so an app checks its status by asking again. The
     first ask for a key returns ``created`` so the server tells the owner
     once, never on every retry. A granted app that asks for sites its grant
     does not cover keeps using what it has, is told which sites are missing
     (``sites_not_allowed``), and its ask for them waits for the owner like
-    any request (``sites_request``).
+    any request (``sites_request``). An app the owner paused on the key
+    hears ``paused`` where it would hear ``granted``: asking changes nothing
+    until the owner switches it back on.
     """
     if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
       raise VaultError(400, "Invalid app id.")
+    asker = {"requester": "app", "app": app_id, "app_name": str(body.get("app_name") or "")[:100]}
+    return self._ask(body, asker, id_prefix=str(app_id), caller=f"app:{app_id}")
+
+  def request_for_agents(self, body: dict, *, actor: str) -> dict:
+    """The owner's agents ask to send a key to sites, as an app asks.
+
+    Agents share the owner's sites (``grants.sites``) and the Agents switch,
+    so one request per key (``agent-<key>``) speaks for all of them, and it
+    is ``granted`` once the switch is on and those sites cover the ask.
+    Approving it adds the sites there and switches agents on (or creates the
+    key, as for an app). ``actor`` is the agent that asked, for the audit log.
+    """
+    asker = {"requester": "agent", "app": None, "app_name": "Your agent"}
+    return self._ask(body, asker, id_prefix="agent", caller=actor)
+
+  def _ask(self, body: dict, asker: dict, *, id_prefix: str, caller: str) -> dict:
     name = validate_name(body.get("key"))
     reason = str(body.get("reason") or "").strip()[:MAX_REASON]
     sites = body.get("sites") or []
@@ -1246,41 +1294,45 @@ class Vault:
     if len(json.dumps(sites)) > MAX_ASK_SITES_BYTES:
       raise VaultError(400, "Ask for fewer sites or paths at once.")
     inject = validate_inject(body["inject"]) if body.get("inject") is not None else None
-    request_id = f"{app_id}-{name}"
+    request_id = f"{id_prefix}-{name}"
     with self._change():
       record = self._records.get(name)
-      grant = app_grant(record["grants"], app_id) if record is not None else None
+      grant = asker_grant(record["grants"], asker) if record is not None else None
       existing = self._requests.get(request_id)
       if grant is not None:
+        status = "paused" if grant.get("paused") else "granted"
         missing = sites_outside(grant["sites"], sites)
         if not missing:
           self._requests.pop(request_id, None)
-          return {"status": "granted", "key": name}
-        answer = {"status": "granted", "key": name, "id": request_id, "sites_not_allowed": missing}
+          return {"status": status, "key": name}
+        answer = {"status": status, "key": name, "id": request_id, "sites_not_allowed": missing}
         if existing is not None:
           return {**answer, "sites_request": existing["status"]}
         sites, inject = missing, None
       elif existing is not None:
         return {"status": existing["status"], "key": name, "id": request_id}
-      if sum(1 for item in self._requests.values() if item["app"] == app_id) >= MAX_REQUESTS_PER_APP:
-        raise VaultError(429, "This app has too many open key requests; ask the owner to review them.")
+      if sum(1 for item in self._requests.values() if _asked_by(item, asker)) >= MAX_REQUESTS_PER_APP:
+        who = "This app has" if asker["requester"] == "app" else "Your agents have"
+        raise VaultError(429, f"{who} too many open key requests; ask the owner to review them.")
       if len(self._requests) >= MAX_REQUESTS:
         raise VaultError(429, "Too many open key requests; ask the owner to review them.")
       self._requests[request_id] = {
-        "id": request_id, "app": app_id, "app_name": str(body.get("app_name") or "")[:100],
+        "id": request_id, **asker,
         "key": name, "reason": reason, "sites": sites, "inject": inject,
         "status": "pending", "created_at": _now(), "ticket": secrets.token_hex(8),
       }
-      self._audit_change(name, f"app:{app_id}", "requested")
+      self._audit_change(name, caller, "requested")
     if grant is not None:
       return {**answer, "sites_request": "pending", "created": True}
     return {"status": "pending", "key": name, "id": request_id, "created": True}
 
   def list_requests(self) -> list[dict]:
-    """Open requests; ``granted`` marks an app asking for more sites on a key it has.
+    """Open requests; ``granted`` marks an asker wanting more sites on a key it may use.
 
-    ``key_origin`` names the app that saved an existing key for itself, so the
-    owner never mistakes an app's planted value for a key of their own.
+    ``requester`` is ``app`` (with its ``app`` id) or ``agent`` (``app``
+    None). ``key_origin`` names the app that saved an existing key for
+    itself, so the owner never mistakes an app's planted value for a key of
+    their own.
     """
     with self._lock:
       requests = [dict(item) for item in self._requests.values()]
@@ -1288,17 +1340,19 @@ class Vault:
         record = self._records.get(item["key"])
         item["key_exists"] = record is not None
         item["key_origin"] = dict(record["origin"]) if record is not None and record.get("origin") else None
-        item["granted"] = record is not None and app_grant(record["grants"], item["app"]) is not None
+        item["granted"] = record is not None and asker_grant(record["grants"], item) is not None
     return sorted(requests, key=lambda item: item["created_at"], reverse=True)
 
   def approve_request(self, request_id: str, body: dict, *, actor: str = "owner") -> dict:
-    """Grant the app exactly what the owner's answer carries.
+    """Grant the asker exactly what the owner's answer carries.
 
     The request only proposes. The sites the answer names go to this app's
     own grant, never to another app or the agents, so approving one app never
-    widens anyone else's use. A new key is created with the answer's value and
-    slot (``Authorization: Bearer`` when the answer names none); an existing
-    key keeps its value and slot, which its own page changes.
+    widens anyone else's use; an agents' request adds them to the owner's and
+    agents' sites and switches agents on. A new key is created with the
+    answer's value and slot (``Authorization: Bearer`` when the answer names
+    none); an existing key keeps its value and slot, which its own page
+    changes. Approving more sites for a paused app leaves it paused.
 
     The answer names the request's ``ticket``: a request id is the app id and
     key name, so a request card left open while its app was purged would
@@ -1308,7 +1362,7 @@ class Vault:
     refuses everyone else too.
     """
     if actor != "owner":
-      raise VaultError(403, "Only the owner can let an app use a key, from Settings › Keys.")
+      raise VaultError(403, "Only the owner can answer a key request, from Settings › Keys.")
     with self._change():
       request = self._requests.get(request_id)
       if request is None:
@@ -1316,31 +1370,32 @@ class Vault:
       if body.get("ticket") != request.get("ticket"):
         raise VaultError(409, "That request changed since it was shown; review it again.")
       name = request["key"]
-      sites = validate_sites(body.get("sites"), "An app")
+      for_agents = request["requester"] == "agent"
+      sites = validate_sites(body.get("sites"), "You and your agents" if for_agents else "An app")
       existing = self._records.get(name)
       if existing is not None:
         if any(body.get(field) is not None for field in ("value", "inject")):
           raise VaultError(
-            409, f"{name} already exists, and approving only lets the app use it. "
+            409, f"{name} already exists, and approving only says who may use it where. "
             "Change the key itself on its page.",
           )
         grants, inject = existing["grants"], existing["inject"]
       else:
         grants = {"apps": [], "agents": False, "sites": []}
         inject = body.get("inject") or dict(DEFAULT_INJECT)
-      grant = app_grant(grants, request["app"]) or {"id": request["app"], "sites": []}
-      merged = {(s["host"], tuple(s["methods"]), tuple(s["paths"])): s for s in grant["sites"]}
-      for site in sites:
-        merged.setdefault((site["host"], tuple(site["methods"]), tuple(site["paths"])), site)
-      grants = {**grants, "apps": [*without_app(grants, request["app"]),
-                                   {"id": request["app"], "sites": list(merged.values())}]}
+      if for_agents:
+        grants = {**grants, "agents": True, "sites": _with_sites(grants["sites"], sites)}
+      else:
+        grant = app_grant(grants, request["app"]) or {"id": request["app"], "sites": []}
+        grants = {**grants, "apps": [*without_app(grants, request["app"]),
+                                     {**grant, "sites": _with_sites(grant["sites"], sites)}]}
       put = {"grants": grants, "inject": inject}
       if existing is None:
         put["value"] = body.get("value")
       result = self.put_key(name, put, actor=actor)
       self._requests.pop(request_id, None)
-      self._audit_change(name, actor, f"granted app:{request['app']}")
-    return {**result, "granted": request["app"]}
+      self._audit_change(name, actor, f"granted {_asker_label(request)}")
+    return {**result, "granted": request["app"] if not for_agents else "agents"}
 
   def deny_request(self, request_id: str, body: dict | None = None, *, actor: str = "owner") -> dict:
     """Refuse an ask. A ``ticket`` in ``body`` must be the request's, as when
@@ -1354,7 +1409,7 @@ class Vault:
         raise VaultError(409, "That request changed since it was shown; review it again.")
       request["status"] = "denied"
       request["answered_at"] = _now()
-      self._audit_change(request["key"], actor, f"denied app:{request['app']}")
+      self._audit_change(request["key"], actor, f"denied {_asker_label(request)}")
     return {"denied": request_id}
 
   def forget_app(self, app_id: int, *, actor: str = "platform") -> dict:
@@ -1383,7 +1438,7 @@ class Vault:
       request = self._requests.pop(request_id, None)
       if request is None:
         return False
-      self._audit_change(request["key"], actor, f"forgot request app:{request['app']}")
+      self._audit_change(request["key"], actor, f"forgot request {_asker_label(request)}")
     return True
 
   # -- use -----------------------------------------------------------------
@@ -1392,16 +1447,20 @@ class Vault:
     """Return (inject, value) for an allowed use, or raise the denial."""
     with self._lock:
       record = self._records.get(name)
+      refused = f"{caller_text(caller)} may not use this key"
       if record is None:
         # An app without a grant learns nothing, including whether the name exists.
         if caller[0] == "app":
-          raise VaultError(403, f"{caller_text(caller)} may not use this key")
-        raise VaultError(404, f"No key named {name}" if NAME_RE.fullmatch(name) else "No key by that name")
+          raise GrantRefusal(403, refused)
+        raise GrantRefusal(404, f"No key named {name}" if NAME_RE.fullmatch(name) else "No key by that name")
       if not caller_allowed(record["grants"], *caller):
-        raise VaultError(403, f"{caller_text(caller)} may not use this key")
+        # A paused app is told what any app without a grant is told; the
+        # owner's log says why.
+        paused = caller[0] == "app" and app_grant(record["grants"], int(caller[1])) is not None
+        raise GrantRefusal(403, refused, logged=f"{caller_text(caller)} is paused for this key" if paused else None)
       reason = site_allows(caller_sites(record["grants"], *caller), host, method, path)
       if reason:
-        raise VaultError(403, reason)
+        raise GrantRefusal(403, reason)
       value = self._open(name, record)
       if record["inject"]["type"] == "header":
         if any(ch in value for ch in "\r\n"):
@@ -1506,17 +1565,50 @@ def _count(item: dict, outcome: str, ts: str) -> None:
     item["denied"] += 1
 
 
+def asker_grant(grants: dict, asker: dict) -> dict | None:
+  """What a request's asker (an app, or the owner's agents) may already do
+  with a key: the app's own grant, or for agents the owner's sites while the
+  Agents switch is on."""
+  if asker["requester"] == "agent":
+    return {"sites": grants.get("sites") or []} if grants.get("agents") else None
+  return app_grant(grants, asker["app"])
+
+
+def _asked_by(item: dict, asker: dict) -> bool:
+  return item["requester"] == asker["requester"] and item["app"] == asker["app"]
+
+
+def _asker_label(request: dict) -> str:
+  """Who a request is for, as the audit log names it."""
+  return "agents" if request["requester"] == "agent" else f"app:{request['app']}"
+
+
+def _with_sites(current: list[dict], added: list[dict]) -> list[dict]:
+  """``current`` plus each site of ``added`` it does not already list."""
+  merged = {(s["host"], tuple(s["methods"]), tuple(s["paths"])): s for s in current}
+  for site in added:
+    merged.setdefault((site["host"], tuple(site["methods"]), tuple(site["paths"])), site)
+  return list(merged.values())
+
+
 def _sites_covered(grant: dict | None, wanted: list[dict]) -> bool:
-  """Whether an app grant already allows everything in ``wanted``."""
+  """Whether a grant (``asker_grant``) already allows everything in ``wanted``."""
   return grant is not None and not sites_outside(grant["sites"], wanted)
 
 
 def _refuse_an_agent_widening(existing: dict | None, grants: dict) -> None:
-  """Agents may take access away, but giving it is the owner's own decision."""
+  """Agents may take access away, but giving it is the owner's own decision.
+
+  An agent that needs a key on a new site asks (``AGENT_ASK``), and the
+  owner answers the card.
+  """
   if existing is not None and grants["agents"] and not existing["grants"].get("agents"):
     raise VaultError(403, "Only you can let agents use this key, from Settings › Keys.")
   if widened_apps(existing["grants"] if existing else None, grants):
-    raise VaultError(403, "Only you can let an app use a key or reach more sites, from Settings › Keys.")
+    raise VaultError(403, "Only you can let an app use a key, reach more sites or switch back on, "
+                     "from Settings › Keys.")
+  if sites_outside(existing["grants"]["sites"] if existing else [], grants["sites"]):
+    raise VaultError(403, f"Only the owner adds sites a key is sent to; ask with {AGENT_ASK}.")
 
 
 def _migrated_from_version_one(name: str, record: dict) -> dict:
@@ -1541,8 +1633,14 @@ def _migrated_from_version_one(name: str, record: dict) -> dict:
 
 
 def _is_stored_request(item) -> bool:
+  if not isinstance(item, dict):
+    return False
+  if item.get("requester") == "agent":
+    asker_ok = item.get("app") is None
+  else:
+    asker_ok = item.get("requester") in (None, "app") and isinstance(item.get("app"), int)
   return (
-    isinstance(item, dict) and isinstance(item.get("app"), int) and isinstance(item.get("key"), str)
+    asker_ok and isinstance(item.get("key"), str)
     and isinstance(item.get("sites"), list) and isinstance(item.get("status"), str)
     and isinstance(item.get("created_at"), str)
   )
@@ -1761,10 +1859,13 @@ class VaultHandler(BaseHTTPRequestHandler):
     elif method == "GET" and parts == ["requests"]:
       self._send_json(200, {"requests": vault.list_requests()})
     elif method == "POST" and parts == ["requests"]:
-      kind, ident = parse_caller(self.headers.get("X-Vault-Caller"))
-      if kind != "app":
-        raise VaultError(403, "Only apps ask for keys.")
-      self._send_json(200, vault.request_access(int(ident), self._json_body()))
+      caller = parse_caller(self.headers.get("X-Vault-Caller"))
+      if caller[0] == "app":
+        self._send_json(200, vault.request_access(int(caller[1]), self._json_body()))
+      elif caller[0] == "agent":
+        self._send_json(200, vault.request_for_agents(self._json_body(), actor=caller_text(caller)))
+      else:
+        raise VaultError(403, "Only apps and agents ask for keys.")
     elif method == "POST" and len(parts) == 3 and parts[0] == "requests" and parts[2] == "approve":
       self._send_json(200, vault.approve_request(parts[1], self._json_body(), actor=self._manager()))
     elif method == "POST" and len(parts) == 3 and parts[0] == "requests" and parts[2] == "deny":
@@ -1831,9 +1932,13 @@ class VaultHandler(BaseHTTPRequestHandler):
         refused = exc.status < 500 and exc.status != 429
         self.vault.log_traffic(
           logged_name, caller_label, method, host, raw_path, "denied" if refused else "failed",
-          status=exc.status, reason=exc.reason,
+          status=exc.status, reason=exc.logged if isinstance(exc, GrantRefusal) else exc.reason,
         )
-        self._send_json(exc.status, {"error": "denied", "reason": exc.reason}, denied=True)
+        answer = {"error": "denied", "reason": exc.reason}
+        if isinstance(exc, GrantRefusal) and caller_label.split(":", 1)[0] == "agent":
+          # Agents do not widen a key themselves: the owner answers a card.
+          answer["ask"] = AGENT_ASK
+        self._send_json(exc.status, answer, denied=True)
         return
       self._relay(logged_name, caller_label, request, body, secret_echoes(value), started, deadline)
     finally:
