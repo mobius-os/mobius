@@ -126,25 +126,35 @@ entrypoint creates an unrestricted sudo rule unless an operator sets
 ### Keys: the agent may read them, apps only borrow them
 
 Keys live encrypted in the key vault (`/data/.vault/`), managed in
-**Settings › Keys**. The owner and the owner's agents may read a key unless
-its Agents switch is off; every read and change is logged with its real
-caller and without its value, and an agent replacing a value, changing how a
-key is sent or adding sites notifies the owner. Only the owner's own input
-can let an app use a key or widen where it may send it; each app's sites
-belong to its own grant, so approving one app never widens another. Apps never receive a value: an app asks once for a key by
-name, the owner approves it, and the app then sends requests through
-`/api/keys/use/…`, where the server identifies the app from its own
-platform-issued token and the vault adds the key on the way out (default-deny
-sites, methods and paths, with method-override headers dropped;
-public-address pinning; no redirects; echoed values
-redacted, also when streamed; answers sandboxed). The vault listens only on a mode-0600 socket
-and trusts any process that can open it (the server, and owner tools running
-as the same user). Approving requests and changing grants is refused to apps,
-shared-browser guests and delegated helpers; approving a request is refused to
-agents as well. A key an app saved for itself obeys its grant's sites too, including when the platform sends it to the app's model
-provider (a new provider key starts on that provider's site). It stops being
-the app's, and the app loses its grant, once the owner or an agent stores a
-new value in it.
+**Settings › Keys**. The owner and the owner's top-level agents may read a key
+unless its Agents switch is off, and only the owner's own input turns that
+switch back on; delegated helpers may borrow a key but never read its value.
+Every read and change is logged with its real caller and without its value,
+and an agent replacing a value, changing how a key is sent or adding sites
+notifies the owner. Only the owner's own input can let an app use a key or
+widen where it may send it; each app's sites belong to its own grant, so
+approving one app never widens another. Apps never receive a value: an app
+asks once for a key by name, the owner approves it, and the app then sends
+requests through `/api/keys/use/…`, where the server identifies the app from
+its own platform-issued token and the vault adds the key on the way out
+(default-deny sites, methods and paths, with method- and path-override
+headers dropped and paths a site could decode differently refused;
+public-address pinning; no redirects; echoed values redacted in their common
+encodings, also when streamed, with a fixed hold-back so timing never hints at
+the key; only an allowlist of the site's answer headers, sandboxed). The vault
+listens only on a mode-0600 socket and trusts any process that can open it
+(the server, and owner tools running as the same user); it applies a change
+only once it is safely on disk. Approving requests and changing grants is
+refused to apps, shared-browser guests (including app tokens a guest's session
+minted, which cannot borrow or ask either) and delegated helpers; approving a
+request is refused to agents as well, by the server and by the vault itself.
+A key an app saves for itself gets a name scoped to that app, so it can never
+answer another app's request for a plain name, and a request card names the
+app that saved an existing key. Such a key obeys its grant's sites too,
+including when the platform sends it to the app's model provider (a new
+provider key starts on the paths that provider's protocol calls). It stops
+being the app's, and the app loses its grant, once the owner or an agent
+stores a new value in it.
 App ids are reused after a purge, so a purge removes that app's grants and,
 like a data wipe, erases the keys it saved for itself. Backups carry the vault only in the
 encrypted secrets archive (skipped when no backup recipient is configured),
@@ -157,6 +167,13 @@ server, which has root by default, so determined server-side app code could
 read the vault folder. A kernel sandbox for that code is future work
 (KEY_VAULT_DESIGN.md). Treat any key as readable by your agent, and by
 installed apps' server code until then.
+
+Two further limits follow from how upstream identifies callers. The service
+token in `/data/service-token.txt` is a plain owner token, so anything that
+can read that file (agents and app server code, as above) counts as the
+owner's own input and could approve a request. And an agent run an app starts
+is an ordinary agent: an app that can start agent runs can ask that agent to
+read or borrow a key the Agents switch allows.
 
 ## Opaque embedded-chat contract
 

@@ -53,8 +53,10 @@ owner's key vault. The app asks for the key named by `secret_name`
 (`POST /api/keys/requests`) and the owner enters and approves it in
 **Settings › Keys**; it is not a manifest value and never passes through the
 app, the agent process or a chat prompt. The models are available while the
-owner's grant to the app stands and that grant's sites allow the provider's
-`POST <base_url>/responses`; availability never reads the value. Only the
+owner's grant to the app stands and that grant's sites allow every path the
+relay calls for the declared protocol (`POST <base_url>/responses`, or
+`POST <base_url>/v1/messages` and `/v1/messages/count_tokens` for
+`anthropic_messages`); availability never reads the value. Only the
 relay reads the key (logged as `platform:app-<id>`), and it never leaves the
 server. The provider
 app's endpoint receives the conversation and tool requests, so installing and
