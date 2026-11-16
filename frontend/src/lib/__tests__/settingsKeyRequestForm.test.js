@@ -279,4 +279,8 @@ test('recent activity reads as sentences, including refusals of a switched-off a
     'Weather was refused (switched off) 2 min ago')
   assert.equal(usageSentence({ caller: 'owner', outcome: 'granted app:8', host: '-', ts: at }, appNames, now), 'You let Weather use it 2 min ago')
   assert.equal(usageSentence({ caller: 'owner', outcome: 'something new', host: '-', ts: at }, appNames, now), null)
+  // The vault writes an agent request's answers as "<verb> agents".
+  assert.equal(usageSentence({ caller: 'owner', outcome: 'granted agents', host: '-', ts: at }, appNames, now), 'You let your agents use it 2 min ago')
+  assert.equal(usageSentence({ caller: 'owner', outcome: 'denied agents', host: '-', ts: at }, appNames, now), 'You said no to your agent 2 min ago')
+  assert.equal(usageSentence({ caller: 'agent:c1', outcome: 'requested', host: '-', ts: at }, appNames, now), 'Your agent asked to use it 2 min ago')
 })

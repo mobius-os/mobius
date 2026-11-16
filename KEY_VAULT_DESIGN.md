@@ -10,14 +10,26 @@ Status: draft for review.
   sites**, so approving sites for one app never widens another app or the
   agents. The owner's top-level agents may manage keys too, but only the
   owner's own input lets an app use a key or reach more sites (approving a
-  request, adding an app, widening an app's sites); agents may remove an app
-  or narrow its sites.
+  request, adding an app, widening an app's sites); agents may remove, pause
+  or narrow an app.
+- **Adding a key is paste and save.** A key needs no site to be stored: one
+  with no sites is kept, readable by the owner and (unless switched off)
+  agents, and sent nowhere. Where it may go is decided the first time
+  something needs it, on a request card: an app's, or the owner's agent's.
+- **Agents ask for sites like apps do.** A top-level agent that needs a key
+  on a site the key does not list asks with `POST /api/keys/requests` (the
+  refusal of its borrow says so); the owner answers on a card, and approving
+  adds the sites to the key's own list and lets agents use it. An agent
+  cannot add sites itself.
+- **Switching an app off pauses it.** A paused grant keeps its sites but the
+  app cannot borrow the key (nor its model provider use it) until the owner
+  switches it back on, which needs no new request.
 - **The owner and the owner's top-level agents may read a key**, unless its
   Agents switch is off; only the owner's own input turns that switch on.
   Delegated helpers may borrow a key but never read its value. Every read and
   change is logged, without its value, under the caller it was made for. An
-  agent that replaces a value, changes how a key is sent or adds sites
-  through the server notifies the owner. A save names only what it changes:
+  agent that replaces a value or changes how a key is sent through the server
+  notifies the owner. A save names only what it changes:
   on an existing key, an omitted `inject` or `grants` keeps the current one,
   so replacing a value never touches who may use it. An agent's edit always
   carries the revision it was made from, so it cannot undo a change the owner
@@ -38,7 +50,9 @@ Status: draft for review.
 
 ## The handshake
 
-1. **Ask.** An app sends `POST /api/keys/requests` with its own app token:
+1. **Ask.** An app sends `POST /api/keys/requests` with its own app token
+   (a top-level agent sends the same request with its own token, for a key
+   on a site the key does not list yet; see Contract):
    the key name, a reason, the sites it needs and how the key is sent. The
    sites are exact hosts: a wildcard (`*.workers.dev`) is refused, because on
    a shared domain the app's author can own a subdomain, and that host reads

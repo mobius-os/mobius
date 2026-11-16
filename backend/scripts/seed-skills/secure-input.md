@@ -63,10 +63,13 @@ than saving credentials in its execution specification.
 
 For an API key or token a service call needs, use the vault's consumer
 instead of writing your own: `["python3",
-"/data/platform/backend/scripts/store-key.py", "NAME", "--site",
-"api.example.com:GET,POST:/v1/*"]` (add `--header NAME [--prefix TEXT]` or
-`--query NAME` when the service does not take `Authorization: Bearer`). The
-owner then sees and manages it in Settings › Keys. It never replaces a key
+"/data/platform/backend/scripts/store-key.py", "NAME"]` (add `--header NAME
+[--prefix TEXT]` or `--query NAME` when the service does not take
+`Authorization: Bearer`). Save it without sites: the first time you borrow it
+for a site, ask the owner with `POST /api/keys/requests` and they approve that
+site on a card. Add `--site api.example.com:GET,POST:/v1/*` only when the
+owner told you where the key goes. The owner then sees and manages it in
+Settings › Keys. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
 consumer's receipt does not say why and the submitted value is discarded, so
 before opening the card check `mapi /api/keys` for the name; if it exists,

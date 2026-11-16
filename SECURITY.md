@@ -130,9 +130,10 @@ Keys live encrypted in the key vault (`/data/.vault/`), managed in
 unless its Agents switch is off, and only the owner's own input turns that
 switch back on; delegated helpers may borrow a key but never read its value.
 Every read and change is logged without its value, under the caller it was
-made for, and an agent replacing a value, changing how a key is sent or adding
-sites through the server notifies the owner. Only the owner's own input can
-let an app use a key or widen where it may send it; each app's sites belong to
+made for, and an agent replacing a value or changing how a key is sent
+through the server notifies the owner. Only the owner's own input can let an
+app or the agents use a key on more sites (an agent asks on a card, as an app
+does), or switch a paused app back on; each app's sites belong to
 its own grant, so approving one app never widens another. Apps never receive a value: an app
 asks once for a key by name, the owner approves it, and the app then sends
 requests through `/api/keys/use/…`, where the server identifies the app from
