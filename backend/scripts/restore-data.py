@@ -98,9 +98,11 @@ SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
 SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push", ".vault")
 
-# The key vault program: a restore without secrets keeps the current vault and
-# withdraws, with the vault's own purge step, grants to apps the restored
-# database does not have.
+# The key vault program: a restore whose backup carries no vault keeps the
+# current vault and withdraws, with the vault's own purge step, grants to apps
+# the restored database does not have. It resolves to /app/vault/keyvault.py in
+# the image (the Dockerfile ships backend/vault beside backend/scripts), never
+# to agent-editable /data, because a restore runs as root.
 VAULT_PROGRAM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "..", "vault", "keyvault.py")
 DB_RELPATH = os.path.join("db", "ultimate.db")
@@ -301,14 +303,15 @@ def withdraw_grants_of_other_apps(vault_dir, before, after):
 
 
 def reconcile_kept_vault(data_dir, before):
-  """After a restore without secrets: the current vault was kept, so its app
-  grants still name this install's app ids. Withdraw those the restored
-  database gives to no app or another app, and tell the owner to review."""
+  """After a restore that swapped in no vault (no secrets, or secrets from
+  before the vault): the current vault was kept, so its app grants still name
+  this install's app ids. Withdraw those the restored database gives to no app
+  or another app, and tell the owner to review."""
   vault_dir = os.path.join(data_dir, ".vault")
   if not any(os.path.isfile(os.path.join(vault_dir, name))
              for name in ("keys.json", "requests.json")):
     return
-  log("WARNING: the backup has no secrets, so the key vault (/data/.vault) "
+  log("WARNING: the backup has no key vault, so the key vault (/data/.vault) "
       "was KEPT from the current install. Its app grants refer to app ids "
       "of the current install, which the restored database may give to "
       "other apps.")
@@ -451,9 +454,10 @@ def main():
     die(f"insufficient space to stage restore: need ~{need}, have {free}",
         code=3)
 
-  secrets_kept = secrets_state not in ("encrypted", "plaintext")
   # Which app each id names now, before the restored database replaces it.
-  apps_before = app_identities(os.path.join(data_dir, DB_RELPATH)) if secrets_kept else None
+  # Read whatever the backup holds: only the swap tells whether a vault came
+  # with it (a secrets archive from before the vault has none).
+  apps_before = app_identities(os.path.join(data_dir, DB_RELPATH))
 
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
@@ -516,7 +520,7 @@ def main():
     if not preserve_rollback:
       shutil.rmtree(rollback_dir, ignore_errors=True)
 
-  if secrets_kept:
+  if ".vault" not in moved:
     reconcile_kept_vault(data_dir, apps_before)
   harden_secret_perms(data_dir)
   log("hardened secret perms (600/700)")

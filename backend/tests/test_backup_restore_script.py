@@ -609,6 +609,29 @@ def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_pa
   assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
 
 
+def test_a_secrets_archive_from_before_the_vault_still_withdraws_stale_grants(tmp_path):
+  """A backup made before the vault existed has secrets but no `.vault`, so
+  the current vault is kept just as when the backup has no secrets at all:
+  grants to ids the restored database gives to other apps are withdrawn."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  shutil.rmtree(data / ".vault")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target), "--plaintext-secrets")
+  bdir = str(next(target.glob("mobius-backup-*")))
+  with tarfile.open(Path(bdir) / "secrets.tar.gz") as archive:
+    assert not any(m.startswith(".vault") for m in archive.getnames())
+  _set_apps(data, {1: "notes", 2: "chess", 3: "maps"})
+  (data / ".vault").mkdir()
+  _vault_granting(data, kv, [1, 2, 3])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "was KEPT" in restored.stdout and "app ids [2, 3]" in restored.stdout
+  [key] = kv.Vault(data / ".vault").list_keys()
+  assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
+
+
 def test_a_reused_id_with_the_same_slug_is_still_another_app_after_a_restore(tmp_path):
   """A purged app's id can go to a new installation of an app with the same
   slug; its nonce differs, so the kept vault's grant to that id is withdrawn."""
@@ -625,6 +648,24 @@ def test_a_reused_id_with_the_same_slug_is_still_another_app_after_a_restore(tmp
   assert "app ids [2]" in restored.stdout
   [key] = kv.Vault(data / ".vault").list_keys()
   assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
+
+
+def test_the_image_ships_the_vault_program_where_the_restore_script_loads_it(tmp_path):
+  """The shipped restore runs as /app/scripts/restore-data.py, so the image
+  must carry the vault program where that copy resolves it. Lay out /app from
+  the Dockerfile's own `COPY backend/<dir> ./<dir>/` lines and ask the script."""
+  import importlib.util
+  import re
+  dockerfile = (SCRIPTS.parents[1] / "Dockerfile").read_text(encoding="utf-8")
+  app_root = tmp_path / "app"
+  for source, dest in re.findall(r"^COPY (backend/[\w-]+)/? \./([\w-]+)/$", dockerfile, re.M):
+    shutil.copytree(SCRIPTS.parents[1] / source, app_root / dest)
+  spec = importlib.util.spec_from_file_location(
+    "mobius_image_restore", app_root / "scripts" / "restore-data.py")
+  restore = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(restore)
+  assert os.path.realpath(restore.VAULT_PROGRAM) == os.path.realpath(app_root / "vault" / "keyvault.py")
+  assert os.path.isfile(restore.VAULT_PROGRAM)
 
 
 def test_a_restore_without_secrets_never_edits_a_running_vault(tmp_path):

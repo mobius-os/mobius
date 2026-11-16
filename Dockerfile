@@ -497,6 +497,9 @@ RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY backend/runtime ./runtime/
+# The key vault program beside the scripts: /app/scripts/restore-data.py runs
+# as root and loads /app/vault/keyvault.py, never agent-editable /data code.
+COPY backend/vault ./vault/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 
