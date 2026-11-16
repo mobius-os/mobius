@@ -1964,6 +1964,18 @@ def test_a_key_request_notification_opens_where_its_card_waits(client, auth, db,
   assert chats == {"agent-maps": "chat-keys", f"{weather.id}-weather_api": None}
 
 
+def test_a_key_request_notification_asks_for_a_tap_where_it_opens_not_a_trip_to_settings(
+    client, auth, db, vault, pushes):
+  """Tapping the notification opens the asking chat or app, where the card
+  waits, so its text asks for a tap rather than sending the owner to
+  Settings › Keys."""
+  ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
+  client.post("/api/keys/requests", headers=_agent_auth(db), json=ask)
+  weather = _app(db, "weather")
+  client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK)
+  assert [p["body"] for p in pushes] == ["Tap to review “maps”.", "Tap to review “weather_api”."]
+
+
 def test_an_agents_partial_ask_names_the_missing_site_to_the_owner(client, auth, db, vault, pushes):
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [], "agents": True, "sites": [SITE]}})

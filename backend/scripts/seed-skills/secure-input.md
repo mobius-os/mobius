@@ -88,7 +88,9 @@ answer's `id`, and one sentence saying a card is waiting here:
 
 The owner answers that card in this chat (Settings › Keys lists it too);
 their answer arrives as a message ("Allowed: …" or "Not now: …") that
-resumes you, so do not poll.
+resumes you, so do not poll. If the owner answers in Settings › Keys or in
+another chat instead, no message arrives; asking again
+(`POST /api/keys/requests`) reports the answer.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and

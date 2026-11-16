@@ -815,7 +815,8 @@ def test_core_guidance_names_the_current_goal_completion_syntax():
 def test_an_agents_pending_key_request_ends_the_turn_with_its_card_in_the_chat():
   """An agent asking for a key puts the owner's card in its own chat and is
   resumed by the owner's answer, so the skills name the block and the answer
-  message rather than sending the owner to Settings and polling."""
+  message rather than sending the owner to Settings and polling; an answer
+  given in Settings or another chat is learnt by asking again."""
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
   for name in ("building-apps.md", "secure-input.md"):
@@ -824,3 +825,7 @@ def test_an_agents_pending_key_request_ends_the_turn_with_its_card_in_the_chat()
     assert "```mobius-key-request\n{\"id\":\"agent-" in text, name
     assert "one sentence saying a card is waiting here" in normalized, name
     assert "(\"Allowed: …\" or \"Not now: …\") that resumes you" in normalized, name
+    # An answer given anywhere else sends no message, so the agent learns it
+    # by asking again.
+    assert ("If the owner answers in Settings › Keys or in another chat instead, no message arrives; "
+            "asking again (`POST /api/keys/requests`) reports the answer") in normalized, name
