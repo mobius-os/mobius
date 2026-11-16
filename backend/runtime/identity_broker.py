@@ -28,7 +28,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -37,13 +37,49 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 
+DEFAULT_LAUNCHER = "https://www.mobius.you"
+# A link, its pending enrollment and its sign-in attempts belong to one
+# launcher; the instance key and id are the same towards every launcher.
+LAUNCHER_FILES = ("identity.json", "pending-enrollment.jwt", "oauth-states.json")
+
+
+def launcher_origin(environ: Mapping[str, str]) -> str:
+  """Return the launcher this instance links with.
+
+  Only the explicit MOBIUS_IDENTITY_ISSUER moves an instance off the default
+  launcher, so no existing installation changes launcher, or loses its link,
+  by updating.
+  """
+  configured = environ.get("MOBIUS_IDENTITY_ISSUER") or DEFAULT_LAUNCHER
+  return configured.strip().rstrip("/")
+
+
+def launcher_file(private_dir: Path, name: str, launcher: str) -> Path:
+  """Return one launcher's own copy of a link file.
+
+  The default launcher keeps the historical names, so an existing link is
+  found unchanged. Any other launcher gets its own files: linking with it can
+  never overwrite, or be mistaken for, the default launcher's link.
+  """
+  if launcher == DEFAULT_LAUNCHER:
+    return private_dir / name
+  stem, _dot, suffix = name.rpartition(".")
+  digest = hashlib.sha256(launcher.encode("utf-8")).hexdigest()[:16]
+  return private_dir / f"{stem}.{digest}.{suffix}"
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 PRIVATE_DIR = DATA_DIR / "identity-broker"
+IDENTITY_BASE_URL = launcher_origin(os.environ)
 KEY_PATH = PRIVATE_DIR / "instance-ed25519.pem"
-STATE_PATH = PRIVATE_DIR / "identity.json"
+STATE_PATH = launcher_file(PRIVATE_DIR, "identity.json", IDENTITY_BASE_URL)
 INSTANCE_PATH = PRIVATE_DIR / "instance-id"
-PENDING_BOOTSTRAP_PATH = PRIVATE_DIR / "pending-enrollment.jwt"
-OAUTH_STATE_PATH = PRIVATE_DIR / "oauth-states.json"
+PENDING_BOOTSTRAP_PATH = launcher_file(
+  PRIVATE_DIR, "pending-enrollment.jwt", IDENTITY_BASE_URL
+)
+OAUTH_STATE_PATH = launcher_file(
+  PRIVATE_DIR, "oauth-states.json", IDENTITY_BASE_URL
+)
 SOCKET_PATH = Path(
   os.environ.get(
     "MOBIUS_IDENTITY_BROKER_SOCKET",
@@ -52,15 +88,12 @@ SOCKET_PATH = Path(
 )
 TCP_HOST = "127.0.0.1"
 TCP_PORT = int(os.environ.get("MOBIUS_IDENTITY_BROKER_PORT", "8765"))
-IDENTITY_BASE_URL = os.environ.get(
-  "MOBIUS_IDENTITY_ISSUER", "https://www.mobius.you"
-).rstrip("/")
 GATEWAY_BASE_URL = os.environ.get(
   # Keep the compute service independently deployable while routing it through
   # the launcher's existing public edge. A separate hostname added DNS and TLS
   # state without creating a useful trust boundary: request capabilities still
   # authenticate every exact gateway route.
-  "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
+  "MOBIUS_AGENT_GATEWAY_URL", IDENTITY_BASE_URL
 ).rstrip("/")
 CONTRIBUTION_BASE_URL = os.environ.get(
   "MOBIUS_CONTRIBUTION_RELAY_URL", IDENTITY_BASE_URL
@@ -574,20 +607,25 @@ def _reclaim_private_state_after_compat_chown() -> None:
 
     # These are fixed children of PRIVATE_DIR, so opening them by name relative
     # to the pinned directory keeps a rename of PRIVATE_DIR itself irrelevant.
-    for path in (
-      KEY_PATH,
-      STATE_PATH,
-      INSTANCE_PATH,
-      PENDING_BOOTSTRAP_PATH,
-      OAUTH_STATE_PATH,
-    ):
+    # The default launcher's files are reclaimed even while another launcher
+    # is active, so its link is never left writable by the application.
+    names = {
+      path.name for path in (
+        KEY_PATH,
+        STATE_PATH,
+        INSTANCE_PATH,
+        PENDING_BOOTSTRAP_PATH,
+        OAUTH_STATE_PATH,
+      )
+    } | set(LAUNCHER_FILES)
+    for name in sorted(names):
       try:
-        file_fd = os.open(path.name, open_flags, dir_fd=dir_fd)
+        file_fd = os.open(name, open_flags, dir_fd=dir_fd)
       except FileNotFoundError:
         continue
       except OSError as exc:
         raise RuntimeError(
-          f"identity broker file is unsafe: {path.name}"
+          f"identity broker file is unsafe: {name}"
         ) from exc
       opened.append((file_fd, 0o600))
       item = os.fstat(file_fd)
@@ -597,7 +635,7 @@ def _reclaim_private_state_after_compat_chown() -> None:
         or (item.st_uid, item.st_gid) not in allowed_owners
         or stat.S_IMODE(item.st_mode) & 0o077
       ):
-        raise RuntimeError(f"identity broker file is unsafe: {path.name}")
+        raise RuntimeError(f"identity broker file is unsafe: {name}")
 
     # Nothing is mutated until every entry has passed, so a rejected tree is
     # left exactly as found.

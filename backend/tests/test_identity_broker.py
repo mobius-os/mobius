@@ -360,6 +360,159 @@ def _unsigned_receipt(instance_id, *, expires_in=600):
   return f"{header}.{payload}.signature"
 
 
+STAGING_LAUNCHER = "https://staging.launcher.example"
+
+
+@pytest.mark.parametrize(("environ", "expected"), [
+  ({}, "https://www.mobius.you"),
+  ({"MOBIUS_IDENTITY_ISSUER": ""}, "https://www.mobius.you"),
+  # Managed sign-in alone never moves an installation to another launcher.
+  ({"MOBIUS_SSO_ISSUER": STAGING_LAUNCHER}, "https://www.mobius.you"),
+  ({"MOBIUS_IDENTITY_ISSUER": STAGING_LAUNCHER + "/"}, STAGING_LAUNCHER),
+])
+def test_only_the_explicit_identity_issuer_moves_an_instance_to_another_launcher(
+  environ, expected,
+):
+  assert broker_module.launcher_origin(environ) == expected
+
+
+def test_default_launcher_keeps_its_historical_link_files(tmp_path):
+  for name in broker_module.LAUNCHER_FILES:
+    assert broker_module.launcher_file(
+      tmp_path, name, broker_module.DEFAULT_LAUNCHER
+    ) == tmp_path / name
+
+
+def test_each_other_launcher_gets_its_own_link_files(tmp_path):
+  other = "https://other.launcher.example"
+  for name in broker_module.LAUNCHER_FILES:
+    staging = broker_module.launcher_file(tmp_path, name, STAGING_LAUNCHER)
+    assert staging.parent == tmp_path
+    assert staging != tmp_path / name
+    assert staging.suffix == Path(name).suffix
+    assert staging == broker_module.launcher_file(tmp_path, name, STAGING_LAUNCHER)
+    assert staging != broker_module.launcher_file(tmp_path, name, other)
+
+
+def _use_launcher(monkeypatch, launcher):
+  private = broker_module.PRIVATE_DIR
+  for attribute, name in (
+    ("STATE_PATH", "identity.json"),
+    ("PENDING_BOOTSTRAP_PATH", "pending-enrollment.jwt"),
+    ("OAUTH_STATE_PATH", "oauth-states.json"),
+  ):
+    monkeypatch.setattr(
+      broker_module, attribute,
+      broker_module.launcher_file(private, name, launcher),
+    )
+  monkeypatch.setattr(broker_module, "IDENTITY_BASE_URL", launcher)
+
+
+def test_linking_with_another_launcher_never_touches_the_default_link(
+  broker, monkeypatch,
+):
+  production_link = json.dumps({
+    "issuer": broker_module.DEFAULT_LAUNCHER,
+    "subject": "user_example",
+    "instance_id": broker.instance_id,
+    "key_thumbprint": broker.thumbprint(),
+    "key_generation": 1,
+  }, separators=(",", ":")).encode()
+  default_link_path = broker_module.STATE_PATH
+  broker_module._atomic_root_write(default_link_path, production_link)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["linked"] is False
+    posted = {}
+
+    class Enrolled:
+      def raise_for_status(self):
+        return None
+
+      def json(self):
+        return {"identity": {
+          "issuer": STAGING_LAUNCHER,
+          "subject": "user_example",
+          "instance_id": on_staging.instance_id,
+          "key_thumbprint": on_staging.thumbprint(),
+          "key_generation": 1,
+        }}
+
+    def post(url, **_kwargs):
+      posted["url"] = url
+      return Enrolled()
+
+    monkeypatch.setattr(on_staging.client, "post", post)
+    linked = on_staging.enroll(_unsigned_receipt(on_staging.instance_id))
+    assert posted["url"] == STAGING_LAUNCHER + "/identity/runtime-enroll"
+    assert linked["issuer"] == STAGING_LAUNCHER
+    assert broker_module.STATE_PATH.exists()
+    assert broker_module.STATE_PATH != default_link_path
+    assert default_link_path.read_bytes() == production_link
+
+    on_staging.unlink("user_example")
+    assert default_link_path.read_bytes() == production_link
+  finally:
+    on_staging.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  back_on_production = broker_module.Broker()
+  try:
+    identity = back_on_production.identity()
+    assert identity["linked"] is True
+    assert identity["issuer"] == broker_module.DEFAULT_LAUNCHER
+    assert default_link_path.read_bytes() == production_link
+  finally:
+    back_on_production.close()
+
+
+def test_pending_enrollment_for_another_launcher_survives_a_switch_back(
+  broker, monkeypatch,
+):
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  staging_receipt = _unsigned_receipt(broker.instance_id)
+  on_staging = broker_module.Broker()
+  try:
+    on_staging.queue_bootstrap(staging_receipt)
+    staging_pending = broker_module.PENDING_BOOTSTRAP_PATH
+  finally:
+    on_staging.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  on_production = broker_module.Broker()
+  try:
+    on_production.state = {"subject": "user_example"}
+    assert on_production.retry_pending_once() is True
+    assert staging_pending.read_text() == staging_receipt
+  finally:
+    on_production.close()
+
+
+def test_root_broker_reclaims_the_default_link_while_another_launcher_is_active(
+  tmp_path, monkeypatch,
+):
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  default_link = private / "identity.json"
+  default_link.write_text("{}", encoding="utf-8")
+  default_link.chmod(0o600)
+  staging_link = broker_module.STATE_PATH
+  staging_link.write_text("{}", encoding="utf-8")
+  staging_link.chmod(0o600)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert {inode for inode, _uid, _gid in adopted} == {
+    private.stat().st_ino,
+    key.stat().st_ino,
+    default_link.stat().st_ino,
+    staging_link.stat().st_ino,
+  }
+
+
 def test_transient_bootstrap_is_root_persisted_and_survives_restart(
   broker, monkeypatch,
 ):
