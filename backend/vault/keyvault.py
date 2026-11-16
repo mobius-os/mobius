@@ -480,7 +480,7 @@ class PinnedHTTPSConnection(http.client.HTTPSConnection):
     self._pinned_address = address
 
   def connect(self) -> None:
-    raw = socket.create_connection((self._pinned_address, 443), self.timeout)
+    raw = socket.create_connection((self._pinned_address, self.port), self.timeout)
     self.sock = self._context.wrap_socket(raw, server_hostname=self.host)
 
 
@@ -1575,10 +1575,13 @@ class FinalAnswer(http.client.HTTPResponse):
 class BorrowDeadline:
   """When a borrow must end, enforced on the site's connection.
 
-  Each wait gets its own timeout (``time_left``), which alone would let a site
-  that trickles header or chunk-size lines keep a borrow, and a purge waiting
-  for it, open long past the deadline: ``watch`` shuts the site's connection
-  down when the deadline passes, and ``stop`` cancels that.
+  Connecting is bounded by the connection's timeout (``time_left`` when it is
+  made): it limits the TCP connect, and the TLS handshake as a whole, since
+  Python applies a socket's timeout to the handshake as one deadline. After
+  that each read gets its own timeout, which alone would let a site that
+  trickles header or chunk-size lines keep a borrow, and a purge waiting for
+  it, open long past the deadline: ``watch`` shuts the site's connection down
+  when the deadline passes, and ``stop`` cancels that.
   """
 
   def __init__(self, started: float) -> None:
@@ -1954,6 +1957,8 @@ class VaultHandler(BaseHTTPRequestHandler):
     """Send the request; return the open connection, its socket and the answer's head."""
     connection = None
     try:
+      # Within the deadline, this timeout bounds connecting and the whole TLS
+      # handshake (see BorrowDeadline); never give it a flat timeout.
       connection = self.connect(request.host, deadline.time_left(UPSTREAM_TIMEOUT_SECS))
       connection.response_class = FinalAnswer
       connection.connect()

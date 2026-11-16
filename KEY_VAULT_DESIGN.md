@@ -128,8 +128,9 @@ alignment. The caller's path-override headers (`X-Original-URL`,
 folded header lines are refused. Of the site's answer, only an allowlist of
 headers reaches the app, the site's own `X-Vault-*` headers never do, the
 status line carries the standard reason, and informational `1xx` answers are
-skipped. A borrow ends after 300 seconds, however slowly the site sends its
-answer (the vault shuts the site's connection then), and a caller that takes
+skipped. A borrow ends 300 seconds after it starts, however slowly the site
+connects, sets up TLS or sends its answer (the vault shuts the site's
+connection then), and a caller that takes
 60 seconds to accept the next piece is cut off. At most 32 borrows run at
 once, and at most 8 for one caller (an app, one agent's chat); beyond either
 the vault answers 429. Headers

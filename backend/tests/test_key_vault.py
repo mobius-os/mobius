@@ -1391,6 +1391,44 @@ def test_a_site_trickling_its_framing_is_cut_off_at_the_deadline(vault, monkeypa
   assert entry["outcome"] == "failed" and "longer than 1 seconds" in entry["reason"]
 
 
+def test_a_site_dribbling_its_tls_handshake_is_cut_off_at_the_deadline(vault, monkeypatch):
+  """The deadline covers connecting too: a site that answers the ClientHello a
+  byte at a time (each read with a fresh timeout) is cut off like any stage."""
+  import time
+  monkeypatch.setattr(kv, "BORROW_DEADLINE_SECS", 1)
+  listener = socket.socket()
+  listener.bind(("127.0.0.1", 0))
+  listener.listen(1)
+  port = listener.getsockname()[1]
+
+  def dribble():
+    conn, _ = listener.accept()
+    with conn, contextlib.suppress(OSError):
+      conn.recv(65536)  # the ClientHello
+      conn.sendall(b"\x16\x03\x03\x40\x00")  # a handshake record of 16 KiB...
+      for _ in range(12):
+        time.sleep(0.3)
+        conn.sendall(b"\x00")  # ...that never finishes arriving
+
+  threading.Thread(target=dribble, daemon=True).start()
+
+  def pinned_to_this_site(host, timeout):
+    connection = kv.PinnedHTTPSConnection(host, "127.0.0.1", timeout)
+    connection.port = port
+    return connection
+
+  started = time.monotonic()
+  try:
+    with _vault_server(vault, pinned_to_this_site) as path:
+      answer = _raw_exchange(path, _borrow(), timeout=30)
+  finally:
+    listener.close()
+  assert time.monotonic() - started < 2.5
+  assert answer.startswith(b"HTTP/1.1 504")
+  entry = vault.usage(key="echo")[0]
+  assert entry["outcome"] == "failed" and "longer than 1 seconds" in entry["reason"]
+
+
 def test_a_caller_that_stops_reading_is_cut_off_and_frees_its_slot(vault, monkeypatch):
   import time
   monkeypatch.setattr(kv, "MAX_CONCURRENT_BORROWS", 1)
