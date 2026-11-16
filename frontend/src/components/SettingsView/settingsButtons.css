@@ -21,12 +21,15 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .settings__btn:hover:not(:disabled) {
+  .settings__btn:hover:not(:disabled):not([aria-disabled="true"]) {
     background: var(--accent-fill-hover, var(--accent-hover));
   }
 }
 
-.settings__btn:disabled {
+/* aria-disabled: a control that is briefly asleep, still hearing presses
+   (a key request card's answers, KeyRequest.jsx). */
+.settings__btn:disabled,
+.settings__btn[aria-disabled="true"] {
   opacity: 0.6;
   cursor: not-allowed;
 }
@@ -55,7 +58,7 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .settings__btn--outline:hover {
+  .settings__btn--outline:hover:not([aria-disabled="true"]) {
     background: var(--surface-2);
   }
 }

@@ -210,26 +210,68 @@ test("a follow-up the chat could not send reports failure, so the card can say s
 // -- after a reload ----------------------------------------------------------
 
 const mapsKey = { name: 'maps', grants: { agents: true, sites: [TILES, { ...TILES, host: 'api.example.com' }], apps: [] } }
-const at = (outcome, ts, key = 'maps') => ({ key, caller: 'owner', outcome, ts })
+const at = (outcome, ts, { key = 'maps', caller = 'owner' } = {}) => ({ key, caller, outcome, ts })
+const asked = (chat, ts, key = 'maps') => at('requested', ts, { key, caller: `agent:${chat}` })
+const gone = (usage, chatId = 'chat-1', keyList = [mapsKey]) => goneKeyRequestLine('agent-maps', chatId, keyList, usage)
 
 test("an allowed request that left the vault still says what the owner allowed, from the key's activity", () => {
-  const usage = [at('used', '2026-11-16T10:05:00Z'), at('granted agents', '2026-11-16T10:00:00Z')]
-  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], usage),
-    'You allowed your agent to send maps to tiles.example.com and api.example.com.')
+  const usage = [
+    at('used', '2026-11-16T10:05:00Z', { caller: 'agent:chat-1' }),
+    at('granted agents', '2026-11-16T10:00:00Z'),
+    asked('chat-1', '2026-11-16T09:59:00Z'),
+  ]
+  assert.equal(gone(usage), 'You allowed your agent to send maps to tiles.example.com and api.example.com.')
 })
 
-test('the latest answer wins, and a refusal names no websites', () => {
-  const usage = [at('denied agents', '2026-11-16T11:00:00Z'), at('granted agents', '2026-11-16T10:00:00Z')]
-  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], usage), 'You said no to your agent using maps.')
+test('the key update an approval writes in the same second does not hide its answer, in either order', () => {
+  for (const usage of [
+    [at('updated', '2026-11-16T10:00:00Z'), at('granted agents', '2026-11-16T10:00:00Z'), asked('chat-1', '2026-11-16T09:59:00Z')],
+    [at('granted agents', '2026-11-16T10:00:00Z'), at('updated', '2026-11-16T10:00:00Z'), asked('chat-1', '2026-11-16T09:59:00Z')],
+  ]) {
+    assert.match(gone(usage), /^You allowed your agent/)
+  }
 })
 
-test('without an answer on record, or for an allowed key since deleted, nothing is claimed', () => {
-  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('used', '2026-11-16T10:05:00Z')]), null)
-  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('granted agents', '2026-11-16T10:00:00Z', 'other')]), null)
-  assert.equal(goneKeyRequestLine('agent-maps', [], [at('granted agents', '2026-11-16T10:00:00Z')]), null)
-  assert.equal(goneKeyRequestLine('agent-maps', undefined, undefined), null)
-  // An app's answer is not the agents'.
-  assert.equal(goneKeyRequestLine('7-maps', [mapsKey], [at('granted app:7', '2026-11-16T10:00:00Z')]), null)
-  assert.equal(goneKeyRequestLine('agent-maps', [mapsKey], [at('granted app:7', '2026-11-16T10:00:00Z')]), null)
+test("a refusal of this chat's ask names no websites", () => {
+  assert.equal(gone([at('denied agents', '2026-11-16T10:00:00Z'), asked('chat-1', '2026-11-16T09:59:00Z')]),
+    'You said no to your agent using maps.')
 })
 
+test("another chat's later refusal is not this chat's answer", () => {
+  const usage = [
+    at('denied agents', '2026-11-16T12:00:00Z'),
+    asked('chat-2', '2026-11-16T11:59:00Z'),
+    at('granted agents', '2026-11-16T10:00:00Z'),
+    at('updated', '2026-11-16T10:00:00Z'),
+    asked('chat-1', '2026-11-16T09:59:00Z'),
+  ]
+  assert.match(gone(usage, 'chat-1'), /^You allowed your agent to send maps/)
+  assert.equal(gone(usage, 'chat-2'), 'You said no to your agent using maps.')
+})
+
+test('a cleared refusal followed by a site added by hand claims no answer to the new ask', () => {
+  // Refused, let ask again, asked again; the owner then added the site on the
+  // key's page and the agent's next ask was simply granted, with no answer.
+  const usage = [
+    at('used', '2026-11-16T12:05:00Z', { caller: 'agent:chat-1' }),
+    at('updated', '2026-11-16T12:00:00Z'),
+    asked('chat-1', '2026-11-16T11:00:00Z'),
+    at('forgot request agents', '2026-11-16T10:30:00Z'),
+    at('denied agents', '2026-11-16T10:00:00Z'),
+    asked('chat-1', '2026-11-16T09:59:00Z'),
+  ]
+  assert.equal(gone(usage), null)
+})
+
+test("without this chat's ask on record, outside a chat, or for an allowed key since deleted, nothing is claimed", () => {
+  const answered = [at('granted agents', '2026-11-16T10:00:00Z'), asked('chat-1', '2026-11-16T09:59:00Z')]
+  // The ask scrolled out of the activity fetched.
+  assert.equal(gone([at('granted agents', '2026-11-16T10:00:00Z')]), null)
+  assert.equal(gone(answered, null), null)
+  assert.equal(gone(answered, 'chat-1', []), null)
+  assert.equal(gone(undefined), null)
+  // Another key's activity, or an app's answer, is not this request's.
+  assert.equal(gone([at('granted agents', '2026-11-16T10:00:00Z', { key: 'other' }), asked('chat-1', '2026-11-16T09:59:00Z')]), null)
+  assert.equal(gone([at('granted app:7', '2026-11-16T10:00:00Z'), asked('chat-1', '2026-11-16T09:59:00Z')]), null)
+  assert.equal(goneKeyRequestLine('7-maps', 'chat-1', [mapsKey], answered), null)
+})

@@ -64,13 +64,15 @@ test("only an assistant reply turns the fence into a card; elsewhere it stays co
 
 const existing = { ...ask, key_exists: true }
 
-test('Not now and Allow start inactive on every card, so a card appearing under the pointer takes no click', () => {
+test('Not now and Allow start asleep on every card, so a card appearing under the pointer takes no click', () => {
   for (const html of [
     render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }), { requests: [existing] }),
     render(createElement(KeyRequest, { request: existing, names: {}, onAnswered() {} })),
   ]) {
-    assert.match(html, /<button[^>]*disabled=""[^>]*>Not now<\/button>/)
-    assert.match(html, /<button[^>]*disabled=""[^>]*>Allow<\/button>/)
+    // aria-disabled, not disabled: an asleep answer still hears the presses that keep it asleep.
+    assert.match(html, /<button[^>]*aria-disabled="true"[^>]*>Not now<\/button>/)
+    assert.match(html, /<button[^>]*aria-disabled="true"[^>]*>Allow<\/button>/)
+    assert.doesNotMatch(html, /<button[^>]* disabled=""/)
   }
 })
 
@@ -99,7 +101,10 @@ test('an answered card says what the owner decided, and if the agent could not b
 
 test("after a reload an allowed request that left the vault says what was allowed, from the key's activity", () => {
   const keys = [{ name: 'maps', grants: { agents: true, sites: [TILES], apps: [] } }]
-  const usage = [{ key: 'maps', caller: 'owner', outcome: 'granted agents', ts: '2026-11-16T10:00:00Z' }]
+  const usage = [
+    { key: 'maps', caller: 'owner', outcome: 'granted agents', ts: '2026-11-16T10:00:00Z' },
+    { key: 'maps', caller: 'agent:chat-1', outcome: 'requested', ts: '2026-11-16T09:59:00Z' },
+  ]
   const html = render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }), { requests: [], keys, usage })
   assert.match(html, /You allowed your agent to send maps to tiles\.example\.com\./)
   assert.doesNotMatch(html, /answered or withdrawn/)

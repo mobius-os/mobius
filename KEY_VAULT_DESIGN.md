@@ -79,10 +79,12 @@ Status: draft for review.
    request, and the owner's answer there is posted to that chat as their own
    message, which resumes the agent), and an app's over the app's window while
    the owner has it open. A chat only answers its own agent's request; an
-   app's shown in a chat is read-only. Every card's answers stay inactive for
-   about a second after it appears and ignore a press that began earlier, as
-   a browser's permission prompt does, so a card appearing under the pointer
-   takes no click meant for what was there. The
+   app's shown in a chat is read-only. Every card's answers wake only after
+   the card has been still and untouched for about a second (since it
+   appeared, last moved on screen or was last pressed anywhere) and ignore a
+   press that began while they slept, as a browser's permission prompt does,
+   so a card appearing or moving under the pointer takes no click meant for
+   what was there, and steady clicking never answers. The
    request only proposes: approval applies the sites and slot the owner's
    answer carries (a new key answered without a slot is sent as
    `Authorization: Bearer`). The sites go to that app's own grant. An existing

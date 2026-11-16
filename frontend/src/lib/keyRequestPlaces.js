@@ -74,19 +74,46 @@ export function agentRequestKey(id) {
 
 // The vault's audit outcome when the owner answers an agent's request.
 const AGENT_ANSWERS = { 'granted agents': 'approve', 'denied agents': 'deny' }
+const isAgentCaller = caller => caller === 'agent' || String(caller || '').startsWith('agent:')
 
 /**
- * What a ``gone`` card for the agent's request ``id`` can still say after a
- * reload, from the key's recent activity (``usage``, newest first) and the
- * keys (``GET /api/keys``): the owner's latest answer to the agents on that
- * key, or null when it can't be known (an app's request, no answer on
- * record, an allowed key since deleted). An allowed agent may send the key
- * to the key's sites for the owner and agents, so those are the hosts named;
- * a "no" names none, since the refused sites were never saved.
+ * The owner's answer to the ask chat ``chatId`` made for ``key``, from the
+ * key's recent activity (``usage``, newest first), or null when the log
+ * doesn't show it. It is the answer to the agents (``granted agents`` /
+ * ``denied agents``) that came after this chat's own ``requested`` entry and
+ * before any later agent's ``requested`` entry: another chat's ask, or this
+ * chat's next one, is another request with its own answer. Anything else in
+ * between, such as the ``updated`` an approval writes just before its
+ * answer, is passed over. A request that ended with no answer on record (the
+ * owner added the site on the key's page and the agent asked again) has none.
  */
-export function goneKeyRequestLine(id, keys, usage) {
+function chatsAnswer(key, chatId, usage) {
+  let answer = null
+  for (const entry of usage || []) {
+    if (entry.key !== key) continue
+    if (AGENT_ANSWERS[entry.outcome]) {
+      // Newest first: the last one seen is the oldest, the answer to the ask below it.
+      answer = entry
+    } else if (entry.outcome === 'requested' && isAgentCaller(entry.caller)) {
+      if (entry.caller === `agent:${chatId}`) return answer
+      answer = null
+    }
+  }
+  return null
+}
+
+/**
+ * What a ``gone`` card for the agent's request ``id`` in chat ``chatId`` can
+ * still say after a reload, from the key's recent activity and the keys
+ * (``GET /api/keys``), or null when it can't be known (an app's request, a
+ * card outside a chat, no answer to this chat's ask on record, an allowed key
+ * since deleted). An allowed agent may send the key to the key's sites for
+ * the owner and agents, so those are the hosts named; a "no" names none,
+ * since the refused sites were never saved.
+ */
+export function goneKeyRequestLine(id, chatId, keys, usage) {
   const key = agentRequestKey(id)
-  const answer = key && (usage || []).find(entry => entry.key === key && AGENT_ANSWERS[entry.outcome])
+  const answer = key && chatId ? chatsAnswer(key, chatId, usage) : null
   if (!answer) return null
   if (AGENT_ANSWERS[answer.outcome] === 'deny') return keyAnswerWords({ requester: 'agent', key, sites: [] }, 'deny', {}).line
   const record = (keys || []).find(item => item.name === key)

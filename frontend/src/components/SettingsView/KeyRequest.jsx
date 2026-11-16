@@ -1,8 +1,11 @@
 /* One app's or agent's key request card, as Settings › Keys, a chat and an app's window show it. */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
-import { keyAnswerClickCounts, keyAnswerWaitMs } from '../../lib/keyAnswerGuard.js'
+import {
+  keyAnswerActiveAt, keyAnswerClickCounts, keyAnswerMoved, keyAnswerPlace, keyAnswerPlaceChanged, keyAnswerPressed,
+  keyAnswerShown,
+} from '../../lib/keyAnswerGuard.js'
 import { requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
@@ -18,25 +21,67 @@ function Lead({ segments }) {
 }
 
 /**
- * The answers stay inactive for a moment after the card appears, and a click
- * whose press began before then is ignored (keyAnswerGuard.js). Callers key
- * each card by ``requestFormKey``, so a replacement request is a new card
- * and waits again.
+ * Keeps the answers asleep until the card has been still and untouched for a
+ * moment (keyAnswerGuard.js). ``cardRef`` goes on the card; ``onPressCapture``
+ * hears every press on it, before any of its controls. The card's place is
+ * checked when it or anything around it changes size, on any scroll and at
+ * each press, so a card pushed or slid into place under the pointer waits
+ * again; scrolling the card yourself does too. Callers key each card by
+ * ``requestFormKey``, so a replacement request is a new card and waits again.
  */
-function useAnswerGuard() {
+function useAnswerGuard({ enabled }) {
+  const cardRef = useRef(null)
+  const place = useRef(null)
   const [shownAt] = useState(() => performance.now())
+  const state = useRef(keyAnswerShown(shownAt))
+  const [activeAt, setActiveAt] = useState(() => keyAnswerActiveAt(keyAnswerShown(shownAt)))
   const [active, setActive] = useState(false)
-  const pressAt = useRef(null)
+
   useEffect(() => {
-    const timer = setTimeout(() => setActive(true), keyAnswerWaitMs(shownAt, performance.now()))
+    const wait = activeAt - performance.now()
+    if (wait <= 0) { setActive(true); return undefined }
+    setActive(false)
+    const timer = setTimeout(() => setActive(true), wait)
     return () => clearTimeout(timer)
-  }, [shownAt])
+  }, [activeAt])
+
+  const noteMove = useCallback(() => {
+    const node = cardRef.current
+    if (!node) return
+    const now = keyAnswerPlace(node.getBoundingClientRect())
+    if (keyAnswerPlaceChanged(place.current, now)) {
+      state.current = keyAnswerMoved(state.current, performance.now())
+      setActiveAt(keyAnswerActiveAt(state.current))
+    }
+    place.current = now
+  }, [])
+
+  useEffect(() => {
+    const node = cardRef.current
+    if (!enabled || !node) return undefined
+    const check = () => noteMove()
+    check()
+    const resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(check)
+    for (let element = node; element && resized; element = element.parentElement) resized.observe(element)
+    window.addEventListener('scroll', check, { capture: true, passive: true })
+    window.addEventListener('resize', check)
+    return () => {
+      resized?.disconnect()
+      window.removeEventListener('scroll', check, { capture: true })
+      window.removeEventListener('resize', check)
+    }
+  }, [enabled, noteMove])
+
   return {
+    cardRef,
     active,
-    onPointerDown: event => { pressAt.current = event.timeStamp },
-    counts: event => keyAnswerClickCounts({
-      shownAt, clickAt: event.timeStamp, pressAt: pressAt.current, byPointer: event.detail > 0,
-    }),
+    onPressCapture: event => {
+      // A move nothing reported yet counts as happening now.
+      noteMove()
+      state.current = keyAnswerPressed(state.current, event)
+      setActiveAt(keyAnswerActiveAt(state.current))
+    },
+    counts: event => keyAnswerClickCounts(state.current, event),
   }
 }
 
@@ -57,7 +102,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
   // the owner and agents.
   const inject = request.inject || BEARER
   const sites = request.sites || []
-  const guard = useAnswerGuard()
+  const guard = useAnswerGuard({ enabled: !readOnly })
 
   async function answer(kind) {
     setBusy(kind)
@@ -81,9 +126,9 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     <button
       type="button"
       className={`settings__btn settings__btn--sm${words.allowHidden ? '' : ' settings__btn--outline'}`}
-      onPointerDown={guard.onPointerDown}
+      aria-disabled={guard.active ? undefined : 'true'}
       onClick={event => { if (guard.counts(event)) answer('deny') }}
-      disabled={!guard.active || Boolean(busy)}
+      disabled={Boolean(busy)}
     >
       Not now
     </button>
@@ -92,16 +137,22 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     <button
       type="button"
       className={`settings__btn settings__btn--sm${primary ? '' : ' settings__btn--outline'}`}
-      onPointerDown={guard.onPointerDown}
+      aria-disabled={guard.active ? undefined : 'true'}
       onClick={event => { if (guard.counts(event)) answer('approve') }}
-      disabled={!guard.active || Boolean(busy) || (words.needsValue && !value)}
+      disabled={Boolean(busy) || (words.needsValue && !value)}
     >
       {busy === 'approve' ? 'Allowing…' : label}
     </button>
   )
 
   return (
-    <div className="settings-keys__request" role="group" aria-label={`${words.who} asks to use ${request.key}`}>
+    <div
+      ref={guard.cardRef}
+      className="settings-keys__request"
+      role="group"
+      aria-label={`${words.who} asks to use ${request.key}`}
+      onPointerDownCapture={guard.onPressCapture}
+    >
       <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
       {request.reason && <p className="settings-keys__muted settings-keys__reason">“{request.reason}”</p>}
       {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}

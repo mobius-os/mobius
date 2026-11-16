@@ -156,7 +156,7 @@ export default function KeyRequestBlock({ block, onInternalNav }) {
     default:
       body = (
         <p className="key-request-place__line">
-          {goneKeyRequestLine(block.id, keysQuery.data?.keys, usageQuery.data?.usage) || 'This request was answered or withdrawn.'}
+          {goneKeyRequestLine(block.id, chat.context?.chatId, keysQuery.data?.keys, usageQuery.data?.usage) || 'This request was answered or withdrawn.'}
         </p>
       )
   }
