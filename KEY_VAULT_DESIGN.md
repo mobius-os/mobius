@@ -181,17 +181,29 @@ it. An app holds at most 16 keys of its own, as in the per-app store. Wiping an 
 purging the app erases its own keys (a key the owner shared with other apps
 stays for them), as the per-app store did. A ledger
 (`.vault-import.json`) next to the old files means a key the owner deletes is
-never re-imported, unreadable values are retried, and a purged app's leftover
-values are skipped because its id may be reused. The old ciphertext stays in
+never re-imported, unreadable values are retried, and values of an app id no
+app holds (a purge, or a restore that dropped the app) are settled as skipped
+for good, because the id may be reused. The old ciphertext stays in
 place for one release.
 
 **Transition.** For one release, `/api/apps/{id}/secrets/{name}`
 (`routes/app_secrets_compat.py`, marked `Deprecation: true`) answers from the
-vault: apps may still save, check and delete their own values, and the owner
-and agents may read them, but no app token reads a value back (services and
-jobs included); they borrow it through `/api/keys/use`. These routes see only
+vault: apps may still save, check and delete their own values with their own
+token, and the owner and top-level agents may read them, but no app token
+reads a value back (services and jobs included); they borrow it through
+`/api/keys/use`. The owner and agents never write through these routes: such
+a write would create a key the app owns, with the app's grant, without the
+owner's own input. They use Settings › Keys or `PUT /api/keys/<name>`. These routes see only
 keys the app itself created and still holds: a key the owner made, or merely
 lets the app borrow, can never be replaced through them.
+
+**Restore.** Backups carry the vault only in the encrypted secrets archive.
+A restore without it keeps the current vault, whose grants name this
+install's app ids. `restore-data.py` warns, and, with the vault stopped,
+withdraws grants and requests for every id the restored database lacks or
+gives to another installation (slug and token nonce), using the vault's own
+purge step; if it cannot open the vault it changes nothing and asks the owner
+to review every grant.
 
 ## Future work: sandbox for app server code
 

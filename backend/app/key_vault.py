@@ -691,9 +691,14 @@ async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
   fernet = _legacy_fernet()
   moved = {}
   for app_id, secret in pending:
-    if app_id not in live_app_ids:
-      continue  # a purged app's id may be reused: never grant it onward
     entry = f"{app_id}/{secret.name}"
+    if app_id not in live_app_ids:
+      # No app row at all: the app was purged (or a restore dropped it), and
+      # its id may be reused by an unrelated app, which must never inherit
+      # this value. A removed app still awaiting recovery keeps its row and
+      # is retried. Recorded so a later app with this id never imports it.
+      _record_in_ledger(root, entry, {"skipped": "no app holds this id"})
+      continue
     try:
       # A purge removes the file under the same lock, so a file still present
       # here belongs to the app that is live now. The deprecated routes save

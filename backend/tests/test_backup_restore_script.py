@@ -556,12 +556,17 @@ def _vault_program():
   return module
 
 
-def _set_apps(data, slugs):
-  """The apps table of the fake /data database: id -> slug."""
+def _set_apps(data, apps):
+  """The apps table of the fake /data database: id -> slug, or id -> (slug,
+  token nonce) for an installation that differs only by its nonce."""
+  rows = sorted(
+    (app_id, *(app if isinstance(app, tuple) else (app, f"nonce-{app}")))
+    for app_id, app in apps.items()
+  )
   db = sqlite3.connect(str(Path(data) / "db" / "ultimate.db"))
-  db.execute("CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, slug TEXT)")
+  db.execute("CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, slug TEXT, token_nonce TEXT)")
   db.execute("DELETE FROM apps")
-  db.executemany("INSERT INTO apps (id, slug) VALUES (?, ?)", sorted(slugs.items()))
+  db.executemany("INSERT INTO apps (id, slug, token_nonce) VALUES (?, ?, ?)", rows)
   db.commit()
   db.close()
 
@@ -602,6 +607,24 @@ def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_pa
   assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
   assert vault.list_requests() == []
   assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+
+
+def test_a_reused_id_with_the_same_slug_is_still_another_app_after_a_restore(tmp_path):
+  """A purged app's id can go to a new installation of an app with the same
+  slug; its nonce differs, so the kept vault's grant to that id is withdrawn."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: ("weather", "first-install")})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: ("weather", "second-install")})
+  _vault_granting(data, kv, [1, 2])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "app ids [2]" in restored.stdout
+  [key] = kv.Vault(data / ".vault").list_keys()
+  assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
 
 
 def test_a_restore_without_secrets_never_edits_a_running_vault(tmp_path):

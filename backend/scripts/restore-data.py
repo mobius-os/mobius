@@ -238,25 +238,33 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
-def app_slugs(db_path):
-  """App id -> slug in a Möbius database, or None when it can't be read."""
+def app_identities(db_path):
+  """App id -> its installation (slug and token nonce) in a Möbius database,
+  or None when it can't be read.
+
+  The nonce changes when an id is reused by a new installation, so a purged
+  app whose id went to a new app with the same slug still counts as another
+  app. A database from before nonces existed is compared by slug alone.
+  """
   if not os.path.isfile(db_path):
     return None
   try:
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
-      rows = conn.execute("SELECT id, slug FROM apps").fetchall()
+      columns = {row[1] for row in conn.execute("PRAGMA table_info(apps)")}
+      nonce = "token_nonce" if "token_nonce" in columns else "NULL"
+      rows = conn.execute(f"SELECT id, slug, {nonce} FROM apps").fetchall()
     finally:
       conn.close()
   except sqlite3.Error:
     return None
-  return {int(app_id): slug for app_id, slug in rows}
+  return {int(app_id): (slug, token_nonce) for app_id, slug, token_nonce in rows}
 
 
 def withdraw_grants_of_other_apps(vault_dir, before, after):
   """Withdraw the kept vault's grants and requests for app ids the restored
-  database lacks or gives to another app (another slug than before the
-  restore); return those ids.
+  database lacks or gives to another app (another installation than
+  before the restore); return those ids.
 
   App ids are reused, so a grant naming such an id would let whichever app
   holds it now borrow the key. Each is withdrawn with the vault's own purge
@@ -304,7 +312,7 @@ def reconcile_kept_vault(data_dir, before):
       "was KEPT from the current install. Its app grants refer to app ids "
       "of the current install, which the restored database may give to "
       "other apps.")
-  after = app_slugs(os.path.join(data_dir, DB_RELPATH))
+  after = app_identities(os.path.join(data_dir, DB_RELPATH))
   if after is None:
     log("WARNING: could not read the restored apps; no grant was changed. "
         "Review every app grant in Settings › Keys before opening apps.")
@@ -445,7 +453,7 @@ def main():
 
   secrets_kept = secrets_state not in ("encrypted", "plaintext")
   # Which app each id names now, before the restored database replaces it.
-  apps_before = app_slugs(os.path.join(data_dir, DB_RELPATH)) if secrets_kept else None
+  apps_before = app_identities(os.path.join(data_dir, DB_RELPATH)) if secrets_kept else None
 
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")

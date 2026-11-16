@@ -316,6 +316,16 @@ def test_an_agent_replacing_a_saved_key_tells_the_owner(client, auth, db, vault,
   assert "fresh" in notice["body"] and "third" not in notice["body"]
 
 
+def test_an_agent_resending_the_same_slot_differently_is_not_a_change(client, auth, db, vault, pushes):
+  agent = _agent_auth(db)
+  vault.put_key("maps", {"value": DUMMY, "inject": {"type": "header", "name": "X-Api-Key", "prefix": ""},
+                         "grants": {"apps": [], "agents": True, "sites": [SITE]}})
+  [page] = client.get("/api/keys", headers=auth).json()["keys"]
+  same = {"inject": {"type": "header", "name": " X-Api-Key "}, "revision": page["revision"]}
+  assert client.put("/api/keys/maps", headers=agent, json=same).status_code == 200
+  assert pushes == []
+
+
 def test_an_agent_adding_a_site_tells_the_owner_and_is_logged_as_the_agent(client, auth, db, vault, pushes):
   agent = _agent_auth(db)
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
@@ -501,6 +511,21 @@ def test_a_purged_apps_unimported_secrets_never_reach_an_app_reusing_its_id(clie
   # A new app that receives the same id inherits nothing on the next start.
   assert asyncio.run(key_vault.import_legacy_app_secrets({gone.id})) == {}
   assert key_vault.reveal_model_provider_key(gone.id, "api_key", PROVIDER) is None
+  assert vault.list_keys() == []
+
+
+def test_old_secrets_of_an_id_no_app_holds_are_never_imported_later(client, auth, db, vault):
+  """A restore can bring back old secret files for an app id the database no
+  longer has. The import settles them as skipped, so an app that later takes
+  that id never inherits the value."""
+  import asyncio
+  from app.config import get_settings
+  _legacy_secret(4242, "api_key", "a-vanished-apps-secret")
+  assert asyncio.run(key_vault.import_legacy_app_secrets(set())) == {}
+  ledger = json.loads((Path(get_settings().data_dir) / "app-secrets" / ".vault-import.json").read_text())
+  assert ledger["4242/api_key"] == {"skipped": "no app holds this id"}
+  # The id is reused; the next start imports nothing for it.
+  assert asyncio.run(key_vault.import_legacy_app_secrets({4242})) == {}
   assert vault.list_keys() == []
 
 
