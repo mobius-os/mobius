@@ -1,9 +1,9 @@
 # Secure input
 
 Use this skill when the owner needs to supply a password, API key, token,
-private username, or other value that should not pass through the LLM API or
-enter the chat transcript. The trusted card is an interactive live-chat
-primitive, not a background/scheduled-agent mechanism.
+private username, or other secret that must stay out of the LLM API and the
+chat transcript, including adding or saving a key in their key vault
+(Settings › Keys). The card is a live-chat primitive, not for background work.
 
 ## Default: saved sealed pause
 
