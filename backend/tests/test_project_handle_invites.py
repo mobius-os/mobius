@@ -42,6 +42,8 @@ def peers(client, monkeypatch):
       raise invites.HTTPException(400, "Cannot resolve host 'dead.example'")
     if parts.path.endswith("/redeem") and state["redeem_answer"] is not None:
       return httpx.Response(200, json=state["redeem_answer"])
+    if parts.path.endswith("/redeem") and state.get("redeem_unreachable"):
+      raise httpx.ConnectError("unreachable")
     if parts.netloc != HOST or (state["fail_delivery"] and parts.path.endswith("/inbox")):
       raise httpx.ConnectError("unreachable")
     if parts.path.endswith("/inbox"):
@@ -310,3 +312,27 @@ def test_the_inbox_is_rate_limited(client, peers):
   url = f"https://{HOST}/project-invite#short"
   codes = [deliver(client, url).status_code for _ in range(31)]
   assert codes[:30] == [422] * 30 and codes[30] == 429
+
+
+def test_accepting_while_the_sender_is_unreachable_leaves_it_pending(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  peers["redeem_unreachable"] = True
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 502
+  assert db.get(models.ReceivedProjectInvite, invite_id).status == "pending"
+
+
+def test_opening_after_access_expired_is_refused(client, auth, db, peers):
+  project = make_project(client, auth)
+  assert send(client, auth, project).status_code == 200
+  invite_id = client.get("/api/project-invites", headers=auth).json()[0]["id"]
+  peers["me"] = "bob"
+  assert client.post(f"/api/project-invites/{invite_id}/accept", headers=auth).status_code == 200
+  row = db.get(models.ReceivedProjectInvite, invite_id)
+  db.refresh(row)
+  row.access_expires_at = now_naive_utc() - timedelta(minutes=1)
+  db.commit()
+  assert client.post(f"/api/project-invites/{invite_id}/open", headers=auth).status_code == 410
+  assert client.get("/api/project-invites", headers=auth).json()[0]["access_expired"] is True
