@@ -67,10 +67,13 @@ instead of writing your own: `["python3",
 "api.example.com:GET,POST:/v1/*"]` (add `--header NAME [--prefix TEXT]` or
 `--query NAME` when the service does not take `Authorization: Bearer`). The
 owner then sees and manages it in Settings › Keys. It never replaces a key
-that already has that name: it leaves that key as it was and exits with code
-3. Add `--replace` only when the owner asked to replace that key's value. It
-writes to the vault directly, so the owner gets no notification of the
-replacement: tell them yourself.
+that already has that name: it leaves that key as it was and fails. A failed
+consumer's receipt does not say why and the submitted value is discarded, so
+before opening the card check `mapi /api/keys` for the name; if it exists,
+ask the owner whether to replace it and add `--replace` only when they said
+so. After a failed receipt, check the list again before asking the owner a
+second time. It writes to the vault directly, so the owner gets no
+notification of a replacement: tell them yourself.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and

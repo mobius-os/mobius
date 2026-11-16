@@ -399,9 +399,9 @@ def _relayed_request_headers(request: Request) -> list[tuple[str, str]]:
   The relay to the vault encodes header text as ASCII, and the vault refuses
   a value spanning lines, so a name must be an HTTP token and a value
   printable ASCII (tabs allowed), as the destination's path and query must
-  be. Refused here, before a borrow starts, such a request is a caller's
-  mistake, never a failed relay. Dropped headers (a browser's ``Referer``)
-  never count.
+  be; whitespace around a value is trimmed. Refused here, before a borrow
+  starts, such a request is a caller's mistake, never a failed relay.
+  Dropped headers (a browser's ``Referer``) never count.
   """
   headers = []
   for raw_name, raw_value in request.headers.raw:
@@ -411,6 +411,9 @@ def _relayed_request_headers(request: Request) -> list[tuple[str, str]]:
       continue
     if not _HEADER_NAME.fullmatch(raw_name):
       raise HTTPException(400, "A header name has characters HTTP can't carry.")
+    # Whitespace around a value is not part of it (RFC 9110 §5.5), and the
+    # relay refuses to send it; inside a value it is ordinary text.
+    raw_value = raw_value.strip(b" \t")
     if any(not (0x20 <= byte <= 0x7E or byte == 0x09) for byte in raw_value):
       raise HTTPException(
         400, f"The {name} header has characters HTTP can't carry; send it as plain ASCII.",

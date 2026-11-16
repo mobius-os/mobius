@@ -842,7 +842,9 @@ async def _tell_owner_which_imported_keys_need_sites(moved: dict) -> None:
   Settings › Keys. The ledger settles each old value once, so a later start
   never imports, or names, the same key again.
   """
-  keys = {k["name"]: k for k in (await vault_call("GET", "/keys"))["keys"]} if moved else {}
+  if not moved:
+    return
+  keys = {k["name"]: k for k in (await vault_call("GET", "/keys"))["keys"]}
   app_ids = set()
   for entry, name in moved.items():
     app_id = int(entry.split("/", 1)[0])
@@ -855,7 +857,12 @@ async def _tell_owner_which_imported_keys_need_sites(moved: dict) -> None:
   from app.database import SessionLocal
   with SessionLocal() as db:
     owner = db.query(models.Owner).first()
-    names = sorted(name for (name,) in db.query(models.App.name).filter(models.App.id.in_(app_ids)))
+    rows = db.query(models.App.id, models.App.name).filter(models.App.id.in_(app_ids)).all()
+    counts = {}
+    for _, name in rows:
+      counts[name] = counts.get(name, 0) + 1
+    # Two apps may share a name; the owner must still tell them apart.
+    names = sorted(name if counts[name] == 1 else f"{name} (#{app_id})" for app_id, name in rows)
     if owner is None or not names:
       return
     shown = names if len(names) <= 5 else [*names[:4], f"{len(names) - 4} more apps"]

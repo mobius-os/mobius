@@ -1268,6 +1268,15 @@ def test_a_header_the_relay_cannot_carry_is_a_bad_request_and_never_pins_the_app
   ))
   assert sent.status_code == 200
   assert key_vault._borrows_in_flight == {}
+  # Whitespace around a value is not part of it: a service's "X-Title: notes "
+  # is sent trimmed, never refused by the relay after the borrow started.
+  sent = asyncio.run(keys_routes.use_key(
+    "shared", "api.example.com", "v1/x",
+    _use_request(path, headers=[(b"x-title", b"\tweekly notes ")]),
+    principal=_app_principal(db, live),
+  ))
+  assert sent.status_code == 200
+  assert key_vault._borrows_in_flight == {}
 
 
 def test_a_borrow_that_fails_before_reaching_the_vault_releases_the_app(

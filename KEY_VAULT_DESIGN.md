@@ -19,8 +19,9 @@ Status: draft for review.
   agent that replaces a value, changes how a key is sent or adds sites
   through the server notifies the owner. A save names only what it changes:
   on an existing key, an omitted `inject` or `grants` keeps the current one,
-  so replacing a value never touches who may use it. An agent's edit always carries the revision it was
-  made from, so it cannot undo a change the owner made meanwhile.
+  so replacing a value never touches who may use it. An agent's edit always
+  carries the revision it was made from, so it cannot undo a change the owner
+  made meanwhile.
 - **Apps never receive a value**, in their browser frame, service or job. They
   borrow keys through a handshake (below).
 - **The server's HTTP routes enforce who may do what.** The owner-only gate
@@ -203,8 +204,9 @@ first free name scoped to the app (`api.key` → `app<id>-api-key`, then
 numbered): never a plain name another app could later ask for. Distinct old
 names never merge, simultaneous saves never leave two keys for one secret,
 and no existing key is overwritten. An old value the app already replaced
-through the adapter below, or deleted, is not imported over it. Model providers and the adapter below find a
-secret by that origin, not by its vault name. Once the owner or an agent
+through the adapter below, or deleted, is not imported over it. Model
+providers and the adapter below find a secret by that origin, not by its
+vault name. Once the owner or an agent
 stores a new value in such a key, its origin and the app's own grant are
 cleared: the key is the owner's, and the app uses it only if the owner grants
 it. An app holds at most 16 keys of its own, as in the per-app store. Wiping an app's data or
