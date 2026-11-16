@@ -681,6 +681,42 @@ def _private_file_exists(path: Path) -> bool:
   return True
 
 
+def _recorded_launcher(name: str, path: Path) -> str | None:
+  """Return the launcher a link file says it was saved for, if it says."""
+  try:
+    text = path.read_text(encoding="utf-8").strip()
+    if name == "identity.json":
+      value, claim = json.loads(text), "issuer"
+    else:
+      value, claim = Broker._receipt_claims(text), "iss"
+  except (ValueError, UnicodeError):
+    return None
+  recorded = value.get(claim) if isinstance(value, dict) else None
+  return recorded.rstrip("/") if isinstance(recorded, str) else None
+
+
+def _adopt_historical_launcher_files() -> None:
+  """Move a link saved under the historical names to its own launcher's files.
+
+  Earlier versions saved every launcher's link and pending enrollment under
+  the historical names. An installation already linked with another launcher
+  keeps that link when it updates; a file the default launcher issued, or one
+  that names no launcher, stays where it is. Sign-in attempts name no launcher
+  and last ten minutes, so one begun before the update is simply begun again.
+  """
+  if IDENTITY_BASE_URL == DEFAULT_LAUNCHER:
+    return
+  for name, own in (
+    ("identity.json", STATE_PATH),
+    ("pending-enrollment.jwt", PENDING_BOOTSTRAP_PATH),
+  ):
+    historical = PRIVATE_DIR / name
+    if _private_file_exists(own) or not _private_file_exists(historical):
+      continue
+    if _recorded_launcher(name, historical) == IDENTITY_BASE_URL:
+      os.replace(historical, own)
+
+
 def _prepare_socket_dir() -> None:
   """Require a root-owned parent so the unprivileged app cannot swap the UDS."""
   parent = SOCKET_PATH.parent
@@ -736,6 +772,7 @@ class Broker:
     self.client = httpx.Client(timeout=30.0, follow_redirects=False)
     # Codex's opaque ref_ids are local to one search session, not a durable index.
     self.search_sessions: dict[str, dict[str, Any]] = {}
+    _adopt_historical_launcher_files()
     self.state = self._load_state()
 
   def close(self) -> None:

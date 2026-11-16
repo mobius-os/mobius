@@ -350,13 +350,16 @@ def test_unlink_clears_only_matching_identity_and_keeps_instance_keys(broker):
   assert broker.instance_id == instance_before
 
 
-def _unsigned_receipt(instance_id, *, expires_in=600):
+def _unsigned_receipt(instance_id, *, expires_in=600, issuer=None):
   header = broker_module._b64(b'{"alg":"HS256","typ":"JWT"}')
-  payload = broker_module._b64(json.dumps({
+  claims = {
     "instance_id": instance_id,
     "jti": "receipt_test_123456789",
     "exp": int(time.time()) + expires_in,
-  }).encode())
+  }
+  if issuer:
+    claims["iss"] = issuer
+  payload = broker_module._b64(json.dumps(claims).encode())
   return f"{header}.{payload}.signature"
 
 
@@ -488,6 +491,103 @@ def test_pending_enrollment_for_another_launcher_survives_a_switch_back(
     assert staging_pending.read_text() == staging_receipt
   finally:
     on_production.close()
+
+
+def _link(broker, issuer):
+  return json.dumps({
+    "issuer": issuer,
+    "subject": "user_example",
+    "instance_id": broker.instance_id,
+    "key_thumbprint": broker.thumbprint(),
+    "key_generation": 1,
+  }, separators=(",", ":")).encode()
+
+
+def test_an_existing_link_with_another_launcher_survives_the_update(
+  broker, monkeypatch,
+):
+  # Earlier versions saved every launcher's link under the historical name.
+  historical = broker_module.STATE_PATH
+  staging_link = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, staging_link)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  updated = broker_module.Broker()
+  try:
+    identity = updated.identity()
+    assert identity["linked"] is True
+    assert identity["issuer"] == STAGING_LAUNCHER
+    assert broker_module.STATE_PATH.read_bytes() == staging_link
+    assert not historical.exists()
+  finally:
+    updated.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  on_default = broker_module.Broker()
+  try:
+    assert on_default.identity()["linked"] is False
+  finally:
+    on_default.close()
+
+
+def test_a_pending_enrollment_for_another_launcher_survives_the_update(
+  broker, monkeypatch,
+):
+  historical = broker_module.PENDING_BOOTSTRAP_PATH
+  receipt = _unsigned_receipt(broker.instance_id, issuer=STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, receipt.encode("ascii"))
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  updated = broker_module.Broker()
+  try:
+    assert not historical.exists()
+    enrolled = []
+    monkeypatch.setattr(updated, "enroll", enrolled.append)
+    assert updated.retry_pending_once() is True
+    assert enrolled == [receipt]
+  finally:
+    updated.close()
+
+
+@pytest.mark.parametrize("issuer", [broker_module.DEFAULT_LAUNCHER, None])
+def test_the_update_leaves_files_another_launcher_did_not_issue(
+  broker, monkeypatch, issuer,
+):
+  link = _link(broker, issuer)
+  receipt = _unsigned_receipt(broker.instance_id, issuer=issuer).encode("ascii")
+  historical_link = broker_module.STATE_PATH
+  historical_receipt = broker_module.PENDING_BOOTSTRAP_PATH
+  broker_module._atomic_root_write(historical_link, link)
+  broker_module._atomic_root_write(historical_receipt, receipt)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["linked"] is False
+    assert on_staging.retry_pending_once() is False
+    assert historical_link.read_bytes() == link
+    assert historical_receipt.read_bytes() == receipt
+    assert not broker_module.STATE_PATH.exists()
+    assert not broker_module.PENDING_BOOTSTRAP_PATH.exists()
+  finally:
+    on_staging.close()
+
+
+def test_the_update_never_replaces_a_launchers_own_link(broker, monkeypatch):
+  historical = broker_module.STATE_PATH
+  older = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, older)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  current = _link(broker, STAGING_LAUNCHER).replace(b"user_example", b"user_current")
+  broker_module._atomic_root_write(broker_module.STATE_PATH, current)
+
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["subject"] == "user_current"
+    assert broker_module.STATE_PATH.read_bytes() == current
+    assert historical.read_bytes() == older
+  finally:
+    on_staging.close()
 
 
 def test_root_broker_reclaims_the_default_link_while_another_launcher_is_active(
