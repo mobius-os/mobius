@@ -156,6 +156,21 @@ def pushes(monkeypatch):
   return sent
 
 
+@pytest.fixture
+def nudges(monkeypatch):
+  """The content-free ``key_requests_changed`` events an open shell hears."""
+  from app import broadcast
+  seen = []
+  bus = broadcast.get_system_broadcast()
+  real = bus.publish
+  def record(event):
+    if event.get("type") == "key_requests_changed":
+      seen.append(event)
+    real(event)
+  monkeypatch.setattr(bus, "publish", record)
+  return seen
+
+
 def _app(db, slug, app_id=None, provider_key=None, base_url=PROVIDER, protocol=None):
   """An installed app; ``provider_key`` declares its model provider's secret name."""
   contract = None
@@ -212,14 +227,15 @@ ASK = {"key": "weather_api", "reason": "Show the forecast", "sites": [SITE],
        "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "}}
 
 
-def test_handshake_from_request_to_use_without_seeing_the_value(client, auth, db, vault, pushes):
+def test_handshake_from_request_to_use_without_seeing_the_value(client, auth, db, vault, pushes, nudges):
   weather = _app(db, "weather")
   app_auth = _app_auth(db, weather)
 
-  # Before approval the app is told to wait, and the owner is told once.
+  # Before approval the app is told to wait. Nothing notifies the owner: an
+  # open shell is nudged once, for the new ask, and the card shows over the app.
   assert client.post("/api/keys/requests", headers=app_auth, json=ASK).json()["status"] == "pending"
   assert client.post("/api/keys/requests", headers=app_auth, json=ASK).json()["status"] == "pending"
-  assert [p["title"] for p in pushes] == ["Weather asks to use a key"]
+  assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
   denied = client.get("/api/keys/use/weather_api/api.example.com/v1/today", headers=app_auth)
   # The same refusal as for a key it was not given: an app learns no key names.
   assert denied.status_code == 403 and denied.headers["X-Vault-Denied"] == "1"
@@ -395,7 +411,7 @@ def test_only_the_owners_own_input_lets_an_app_use_a_key(client, auth, db, vault
   assert client.put("/api/keys/maps", headers=agent, json={**narrowed, "grants": {**narrowed["grants"], "apps": []}}).status_code == 200
 
 
-def test_a_granted_app_asks_for_more_sites_and_the_owner_is_told(client, auth, db, vault, pushes):
+def test_a_granted_app_asks_for_more_sites_in_the_moment(client, auth, db, vault, pushes, nudges):
   weather = _app(db, "weather")
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
@@ -404,7 +420,7 @@ def test_a_granted_app_asks_for_more_sites_and_the_owner_is_told(client, auth, d
   answer = client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ask).json()
   assert answer["status"] == "granted" and answer["sites_request"] == "pending"
   assert answer["sites_not_allowed"] == [tiles] and "created" not in answer
-  assert [p["title"] for p in pushes] == ["Weather asks to use a key on more sites"]
+  assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
   [request] = client.get("/api/keys", headers=auth).json()["requests"]
   assert request["granted"] is True and request["sites"] == [tiles]
   assert client.post(f"/api/keys/requests/{request['id']}/approve", headers=auth,
@@ -1926,7 +1942,7 @@ def test_a_paused_apps_model_provider_gets_no_key(client, auth, db, vault):
 TILES = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
 
 
-def test_a_top_level_agent_asks_by_card_and_the_owner_is_told_once(client, auth, db, vault, pushes):
+def test_a_top_level_agent_asks_by_card_in_its_chat(client, auth, db, vault, pushes, nudges):
   """Approving the card adds the site for the owner and agents and switches
   agents on."""
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
@@ -1938,9 +1954,8 @@ def test_a_top_level_agent_asks_by_card_and_the_owner_is_told_once(client, auth,
   first = client.post("/api/keys/requests", headers=agent, json=ask)
   assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps"}, first.text
   assert client.post("/api/keys/requests", headers=agent, json=ask).json()["status"] == "pending"
-  [notice] = pushes
-  assert notice["title"] == "Your agent asks to send a key to tiles.example.com"
-  assert "maps" in notice["body"] and notice["tag"] == "key-request-agent-maps"
+  # The card waits in the agent's chat; nothing notifies the owner.
+  assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
   [card] = client.get("/api/keys", headers=auth).json()["requests"]
   assert (card["requester"], card["app"], card["app_name"]) == ("agent", None, "Your agent")
   # Answering is the owner's own decision.
@@ -1953,37 +1968,29 @@ def test_a_top_level_agent_asks_by_card_and_the_owner_is_told_once(client, auth,
   assert client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent).status_code == 200
 
 
-def test_a_key_request_notification_opens_where_its_card_waits(client, auth, db, vault, pushes):
-  """An agent's card waits in the chat that asked, an app's over the app."""
+def test_a_key_request_never_notifies_and_keeps_the_asking_chat(client, auth, db, vault, pushes, nudges):
+  """Asks are answered in the moment, an agent's in the chat that asked and
+  an app's over the app, so no request sends a push or a bell entry: each new
+  ask only nudges an open shell to re-read the requests."""
   ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
   client.post("/api/keys/requests", headers=_agent_auth(db), json=ask)
   weather = _app(db, "weather")
   client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK)
-  assert [p["target"] for p in pushes] == ["/shell/?chat=chat-keys", f"/shell/?app={weather.id}"]
+  assert pushes == [] and len(nudges) == 2
   chats = {r["id"]: r["chat_id"] for r in client.get("/api/keys", headers=auth).json()["requests"]}
   assert chats == {"agent-maps": "chat-keys", f"{weather.id}-weather_api": None}
 
 
-def test_a_key_request_notification_asks_for_a_tap_where_it_opens_not_a_trip_to_settings(
-    client, auth, db, vault, pushes):
-  """Tapping the notification opens the asking chat or app, where the card
-  waits, so its text asks for a tap rather than sending the owner to
-  Settings › Keys."""
-  ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
-  client.post("/api/keys/requests", headers=_agent_auth(db), json=ask)
-  weather = _app(db, "weather")
-  client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK)
-  assert [p["body"] for p in pushes] == ["Tap to review “maps”.", "Tap to review “weather_api”."]
-
-
-def test_an_agents_partial_ask_names_the_missing_site_to_the_owner(client, auth, db, vault, pushes):
+def test_an_agents_partial_ask_waits_for_the_missing_site(client, auth, db, vault, pushes, nudges):
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [], "agents": True, "sites": [SITE]}})
   answer = client.post("/api/keys/requests", headers=_agent_auth(db),
                        json={"key": "maps", "reason": "Tiles too", "sites": [SITE, TILES]}).json()
   assert answer["status"] == "granted" and answer["sites_request"] == "pending"
   assert answer["sites_not_allowed"] == [TILES]
-  assert [p["title"] for p in pushes] == ["Your agent asks to send a key to tiles.example.com"]
+  assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert request["sites"] == [TILES]
 
 
 def test_only_top_level_agents_and_apps_ask_by_card(client, auth, db, vault, pushes):

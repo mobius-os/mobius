@@ -301,13 +301,14 @@ async def request_key(
   The answer is ``granted``, ``paused`` (an app the owner switched off on the
   key), ``pending`` or ``denied``. A granted asker wanting sites it lacks
   gets ``sites_not_allowed`` and ``sites_request`` (the state of its ask for
-  those sites). The owner is told once, when an ask is new.
+  those sites). Nothing notifies the owner: a new ask nudges an open shell
+  (_key_requests_changed), and the owner answers it in the moment.
   """
   if principal.browser is not None:
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
   payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   if principal.app_id is None:
-    return await _agent_asks(payload, principal, db)
+    return await _agent_asks(payload, principal)
   app = db.query(models.App).filter(
     models.App.id == principal.app_id, models.App.deleted_at.is_(None),
   ).first()
@@ -324,21 +325,11 @@ async def request_key(
     raise HTTPException(404, "App not found.") from None
   if answer.pop("created", False):
     activity.log_event("key_requested", app_id=app.id, key=answer["key"])
-    await push.notify_owner_async(
-      db, principal.owner.id,
-      title=(f"{app.name} asks to use a key on more sites" if answer.get("sites_request")
-             else f"{app.name} asks to use a key"),
-      # The notification opens the app, where the card waits over it (and in
-      # Settings › Keys).
-      body=f"Tap to review “{answer['key']}”.",
-      source_type="system",
-      target=f"/shell/?{urlencode({'app': app.id})}",
-      tag=f"key-request-{app.id}-{answer['key']}",
-    )
+    _key_requests_changed()
   return answer
 
 
-async def _agent_asks(payload: dict, principal: Principal, db: Session) -> dict:
+async def _agent_asks(payload: dict, principal: Principal) -> dict:
   """A top-level agent asks the owner to send a key to sites; the owner
   answers the card. Delegated helpers ask the agent that started them."""
   if principal.delegation_id is not None:
@@ -350,31 +341,19 @@ async def _agent_asks(payload: dict, principal: Principal, db: Session) -> dict:
   answer = await _relay("POST", "/requests", payload, caller=_caller(principal))
   if answer.pop("created", False):
     activity.log_event("key_requested", chat_id=principal.chat_id, key=answer["key"])
-    asked = answer.get("sites_not_allowed") or payload.get("sites") or []
-    hosts = sorted({str(site["host"]).strip().lower().rstrip(".") for site in asked})
-    await push.notify_owner_async(
-      db, principal.owner.id,
-      title=(f"Your agent asks to send a key to {_listed(hosts)}" if hosts
-             else "Your agent asks for a key"),
-      # The asking agent puts the card in its own chat (a mobius-key-request
-      # block), which the notification opens; without a chat it waits only in
-      # Settings › Keys.
-      body=(f"Tap to review “{answer['key']}”." if principal.chat_id
-            else f"Review “{answer['key']}” in Settings › Keys."),
-      source_type="system",
-      target=(f"/shell/?{urlencode({'chat': principal.chat_id})}" if principal.chat_id
-              else "/shell/?settings=keys"),
-      tag=f"key-request-agent-{answer['key']}",
-    )
+    _key_requests_changed()
   return answer
 
 
-def _listed(hosts: list[str]) -> str:
-  if len(hosts) == 1:
-    return hosts[0]
-  if len(hosts) == 2:
-    return f"{hosts[0]} and {hosts[1]}"
-  return f"{hosts[0]} and {len(hosts) - 1} more sites"
+def _key_requests_changed() -> None:
+  """Asks are answered in the moment, never through a notification: an
+  app's over its window while the owner has it open (straight away, or when
+  they next open it), an agent's in the chat that asked. This content-free
+  nudge on the system bus makes an open shell re-read the requests, so a
+  card appears over a visible app as soon as it asks. Not in
+  SYSTEM_EVENT_TYPES: only the server announces it."""
+  from app.broadcast import get_system_broadcast
+  get_system_broadcast().publish({"type": "key_requests_changed"})
 
 
 @router.api_route(

@@ -3,11 +3,11 @@
 // appears or moves under the pointer (over an app, streamed or pushed into
 // place in a chat, sliding up in Settings) must not take a click the owner
 // aimed at what was there before, and steady clicking must not wear the wait
-// down. The card's asleep first render is checked in
-// ChatView/__tests__/keyRequestBlock.test.js.
+// down. The card's handlers are driven in
+// SettingsView/__tests__/useKeyAnswerGuard.hooktest.js, and its asleep first
+// render is checked in ChatView/__tests__/keyRequestBlock.test.js.
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
@@ -87,15 +87,4 @@ test("a card's place changes when it moves or resizes; the first sighting is not
   assert.equal(keyAnswerPlaceChanged(here, { ...here }), false)
   assert.equal(keyAnswerPlaceChanged(here, { ...here, top: 60 }), true)
   assert.equal(keyAnswerPlaceChanged(here, { ...here, height: 200 }), true)
-})
-
-test('every card hands the guard its real events: presses caught on the card, clicks on each answer', () => {
-  const card = readFileSync(new URL('../../components/SettingsView/KeyRequest.jsx', import.meta.url), 'utf8')
-  assert.match(card, /onPointerDownCapture=\{guard\.onPressCapture\}/)
-  assert.match(card, /state\.current = keyAnswerPressed\(state\.current, event\)/)
-  assert.match(card, /counts: event => keyAnswerClickCounts\(state\.current, event\)/)
-  assert.equal(card.match(/onClick=\{event => \{ if \(guard\.counts\(event\)\) answer\('(deny|approve)'\) \}\}/g)?.length, 2)
-  // Asleep is aria-disabled, not disabled: the buttons keep hearing presses.
-  assert.equal(card.match(/aria-disabled=\{guard\.active \? undefined : 'true'\}/g)?.length, 2)
-  assert.doesNotMatch(card, /\sdisabled=\{[^}]*guard\.active/)
 })

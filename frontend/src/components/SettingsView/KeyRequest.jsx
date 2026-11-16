@@ -1,11 +1,8 @@
 /* One app's or agent's key request card, as Settings › Keys, a chat and an app's window show it. */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
-import {
-  keyAnswerActiveAt, keyAnswerClickCounts, keyAnswerMoved, keyAnswerPlace, keyAnswerPlaceChanged, keyAnswerPressed,
-  keyAnswerShown,
-} from '../../lib/keyAnswerGuard.js'
+import useKeyAnswerGuard from './useKeyAnswerGuard.js'
 import { requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
@@ -21,79 +18,18 @@ function Lead({ segments }) {
 }
 
 /**
- * Keeps the answers asleep until the card has been still and untouched for a
- * moment (keyAnswerGuard.js). ``cardRef`` goes on the card; ``onPressCapture``
- * hears every press on it, before any of its controls. The card's place is
- * checked when it or anything around it changes size, on any scroll and at
- * each press, so a card pushed or slid into place under the pointer waits
- * again; scrolling the card yourself does too. Callers key each card by
- * ``requestFormKey``, so a replacement request is a new card and waits again.
- */
-function useAnswerGuard({ enabled }) {
-  const cardRef = useRef(null)
-  const place = useRef(null)
-  const [shownAt] = useState(() => performance.now())
-  const state = useRef(keyAnswerShown(shownAt))
-  const [activeAt, setActiveAt] = useState(() => keyAnswerActiveAt(keyAnswerShown(shownAt)))
-  const [active, setActive] = useState(false)
-
-  useEffect(() => {
-    const wait = activeAt - performance.now()
-    if (wait <= 0) { setActive(true); return undefined }
-    setActive(false)
-    const timer = setTimeout(() => setActive(true), wait)
-    return () => clearTimeout(timer)
-  }, [activeAt])
-
-  const noteMove = useCallback(() => {
-    const node = cardRef.current
-    if (!node) return
-    const now = keyAnswerPlace(node.getBoundingClientRect())
-    if (keyAnswerPlaceChanged(place.current, now)) {
-      state.current = keyAnswerMoved(state.current, performance.now())
-      setActiveAt(keyAnswerActiveAt(state.current))
-    }
-    place.current = now
-  }, [])
-
-  useEffect(() => {
-    const node = cardRef.current
-    if (!enabled || !node) return undefined
-    const check = () => noteMove()
-    check()
-    const resized = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(check)
-    for (let element = node; element && resized; element = element.parentElement) resized.observe(element)
-    window.addEventListener('scroll', check, { capture: true, passive: true })
-    window.addEventListener('resize', check)
-    return () => {
-      resized?.disconnect()
-      window.removeEventListener('scroll', check, { capture: true })
-      window.removeEventListener('resize', check)
-    }
-  }, [enabled, noteMove])
-
-  return {
-    cardRef,
-    active,
-    onPressCapture: event => {
-      // A move nothing reported yet counts as happening now.
-      noteMove()
-      state.current = keyAnswerPressed(state.current, event)
-      setActiveAt(keyAnswerActiveAt(state.current))
-    },
-    counts: event => keyAnswerClickCounts(state.current, event),
-  }
-}
-
-/**
- * Not now / Allow answer the request through the owner-only routes with its
- * ticket; a pasted value goes only to the approve route, never anywhere else.
+ * One question at a time. The card asks whether to allow the request; a key
+ * the owner has no value for yet takes a second step, after Continue, that
+ * asks only for the value (Back returns). Not now / Allow (Save and allow)
+ * answer through the owner-only routes with the request's ticket; a pasted
+ * value goes only to the approve route, never anywhere else.
  * ``onAnswered`` hears ``'approve'`` or ``'deny'`` once the vault accepted it.
  * ``readOnly`` shows what is asked without the paste field or answers, for a
  * card the owner answers elsewhere.
  */
 export default function KeyRequest({ request, names, onAnswered, readOnly = false }) {
   const [value, setValue] = useState('')
+  const [pasting, setPasting] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const words = requestWording(request, names)
@@ -102,7 +38,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
   // the owner and agents.
   const inject = request.inject || BEARER
   const sites = request.sites || []
-  const guard = useAnswerGuard({ enabled: !readOnly })
+  const guard = useKeyAnswerGuard({ enabled: !readOnly })
 
   async function answer(kind) {
     setBusy(kind)
@@ -115,6 +51,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
         : await api.keys.deny(request.id, request.ticket)
       await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Not now')
       setValue('')
+      setPasting(false)
       onAnswered(kind)
     } catch (err) {
       setError(err.message)
@@ -145,19 +82,19 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     </button>
   )
 
-  return (
-    <div
-      ref={guard.cardRef}
-      className="settings-keys__request"
-      role="group"
-      aria-label={`${words.who} asks to use ${request.key}`}
-      onPointerDownCapture={guard.onPressCapture}
-    >
-      <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
-      {request.reason && <p className="settings-keys__muted settings-keys__reason">“{request.reason}”</p>}
-      {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
-      <p className="settings-keys__muted">{words.note}</p>
-      {words.needsValue && !readOnly && (
+  // Continue answers nothing, so it needs no guard; the second step's new
+  // size wakes the guard again, so a double tap never lands on Save and allow.
+  const twoSteps = words.needsValue && !readOnly
+  if (twoSteps && pasting) {
+    return (
+      <div
+        ref={guard.cardRef}
+        className="settings-keys__request"
+        role="group"
+        aria-label={words.pasteTitle}
+        onPointerDownCapture={guard.onPressCapture}
+      >
+        <p className="settings-keys__request-lead"><strong>{words.pasteTitle}</strong></p>
         <input
           className="settings-keys__input"
           type="password"
@@ -167,8 +104,41 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
           aria-label="Key value"
           autoComplete="new-password"
           spellCheck={false}
+          autoFocus
         />
+        <p className="settings-keys__muted">{words.pasteNote}</p>
+        {error && <Alert color="danger" variant="soft" description={error} />}
+        <div className="settings-keys__actions">
+          <button
+            type="button"
+            className="settings__btn settings__btn--sm settings__btn--outline"
+            onClick={() => { setPasting(false); setError('') }}
+            disabled={Boolean(busy)}
+          >
+            Back
+          </button>
+          {allowButton('Save and allow', true)}
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div
+      ref={guard.cardRef}
+      className="settings-keys__request"
+      role="group"
+      aria-label={`${words.who} asks to use ${request.key}`}
+      onPointerDownCapture={guard.onPressCapture}
+    >
+      <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
+      {request.reason && (
+        <p className="settings-keys__says">
+          <span className="settings-keys__muted">{words.says}</span> {request.reason}
+        </p>
       )}
+      {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
+      <p className="settings-keys__muted">{words.note}</p>
       <details className="settings-keys__details">
         <summary>Details</summary>
         <ul className="settings-keys__details-list">
@@ -194,7 +164,13 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
       {!readOnly && (
         <div className="settings-keys__actions">
           {denyButton}
-          {!words.allowHidden && allowButton('Allow', true)}
+          {twoSteps
+            ? (
+              <button type="button" className="settings__btn settings__btn--sm" onClick={() => setPasting(true)} disabled={Boolean(busy)}>
+                Continue
+              </button>
+            )
+            : !words.allowHidden && allowButton('Allow', true)}
         </div>
       )}
     </div>

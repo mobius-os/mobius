@@ -65,20 +65,26 @@ Status: draft for review.
    cannot ask (or borrow): the guest works through the app, not as it.
    The answer is `granted`, `pending`, `denied` or (for an app the owner
    switched off on that key) `paused`; asking again is how the app
-   checks, and only a new request notifies the owner. One app may hold at
+   checks. No request notifies the owner: a new one only nudges an open
+   shell (a content-free `key_requests_changed` system event) to re-read
+   the requests, and the owner is asked in the moment. One app may hold at
    most ten open requests. A granted app that asks for sites its grant lacks
    keeps using what it has, is told which are missing (`sites_not_allowed`),
    and its ask for them waits for the owner like any request
    (`sites_request`).
 2. **Approve.** The owner sees the app's name, reason, requested sites,
-   methods and paths and, for a new key, how it would be sent, in Settings ›
-   Keys, and approves or denies; only the owner's own input can approve. The
-   same card also waits where it was asked, answered through the same
-   owner-only routes: an agent's in the chat that asked (the vault keeps that
-   chat, the agent ends its turn with a `mobius-key-request` block naming the
-   request, and the owner's answer there is posted to that chat as their own
-   message, which resumes the agent), and an app's over the app's window while
-   the owner has it open. A chat only answers its own agent's request; an
+   methods and paths and, for a new key, how it would be sent, and approves
+   or denies; only the owner's own input can approve. The card asks where
+   the request was made, answered through the owner-only routes: an agent's
+   in the chat that asked (the vault keeps that chat, the agent ends its turn
+   with a `mobius-key-request` block naming the request, and the owner's
+   answer there is posted to that chat as their own message, which resumes
+   the agent), and an app's in a dialog over the app's window while the
+   owner has it open, straight away or when they next open it (the app list
+   marks the app as needing them until then). Not now is the dialog's only
+   way out. Settings › Keys answers only an agent's request that names no
+   chat. The card asks one thing at a time: whether to allow, then, for a
+   key the owner has no value for yet, the value. A chat only answers its own agent's request; an
    app's shown in a chat is read-only. Every card's answers wake only after
    the card has been still and untouched for about a second (since it
    appeared, last moved on screen or was last pressed anywhere) and ignore a

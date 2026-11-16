@@ -154,6 +154,7 @@ export default function Drawer({
   // visual precedence over streaming because the agent cannot make progress
   // until the owner acts.
   ownerInputChatIds,
+  keyWaitingAppIds,
   // Set of chats whose latest unacknowledged terminal run genuinely failed.
   // Planned restart parks never enter this set.
   failedChatIds,
@@ -178,6 +179,7 @@ export default function Drawer({
 }) {
   const streamingSet = streamingChatIds || EMPTY_SET
   const ownerInputSet = ownerInputChatIds || EMPTY_SET
+  const keyWaitingSet = keyWaitingAppIds || EMPTY_SET
   const failedSet = failedChatIds || EMPTY_SET
   const attentionSet = attentionChatIds || EMPTY_SET
   const newAppSet = newAppIds || EMPTY_SET
@@ -1201,7 +1203,7 @@ export default function Drawer({
                       needsOwnerInput={kind === 'chat'
                         ? ownerInputSet.has(item.id)
                         : kind === 'app'
-                          ? !!(item.chat_id && ownerInputSet.has(item.chat_id))
+                          ? !!(item.chat_id && ownerInputSet.has(item.chat_id)) || keyWaitingSet.has(String(item.id))
                           : false}
                       streaming={kind === 'chat' && streamingSet.has(item.id)}
                       failed={kind === 'chat' && failedSet.has(item.id)}
@@ -1226,6 +1228,7 @@ export default function Drawer({
                 apps={recentApps}
                 activeAppId={activeView === 'canvas' ? activeAppId : null}
                 ownerInputSet={ownerInputSet}
+                keyWaitingSet={keyWaitingSet}
                 streamingSet={streamingSet}
                 newAppSet={newAppSet}
                 actions={rowActions}
@@ -1322,7 +1325,7 @@ export default function Drawer({
                       needsOwnerInput={kind === 'chat'
                         ? ownerInputSet.has(item.id)
                         : kind === 'app'
-                          ? !!(item.chat_id && ownerInputSet.has(item.chat_id))
+                          ? !!(item.chat_id && ownerInputSet.has(item.chat_id)) || keyWaitingSet.has(String(item.id))
                           : false}
                       streaming={kind === 'chat' && streamingSet.has(item.id)}
                       failed={kind === 'chat' && failedSet.has(item.id)}
@@ -1421,7 +1424,7 @@ export default function Drawer({
               item={app}
               variant="card"
               surface="directory"
-              needsOwnerInput={!!(app.chat_id && ownerInputSet.has(app.chat_id))}
+              needsOwnerInput={!!(app.chat_id && ownerInputSet.has(app.chat_id)) || keyWaitingSet.has(String(app.id))}
               building={!!(app.chat_id && streamingSet.has(app.chat_id))}
               attention={newAppSet.has(Number(app.id))}
               active={activeView === 'canvas' && Number(activeAppId) === Number(app.id)}

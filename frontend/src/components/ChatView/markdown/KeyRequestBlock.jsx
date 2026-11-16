@@ -8,7 +8,6 @@ import { keyAnswerWords, requestAppName, requestAppPaused, requestFormKey } from
 import {
   KEY_REQUEST_FENCE, agentRequestKey, chatKeyRequestView, goneKeyRequestLine, tellAgentKeyAnswer,
 } from '../../../lib/keyRequestPlaces.js'
-import { settingsDeepLink } from '../../../lib/settingsSections.js'
 import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { openInternalLink } from '../internalLink.js'
 import { useAppBlockChat } from './appBlockChat.js'
@@ -21,10 +20,6 @@ function ShellLink({ to, onInternalNav, children }) {
       {children}
     </a>
   )
-}
-
-function SettingsKeysLink({ onInternalNav }) {
-  return <ShellLink to={settingsDeepLink('keys')} onInternalNav={onInternalNav}>Settings › Keys</ShellLink>
 }
 
 /**
@@ -94,7 +89,8 @@ export default function KeyRequestBlock({ block, onInternalNav }) {
         <>
           <KeyRequest request={view.request} names={names} readOnly />
           <p className="key-request-place__note">
-            Another chat asked for this. Answer it in <SettingsKeysLink onInternalNav={onInternalNav} />.
+            Another chat asked for this.{' '}
+            <ShellLink to={`/shell/?chat=${encodeURIComponent(view.request.chat_id)}`} onInternalNav={onInternalNav}>Answer it there</ShellLink>.
           </p>
         </>
       )
@@ -105,9 +101,8 @@ export default function KeyRequestBlock({ block, onInternalNav }) {
         <>
           <KeyRequest request={view.request} names={names} readOnly />
           <p className="key-request-place__note">
-            {app} asked for this. Answer it in{' '}
-            <ShellLink to={`/shell/?app=${encodeURIComponent(view.request.app)}`} onInternalNav={onInternalNav}>{app}</ShellLink>
-            {' '}or in <SettingsKeysLink onInternalNav={onInternalNav} />.
+            {app} asked for this. It asks again when you open{' '}
+            <ShellLink to={`/shell/?app=${encodeURIComponent(view.request.app)}`} onInternalNav={onInternalNav}>{app}</ShellLink>.
           </p>
         </>
       )
@@ -149,7 +144,7 @@ export default function KeyRequestBlock({ block, onInternalNav }) {
     case 'error':
       body = (
         <p className="key-request-place__line">
-          Couldn't load this key request. It's also in <SettingsKeysLink onInternalNav={onInternalNav} />.
+          Couldn't load this key request. Reload to try again.
         </p>
       )
       break

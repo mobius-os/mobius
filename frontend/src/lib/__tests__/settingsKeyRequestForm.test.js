@@ -113,25 +113,30 @@ const site = host => ({ host, paths: ['/data/2.5/*'], methods: ['GET'] })
 const weatherAsk = { ...ask, app: 8, key: 'openweather', sites: [site('api.openweathermap.org')], reason: 'Shows the forecast.' }
 const appNames = { 8: 'Weather', 10: 'Modelapp' }
 
-test("an app asking for the owner's existing key names the app, the key and where it goes", () => {
+test("an app asking for the owner's existing key asks whether to let it, naming the key and where it goes", () => {
   const words = requestWording({ ...weatherAsk, key_exists: true, key_origin: null }, appNames)
-  assert.equal(leadText(words), 'Weather needs your openweather key')
+  assert.equal(leadText(words), 'Let Weather use your openweather key on api.openweathermap.org?')
+  assert.equal(words.says, 'Weather says:')
   assert.equal(words.note, 'It will only ever be sent to api.openweathermap.org. Weather never sees the key itself.')
   assert.equal(words.needsValue, false)
   assert.equal(words.allowHidden, false)
 })
 
-test('an app asking for a key that does not exist yet asks the owner to paste it', () => {
+test('an app asking for a key that does not exist yet asks first, then for the value by its website', () => {
   const words = requestWording({ ...weatherAsk, key_exists: false }, appNames)
-  assert.equal(leadText(words), 'Weather needs a key it calls openweather')
+  // The app's own name for the key is a detail; the question is about the website.
+  assert.equal(leadText(words), 'Let Weather use a key on api.openweathermap.org?')
   assert.equal(words.needsValue, true)
+  assert.equal(words.pasteTitle, 'Paste your api.openweathermap.org key')
+  assert.equal(words.pasteNote, "Saved as “openweather”. You'll find it in Settings › Keys.")
+  assert.equal(requestWording({ ...weatherAsk, key_exists: false, sites: [] }, appNames).pasteTitle, 'Paste the key')
 })
 
 test('an app asking for more websites lists the new ones', () => {
   const words = requestWording({
     ...weatherAsk, key_exists: true, granted: true, sites: [site('a.example.com'), site('b.example.com')],
   }, appNames)
-  assert.equal(leadText(words), 'Weather wants to use openweather on more websites: a.example.com and b.example.com')
+  assert.equal(leadText(words), 'Let Weather use openweather on more websites: a.example.com and b.example.com?')
 })
 
 test("the owner's agent asking reads as the agent sending the key to a website", () => {
@@ -142,7 +147,8 @@ test("the owner's agent asking reads as the agent sending the key to a website",
   assert.equal(requestAppName(agentAsk, appNames), 'Your agent')
   const words = requestWording(agentAsk, appNames)
   assert.equal(words.kind, 'agent')
-  assert.equal(leadText(words), 'Your agent wants to send github to api.github.com')
+  assert.equal(leadText(words), 'Let your agent send github to api.github.com?')
+  assert.equal(words.says, 'Your agent says:')
   assert.equal(words.needsValue, false)
   assert.equal(requestWording({ ...agentAsk, key_exists: false }, appNames).needsValue, true)
 })

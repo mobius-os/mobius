@@ -1,7 +1,7 @@
 /*
- * Where a key request card shows besides Settings › Keys: in the chat whose
- * agent asked (a `mobius-key-request` fence in its reply) and over the app
- * that asked while its window is open. Pure and unit-tested;
+ * Where a key request is asked, in the moment: in the chat whose agent asked
+ * (a `mobius-key-request` fence in its reply) and over the app that asked
+ * while its window is open. Pure and unit-tested;
  * KeyRequestBlock.jsx and AppKeyRequestCard.jsx render it. A card only ever
  * answers through the owner-only routes, so nothing here grants anything.
  */
@@ -40,10 +40,10 @@ export function keyRequestBlockFromToken(token) {
  *   (``asker`` is ``'agent'`` or ``'app'``, from the id).
  * - ``loading``, ``unavailable`` (the vault is not running) or ``error``.
  * - ``denied``: the owner said no, here or elsewhere.
- * - ``app``: an app asked; read-only, answered over the app or in Settings.
+ * - ``app``: an app asked; read-only, answered over the app.
  *   A chat only ever answers its own agent's requests, and its answer
  *   message is for that agent.
- * - ``elsewhere``: another chat's agent asked; read-only, answered in Settings.
+ * - ``elsewhere``: another chat's agent asked; read-only, answered in that chat.
  * - ``repeated``: a newer copy of this card further down the chat answers it.
  * - ``pending``: the live card.
  * - ``gone``: allowed or withdrawn elsewhere (an allowed request leaves the
@@ -121,15 +121,31 @@ export function goneKeyRequestLine(id, chatId, keys, usage) {
 }
 
 /**
- * The pending requests an app made, newest first, for the card over that
- * app's window; ``later`` holds the requests (``requestFormKey``) the owner
- * put off until the page reloads. A replacement request under the same id
- * has a new ticket, so it shows again.
+ * The pending requests app ``appId`` made, newest first, for the dialog over
+ * that app's window.
  */
-export function appKeyRequestsToShow(data, appId, later = new Set()) {
+export function appKeyRequestsToShow(data, appId) {
   return (data?.requests || []).filter(request => request.status === 'pending'
-    && request.requester !== 'agent' && String(request.app) === String(appId)
-    && !later.has(requestFormKey(request)))
+    && request.requester !== 'agent' && String(request.app) === String(appId))
+}
+
+/**
+ * The apps (by string id) with a key request waiting for the owner, so the
+ * app list can mark them as needing the owner until they open the app.
+ */
+export function appsWaitingForKeys(data) {
+  return new Set((data?.requests || []).filter(request => request.status === 'pending'
+    && request.requester !== 'agent' && request.app != null).map(request => String(request.app)))
+}
+
+/**
+ * The pending requests Settings › Keys answers: only an agent's that names
+ * no chat (one asked before requests kept their chat), since every other
+ * ask is answered where it was made.
+ */
+export function settingsKeyRequests(data) {
+  return (data?.requests || []).filter(request => request.status === 'pending'
+    && request.requester === 'agent' && !request.chat_id)
 }
 
 /**

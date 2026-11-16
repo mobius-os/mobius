@@ -45,7 +45,16 @@
 }
 .settings-keys__request-lead { margin: 0; font-size: 14px; line-height: 1.45; color: var(--text); }
 .settings-keys__request-lead strong { font-weight: 600; overflow-wrap: anywhere; }
-.settings-keys__reason { font-style: italic; }
+/* The requester's own words, set apart from what Möbius says. */
+.settings-keys__says {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border);
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
 
 /* "Details" and "Use <app>'s key anyway": the technical or risky part, one tap away. */
 .settings-keys__details summary {

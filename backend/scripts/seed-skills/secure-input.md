@@ -86,11 +86,11 @@ answer's `id`, and one sentence saying a card is waiting here:
 {"id":"agent-NAME"}
 ```
 
-The owner answers that card in this chat (Settings › Keys lists it too);
-their answer arrives as a message ("Allowed: …" or "Not now: …") that
-resumes you, so do not poll. If the owner answers in Settings › Keys or in
-another chat instead, no message arrives; asking again
-(`POST /api/keys/requests`) reports the answer.
+The owner answers that card in this chat, and nothing else tells them: no
+notification is sent, so the card in your reply is the ask. Their answer
+arrives as a message ("Allowed: …" or "Not now: …") that resumes you, so do
+not poll. If the owner answers in another chat instead, no message arrives;
+asking again (`POST /api/keys/requests`) reports the answer.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and

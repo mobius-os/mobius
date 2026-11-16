@@ -1,4 +1,4 @@
-/* Settings › Keys: the overview list, app and agent requests, and each key's own page. */
+/* Settings › Keys: the overview list, the requests you said no to, and each key's own page. */
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
@@ -12,6 +12,7 @@ import {
 import KeyRequest, { BEARER } from './KeyRequest.jsx'
 import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
 import './KeysSection.css'
+import { settingsKeyRequests } from '../../lib/keyRequestPlaces.js'
 
 const DEFAULT_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 const ACTIVITY_SHOWN = 8
@@ -56,7 +57,8 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
   const guest = isSharedBrowserAuth()
   const data = guest ? null : keysQuery.data
   const keys = data?.keys || []
-  const pending = (data?.requests || []).filter(request => request.status === 'pending')
+  // Asks are answered where they were made; only an agent's with no chat lands here.
+  const pending = settingsKeyRequests(data)
   const denied = (data?.requests || []).filter(request => request.status === 'denied')
   const refresh = () => queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
 

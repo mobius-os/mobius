@@ -260,10 +260,13 @@ export function requestSubject(request, names) {
 const strong = text => ({ text, strong: true })
 
 /**
- * The card's words for one request: ``lead`` is a list of segments (bold ones
- * name who, which key and where), ``note`` says where the key may go, and
- * ``warning`` with ``allowHidden`` keep another app's key behind an explicit
- * "anyway" so the safe answer is the default.
+ * The card's words for one request. ``lead`` is the question it asks, as a
+ * list of segments (bold ones name who, which key and where); ``says``
+ * labels the requester's own reason; ``note`` says where the key may go. A
+ * new key is asked in two steps: first the question, then ``pasteTitle``
+ * and ``pasteNote`` over the paste field. ``warning`` with ``allowHidden``
+ * keep another app's key behind an explicit "anyway" so the safe answer is
+ * the default.
  */
 export function requestWording(request, names) {
   const subject = requestSubject(request, names)
@@ -271,10 +274,18 @@ export function requestWording(request, names) {
   const hosts = hostList((request.sites || []).map(site => site.host))
   const key = request.key
   const needsValue = !request.key_exists
+  // "Let your agent …", but "Your agent says:".
+  const asked = subject.kind === 'agent' ? 'your agent' : who
+  const on = hosts ? [' on ', strong(hosts)] : []
   const appNote = hosts
     ? `It will only ever be sent to ${hosts}. ${who} never sees the key itself.`
     : `It names no websites, so ${who} can't send this key anywhere until you add one on the key's page.`
-  const base = { kind: subject.kind, who, needsValue, savedBy: subject.savedBy || null, allowHidden: false, warning: null }
+  const base = {
+    kind: subject.kind, who, needsValue, savedBy: subject.savedBy || null, allowHidden: false, warning: null,
+    says: `${who} says:`,
+    pasteTitle: hosts ? `Paste your ${hosts} key` : 'Paste the key',
+    pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
+  }
   const otherApp = subject.savedBy && {
     allowHidden: true,
     warning: `This key belongs to ${subject.savedBy}, not you: ${subject.savedBy} saved it for itself and can change it at any time. `
@@ -291,32 +302,32 @@ export function requestWording(request, names) {
         ...base,
         ...otherApp,
         lead: hosts
-          ? [strong(who), ' wants to send ', strong(key), ' to ', strong(hosts)]
-          : [strong(who), ' wants to use ', strong(key)],
+          ? ['Let ', strong(asked), ' send ', strong(key), ' to ', strong(hosts), '?']
+          : ['Let ', strong(asked), ' use ', strong(key), '?'],
         note: needsValue
-          ? 'Paste the key to save it. Your agents will be able to read it, and send it only to websites you allow.'
+          ? 'You have no key by that name yet. Your agents will be able to read it, and send it only to websites you allow.'
           : hosts ? `Allowing lets your agents read it and send it to ${hosts}.` : 'Allowing lets your agents read and use it.',
       }
     case 'new':
-      return { ...base, lead: [strong(who), ' needs a key it calls ', strong(key)], note: appNote }
+      return { ...base, lead: ['Let ', strong(who), ' use a key', ...on, '?'], note: appNote }
     case 'more-sites':
       return {
         ...base,
         ...otherApp,
         lead: hosts
-          ? [strong(who), ' wants to use ', strong(key), ' on more websites: ', strong(hosts)]
-          : [strong(who), ' wants to use ', strong(key), ' on more websites'],
+          ? ['Let ', strong(who), ' use ', strong(key), ' on more websites: ', strong(hosts), '?']
+          : ['Let ', strong(who), ' use ', strong(key), ' on more websites?'],
         note: `${who} never sees the key itself.${stillOff}`,
       }
     case 'saved-by-other':
       return {
         ...base,
         ...otherApp,
-        lead: [strong(who), ' wants to use ', strong(key), ', a key ', strong(subject.savedBy), ' saved'],
+        lead: ['Let ', strong(who), ' use ', strong(key), ', a key ', strong(subject.savedBy), ' saved?'],
         note: appNote,
       }
     default:
-      return { ...base, lead: [strong(who), ' needs your ', strong(key), ' key'], note: appNote }
+      return { ...base, lead: ['Let ', strong(who), ' use your ', strong(key), ' key', ...on, '?'], note: appNote }
   }
 }
 

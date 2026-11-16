@@ -1,15 +1,15 @@
-// An app's pending key request waits over that app's window while the owner
-// looks at it, with Later to put it off until the page reloads; the Shell
-// re-reads the vault's requests when a notification arrives, so a new
-// request shows without polling. Guests: keyRequestSharedBrowserGuest.test.js.
+// An app's pending key request is asked in the moment: a dialog in the
+// middle of that app's window while the owner looks at it, with Not now as
+// the only way out. A new request never notifies; the server's
+// key_requests_changed nudge makes the Shell re-read the vault's requests, so
+// it shows without polling. Guests: keyRequestSharedBrowserGuest.test.js.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
-import AppKeyRequestCard, { putOffAppKeyRequests } from '../../AppCanvas/AppKeyRequestCard.jsx'
+import AppKeyRequestCard from '../../AppCanvas/AppKeyRequestCard.jsx'
 import { KEYS_QUERY } from '../../SettingsView/keysQueries.js'
 import { appQueries } from '../../../hooks/queries.js'
 
@@ -28,13 +28,22 @@ function render(props, requests) {
 
 const waiting = [appAsk(7, 'maps'), appAsk(7, 'tiles'), appAsk(8, 'notes_api')]
 
-test("a visible app shows its own pending request over its window, with Later", () => {
+test("a visible app asks its own pending request in a dialog, with no way to put it off", () => {
   const html = render({ appId: 7, visible: true }, waiting)
-  assert.match(html, /<strong>Weather<\/strong>/)
+  assert.match(html, /role="dialog" aria-modal="true" aria-label="Key request"/)
+  assert.match(html, /<span>Let <\/span><strong>Weather<\/strong>/)
   assert.match(html, /<strong>maps<\/strong>/)
-  assert.doesNotMatch(html, /notes_api/)
-  assert.match(html, />Later<\/button>/)
+  assert.match(html, /Weather says:<\/span> Fetch tiles/)
+  assert.doesNotMatch(html, /notes_api|Later/)
+  assert.match(html, />Not now<\/button>/)
   assert.match(html, /One more request follows\./)
+})
+
+test("a key the owner doesn't have yet is asked first; the paste field comes after Continue", () => {
+  const html = render({ appId: 7, visible: true }, [appAsk(7, 'maps', { key_exists: false })])
+  assert.match(html, /<span>Let <\/span><strong>Weather<\/strong><span> use a key<\/span><span> on <\/span><strong>tiles\.example\.com<\/strong>/)
+  assert.match(html, />Continue<\/button>/)
+  assert.doesNotMatch(html, /type="password"|>Allow</)
 })
 
 test("the card stays hidden while the app is not visible", () => {
@@ -43,29 +52,4 @@ test("the card stays hidden while the app is not visible", () => {
 
 test('an app with nothing pending shows no card', () => {
   assert.equal(render({ appId: 9, visible: true }, waiting), '')
-})
-
-// Later is module state for the page: keep these last.
-test('Later puts off exactly the requests shown, until a replacement or another app asks', () => {
-  putOffAppKeyRequests(waiting.filter(request => request.app === 7))
-  assert.equal(render({ appId: 7, visible: true }, waiting), '')
-  // Reopening the app keeps them put off.
-  assert.equal(render({ appId: 7, visible: true }, waiting), '')
-  assert.match(render({ appId: 8, visible: true }, waiting), /<strong>notes_api<\/strong>/)
-  // A replacement under the same id carries a new ticket, so it shows again.
-  assert.match(render({ appId: 7, visible: true }, [appAsk(7, 'maps', { ticket: 't-new' })]), /<strong>maps<\/strong>/)
-})
-
-// -- the Shell -----------------------------------------------------------------
-
-const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
-
-test("a new notification re-reads the vault's requests, and only the list, not an open key page's activity", () => {
-  const branch = shell.match(/ev\.type === 'notification_created'\) \{([\s\S]*?)\n {4}\}\n {2}\}, \[/)?.[1] || ''
-  assert.match(branch, /onNotificationCreated\(\)/)
-  assert.match(branch, /queryClient\.invalidateQueries\(\{ queryKey: KEYS_QUERY, exact: true \}\)/)
-})
-
-test("each app window carries its key request card, for the owner only, while the app is visible", () => {
-  assert.match(shell, /\{!isSharedBrowserAccess && \(\s*<Suspense fallback=\{null\}>\s*<AppKeyRequestCard appId=\{id\} visible=\{appRuntimeVisible\} \/>/)
 })

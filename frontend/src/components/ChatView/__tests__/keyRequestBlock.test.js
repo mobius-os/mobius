@@ -1,7 +1,8 @@
 // A `mobius-key-request` fence renders the live key request card in the chat
-// whose agent asked: the same card as Settings › Keys, with the sealed paste
-// field for a new key. In another chat the card is read-only and points to
-// Settings › Keys, and only assistant replies turn the fence into a card.
+// whose agent asked: the same two-step card as over an app, asking first and
+// taking a new key's value only after Continue. In another chat the card is
+// read-only and points to the chat that asked, and only assistant replies
+// turn the fence into a card.
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createElement } from 'react'
@@ -30,19 +31,22 @@ function render(element, { chatId = 'chat-1', requests = [ask], keys = [], usage
   return renderToStaticMarkup(createElement(QueryClientProvider, { client }, inChat))
 }
 
-test("the asking chat shows the request card with a sealed paste field and the owner's answers", () => {
+test("the asking chat asks first, then takes a new key's value after Continue", () => {
   const html = render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }))
-  assert.match(html, /<strong>Your agent<\/strong><span> wants to send <\/span><strong>maps<\/strong>/)
-  assert.match(html, /<input[^>]*type="password"[^>]*aria-label="Key value"/)
+  assert.match(html, /<span>Let <\/span><strong>your agent<\/strong><span> send <\/span><strong>maps<\/strong>/)
+  assert.match(html, /Your agent says:<\/span> Fetch map tiles/)
+  // The value is the second step, never asked next to the question.
+  assert.doesNotMatch(html, /type="password"|>Allow</)
   assert.match(html, />Not now<\/button>/)
-  assert.match(html, />Allow<\/button>/)
+  assert.match(html, />Continue<\/button>/)
 })
 
-test("another chat's card shows the request read-only and points to Settings › Keys", () => {
+test("another chat's card shows the request read-only and points to the chat that asked", () => {
   const html = render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }), { chatId: 'chat-2' })
-  assert.match(html, /wants to send/)
-  assert.doesNotMatch(html, /type="password"|>Allow<|>Not now</)
-  assert.match(html, /href="\/shell\/\?settings=keys"[^>]*>Settings › Keys<\/a>/)
+  assert.match(html, /<strong>maps<\/strong>/)
+  assert.doesNotMatch(html, /type="password"|>Allow<|>Not now<|>Continue</)
+  assert.match(html, /Another chat asked for this\. <a[^>]*href="\/shell\/\?chat=chat-1"[^>]*>Answer it there<\/a>/)
+  assert.doesNotMatch(html, /settings=keys/)
 })
 
 test('a request no longer waiting says it was answered or withdrawn', () => {
@@ -80,12 +84,12 @@ test('Not now and Allow start asleep on every card, so a card appearing under th
 
 const appRequest = { ...ask, id: '7-maps', requester: 'app', app: 7, app_name: 'Weather', chat_id: null }
 
-test("an app's request in a chat is shown read-only and points to the app and Settings › Keys", () => {
+test("an app's request in a chat is shown read-only and says the app asks when opened", () => {
   const html = render(createElement(KeyRequestBlock, { block: { id: '7-maps' } }), { requests: [appRequest] })
   assert.match(html, /<strong>Weather<\/strong>/)
-  assert.doesNotMatch(html, /type="password"|>Allow<|>Not now<|Use .*'s key/)
-  assert.match(html, /Weather asked for this\. Answer it in <a[^>]*href="\/shell\/\?app=7"[^>]*>Weather<\/a>/)
-  assert.match(html, /href="\/shell\/\?settings=keys"[^>]*>Settings › Keys<\/a>/)
+  assert.doesNotMatch(html, /type="password"|>Allow<|>Not now<|>Continue<|Use .*'s key/)
+  assert.match(html, /Weather asked for this\. It asks again when you open <a[^>]*href="\/shell\/\?app=7"[^>]*>Weather<\/a>/)
+  assert.doesNotMatch(html, /settings=keys/)
 })
 
 // -- after an answer ---------------------------------------------------------

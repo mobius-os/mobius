@@ -1,5 +1,7 @@
-// Key requests where they are asked: a `mobius-key-request` fence in the
-// asking chat and a card over the asking app. A block names a request only
+// Key requests are asked in the moment: a `mobius-key-request` fence in the
+// asking chat and a dialog over the asking app, with the app list marking an
+// app whose request waits and Settings › Keys answering only what has no
+// other place. A block names a request only
 // by id (the card reads everything else from the vault), a chat only
 // answers the requests its own agent made, the over-app card shows only that
 // app's pending asks, and the owner's follow-up message names the key and
@@ -10,11 +12,11 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
 const {
-  keyRequestBlockFromToken, chatKeyRequestView, appKeyRequestsToShow, keyAnswerAsk, goneKeyRequestLine, tellAgentKeyAnswer,
+  keyRequestBlockFromToken, chatKeyRequestView, appKeyRequestsToShow, appsWaitingForKeys, settingsKeyRequests, keyAnswerAsk, goneKeyRequestLine, tellAgentKeyAnswer,
   KEY_REQUEST_FENCE,
 } = await vite.ssrLoadModule('/src/lib/keyRequestPlaces.js')
 const { createAppBlockChat, askCid } = await vite.ssrLoadModule('/src/components/ChatView/markdown/appBlockChat.js')
-const { keyAnswerWords, requestAppPaused, requestFormKey } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
+const { keyAnswerWords, requestAppPaused } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
 const fence = text => ({ type: 'code', lang: KEY_REQUEST_FENCE, text })
@@ -118,12 +120,17 @@ test("an app's window shows only that app's pending requests", () => {
   assert.deepEqual(appKeyRequestsToShow(undefined, 7), [])
 })
 
-test('Later puts off that exact request; a replacement under the same id shows again', () => {
-  const first = appAsk(7, 'maps')
-  const later = new Set([requestFormKey(first)])
-  assert.deepEqual(appKeyRequestsToShow({ requests: [first] }, 7, later), [])
-  const replaced = { ...first, ticket: 'new-ticket' }
-  assert.deepEqual(appKeyRequestsToShow({ requests: [replaced] }, 7, later), [replaced])
+test('the app list marks every app with a pending request, and no agent or answered one', () => {
+  const data = { requests: [appAsk(7, 'maps'), appAsk(8, 'old', { status: 'denied' }), appAsk(9, 'x'), agentAsk] }
+  assert.deepEqual([...appsWaitingForKeys(data)].sort(), ['7', '9'])
+  assert.deepEqual([...appsWaitingForKeys(undefined)], [])
+})
+
+test("Settings › Keys answers only an agent's request that names no chat; every other ask is answered where it was made", () => {
+  const chatless = { ...agentAsk, id: 'agent-old', chat_id: null }
+  const data = { requests: [appAsk(7, 'maps'), { ...agentAsk, chat_id: 'chat-1' }, chatless, { ...chatless, id: 'agent-no', status: 'denied' }] }
+  assert.deepEqual(settingsKeyRequests(data).map(r => r.id), ['agent-old'])
+  assert.deepEqual(settingsKeyRequests(undefined), [])
 })
 
 test('a switched-off app asking for more websites is marked paused on its card', () => {
