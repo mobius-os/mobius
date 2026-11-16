@@ -22,7 +22,7 @@ const {
   requestFormKey, savedByApp, replaceWarning, requestSubject, siteLine, shownRequests, distinctAppNames,
   requestWording, requestAppName, serviceForValue, freeKeyName, newKeyName, hostList, keyHosts, sentToLine,
   usedByLine, usedByRows, lastUseByCaller, usageSentence,
-} = await vite.ssrLoadModule('/src/components/SettingsView/KeysSection.jsx')
+} = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
 const request = ticket => ({ id: '5-weather_api', app: 5, key: 'weather_api', status: 'pending', ticket })
@@ -283,4 +283,32 @@ test('recent activity reads as sentences, including refusals of a switched-off a
   assert.equal(usageSentence({ caller: 'owner', outcome: 'granted agents', host: '-', ts: at }, appNames, now), 'You let your agents use it 2 min ago')
   assert.equal(usageSentence({ caller: 'owner', outcome: 'denied agents', host: '-', ts: at }, appNames, now), 'You said no to your agent 2 min ago')
   assert.equal(usageSentence({ caller: 'agent:c1', outcome: 'requested', host: '-', ts: at }, appNames, now), 'Your agent asked to use it 2 min ago')
+})
+
+// Review follow-ups: the safe default covers agents, and the cards never
+// promise more (or less) than the vault does.
+test("an agent asking for a key an app saved sees that it is the app's key, behind an explicit anyway", () => {
+  const words = requestWording({
+    id: 'agent-app7-notion', requester: 'agent', app: null, key: 'app7-notion', key_exists: true,
+    key_origin: { app: 7, name: 'notion' }, sites: [{ host: 'api.notion.com', methods: ['GET'], paths: ['/*'] }],
+  }, { 7: 'Notes' })
+  assert.equal(words.kind, 'agent')
+  assert.equal(words.allowHidden, true)
+  assert.match(words.warning, /belongs to Notes, not you/)
+  assert.match(words.warning, /lets your agents send Notes's key/)
+})
+
+test("an agent's ask names where the key would go, and claims no site when it names none", () => {
+  const base = { id: 'agent-k', requester: 'agent', app: null, key: 'k', key_exists: true, key_origin: null }
+  assert.equal(requestWording({ ...base, sites: [] }, {}).note, 'Allowing lets your agents read and use it.')
+  assert.equal(requestWording({ ...base, sites: [{ host: 'api.x.com', methods: ['GET'], paths: ['/*'] }] }, {}).note,
+    'Allowing lets your agents read it and send it to api.x.com.')
+})
+
+test('a switched-off app asking for more websites is told it stays off', () => {
+  const request = { id: '8-k', requester: 'app', app: 8, key: 'k', key_exists: true, granted: true,
+                    sites: [{ host: 'api.x.com', methods: ['GET'], paths: ['/*'] }] }
+  assert.doesNotMatch(requestWording(request, { 8: 'Weather' }).note, /switched off/)
+  assert.match(requestWording({ ...request, app_paused: true }, { 8: 'Weather' }).note,
+    /Weather is switched off for this key and stays off until you switch it back on/)
 })

@@ -23,7 +23,9 @@ Status: draft for review.
   cannot add sites itself.
 - **Switching an app off pauses it.** A paused grant keeps its sites but the
   app cannot borrow the key (nor its model provider use it) until the owner
-  switches it back on, which needs no new request.
+  switches it back on, which needs no new request. Pausing holds for keys
+  the owner or another app owns; an app can still delete a key it saved for
+  itself and save the value again as a new key, as it always could.
 - **The owner and the owner's top-level agents may read a key**, unless its
   Agents switch is off; only the owner's own input turns that switch on.
   Delegated helpers may borrow a key but never read its value. Every read and
@@ -37,7 +39,8 @@ Status: draft for review.
 - **Apps never receive a value**, in their browser frame, service or job. They
   borrow keys through a handshake (below).
 - **The server's HTTP routes enforce who may do what.** The owner-only gate
-  (approving requests, letting an app use a key or reach more sites, turning
+  (approving requests, letting an app use a key or reach more sites, adding
+  sites for the owner and agents, switching a paused app back on, turning
   the Agents switch on), the owner's notification of an agent's change, and
   logging each read and change under its real caller hold only for calls
   through the server, which attests the caller from its token. The vault
@@ -60,7 +63,8 @@ Status: draft for review.
    key's page. The server reads the app's identity from the token, never
    from the request. An app token a shared-browser guest's session minted
    cannot ask (or borrow): the guest works through the app, not as it.
-   The answer is `granted`, `pending` or `denied`; asking again is how the app
+   The answer is `granted`, `pending`, `denied` or (for an app the owner
+   switched off on that key) `paused`; asking again is how the app
    checks, and only a new request notifies the owner. One app may hold at
    most ten open requests. A granted app that asks for sites its grant lacks
    keeps using what it has, is told which are missing (`sites_not_allowed`),
