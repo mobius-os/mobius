@@ -1567,6 +1567,7 @@ def redeem_project_invite(
     "project": _project_response(project, []),
     "role": member.role,
     "member_id": member.id,
+    "expires_at": now + auth.PROJECT_COLLABORATOR_TTL,
   }
 
 
@@ -1750,6 +1751,18 @@ def create_project_invite(
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
+  return _issue_project_invite(db, project, body.invitee_name, body.role)
+
+
+def _issue_project_invite(
+  db: Session, project: models.Project, invitee_name: str | None, role: str,
+) -> dict[str, Any]:
+  """Create and commit one single-use invitation; return it with its join URL.
+
+  The plain secret exists only in the returned ``join_url``: the link
+  invitation shows it to the owner, and a Möbius-handle invitation delivers it
+  to the invitee's own Möbius.
+  """
   active_count = db.query(models.ProjectInvite).filter(
     models.ProjectInvite.project_id == project.id,
     models.ProjectInvite.revoked_at.is_(None),
@@ -1762,8 +1775,8 @@ def create_project_invite(
   now = now_naive_utc()
   invite = models.ProjectInvite(
     id=str(uuid.uuid4()), project_id=project.id,
-    token_hash=_invite_hash(secret), invitee_name=body.invitee_name,
-    role=body.role, created_at=now, expires_at=now + _INVITE_TTL,
+    token_hash=_invite_hash(secret), invitee_name=invitee_name,
+    role=role, created_at=now, expires_at=now + _INVITE_TTL,
   )
   db.add(invite)
   db.commit()

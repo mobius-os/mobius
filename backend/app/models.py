@@ -1625,6 +1625,35 @@ class ProjectInvite(Base):
   )
 
 
+class ReceivedProjectInvite(Base):
+  """A project invitation another Möbius delivered to this owner by handle.
+
+  Its details were confirmed with the sender's own Möbius, which the account
+  directory names as that handle's deployment. The single-use invitation
+  secret, and after acceptance the project-only access token, are sealed.
+  """
+
+  __tablename__ = "received_project_invites"
+
+  id = Column(String(64), primary_key=True)
+  # sha256 of "<from_host>\n<invitation secret>": one row per delivered invite.
+  delivery_key = Column(String(64), nullable=False, unique=True, index=True)
+  from_handle = Column(String(32), nullable=False)
+  from_host = Column(String(253), nullable=False)
+  project_name = Column(String(256), nullable=False)
+  project_type = Column(String(128), nullable=True)
+  role = Column(String(16), nullable=False)
+  invite_secret_sealed = Column(Text, nullable=True)
+  received_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False)
+  # pending -> accepted | declined. Removal deletes the row.
+  status = Column(String(16), nullable=False, default="pending", index=True)
+  responded_at = Column(DateTime, nullable=True)
+  remote_project_id = Column(String(64), nullable=True)
+  access_token_sealed = Column(Text, nullable=True)
+  access_expires_at = Column(DateTime, nullable=True)
+
+
 class SharedAppInstance(Base):
   """A pinned project build with its own members and shared runtime data."""
 

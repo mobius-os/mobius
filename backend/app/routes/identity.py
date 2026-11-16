@@ -665,6 +665,16 @@ async def read_identity(
   return _with_member_since(_managed_payload(remote, owner), owner)
 
 
+
+async def owner_handle(db: Session, owner: models.Owner) -> str | None:
+  """This owner's own mobius.you handle, or None when there is none to use."""
+  try:
+    payload = await read_identity(owner=owner, db=db)
+  except HTTPException:
+    return None
+  handle = (payload.get("profile") or {}).get("handle")
+  return handle if isinstance(handle, str) and _HANDLE_RE.fullmatch(handle) else None
+
 @router.get("/agent")
 async def read_agent_access(
   owner: models.Owner = Depends(get_owner_or_app_with_identity_manage),
