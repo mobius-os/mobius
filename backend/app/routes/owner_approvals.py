@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
-from app import chat_queue, models, questions, secure_inputs
+from app import chat_queue, key_request_cards, models, questions, secure_inputs
 from app.chat_event_sink import get_active_sink
 from app.database import get_db
 from app.deps import Principal, get_agent_run_principal, reject_cross_site
@@ -107,6 +107,17 @@ class RestartRequest(BaseModel):
   message: ClosingMessage = None
 
 
+class KeyRequest(BaseModel):
+  """An agent's ask to use a key on sites; the vault validates the fields."""
+
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+  key: str = Field(min_length=1, max_length=64)
+  reason: str = Field(min_length=1, max_length=500)
+  sites: list[dict] = Field(default_factory=list, max_length=20)
+  inject: dict | None = None
+  message: ClosingMessage = None
+
+
 class TurnEndRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
   receipt_id: str = Field(min_length=1, max_length=64)
@@ -171,6 +182,35 @@ async def request_approval(
   }, principal, db, identity_payload=body.model_dump(exclude={"message"}, exclude_none=True),
      approval_work_key=body.work_key,
      approval_summary=body.question[:500], closing_message=body.message)
+
+
+@router.post("/{chat_id}/key-request", dependencies=[Depends(reject_cross_site)])
+async def request_key(
+  chat_id: str,
+  body: KeyRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Ask the vault; when the owner must answer, save the ask as this turn's card.
+
+  A key the agent may already use where it asked answers at once, with no
+  card, and the turn continues.
+  """
+  from app.routes.keys import agent_asks
+
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  ask = body.model_dump(exclude={"message"}, exclude_none=True)
+  answer = await agent_asks(ask, principal)
+  if not key_request_cards.needs_owner(answer):
+    return {"state": "answered_without_card", "answer": answer}
+  return {
+    **await save_owner_question(
+      chat_id, key_request_cards.card_payload(answer, body.reason, answer.get("sites_not_allowed") or body.sites),
+      principal, db, closing_message=body.message,
+    ),
+    "answer": answer,
+  }
 
 
 @router.post("/{chat_id}/restart-request", dependencies=[Depends(reject_cross_site)])

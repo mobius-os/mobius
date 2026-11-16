@@ -48,6 +48,7 @@ CANCEL_WAIT_TOOL = "cancel_wait"
 REQUEST_APPROVAL_TOOL = "request_approval"
 REQUEST_QUESTION_TOOL = "request_question"
 REQUEST_RESTART_TOOL = "request_restart"
+REQUEST_KEY_TOOL = "request_key"
 _CARD_ENDS_TURN = (
   "This tool call ends the turn: nothing after the card reaches the owner "
   "until they reply."
@@ -708,6 +709,17 @@ def _call_request_question(arguments: dict[str, Any]) -> dict:
     raise ValueError("request_question needs questions and may take message")
   try:
     return _APPROVALS.request_question(**arguments)
+  except SystemExit as exc:
+    raise RuntimeError(str(exc)) from exc
+
+
+def _call_request_key(arguments: dict[str, Any]) -> dict:
+  if not {"key", "reason"}.issubset(arguments) or not set(arguments).issubset(
+    {"key", "reason", "sites", "inject", "message"}
+  ):
+    raise ValueError("request_key needs key and reason, and may take sites, inject and message")
+  try:
+    return _APPROVALS.request_key(**arguments)
   except SystemExit as exc:
     raise RuntimeError(str(exc)) from exc
 
@@ -1678,6 +1690,59 @@ _TOOL_DEFINITIONS = {
       "required": ["question", "options", "work_key"], "additionalProperties": False,
     },
   },
+  REQUEST_KEY_TOOL: {
+    "name": REQUEST_KEY_TOOL,
+    "description": (
+      "Ask the owner to let you use a saved key, by name, on exact sites (or "
+      "to provide a key you need that is not saved yet). If you may already "
+      "use the key there, or the owner already said no, it answers at once "
+      "with no card: state answered_without_card and the vault's answer "
+      "(granted, paused or denied), and your turn continues. Otherwise it "
+      "saves a key card in this chat and returns a receipt, NOT an answer. "
+      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      "The owner answers on the card (and pastes a new key there, never into "
+      "chat); the answer resumes you as Allow or Not now. Only the owner's own "
+      "answer widens where a key goes. Delegated helpers ask their parent."
+    ),
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "key": {"type": "string", "minLength": 1, "maxLength": 64,
+                "description": "The key's name in Settings › Keys, e.g. nasa."},
+        "reason": {"type": "string", "minLength": 1, "maxLength": 500,
+                   "description": "One plain sentence the owner reads: what you will do with it."},
+        "sites": {
+          "type": "array", "maxItems": 20,
+          "description": "Exact sites the key may be sent to. Wildcard hosts are refused.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host": {"type": "string", "description": "e.g. api.nasa.gov"},
+              "methods": {"type": "array", "items": {"type": "string"}},
+              "paths": {"type": "array", "items": {"type": "string"},
+                        "description": "e.g. /planetary/apod or /v1/*"},
+            },
+            "required": ["host"], "additionalProperties": False,
+          },
+        },
+        "inject": {
+          "type": "object",
+          "description": (
+            "How a NEW key is sent; default Authorization: Bearer. "
+            "{type: header, name, prefix?} or {type: query, name}."
+          ),
+          "properties": {
+            "type": {"type": "string", "enum": ["header", "query"]},
+            "name": {"type": "string"},
+            "prefix": {"type": "string"},
+          },
+          "required": ["type", "name"], "additionalProperties": False,
+        },
+        "message": CARD_MESSAGE_PROPERTY,
+      },
+      "required": ["key", "reason"], "additionalProperties": False,
+    },
+  },
   REQUEST_RESTART_TOOL: {
     "name": REQUEST_RESTART_TOOL,
     "description": (
@@ -2247,6 +2312,7 @@ _TOOL_HANDLERS = {
   LIST_AGENTS_TOOL: _call_list_agents,
   REQUEST_APPROVAL_TOOL: _call_request_approval,
   REQUEST_QUESTION_TOOL: _call_request_question,
+  REQUEST_KEY_TOOL: _call_request_key,
   REQUEST_RESTART_TOOL: _call_request_restart,
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   UPDATE_GOAL_TOOL: _call_update_goal,

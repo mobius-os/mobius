@@ -1899,10 +1899,10 @@ def test_an_agent_asks_for_sites_over_the_socket(vault, client):
 # -- agents never widen where a key goes themselves ----------------------------
 
 def test_an_agent_cannot_add_sites_for_itself_at_the_vault(vault):
-  with pytest.raises(kv.VaultError, match="ask with POST /api/keys/requests") as refused:
+  with pytest.raises(kv.VaultError, match="ask with the request_key tool") as refused:
     vault.put_key("echo", {"grants": _grants(sites=[ECHO_SITE, TILES])}, actor="agent:c1")
   assert refused.value.status == 403
-  with pytest.raises(kv.VaultError, match="ask with POST"):
+  with pytest.raises(kv.VaultError, match="ask with the request_key tool"):
     vault.put_key("fresh", {"value": DUMMY, "inject": HEADER_SLOT, "grants": {"agents": True, "sites": [TILES]}},
                   actor="agent:c1")
   # Setting a key up without sites, narrowing and pausing stay the agents'.
@@ -1915,9 +1915,9 @@ def test_an_agent_cannot_add_sites_for_itself_at_the_vault(vault):
 def test_an_agent_refused_a_key_is_pointed_to_asking_and_others_are_not(vault, client):
   path = "/use/echo/tiles.example.com/a.png"
   agent = client.get(path, headers={"X-Vault-Caller": "agent:c1"})
-  assert agent.status_code == 403 and agent.json()["ask"] == "POST /api/keys/requests"
+  assert agent.status_code == 403 and agent.json()["ask"] == "the request_key tool"
   missing = client.get("/use/nothing/tiles.example.com/a.png", headers={"X-Vault-Caller": "agent:c1"})
-  assert missing.status_code == 404 and missing.json()["ask"] == "POST /api/keys/requests"
+  assert missing.status_code == 404 and missing.json()["ask"] == "the request_key tool"
   for caller in ("app:7", "owner"):
     assert "ask" not in client.get(path, headers={"X-Vault-Caller": caller}).json()
   # A request the relay cannot carry is no reason to ask the owner.

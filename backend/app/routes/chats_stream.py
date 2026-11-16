@@ -1181,6 +1181,13 @@ async def _send_message_impl(
     # input. Only the sealed consumer may queue their fixed safe outcome.
     if questions.is_secure_question(chat, body.question_id):
       raise HTTPException(409, detail="Use the secure input card to respond.")
+    # A key card records an answer the owner already gave the vault.
+    key_card = questions.saved_question(chat, body.question_id)
+    if key_card and key_card.get("key_request"):
+      if body.attachments:
+        raise HTTPException(409, detail="A key request can't take files.")
+      from app import key_request_cards
+      await key_request_cards.check_answer(key_card, body.selected_options)
     # Snapshot the Stop tombstone BEFORE waiting on the queue lock. A Stop
     # that lands after this request began must still win the race (410); a
     # Stop that had already completed is different: pressing Submit afterward

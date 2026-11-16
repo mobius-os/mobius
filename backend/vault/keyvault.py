@@ -91,7 +91,7 @@ MAX_REQUESTS = 200
 # the owner's agents together are held to the same number.
 MAX_REQUESTS_PER_APP = 10
 # Where an agent refused a key, or a site for it, asks the owner instead.
-AGENT_ASK = "POST /api/keys/requests"
+AGENT_ASK = "the request_key tool"
 MAX_REASON = 300
 # The sites one ask may list, as stored: ten asks from one app stay small.
 MAX_ASK_SITES_BYTES = 8 * 1024

@@ -277,7 +277,7 @@ def grant_widening(before: dict | None, grants) -> GrantWidening:
   ``grants`` None is an update that keeps the current grants: no change.
   Malformed grants count as no change too; the vault refuses them. A new key
   widens by the apps it names and the sites it starts with: an agent sets up
-  a key without sites, and asks for them (``POST /api/keys/requests``).
+  a key without sites, and asks for them (the ``request_key`` control).
   """
   rules = _vault_rules()
   if grants is None:

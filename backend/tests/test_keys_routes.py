@@ -378,7 +378,7 @@ def test_an_agent_adding_a_site_is_refused_and_pointed_to_asking_the_owner(clien
   created = {"value": DUMMY, "inject": ASK["inject"], "grants": {"agents": True, "sites": [other]}}
   for name, body in (("maps", wider), ("fresh", created)):
     refused = client.put(f"/api/keys/{name}", headers=agent, json=body)
-    assert refused.status_code == 403 and "POST /api/keys/requests" in refused.json()["detail"]
+    assert refused.status_code == 403 and "request_key" in refused.json()["detail"]
   assert writes == [] and pushes == []
   assert [k["grants"]["sites"] for k in vault.list_keys()] == [[kv.validate_site(SITE)]]
   # The owner adds the site themselves.
@@ -1480,7 +1480,7 @@ def test_an_agent_may_narrow_reorder_or_recase_sites_without_widening(client, au
   added = client.put("/api/keys/maps", headers=agent, json={
     "grants": {"apps": [{"id": weather.id, "sites": [narrowed]}], "agents": True, "sites": [narrowed, tiles]},
   })
-  assert added.status_code == 403 and "POST /api/keys/requests" in added.text
+  assert added.status_code == 403 and "request_key" in added.text
   assert pushes == []
 
 
@@ -1949,7 +1949,7 @@ def test_a_top_level_agent_asks_by_card_in_its_chat(client, auth, db, vault, pus
                          "grants": {"apps": [], "agents": False, "sites": [SITE]}})
   agent = _agent_auth(db)
   refused = client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent)
-  assert refused.status_code == 403 and refused.json()["ask"] == "POST /api/keys/requests"
+  assert refused.status_code == 403 and refused.json()["ask"] == "the request_key tool"
   ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
   first = client.post("/api/keys/requests", headers=agent, json=ask)
   assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps"}, first.text

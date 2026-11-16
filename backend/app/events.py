@@ -561,6 +561,9 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
       new_block["response_mode"] = "continuation"
       if isinstance(event.get("secure_input"), dict):
         new_block["secure_input"] = copy.deepcopy(event["secure_input"])
+      # An agent's key ask (app/key_request_cards.py): names the vault request.
+      if isinstance(event.get("key_request"), dict):
+        new_block["key_request"] = copy.deepcopy(event["key_request"])
     if question_id:
       new_block["question_id"] = question_id
     key = question_block_key(new_block)

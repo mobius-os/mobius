@@ -66,8 +66,8 @@ instead of writing your own: `["python3",
 "/data/platform/backend/scripts/store-key.py", "NAME"]` (add `--header NAME
 [--prefix TEXT]` or `--query NAME` when the service does not take
 `Authorization: Bearer`). Save it without sites: the first time you borrow it
-for a site, ask the owner with `POST /api/keys/requests` and they approve that
-site on a card (below). Add `--site api.example.com:GET,POST:/v1/*` only when the
+for a site, ask the owner with the `request_key` tool and they approve that
+site on its card (below). Add `--site api.example.com:GET,POST:/v1/*` only when the
 owner told you where the key goes. The owner then sees and manages it in
 Settings › Keys. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
@@ -78,19 +78,16 @@ so. After a failed receipt, check the list again before asking the owner a
 second time. It writes to the vault directly, so the owner gets no
 notification of a replacement: tell them yourself.
 
-When `POST /api/keys/requests` answers `pending` (or `sites_request` is
-`pending`), end your turn with one block per request, holding only the
-answer's `id`, and one sentence saying a card is waiting here:
-
-```mobius-key-request
-{"id":"agent-NAME"}
-```
-
-The owner answers that card in this chat, and nothing else tells them: no
-notification is sent, so the card in your reply is the ask. Their answer
-arrives as a message ("Allowed: …" or "Not now: …") that resumes you, so do
-not poll. If the owner answers in another chat instead, no message arrives;
-asking again (`POST /api/keys/requests`) reports the answer.
+To use a key on a site it does not list yet, or a key the owner has not
+saved, call `request_key` with the key's name, a one-sentence `reason`, the
+exact `sites`, an optional `inject` for a new key, and your closing `message`.
+If you may already use it there, or the owner already said no, it answers at
+once with no card (`answered_without_card`, with `granted`, `paused` or
+`denied`) and your turn continues. Otherwise it saves a key card in this chat
+and ends your turn like any other owner card: the chat waits for the owner,
+nothing else tells them (no notification is sent), and their answer resumes
+you as **Allow** or **Not now**, so do not poll. A new key is pasted on that
+card, never into chat.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and

@@ -18,6 +18,7 @@ import {
 } from './groupBlocks.js'
 import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
+import KeyQuestionCard from './KeyQuestionCard.jsx'
 import { questionCardOpen } from './questionOpen.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
@@ -550,9 +551,10 @@ function MsgContentInner({
             </div>
           )
         }
+        const Card = block.key_request ? KeyQuestionCard : QuestionCard
         return (
           <div key={assistantBlockKey(block, i)}>
-            <QuestionCard
+            <Card
               chatId={chatId}
               questions={block.questions || []}
               questionId={block.question_id}
@@ -560,6 +562,7 @@ function MsgContentInner({
               neededBy={block.needed_by}
               onInternalNav={onInternalNav}
               platformAction={block.platform_action}
+              {...(block.key_request ? { keyRequest: block.key_request } : {})}
               submittedOptions={block.selected_options}
               attachments={block.attachments}
               onAnswer={answerable ? onQuestionAnswer : undefined}

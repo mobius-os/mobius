@@ -812,22 +812,19 @@ def test_core_guidance_names_the_current_goal_completion_syntax():
     assert "complete --finished" not in text
 
 
-def test_an_agents_pending_key_request_ends_the_turn_with_its_card_in_the_chat():
-  """An agent asking for a key puts the owner's card in its own chat and is
-  resumed by the owner's answer, so the skills name the block and the answer
-  message rather than polling. No notification is sent, so the card is the
-  ask; an answer given in another chat is learnt by asking again."""
+def test_an_agents_key_request_is_a_saved_card_in_its_chat():
+  """An agent asking for a key saves an owner card in its own chat with the
+  request_key tool and is resumed by the owner's answer, so the skills name
+  the tool and the answer rather than a hand-written block or polling. No
+  notification is sent, so the card is the ask."""
   repo = Path(__file__).resolve().parents[2]
   seed_dir = repo / "backend" / "scripts" / "seed-skills"
   for name in ("building-apps.md", "secure-input.md"):
     text = (seed_dir / name).read_text(encoding="utf-8")
     normalized = " ".join(text.split())
-    assert "```mobius-key-request\n{\"id\":\"agent-" in text, name
-    assert "one sentence saying a card is waiting here" in normalized, name
-    assert "(\"Allowed: …\" or \"Not now: …\") that resumes you" in normalized, name
-    # An answer given anywhere else sends no message, so the agent learns it
-    # by asking again.
-    assert ("If the owner answers in another chat instead, no message arrives; "
-            "asking again (`POST /api/keys/requests`) reports the answer") in normalized, name
+    assert "`request_key`" in normalized, name
+    assert "mobius-key-request" not in text, name
+    assert "answered_without_card" in normalized, name
+    assert "**Allow** or **Not now**, so do not poll" in normalized, name
     assert "no notification is sent" in normalized.lower(), name
     assert "Settings › Keys lists it too" not in normalized, name

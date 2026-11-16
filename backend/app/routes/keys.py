@@ -12,8 +12,9 @@
   through ``/api/keys/use/<key>/<host>/<path>`` with its own app token, and
   the vault adds the key on the way out. This route attests which app is
   calling from that token, so an app cannot borrow another app's grant.
-- A top-level agent that needs a key on a new site asks the same way, and
-  the owner answers the card.
+- A top-level agent that needs a key on a new site asks with the
+  ``request_key`` control, which saves an owner card in its chat; the owner
+  answers there.
 
 Validation and storage belong to the vault; this module authenticates callers
 and relays.
@@ -71,8 +72,8 @@ _RELAYED_RESPONSE_HEADERS = frozenset({
 _RELAYED_RESPONSE_PREFIXES = ("ratelimit", "x-ratelimit-", "x-vault-")
 _SHARED_BROWSER_REFUSAL = "Shared browser access cannot use keys."
 _ASK_FOR_SITES = (
-  "Only the owner adds sites a key is sent to. Ask with POST /api/keys/requests "
-  "({key, reason, sites}); the owner answers in Settings › Keys."
+  "Only the owner adds sites a key is sent to. Ask with the request_key tool "
+  "(key, reason, sites); the owner answers its card in your chat."
 )
 # An HTTP header name (RFC 9110 token).
 _HEADER_NAME = re.compile(rb"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
@@ -308,7 +309,7 @@ async def request_key(
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
   payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   if principal.app_id is None:
-    return await _agent_asks(payload, principal)
+    return await agent_asks(payload, principal)
   app = db.query(models.App).filter(
     models.App.id == principal.app_id, models.App.deleted_at.is_(None),
   ).first()
@@ -329,9 +330,11 @@ async def request_key(
   return answer
 
 
-async def _agent_asks(payload: dict, principal: Principal) -> dict:
+async def agent_asks(payload: dict, principal: Principal) -> dict:
   """A top-level agent asks the owner to send a key to sites; the owner
-  answers the card. Delegated helpers ask the agent that started them."""
+  answers the saved card the ``request_key`` control shows in the agent's
+  chat (app/key_request_cards.py). Delegated helpers ask the agent that
+  started them."""
   if principal.delegation_id is not None:
     raise HTTPException(403, "Delegated helpers cannot ask for keys; the agent that started you can.")
   # Never work a shared-browser guest started: the ask would act for the owner.
