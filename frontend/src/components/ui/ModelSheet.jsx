@@ -50,6 +50,7 @@ export default function ModelSheet({
   confirmLabel = 'Use agent',
   confirmDisabled = false,
   collapsible = false,
+  showGroupHeadings = true,
 }) {
   const [expanded, setExpanded] = useState(false)
   const supportsEffort = (
@@ -135,11 +136,11 @@ export default function ModelSheet({
             const Logo = group.Logo
             return (
               <div key={`${group.key}-${index}`} className="model-sheet__group">
-                <div className="model-sheet__group-head">
+                {showGroupHeadings && <div className="model-sheet__group-head">
                   {Logo && <span className="model-sheet__group-icon"><Logo /></span>}
                   <span>{group.label}</span>
                   {!connected && <span className="model-sheet__group-hint">not connected</span>}
-                </div>
+                </div>}
                 {group.models.map((m) => {
                   const on = provider === group.key && model === m.id
                   const disabled = !connected && !on
