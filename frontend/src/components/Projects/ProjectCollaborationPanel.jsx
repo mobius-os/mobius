@@ -35,7 +35,7 @@ function initials(name) {
 function ProjectLiveCollaboration({ project }) {
   const queryClient = useQueryClient()
   const [inviteOpen, setInviteOpen] = useState(false)
-  const [inviteVia, setInviteVia] = useState('handle')
+  const [inviteVia, setInviteVia] = useState('link')
   const [inviteeName, setInviteeName] = useState('')
   const [inviteeHandle, setInviteeHandle] = useState('')
   const [sentInvite, setSentInvite] = useState(null)
@@ -145,7 +145,7 @@ function ProjectLiveCollaboration({ project }) {
   }
 
   return <>
-    <p className="project-sharing__description">Edit the same project together. Invite someone by their Möbius @handle, or send a private link that works without a GitHub account or a Möbius of their own.</p>
+    <p className="project-sharing__description">Edit the same project together. Send a private link that works without a GitHub account or a Möbius of their own, or invite someone by their Möbius @handle.</p>
           {linkedProjectAppId(project) && <p className="project-collab__empty">Share the app’s source files here. Only the owner can update the installed app; access to its data is separate.</p>}
           <section aria-labelledby="project-people-heading">
             <div className="project-collab__section-head"><h3 id="project-people-heading">People</h3><span>Private · {members.length} {members.length === 1 ? 'person' : 'people'}</span></div>
@@ -164,8 +164,8 @@ function ProjectLiveCollaboration({ project }) {
 
             {!inviteOpen ? <button type="button" className="project-collab__invite-toggle" onClick={() => { setInviteOpen(true); setCreatedInvite(null); setSentInvite(null); setError('') }}><UserPlus size={15} /> Invite someone</button> : <form className="project-collab__invite" onSubmit={createInvite}>
               <div className="project-collab__invite-via" role="radiogroup" aria-label="How to invite">
-                <button type="button" role="radio" aria-checked={inviteVia === 'handle'} onClick={() => setInviteVia('handle')}><AtSign size={13} /> Möbius @handle</button>
                 <button type="button" role="radio" aria-checked={inviteVia === 'link'} onClick={() => setInviteVia('link')}><Link2 size={13} /> Private link</button>
+                <button type="button" role="radio" aria-checked={inviteVia === 'handle'} onClick={() => setInviteVia('handle')}><AtSign size={13} /> Möbius @handle</button>
               </div>
               {inviteVia === 'handle'
                 ? <label>Their Möbius @handle<input autoFocus value={inviteeHandle} maxLength={40} placeholder="@friend" autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={event => setInviteeHandle(event.target.value)} /><small className="project-collab__invite-hint">They’ll get a notification and can accept from their Projects.</small></label>
