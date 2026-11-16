@@ -122,7 +122,9 @@ before the borrow starts.
   that.
 - `backend/app/key_vault.py`: supervises the vault (task `key-vault`,
   restarts with backoff; the vault exits when the server is no longer its
-  parent; output in `/data/logs/key-vault.log`) and is the server's client.
+  parent, replacing a stale socket at start and removing at exit only the
+  socket it bound; output in `/data/logs/key-vault.log`) and is the server's
+  client.
 - `backend/app/routes/keys.py`: the owner routes, reveal, the handshake and
   the use relay.
 - `frontend/src/components/SettingsView/KeysSection.jsx`: Settings › Keys.

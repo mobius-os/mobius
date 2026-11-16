@@ -2047,6 +2047,7 @@ def serve(data_dir: Path, parent_pid: int | None) -> None:
   finally:
     os.umask(previous)
   os.chmod(socket_path, 0o600)
+  bound = os.stat(socket_path)
 
   stop = threading.Event()
 
@@ -2062,10 +2063,21 @@ def serve(data_dir: Path, parent_pid: int | None) -> None:
     if parent_pid and os.getppid() != parent_pid:
       break
   server.shutdown()
+  remove_own_socket(socket_path, bound)
+
+
+def remove_own_socket(path: Path, bound: os.stat_result) -> None:
+  """Remove ``path`` only while it is still the socket this vault bound.
+
+  Whatever replaced it since (a restore, an owner's tool) is not this
+  vault's to remove.
+  """
   try:
-    socket_path.unlink()
+    current = os.lstat(path)
   except FileNotFoundError:
-    pass
+    return
+  if (current.st_dev, current.st_ino) == (bound.st_dev, bound.st_ino):
+    path.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> None:
