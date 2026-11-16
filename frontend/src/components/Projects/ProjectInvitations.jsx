@@ -45,6 +45,8 @@ export default function ProjectInvitations() {
   const rows = Array.isArray(query.data) ? query.data : []
   const pending = rows.filter(row => row.status === 'pending')
   const shared = rows.filter(row => row.status === 'accepted')
+  // Expired invitations stay listed until removed, but nothing is waiting on them.
+  const waiting = pending.filter(row => !row.expired).length
   if (!pending.length && !shared.length) return null
 
   async function act(row, kind, run) {
@@ -77,7 +79,7 @@ export default function ProjectInvitations() {
   return (
     <div className="project-invitations projects-collection">
       {pending.length > 0 && <section aria-labelledby="project-invitations-heading">
-        <h2 id="project-invitations-heading">Invitations <span>{pending.length}</span></h2>
+        <h2 id="project-invitations-heading">Invitations {waiting > 0 && <span>{waiting}</span>}</h2>
         <div className="project-invitations__list">
           {pending.map(row => (
             <div className="project-invitations__invite" key={row.id}>
