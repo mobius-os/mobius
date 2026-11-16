@@ -442,23 +442,25 @@ def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
     expires_at = redeemed_at + auth.PROJECT_COLLABORATOR_TTL
     if expires_at <= now:
       raise HTTPException(410, GONE)
+    # Mint from the epochs checked under the lock, not ones re-read after it.
+    token = auth.create_project_collaborator_token(
+      owner_username=owner.username, owner_epoch=owner.token_epoch,
+      project_id=str(project.id), member_id=member.id,
+      member_epoch=member.token_epoch, expires_delta=expires_at - now,
+    )
+    answer = {
+      "access_token": token,
+      "token_type": "bearer",
+      "project": _project_response(project, []),
+      "role": member.role,
+      "member_id": member.id,
+      "expires_at": expires_at.replace(tzinfo=UTC),
+    }
     db.commit()
   except BaseException:
     db.rollback()
     raise
-  token = auth.create_project_collaborator_token(
-    owner_username=owner.username, owner_epoch=owner.token_epoch,
-    project_id=str(project.id), member_id=member.id,
-    member_epoch=member.token_epoch, expires_delta=expires_at - now,
-  )
-  return {
-    "access_token": token,
-    "token_type": "bearer",
-    "project": _project_response(project, []),
-    "role": member.role,
-    "member_id": member.id,
-    "expires_at": expires_at.replace(tzinfo=UTC),
-  }
+  return answer
 
 
 # -- receiver --------------------------------------------------------------
