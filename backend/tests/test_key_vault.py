@@ -1459,6 +1459,31 @@ def test_a_caller_that_stops_reading_is_cut_off_and_frees_its_slot(vault, monkey
   assert "The caller stopped reading the answer." in reasons
 
 
+def test_a_caller_reading_slowly_but_steadily_is_never_taken_for_a_stalled_one(vault, monkeypatch):
+  """A small compressed piece can inflate to megabytes; the send timeout must
+  measure a stall, not how long the whole piece takes a slow reader."""
+  import gzip
+  import time
+  monkeypatch.setattr(kv, "CALLER_SEND_TIMEOUT_SECS", 1)
+  body = gzip.compress(b'{"row": 12345, "name": "example"},\n' * 75_000)  # about 2.6 MB inflated
+
+  def site(conn):
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(body) + body)
+
+  with _raw_site(site) as (connect, _), _vault_server(vault, connect) as path:
+    with socket.socket(socket.AF_UNIX) as caller:
+      caller.settimeout(30)
+      caller.connect(str(path))
+      caller.sendall(_borrow())
+      answer = b""
+      while chunk := caller.recv(65536):
+        answer += chunk
+        time.sleep(0.05)  # steady, never pausing longer than the timeout
+  assert answer.endswith(b"0\r\n\r\n"), "the answer must arrive complete"
+  borrow = vault.usage(key="echo")[0]  # newest first
+  assert borrow["outcome"] == "used" and not borrow.get("reason")
+
+
 def test_one_caller_beyond_its_own_cap_is_busy_while_others_still_borrow(vault, monkeypatch):
   monkeypatch.setattr(kv, "MAX_BORROWS_PER_CALLER", 1)
   release = threading.Event()

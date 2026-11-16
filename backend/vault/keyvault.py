@@ -102,6 +102,7 @@ MAX_BORROWS_PER_CALLER = 8
 # A caller that takes this long to accept the next piece of an answer is cut
 # off, so one that stops reading cannot hold its slot until the deadline.
 CALLER_SEND_TIMEOUT_SECS = 60
+CALLER_SEND_SLICE = 64 * 1024
 # Synthesizes IPv6 addresses for IPv4 hosts; the embedded IPv4 is the real
 # destination, so it must be public too.
 NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
@@ -1906,12 +1907,17 @@ class VaultHandler(BaseHTTPRequestHandler):
     redactor = StreamRedactor(echoes)
 
     def send(data: bytes) -> None:
-      if data:
+      # One inflated piece can be megabytes, and a socket timeout bounds a whole
+      # write: sent in slices, the timeout catches a caller that stopped
+      # reading, not one that reads slowly.
+      for start in range(0, len(data), CALLER_SEND_SLICE):
+        part = data[start:start + CALLER_SEND_SLICE]
         self.connection.settimeout(deadline.time_left(CALLER_SEND_TIMEOUT_SECS))
         try:
-          self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
+          self.wfile.write(b"%x\r\n%s\r\n" % (len(part), part))
           self.wfile.flush()
         except TimeoutError:
+          deadline.raise_if_passed()
           raise VaultError(504, "The caller stopped reading the answer.") from None
 
     try:
