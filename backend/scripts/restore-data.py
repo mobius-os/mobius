@@ -77,9 +77,11 @@ hand recovery.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -95,6 +97,13 @@ SECRET_FILE_MODE = 0o600
 SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
 SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push", ".vault")
+
+# The key vault program: a restore without secrets keeps the current vault and
+# withdraws, with the vault's own purge step, grants to apps the restored
+# database does not have.
+VAULT_PROGRAM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "vault", "keyvault.py")
+DB_RELPATH = os.path.join("db", "ultimate.db")
 
 # Rough gz -> uncompressed expansion for the capacity preflight.
 EXPAND_FACTOR = 4
@@ -229,6 +238,90 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
+def app_slugs(db_path):
+  """App id -> slug in a Möbius database, or None when it can't be read."""
+  if not os.path.isfile(db_path):
+    return None
+  try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+      rows = conn.execute("SELECT id, slug FROM apps").fetchall()
+    finally:
+      conn.close()
+  except sqlite3.Error:
+    return None
+  return {int(app_id): slug for app_id, slug in rows}
+
+
+def withdraw_grants_of_other_apps(vault_dir, before, after):
+  """Withdraw the kept vault's grants and requests for app ids the restored
+  database lacks or gives to another app (another slug than before the
+  restore); return those ids.
+
+  App ids are reused, so a grant naming such an id would let whichever app
+  holds it now borrow the key. Each is withdrawn with the vault's own purge
+  step (``Vault.forget_app``, which also erases keys that app saved for
+  itself), offline and under the vault's single-instance lock. Raises when
+  the vault can't be opened (a vault still running, its program missing).
+  """
+  spec = importlib.util.spec_from_file_location("mobius_restore_vault", VAULT_PROGRAM)
+  if spec is None or not os.path.isfile(VAULT_PROGRAM):
+    raise RuntimeError(f"vault program not found at {VAULT_PROGRAM}")
+  vault_module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = vault_module  # its dataclasses resolve their own module
+  spec.loader.exec_module(vault_module)
+  from pathlib import Path
+  try:
+    lock = vault_module.hold_single_instance_lock(Path(vault_dir))
+    vault = vault_module.Vault(Path(vault_dir))
+  except SystemExit as exc:  # the vault refuses to open: running, or damaged
+    raise RuntimeError(str(exc)) from None
+  try:
+    named = {r["app"] for r in vault.list_requests()}
+    for key in vault.list_keys():
+      named.update(grant["id"] for grant in key["grants"]["apps"])
+    stale = sorted(
+      app_id for app_id in named
+      if app_id not in after or (before is not None and app_id in before
+                                 and before[app_id] != after[app_id])
+    )
+    for app_id in stale:
+      vault.forget_app(app_id, actor="platform:restore")
+    return stale
+  finally:
+    os.close(lock)
+
+
+def reconcile_kept_vault(data_dir, before):
+  """After a restore without secrets: the current vault was kept, so its app
+  grants still name this install's app ids. Withdraw those the restored
+  database gives to no app or another app, and tell the owner to review."""
+  vault_dir = os.path.join(data_dir, ".vault")
+  if not any(os.path.isfile(os.path.join(vault_dir, name))
+             for name in ("keys.json", "requests.json")):
+    return
+  log("WARNING: the backup has no secrets, so the key vault (/data/.vault) "
+      "was KEPT from the current install. Its app grants refer to app ids "
+      "of the current install, which the restored database may give to "
+      "other apps.")
+  after = app_slugs(os.path.join(data_dir, DB_RELPATH))
+  if after is None:
+    log("WARNING: could not read the restored apps; no grant was changed. "
+        "Review every app grant in Settings › Keys before opening apps.")
+    return
+  try:
+    stale = withdraw_grants_of_other_apps(vault_dir, before, after)
+  except Exception as exc:  # noqa: BLE001 - the restore itself succeeded
+    log(f"WARNING: could not update the key vault offline ({exc}); no grant "
+        "was changed. Review every app grant in Settings › Keys before "
+        "opening apps.")
+    return
+  if stale:
+    log(f"withdrew key grants and requests for app ids {stale}: missing "
+        "from the restored database or now another app.")
+  log("Review the remaining app grants in Settings › Keys.")
+
+
 def refuse_if_server_up(health_url, phase):
   """Refuses when a server answers at health_url — restoring under a live
   SQLite pool risks lost writes through stale fds."""
@@ -350,6 +443,10 @@ def main():
     die(f"insufficient space to stage restore: need ~{need}, have {free}",
         code=3)
 
+  secrets_kept = secrets_state not in ("encrypted", "plaintext")
+  # Which app each id names now, before the restored database replaces it.
+  apps_before = app_slugs(os.path.join(data_dir, DB_RELPATH)) if secrets_kept else None
+
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
   rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
@@ -411,6 +508,8 @@ def main():
     if not preserve_rollback:
       shutil.rmtree(rollback_dir, ignore_errors=True)
 
+  if secrets_kept:
+    reconcile_kept_vault(data_dir, apps_before)
   harden_secret_perms(data_dir)
   log("hardened secret perms (600/700)")
   log("restore complete. Start uvicorn / the container now so it opens "

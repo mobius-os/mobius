@@ -10,7 +10,9 @@ writable here.
 What changed for callers: an app may still save, check and delete its own
 values, but no app token reads one back any more, including the app's own
 service and jobs. They borrow the key through ``/api/keys/use`` instead. The
-owner and the owner's agents may still read, as before.
+owner and the owner's top-level agents may still read, as before, but no
+longer write here: a value they write is the owner's key, which an app uses
+only by the owner's own grant, so they write through ``/api/keys/<name>``.
 """
 
 from __future__ import annotations
@@ -57,10 +59,19 @@ def _authorize_app(db: Session, principal: Principal, app_id: int) -> models.App
 
 
 async def _keys() -> list[dict]:
-  try:
+  with keys_routes.vault_outcomes_as_http():
     return (await key_vault.vault_call("GET", "/keys"))["keys"]
-  except key_vault.VaultUnavailable as exc:
-    raise HTTPException(503, str(exc)) from exc
+
+
+def _only_the_apps_own_token(principal: Principal) -> None:
+  """Writes here stay the app's own: one by the owner or an agent would hand
+  the app a value it never chose, as its own key, without the owner's grant."""
+  if principal.app_id is None:
+    raise HTTPException(
+      status_code=403,
+      detail="Only the app itself saves or deletes its secrets here. Manage keys in "
+      "Settings › Keys or with PUT /api/keys/<name>.",
+    )
 
 
 async def _owned(app_id: int, name: str) -> dict:
@@ -79,16 +90,14 @@ async def put_secret(
   app_id: int, name: str, body: SecretWrite,
   db: Session = Depends(get_db), principal: Principal = Depends(get_principal),
 ):
+  _only_the_apps_own_token(principal)
   app = _authorize_app(db, principal, app_id)
   try:
-    async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
-      await key_vault.store_app_key(app_id, name, body.value)
+    with keys_routes.vault_outcomes_as_http():
+      async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
+        await key_vault.store_app_key(app_id, name, body.value)
   except key_vault.AppGone:
     raise HTTPException(status_code=404, detail="App not found.") from None
-  except key_vault.VaultUnavailable as exc:
-    raise HTTPException(503, str(exc)) from exc
-  except key_vault.VaultRefused as exc:
-    raise HTTPException(exc.status, exc.reason) from exc
   return Response(status_code=204, headers=_DEPRECATION)
 
 
@@ -113,15 +122,14 @@ async def get_secret(
       detail="Apps never read key values. Borrow the key through /api/keys/use "
       "(see 'Keys' in the building-apps guide).",
     )
-  # The same caller rule as /api/keys/{name}/value: a shared-browser guest
-  # never reads a key, and the read is logged as the agent or owner it is.
-  caller = keys_routes._caller(principal)
+  # The same caller rule as /api/keys/{name}/value: a shared-browser guest or
+  # a delegated helper never reads a key, and the read is logged as the agent
+  # or owner it is.
+  caller = keys_routes.reader_caller(principal)
   _authorize_app(db, principal, app_id)
   key = await _owned(app_id, name)
-  try:
+  with keys_routes.vault_outcomes_as_http():
     value = (await key_vault.vault_call("GET", f"/keys/{key['name']}/value", caller=caller))["value"]
-  except key_vault.VaultUnavailable as exc:
-    raise HTTPException(503, str(exc)) from exc
   return Response(content=value, media_type="text/plain", headers=_DEPRECATION)
 
 
@@ -134,20 +142,23 @@ async def delete_secret(
   app_id: int, name: str,
   db: Session = Depends(get_db), principal: Principal = Depends(get_principal),
 ):
-  """Delete the app's key, or only its grant when other apps share the key."""
+  """Delete the app's key, or only its grant when other apps share the key.
+
+  A value still waiting in the retired per-app store is withdrawn from the
+  import too, so the next start never brings it back.
+  """
+  _only_the_apps_own_token(principal)
   app = _authorize_app(db, principal, app_id)
   try:
     # Under the app's lock and its authorized installation, as for a save: a
     # delete delayed past a purge must not remove the key of the app that
     # reused the id.
-    async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
-      released = await key_vault.release_app_key(app_id, name)
+    with keys_routes.vault_outcomes_as_http():
+      async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
+        released = await key_vault.release_app_key(app_id, name)
+        withdrawn = key_vault.withdraw_legacy_secret(app_id, name)
   except key_vault.AppGone:
     raise HTTPException(status_code=404, detail="App not found.") from None
-  except key_vault.VaultUnavailable as exc:
-    raise HTTPException(503, str(exc)) from exc
-  except key_vault.VaultRefused as exc:
-    raise HTTPException(exc.status, exc.reason) from exc
-  if released is None:
+  if released is None and not withdrawn:
     raise HTTPException(status_code=404, detail="Secret not found.")
   return Response(status_code=204, headers=_DEPRECATION)

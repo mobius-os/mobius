@@ -1496,11 +1496,15 @@ class AppModelProvider(BaseProvider):
     # inactive, and the relay re-checks consent on every request.
     return self.read_relay_key(data_dir, authorize=False).unavailable
 
-  def read_relay_key(self, data_dir: str, *, authorize: bool = True) -> RelayKeyRead:
+  def read_relay_key(
+    self, data_dir: str, *, authorize: bool = True, endpoint: str | None = None,
+  ) -> RelayKeyRead:
     """Resolve current authorization and the saved key in one blocking read.
 
     The relay runs this in a worker; a stale registry object or failed consent
     read must be refused before touching the encrypted app secret.
+    ``endpoint`` is the path under ``base_url`` the relay is about to call
+    (the protocol's main endpoint when omitted): the key's sites must allow it.
     """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
@@ -1511,11 +1515,12 @@ class AppModelProvider(BaseProvider):
     # grant to this app, for the provider's own site, makes the models
     # available. An availability check never reads the value itself.
     secret, base_url = self.declaration["secret_name"], self.declaration["base_url"]
+    destination = {"protocol": self.protocol, "endpoint": endpoint}
     if not authorize:
-      if key_vault.model_provider_key_sync(self.app_id, secret, base_url):
+      if key_vault.model_provider_key_sync(self.app_id, secret, base_url, **destination):
         return RelayKeyRead(None, None)
     else:
-      key = key_vault.reveal_model_provider_key(self.app_id, secret, base_url)
+      key = key_vault.reveal_model_provider_key(self.app_id, secret, base_url, **destination)
       if key:
         return RelayKeyRead(key, None)
     return RelayKeyRead(None, (

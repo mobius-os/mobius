@@ -179,11 +179,11 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   granted = {(app_id, "api_key")}
   monkeypatch.setattr(
     key_vault, "model_provider_key_sync",
-    lambda a, name, base_url: name if (a, name) in granted else None,
+    lambda a, name, base_url, **_destination: name if (a, name) in granted else None,
   )
   monkeypatch.setattr(
     key_vault, "reveal_model_provider_key",
-    lambda a, name, base_url: "test-only-placeholder-key" if (a, name) in granted else None,
+    lambda a, name, base_url, **_destination: "test-only-placeholder-key" if (a, name) in granted else None,
   )
   adapter = providers.PROVIDERS[provider_id]
   assert providers.provider_runtime_kind(provider_id) == "codex_sdk"

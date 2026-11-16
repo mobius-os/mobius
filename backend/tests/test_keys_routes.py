@@ -37,11 +37,61 @@ PROVIDER = "https://models.example.net/v1"
 PROVIDER_SITE = {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/responses"]}
 
 
+# Answers a site may send that must never act on the Möbius origin.
+_HOSTILE_HEADERS = {
+  "Clear-Site-Data": '"cookies", "storage"',
+  "Refresh": "0; url=https://evil.example/",
+  "Link": "<https://evil.example/x.js>; rel=preload; as=script",
+  "Set-Cookie": "session=planted; Path=/",
+  "X-Frame-Options": "ALLOWALL",
+  "Access-Control-Allow-Origin": "*",
+  "X-Vault-Denied": "1",
+}
+_KEPT_HEADERS = {
+  "ETag": '"v1"', "Retry-After": "30", "RateLimit-Remaining": "9",
+  "X-RateLimit-Limit": "10", "Content-Language": "en",
+}
+
+
 class _Echo(BaseHTTPRequestHandler):
   def log_message(self, *args):
     pass
 
+  def _special(self) -> bool:
+    """Answers for the header, redirect and truncation tests."""
+    if self.path == "/v1/hostile-headers":
+      self.send_response(200)
+      for name, value in {**_HOSTILE_HEADERS, **_KEPT_HEADERS}.items():
+        self.send_header(name, value)
+      self.send_header("Content-Length", "2")
+      self.end_headers()
+      self.wfile.write(b"ok")
+      return True
+    if self.path.startswith("/v1/redirect-"):
+      self.send_response(307)
+      self.send_header("Location", {
+        "/v1/redirect-relative": "/api/apps/1/storage/x",
+        "/v1/redirect-path": "next?page=2",
+        "/v1/redirect-absolute": "https://elsewhere.example/landing",
+      }[self.path])
+      self.send_header("Content-Length", "0")
+      self.end_headers()
+      return True
+    if self.path == "/v1/truncated":
+      # Promises more than it sends, then hangs up mid-answer.
+      self.send_response(200)
+      self.send_header("Content-Type", "text/plain")
+      self.send_header("Content-Length", "100000")
+      self.end_headers()
+      self.wfile.write(b"x" * 1000)
+      self.wfile.flush()
+      self.close_connection = True
+      return True
+    return False
+
   def _answer(self):
+    if self._special():
+      return
     length = int(self.headers.get("Content-Length") or 0)
     body = json.dumps({
       "path": self.path, "headers": dict(self.headers),
@@ -99,13 +149,14 @@ def pushes(monkeypatch):
   return sent
 
 
-def _app(db, slug, app_id=None, provider_key=None, base_url=PROVIDER):
+def _app(db, slug, app_id=None, provider_key=None, base_url=PROVIDER, protocol=None):
   """An installed app; ``provider_key`` declares its model provider's secret name."""
   contract = None
   if provider_key is not None:
     contract = {"model_provider": {
       "name": slug.title(), "base_url": base_url, "secret_name": provider_key,
       "models": [{"id": f"{slug}-model"}], "default_model": f"{slug}-model",
+      **({"protocol": protocol} if protocol else {}),
     }}
   app = models.App(
     id=app_id,
@@ -128,6 +179,25 @@ def _app_auth(db, app, **kwargs):
 def _agent_auth(db):
   owner = db.query(models.Owner).first()
   token = auth_mod.create_agent_token("chat-keys", owner.username, owner.token_epoch)
+  return {"Authorization": f"Bearer {token}"}
+
+
+def _helper_auth(db):
+  """A delegated helper's bearer, for a live delegation."""
+  from app.chat_writer import create_chat
+  db.add(create_chat(id="helper-chat", title="Helper"))
+  db.add(create_chat(id="parent-chat", title="Parent"))
+  db.add(models.Delegation(
+    id="key-helper", parent_chat_id="parent-chat", parent_root_run_id="parent-run",
+    task_key="key-helper", child_chat_id="helper-chat", provider="claude", scope="write",
+    cwd="/tmp", prompt_sha256="0" * 64,
+  ))
+  db.commit()
+  owner = db.query(models.Owner).first()
+  token = auth_mod.create_agent_token(
+    "helper-chat", owner.username, owner.token_epoch,
+    delegation_id="key-helper", delegation_chat="helper-chat",
+  )
   return {"Authorization": f"Bearer {token}"}
 
 
@@ -1120,3 +1190,511 @@ def test_approving_one_apps_sites_never_widens_another_app_or_the_agents(client,
 def _ids(grants):
   """The app ids a key is granted to (each grant also carries its own sites)."""
   return [grant["id"] for grant in grants["apps"]]
+
+
+# -- who may use, read and change keys -----------------------------------------
+
+@pytest.fixture
+def shared_browser(client, monkeypatch):
+  """The test client on the HTTPS origin shared-browser access requires."""
+  from app.config import get_settings
+  from app.routes.browser_access import _limiter
+  _limiter.reset()
+  monkeypatch.setattr(get_settings(), "frontend_origin", "https://shared.example")
+  client.base_url = "https://shared.example"
+  client.headers["Origin"] = "https://shared.example"
+  return client
+
+
+def test_a_guest_minted_app_token_never_borrows_or_asks_for_keys(shared_browser, auth, db, vault, pushes):
+  """A shared-browser guest opens an app the owner lent a key to and mints the
+  app's token: that token acts for the guest, so it neither borrows the
+  owner's key nor asks the owner for one."""
+  from app.database import SessionLocal
+  from tests.browser_access_fixtures import link_grant
+  client = shared_browser
+  with SessionLocal() as session:
+    _grant, invite = link_grant(session, session.query(models.Owner).one(), "Guest")
+  redeemed = client.post("/api/connect/browser-access/session/redeem", json={"invite": invite})
+  assert redeemed.status_code == 200, redeemed.text
+  guest = {"Authorization": "Bearer " + redeemed.json()["access_token"]}
+  weather = _app(db, "weather")
+  vault.put_key("paid", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  minted = client.post("/api/auth/app-token", json={"app_id": weather.id}, headers=guest)
+  assert minted.status_code == 200, minted.text
+  guest_app = {"Authorization": "Bearer " + minted.json()["token"]}
+
+  used = client.post("/api/keys/use/paid/api.example.com/v1/anything", headers=guest_app, content=b"x")
+  assert used.status_code == 403 and DUMMY not in used.text
+  asked = client.post("/api/keys/requests", headers=guest_app, json={**ASK, "key": "other"})
+  assert asked.status_code == 403
+  assert vault.usage(key="paid") and all(e["caller"] != f"app:{weather.id}" for e in vault.usage(key="paid"))
+  assert vault.list_requests() == [] and pushes == []
+  # The owner's own app token still borrows.
+  assert client.post("/api/keys/use/paid/api.example.com/v1/anything",
+                     headers=_app_auth(db, weather), content=b"x").status_code == 200
+
+
+def test_an_agent_cannot_switch_agent_use_back_on(client, auth, db, vault, monkeypatch):
+  """The owner switched agents off a key; an agent switching them back on
+  would read the value. The server refuses before the vault is asked, and the
+  vault refuses too."""
+  vault.put_key("private", {"value": DUMMY, "inject": ASK["inject"],
+                            "grants": {"apps": [], "agents": False, "sites": [SITE]}})
+  agent = _agent_auth(db)
+  [page] = client.get("/api/keys", headers=agent).json()["keys"]
+  writes = []
+  real_call = key_vault.vault_call
+
+  async def record_writes(method, path, payload=None, **kwargs):
+    if method != "GET":
+      writes.append(path)
+    return await real_call(method, path, payload, **kwargs)
+  monkeypatch.setattr(key_vault, "vault_call", record_writes)
+  flip = client.put("/api/keys/private", headers=agent, json={
+    "inject": page["inject"], "revision": page["revision"], "grants": {**page["grants"], "agents": True},
+  })
+  assert flip.status_code == 403 and "agents use this key" in flip.json()["detail"]
+  assert writes == []
+  assert client.get("/api/keys/private/value", headers=agent).status_code == 403
+  with pytest.raises(kv.VaultError) as refused:
+    vault.put_key("private", {"grants": {**page["grants"], "agents": True}}, actor="agent:chat-keys")
+  assert refused.value.status == 403
+  # The owner may switch them back on.
+  assert client.put("/api/keys/private", headers=auth, json={
+    "revision": page["revision"], "grants": {**page["grants"], "agents": True},
+  }).status_code == 200
+  assert client.get("/api/keys/private/value", headers=agent).json()["value"] == DUMMY
+
+
+def test_a_delegated_helper_borrows_a_key_but_never_reads_its_value(client, auth, db, vault):
+  vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"],
+                           "grants": {"apps": [], "agents": True, "sites": [SITE]}})
+  weather = _app(db, "weather")
+  vault.save_owned(weather.id, "token", "apps-own-value")
+  helper = _helper_auth(db)
+  read = client.get("/api/keys/shared/value", headers=helper)
+  assert read.status_code == 403 and "Delegated helpers" in read.text and DUMMY not in read.text
+  old_route = client.get(f"/api/apps/{weather.id}/secrets/token", headers=helper)
+  assert old_route.status_code == 403 and "apps-own-value" not in old_route.text
+  assert [e for e in vault.usage() if e["outcome"] == "revealed"] == []
+  used = client.get("/api/keys/use/shared/api.example.com/v1/x", headers=helper)
+  assert used.status_code == 200
+  assert json.loads(used.content)["headers"]["Authorization"] == "Bearer [redacted by key vault]"
+  # The owner's top-level agent still reads.
+  assert client.get("/api/keys/shared/value", headers=_agent_auth(db)).json()["value"] == DUMMY
+
+
+def test_an_agent_may_narrow_reorder_or_recase_sites_without_widening(client, auth, db, vault, pushes):
+  """Taking access away, or restating it in another order or case, is no
+  widening: the agent's save goes through and the owner is not alerted."""
+  weather = _app(db, "weather")
+  tiles = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"], "grants": {
+    "apps": [{"id": weather.id, "sites": [SITE, tiles]}], "agents": True, "sites": [SITE, tiles]}})
+  agent = _agent_auth(db)
+  recased = {"host": "API.Example.COM", "methods": ["post", "get"], "paths": ["/v1/*"]}
+  narrowed = {"host": "api.example.com", "methods": ["GET"], "paths": ["/v1/today"]}
+  for sites in ([tiles, SITE], [recased, tiles], [narrowed]):
+    [page] = client.get("/api/keys", headers=agent).json()["keys"]
+    saved = client.put("/api/keys/maps", headers=agent, json={
+      "revision": page["revision"],
+      "grants": {"apps": [{"id": weather.id, "sites": sites}], "agents": True, "sites": sites},
+    })
+    assert saved.status_code == 200, saved.text
+  assert pushes == []
+  [page] = vault.list_keys()
+  assert page["grants"]["apps"][0]["sites"] == [kv.validate_site(narrowed)]
+  # Widening back is still the owner's decision.
+  refused = client.put("/api/keys/maps", headers=agent, json={
+    "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": True, "sites": [narrowed]},
+  })
+  assert refused.status_code == 403 and "reach more sites" in refused.text
+  # Adding a site for the owner and agents goes through, and the owner hears of it.
+  added = client.put("/api/keys/maps", headers=agent, json={
+    "grants": {"apps": [{"id": weather.id, "sites": [narrowed]}], "agents": True, "sites": [narrowed, tiles]},
+  })
+  assert added.status_code == 200
+  [notice] = pushes
+  assert "added sites" in notice["body"] and "replaced" not in notice["body"]
+
+
+def test_an_agents_value_only_save_keeps_every_grant(client, auth, db, vault, pushes):
+  weather = _app(db, "weather")
+  grants = {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": True, "sites": [SITE]}
+  vault.put_key("rotating", {"value": DUMMY, "inject": ASK["inject"], "grants": grants})
+  saved = client.put("/api/keys/rotating", headers=_agent_auth(db), json={"value": "rotated-dummy-key"})
+  assert saved.status_code == 200, saved.text
+  [record] = vault.list_keys()
+  assert record["grants"] == kv.validate_grants(grants) and record["inject"] == ASK["inject"]
+  [notice] = pushes
+  assert "replaced its value" in notice["body"] and "added sites" not in notice["body"]
+
+
+def test_an_agent_save_never_undoes_a_change_the_owner_made_meanwhile(client, auth, db, vault, pushes, monkeypatch):
+  """An agent's save lands only on the key it was checked against. The owner
+  removing a site while the save is on its way makes it fail (409) instead of
+  silently restoring the site; an agent creating a key never replaces one the
+  owner created meanwhile."""
+  import contextlib
+  tiles = {"host": "tiles.example.com", "methods": ["GET"], "paths": ["/*"]}
+  vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
+                         "grants": {"apps": [], "agents": True, "sites": [SITE, tiles]}})
+  real = key_vault.for_granted_apps
+
+  @contextlib.asynccontextmanager
+  async def owner_changes_keys_meanwhile(name, app_ids, installations):
+    if name == "maps":
+      [record] = [k for k in vault.list_keys() if k["name"] == "maps"]
+      vault.put_key("maps", {"revision": record["revision"], "grants": {**record["grants"], "sites": [SITE]}})
+    else:
+      vault.put_key(name, {"value": "owners-new-key", "inject": ASK["inject"], "create_only": True})
+    async with real(name, app_ids, installations):
+      yield
+  monkeypatch.setattr(key_vault, "for_granted_apps", owner_changes_keys_meanwhile)
+  agent = _agent_auth(db)
+  stale = client.put("/api/keys/maps", headers=agent, json={
+    "value": "agents-new-key", "grants": {"apps": [], "agents": True, "sites": [SITE, tiles]},
+  })
+  assert stale.status_code == 409
+  [record] = vault.list_keys()
+  assert record["grants"]["sites"] == [kv.validate_site(SITE)]
+  assert vault.reveal("maps", ("owner", "")) == DUMMY
+  created = client.put("/api/keys/fresh", headers=agent, json={
+    "value": "agents-new-key", "inject": ASK["inject"], "grants": {"agents": True, "sites": [SITE]},
+  })
+  assert created.status_code == 409
+  assert vault.reveal("fresh", ("owner", "")) == "owners-new-key"
+  assert pushes == []
+
+
+def test_owner_and_agents_never_write_an_apps_secret_through_the_old_route(client, auth, db, vault, pushes):
+  """The deprecated routes are the app's own: a value the owner or an agent
+  wrote there would become the app's key without the owner's grant."""
+  weather = _app(db, "weather")
+  path = f"/api/apps/{weather.id}/secrets/token"
+  assert client.put(path, headers=_app_auth(db, weather), json={"value": "apps-own-value"}).status_code == 204
+  for headers in (auth, _agent_auth(db)):
+    for write in (client.put(path, headers=headers, json={"value": "chosen-elsewhere"}),
+                  client.delete(path, headers=headers)):
+      assert write.status_code == 403 and "Settings › Keys" in write.json()["detail"]
+    created = client.put(f"/api/apps/{weather.id}/secrets/new_one", headers=headers, json={"value": "x" * 12})
+    assert created.status_code == 403
+  [record] = vault.list_keys()
+  assert record["origin"] == {"app": weather.id, "name": "token"} and _ids(record["grants"]) == [weather.id]
+  assert vault.reveal(record["name"], ("owner", "")) == "apps-own-value"
+  # Reading stays open to the owner and agents.
+  assert client.get(path, headers=_agent_auth(db)).text == "apps-own-value"
+  assert pushes == []
+
+
+def test_denying_a_request_names_the_exact_request_the_owner_saw(client, auth, db, vault):
+  weather, other = _app(db, "weather"), _app(db, "other")
+  for app in (weather, other):
+    assert client.post("/api/keys/requests", headers=_app_auth(db, app), json=ASK).status_code == 200
+  cards = {c["app"]: c for c in client.get("/api/keys", headers=auth).json()["requests"]}
+  card = cards[weather.id]
+  stale = client.post(f"/api/keys/requests/{card['id']}/deny", headers=auth, json={"ticket": "0" * 16})
+  assert stale.status_code == 409
+  assert client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK).json()["status"] == "pending"
+  assert client.post(f"/api/keys/requests/{card['id']}/deny", headers=auth,
+                     json={"ticket": card["ticket"]}).status_code == 200
+  assert client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK).json()["status"] == "denied"
+  # A page that sends no ticket still denies.
+  assert client.post(f"/api/keys/requests/{cards[other.id]['id']}/deny", headers=auth).status_code == 200
+
+
+def test_a_vault_that_cannot_write_or_decrypt_says_so(client, auth, db, vault, monkeypatch):
+  """A full disk or a key that no longer decrypts is the vault failing, not
+  the vault missing: each answers with the vault's own reason, never a crash
+  or "not running"."""
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [], "agents": False, "sites": [SITE]}})
+  vault.save_owned(weather.id, "token", "apps-own-value")
+  [owned] = [k for k in vault.list_keys() if k["origin"]]
+  # Agents switched off: the old route's read is refused, not crashed.
+  vault.put_key(owned["name"], {"grants": {**owned["grants"], "agents": False}})
+  old_route = f"/api/apps/{weather.id}/secrets/token"
+  assert client.get(old_route, headers=_agent_auth(db)).status_code == 403
+
+  def disk_full(*_args):
+    raise OSError(28, "No space left on device")
+  with monkeypatch.context() as patch:
+    patch.setattr(vault, "_write_store", disk_full)
+    failed = client.put("/api/keys/k", headers=auth, json={"value": "new-dummy-value"})
+  assert failed.status_code == 500 and "could not write its files" in failed.json()["detail"]
+  assert vault.reveal("k", ("owner", "")) == DUMMY
+
+  for name in ("k", owned["name"]):
+    vault._records[name]["sealed"] = vault._records[name]["sealed"][::-1]
+  for path in ("/api/keys/k/value", old_route):
+    unreadable = client.get(path, headers=auth)
+    assert unreadable.status_code == 500 and "can't be decrypted" in unreadable.json()["detail"]
+
+
+# -- what a borrow sends and answers -------------------------------------------
+
+def test_override_headers_never_leave_the_server(client, auth, db, vault, monkeypatch):
+  """Headers some servers read as the real path or method are dropped before
+  the vault, which drops them too."""
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  relayed = []
+  real_use = key_vault.vault_use
+
+  async def capture(method, target, *, headers, **kwargs):
+    relayed.extend(name.lower() for name, _ in headers)
+    return await real_use(method, target, headers=headers, **kwargs)
+  monkeypatch.setattr(key_vault, "vault_use", capture)
+  overrides = {name: "/admin" for name in ("X-Original-URL", "X-Rewrite-URL", "X-Override-URL")}
+  overrides.update({name: "DELETE" for name in ("X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override")})
+  used = client.get("/api/keys/use/k/api.example.com/v1/x",
+                    headers={**_app_auth(db, weather), **overrides, "X-Units": "c"})
+  assert used.status_code == 200
+  assert "x-units" in relayed and not {name.lower() for name in overrides} & set(relayed)
+  echoed = {name.lower() for name in json.loads(used.content)["headers"]}
+  assert not {name.lower() for name in overrides} & echoed
+
+
+def test_a_sites_answer_never_acts_on_the_mobius_origin(client, auth, db, vault):
+  """Only headers that describe the content pass; cookies, Clear-Site-Data,
+  Refresh, Link preloads and the like never reach the browser."""
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  used = client.get("/api/keys/use/k/api.example.com/v1/hostile-headers", headers=_app_auth(db, weather))
+  assert used.status_code == 200 and used.content == b"ok"
+  for name, value in _HOSTILE_HEADERS.items():
+    assert used.headers.get(name) != value, name
+  assert "set-cookie" not in used.headers and "x-vault-denied" not in used.headers
+  for name, value in _KEPT_HEADERS.items():
+    assert used.headers.get(name) == value, name
+  assert used.headers["X-Vault-Key"] == "k"
+  assert used.headers["Content-Security-Policy"].startswith("sandbox")
+  assert used.headers["X-Content-Type-Options"] == "nosniff" and used.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize("kind, where", [
+  ("relative", "https://api.example.com/api/apps/1/storage/x"),
+  ("path", "https://api.example.com/v1/next?page=2"),
+  ("absolute", "https://elsewhere.example/landing"),
+])
+def test_a_sites_redirect_is_reported_never_followed(client, auth, db, vault, kind, where):
+  """A browser would follow Location, and a relative one would send the app's
+  request back into Möbius; the app reads where it points instead."""
+  from starlette.middleware.cors import CORSMiddleware
+  from app.main import app as server
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  moved = client.get(f"/api/keys/use/k/api.example.com/v1/redirect-{kind}",
+                     headers=_app_auth(db, weather), follow_redirects=False)
+  assert moved.status_code == 307 and "location" not in moved.headers
+  assert moved.headers["X-Vault-Location"] == where
+  [cors] = [m for m in server.user_middleware if m.cls is CORSMiddleware]
+  assert "X-Vault-Location" in cors.kwargs["expose_headers"]
+
+
+def test_an_answer_that_breaks_off_reaches_the_app_incomplete(client, auth, db, vault):
+  """The site hangs up mid-answer: over a real connection the app sees an
+  incomplete body, never a shorter one that looks complete."""
+  import http.client
+  import socket
+  import time
+  import uvicorn
+  from app.main import app as server_app
+  weather = _app(db, "weather")
+  vault.put_key("k", {"value": DUMMY, "inject": ASK["inject"],
+                      "grants": {"apps": [{"id": weather.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  listener = socket.socket()
+  listener.bind(("127.0.0.1", 0))
+  port = listener.getsockname()[1]
+  server = uvicorn.Server(uvicorn.Config(server_app, lifespan="off", log_level="critical"))
+  thread = threading.Thread(target=server.run, kwargs={"sockets": [listener]}, daemon=True)
+  thread.start()
+  try:
+    for _ in range(200):
+      if server.started:
+        break
+      time.sleep(0.05)
+    assert server.started
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    connection.request("GET", "/api/keys/use/k/api.example.com/v1/truncated", headers=_app_auth(db, weather))
+    answer = connection.getresponse()
+    assert answer.status == 200 and answer.getheader("Transfer-Encoding") == "chunked"
+    with pytest.raises(http.client.IncompleteRead):
+      answer.read()
+    connection.close()
+  finally:
+    server.should_exit = True
+    thread.join(10)
+    listener.close()
+  [entry] = [e for e in vault.usage(key="k") if e["caller"] == f"app:{weather.id}"]
+  assert entry["outcome"] == "failed"
+
+
+def _use_request(raw_path: bytes, *, query: bytes = b"", headers=(), receive=None):
+  from starlette.requests import Request
+
+  async def empty():
+    return {"type": "http.request", "body": b"", "more_body": False}
+  return Request({
+    "type": "http", "method": "POST", "path": raw_path.decode("latin-1"), "raw_path": raw_path,
+    "query_string": query, "headers": list(headers),
+  }, receive or empty)
+
+
+def _app_principal(db, app):
+  from app.deps import Principal
+  return Principal(owner=db.query(models.Owner).first(), app_id=app.id,
+                   app_instance_id=app.token_nonce, scope="app")
+
+
+def test_an_oversized_body_is_refused_before_it_is_buffered(client, auth, db, vault):
+  import asyncio
+  from fastapi import HTTPException
+  from app.routes import keys as keys_routes
+  app = _app(db, "uploader")
+  path = b"/api/keys/use/k/api.example.com/v1/upload"
+  received = []
+
+  async def endless():
+    received.append(1)
+    return {"type": "http.request", "body": b"x" * (1024 * 1024), "more_body": True}
+
+  def use(request):
+    with pytest.raises(HTTPException) as refused:
+      asyncio.run(keys_routes.use_key("k", "api.example.com", "v1/upload", request,
+                                      principal=_app_principal(db, app)))
+    return refused.value.status_code
+
+  declared = [(b"content-length", str(keys_routes.MAX_USE_BODY + 1).encode())]
+  assert use(_use_request(path, headers=declared, receive=endless)) == 413
+  assert received == []
+  # A chunked body is read only until it passes the limit.
+  assert use(_use_request(path, headers=[(b"transfer-encoding", b"chunked")], receive=endless)) == 413
+  assert len(received) == keys_routes.MAX_USE_BODY // (1024 * 1024) + 1
+
+
+@pytest.mark.parametrize("raw_path, query", [
+  (b"/api/keys/use/k/api.example.com/v1/caf\xc3\xa9", b""),
+  (b"/api/keys/use/k/api.example.com/v1/x", b"city=Z\xfcrich"),
+  (b"/api/keys/use/k/api.example.com/v1/x", b"a=1\x7f"),
+])
+def test_raw_non_ascii_bytes_in_a_borrow_are_a_bad_request(client, auth, db, vault, raw_path, query):
+  import asyncio
+  from fastapi import HTTPException
+  from app.routes import keys as keys_routes
+  app = _app(db, "visitor")
+  with pytest.raises(HTTPException) as refused:
+    asyncio.run(keys_routes.use_key("k", "api.example.com", "v1/x", _use_request(raw_path, query=query),
+                                    principal=_app_principal(db, app)))
+  assert refused.value.status_code == 400 and "Percent-encode" in refused.value.detail
+
+
+# -- model providers: the paths the relay really calls --------------------------
+
+@pytest.mark.parametrize("protocol, base_url, real_paths, wrong_path", [
+  ("responses", "https://models.example.net/v1", ["/v1/responses"], "/v1/messages"),
+  ("anthropic_messages", "https://models.example.net",
+   ["/v1/messages", "/v1/messages/count_tokens"], "/responses"),
+])
+def test_a_provider_key_is_checked_on_the_paths_its_protocol_calls(
+  client, auth, db, vault, protocol, base_url, real_paths, wrong_path,
+):
+  """An app's own provider key starts on exactly the endpoints the relay
+  calls for its protocol; narrowed to the main one it keeps working, and a
+  grant for another path never lets the platform send it."""
+  app = _app(db, "provider", provider_key="api_key", base_url=base_url, protocol=protocol)
+  assert client.put(f"/api/apps/{app.id}/secrets/api_key", headers=_app_auth(db, app),
+                    json={"value": DUMMY}).status_code == 204
+  [record] = vault.list_keys()
+  site = {"host": "models.example.net", "methods": ["POST"], "paths": real_paths}
+  assert record["grants"]["apps"] == [{"id": app.id, "sites": [site]}]
+  destination = {"protocol": protocol}
+  reveal = key_vault.reveal_model_provider_key
+  for endpoint in key_vault.PROVIDER_ENDPOINTS[protocol]:
+    assert reveal(app.id, "api_key", base_url, **destination, endpoint=endpoint) == DUMMY
+
+  def grant_only(path):
+    [page] = vault.list_keys()
+    saved = client.put(f"/api/keys/{page['name']}", headers=auth, json={
+      "revision": page["revision"],
+      "grants": {**page["grants"], "apps": [{"id": app.id, "sites": [{**site, "paths": [path]}]}]},
+    })
+    assert saved.status_code == 200, saved.text
+
+  grant_only(real_paths[0])
+  assert reveal(app.id, "api_key", base_url, **destination) == DUMMY
+  assert key_vault.model_provider_key_sync(app.id, "api_key", base_url, **destination) == record["name"]
+  grant_only(wrong_path)
+  assert reveal(app.id, "api_key", base_url, **destination) is None
+  assert key_vault.model_provider_key_sync(app.id, "api_key", base_url, **destination) is None
+
+
+def test_the_anthropic_side_endpoint_needs_its_own_site(client, auth, db, vault):
+  base_url = "https://models.example.net"
+  app = _app(db, "claude-like")
+  vault.put_key("lent", {"value": DUMMY, "inject": ASK["inject"], "grants": {"apps": [{"id": app.id, "sites": [
+    {"host": "models.example.net", "methods": ["POST"], "paths": ["/v1/messages"]}]}], "agents": False, "sites": []}})
+  reveal = key_vault.reveal_model_provider_key
+  assert reveal(app.id, "lent", base_url, "anthropic_messages") == DUMMY
+  assert reveal(app.id, "lent", base_url, "anthropic_messages", "/v1/messages/count_tokens") is None
+  # An endpoint the protocol never calls is never checked, let alone sent to.
+  assert reveal(app.id, "lent", base_url, "anthropic_messages", "/v1/other") is None
+
+
+# -- the retired per-app store: saves and deletes before the import ------------
+
+def _ledger():
+  return key_vault._read_ledger(key_vault._legacy_root())
+
+
+def test_a_secret_saved_again_before_the_import_keeps_the_newer_value(client, auth, db, vault):
+  import asyncio
+  app = _app(db, "weather")
+  _legacy_secret(app.id, "token", "OLD-legacy-value")
+  path = f"/api/apps/{app.id}/secrets/token"
+  assert client.put(path, headers=_app_auth(db, app), json={"value": "NEW-after-upgrade"}).status_code == 204
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
+  owned = key_vault.owned_key_in(vault.list_keys(), app.id, "token")
+  assert vault.reveal(owned["name"], ("owner", "")) == "NEW-after-upgrade"
+  assert _ledger()[f"{app.id}/token"] == {"superseded_by": owned["name"]}
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
+  assert vault.reveal(owned["name"], ("owner", "")) == "NEW-after-upgrade"
+
+
+def test_a_secret_saved_after_the_import_replaces_the_imported_value(client, auth, db, vault):
+  import asyncio
+  app = _app(db, "weather")
+  _legacy_secret(app.id, "token", "OLD-legacy-value")
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {f"{app.id}/token": f"app{app.id}-token"}
+  path = f"/api/apps/{app.id}/secrets/token"
+  assert client.put(path, headers=_app_auth(db, app), json={"value": "NEW-after-import"}).status_code == 204
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
+  assert vault.reveal(f"app{app.id}-token", ("owner", "")) == "NEW-after-import"
+
+
+def test_a_secret_deleted_before_the_import_is_never_brought_back(client, auth, db, vault):
+  import asyncio
+  app = _app(db, "weather")
+  _legacy_secret(app.id, "gone", "deleted-by-app")
+  path = f"/api/apps/{app.id}/secrets/gone"
+  assert client.delete(path, headers=_app_auth(db, app)).status_code == 204
+  assert _ledger()[f"{app.id}/gone"] == {"deleted_by_app": True}
+  assert client.delete(path, headers=_app_auth(db, app)).status_code == 404
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
+  assert key_vault.owned_key_in(vault.list_keys(), app.id, "gone") is None and vault.list_keys() == []
+
+
+def test_a_secret_deleted_after_the_import_stays_deleted(client, auth, db, vault):
+  import asyncio
+  app = _app(db, "weather")
+  _legacy_secret(app.id, "gone", "deleted-by-app")
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {f"{app.id}/gone": f"app{app.id}-gone"}
+  assert client.delete(f"/api/apps/{app.id}/secrets/gone", headers=_app_auth(db, app)).status_code == 204
+  assert asyncio.run(key_vault.import_legacy_app_secrets({app.id})) == {}
+  assert vault.list_keys() == []

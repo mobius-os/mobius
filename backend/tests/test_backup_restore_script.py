@@ -546,6 +546,84 @@ def test_restore_round_trip_and_gates(tmp_path):
            "--i-understand-this-overwrites", "--force")
 
 
+def _vault_program():
+  import importlib.util
+  spec = importlib.util.spec_from_file_location(
+    "mobius_restore_test_vault", SCRIPTS.parent / "vault" / "keyvault.py")
+  module = importlib.util.module_from_spec(spec)
+  sys.modules[spec.name] = module
+  spec.loader.exec_module(module)
+  return module
+
+
+def _set_apps(data, slugs):
+  """The apps table of the fake /data database: id -> slug."""
+  db = sqlite3.connect(str(Path(data) / "db" / "ultimate.db"))
+  db.execute("CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, slug TEXT)")
+  db.execute("DELETE FROM apps")
+  db.executemany("INSERT INTO apps (id, slug) VALUES (?, ?)", sorted(slugs.items()))
+  db.commit()
+  db.close()
+
+
+def _vault_granting(data, kv, app_ids):
+  """A real vault in the fake /data: one key granted to ``app_ids``, and an
+  open request from the last of them."""
+  shutil.rmtree(Path(data) / ".vault")
+  vault = kv.Vault(Path(data) / ".vault")
+  site = {"host": "api.example.com", "methods": ["GET"], "paths": ["/v1/*"]}
+  vault.put_key("shared", {
+    "value": "dummy-restore-key-0123456789",
+    "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
+    "grants": {"apps": [{"id": i, "sites": [site]} for i in app_ids], "agents": True, "sites": []},
+  })
+  vault.request_access(app_ids[-1], {"key": "other", "reason": "x", "sites": [site]})
+
+
+def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_path):
+  """The backup has no secrets, so the current vault stays. Its grants name
+  this install's app ids: those the restored database lacks, or gives to
+  another app, are withdrawn, and the owner is told to review the rest."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  # Since the backup: weather was purged and its id reused by chess; maps is new.
+  _set_apps(data, {1: "notes", 2: "chess", 3: "maps"})
+  _vault_granting(data, kv, [1, 2, 3])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "was KEPT" in restored.stdout and "Settings › Keys" in restored.stdout
+  assert "app ids [2, 3]" in restored.stdout
+  vault = kv.Vault(data / ".vault")
+  [key] = vault.list_keys()
+  assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
+  assert vault.list_requests() == []
+  assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+
+
+def test_a_restore_without_secrets_never_edits_a_running_vault(tmp_path):
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: "maps"})
+  _vault_granting(data, kv, [1, 2])
+  running = kv.hold_single_instance_lock(data / ".vault")
+  try:
+    restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  finally:
+    os.close(running)
+  assert "could not update the key vault" in restored.stdout
+  assert "Review every app grant in Settings › Keys" in restored.stdout
+  [key] = kv.Vault(data / ".vault").list_keys()
+  assert [grant["id"] for grant in key["grants"]["apps"]] == [1, 2]
+
+
 def test_restore_refuses_running_server(tmp_path):
   data = _seed_data_dir(tmp_path / "data")
   target = tmp_path / "backups"

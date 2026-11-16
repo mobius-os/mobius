@@ -14,6 +14,7 @@ headers is refused even from loopback.
 
 from __future__ import annotations
 
+import functools
 import hmac
 import ipaddress
 import json
@@ -201,7 +202,9 @@ def _repaired_body(
 class _Protocol:
   """How one wire protocol crosses the relay."""
 
-  upstream_path: str  # appended to the declared base_url
+  # Appended to the declared base_url. The key's sites are checked against
+  # it, so key_vault.PROVIDER_ENDPOINTS lists the same paths.
+  upstream_path: str
   forwarded_headers: tuple[str, ...]
   key_headers: Callable[[str], dict[str, str]]
   normalize: Callable[[dict[str, Any]], dict[str, Any]]
@@ -279,7 +282,10 @@ async def _relay(provider_id: str, request: Request, protocol_name: str, suffix:
   # Bytes: a non-ASCII header is a wrong token, not a server error.
   if not hmac.compare_digest(_presented_token(request).encode(), provider.relay_token().encode()):
     return protocol.error(401, "authentication_error", "Invalid model relay token.")
-  credential = await anyio.to_thread.run_sync(provider.read_relay_key, data_dir)
+  # The key's sites must allow the exact endpoint this call reaches.
+  credential = await anyio.to_thread.run_sync(functools.partial(
+    provider.read_relay_key, data_dir, endpoint=f"{protocol.upstream_path}{suffix}",
+  ))
   if credential.unavailable or credential.key is None:
     return protocol.error(403, "permission_error", credential.unavailable or "Model key unavailable.")
   key = credential.key

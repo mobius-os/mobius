@@ -1017,8 +1017,9 @@ app.add_middleware(
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
   # X-Vault-Denied tells an app its key request was refused by the vault
-  # rather than by the site it called (/api/keys/use).
-  expose_headers=["ETag", "X-Recovery-Notification-Id", "X-Vault-Denied"],
+  # rather than by the site it called (/api/keys/use); X-Vault-Location is
+  # where a site's redirect points, never followed for the app.
+  expose_headers=["ETag", "X-Recovery-Notification-Id", "X-Vault-Denied", "X-Vault-Location"],
 )
 
 

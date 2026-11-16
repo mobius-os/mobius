@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import importlib.util
@@ -26,6 +27,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import urllib.parse
 from pathlib import Path
 
@@ -116,7 +118,8 @@ async def vault_call(
   except httpx.TimeoutException as exc:
     raise VaultTimeout("The key vault did not answer in time.") from exc
   except (httpx.TransportError, OSError) as exc:
-    raise VaultUnavailable("The key vault is not running.") from exc
+    # It took the call but closed without an answer: running, but failing.
+    raise VaultUnavailable("The key vault did not answer.") from exc
   return _settle(response)
 
 
@@ -238,69 +241,128 @@ def _vault_rules():
   return module
 
 
-def provider_site(base_url: str) -> dict | None:
-  """The one site an app's model provider sends its key to, or None.
+@dataclasses.dataclass(frozen=True)
+class GrantWidening:
+  """What a save's grants allow that the key's current grants do not."""
 
-  The runtime calls ``POST <base_url>/responses``; a base URL that is not
-  plain HTTPS on port 443 cannot be a vault site.
+  apps: tuple[int, ...] = ()  # apps that may newly use the key, or reach more
+  agents: bool = False        # the Agents switch turned on
+  sites: bool = False         # the owner's and agents' own sites reach more
+
+
+def grant_widening(before: dict | None, grants) -> GrantWidening:
+  """Compare a save's ``grants`` with ``before``, the key's current grants
+  (None for a new key), by what their sites allow under the vault's own
+  rules, so removing, narrowing, reordering or re-casing sites never counts.
+
+  ``grants`` None is an update that keeps the current grants: no change.
+  Malformed grants count as no change too; the vault refuses them. A new key
+  widens only by the apps it names: setting a key up is not widening the
+  owner's or agents' use of it.
   """
+  rules = _vault_rules()
+  if grants is None:
+    return GrantWidening()
+  try:
+    after = rules.validate_grants(grants)
+  except rules.VaultError:
+    return GrantWidening()
+  return GrantWidening(
+    apps=tuple(rules.widened_apps(before, after)),
+    agents=before is not None and after["agents"] and not before.get("agents"),
+    sites=before is not None and bool(rules.sites_outside(before["sites"], after["sites"])),
+  )
+
+
+# Where the model relay (``routes/model_relay.py``, ``_PROTOCOLS``) sends an
+# app's provider key, under the provider's declared ``base_url``, for each
+# wire protocol; the first is the protocol's main endpoint.
+PROVIDER_ENDPOINTS: dict[str, tuple[str, ...]] = {
+  "responses": ("/responses",),
+  "anthropic_messages": ("/v1/messages", "/v1/messages/count_tokens"),
+}
+
+
+def provider_site(base_url: str, protocol: str = "responses") -> dict | None:
+  """The site an app's model provider sends its key to, or None.
+
+  It allows ``POST`` on each endpoint the relay calls for ``protocol``
+  (``PROVIDER_ENDPOINTS``); a base URL that is not plain HTTPS on port 443
+  cannot be a vault site.
+  """
+  endpoints = PROVIDER_ENDPOINTS.get(protocol)
   url = urllib.parse.urlsplit(str(base_url or ""))
-  path = url.path.rstrip("/") + "/responses"
   if (
-    url.scheme != "https" or url.port not in (None, 443) or not url.hostname
+    not endpoints
+    or url.scheme != "https" or url.port not in (None, 443) or not url.hostname
     # Credentials, a query or a fragment in the address are never part of a site.
     or url.username is not None or url.password is not None or url.query or url.fragment
     # A literal address, never a site pattern: the manifest is the app's word.
-    or "*" in url.hostname or any(ch in path for ch in "*?[]")
+    or "*" in url.hostname or any(ch in url.path for ch in "*?[]")
   ):
     return None
+  paths = [url.path.rstrip("/") + endpoint for endpoint in endpoints]
   rules = _vault_rules()
   try:
     # The same path rules a use meets: no dot segments or encoded slashes that
     # would match a narrow site rule but reach another endpoint.
-    rules.normalized_request_path(path)
+    for path in paths:
+      rules.normalized_request_path(path)
   except rules.VaultError:
     return None
-  return {"host": url.hostname, "methods": ["POST"], "paths": [path]}
+  return {"host": url.hostname, "methods": ["POST"], "paths": paths}
 
 
-def model_provider_key_in(keys: list[dict], app_id: int, name: str, base_url: str) -> str | None:
-  """The key an app's declared model provider may be sent with.
+def model_provider_key_in(
+  keys: list[dict], app_id: int, name: str, base_url: str,
+  protocol: str = "responses", endpoint: str | None = None,
+) -> str | None:
+  """The key an app's declared model provider may be sent with to ``endpoint``.
 
-  The platform sends the value to the provider's ``base_url`` for the app, so
-  the app's own grant on the key, whether the app created it or the owner
-  lets it borrow one, must allow that destination by the same site rule a use
-  through the vault meets. An app's own key starts with that site
-  (``store_app_key``). A key with line breaks is never sent.
+  The platform sends the value to the provider's ``base_url`` plus the
+  endpoint the relay calls (the protocol's main one by default), for the
+  app, so the app's own grant on the key, whether the app created it or the
+  owner lets it borrow one, must allow that destination by the same site rule
+  a use through the vault meets. An app's own key starts with the protocol's
+  site (``store_app_key``). A key with line breaks is never sent.
   """
+  endpoints = PROVIDER_ENDPOINTS.get(protocol, ())
+  endpoint = endpoint if endpoint is not None else next(iter(endpoints), None)
   key = resolve_key_in(keys, app_id, name)
-  site = provider_site(base_url)
-  if key is None or site is None:
+  site = provider_site(base_url, protocol)
+  if key is None or site is None or endpoint not in endpoints:
     return None
   record = next(k for k in keys if k["name"] == key)
   if record.get("multiline"):
     return None
   allowed = _vault_rules().site_allows(
-    _grant_of(record, app_id)["sites"], site["host"], "POST", site["paths"][0],
+    _grant_of(record, app_id)["sites"], site["host"], "POST",
+    site["paths"][endpoints.index(endpoint)],
   ) is None
   return key if allowed else None
 
 
-def model_provider_key_sync(app_id: int, name: str, base_url: str) -> str | None:
+def model_provider_key_sync(
+  app_id: int, name: str, base_url: str,
+  protocol: str = "responses", endpoint: str | None = None,
+) -> str | None:
   try:
     keys = vault_call_sync("GET", "/keys")["keys"]
   except (VaultUnavailable, VaultRefused):
     return None
-  return model_provider_key_in(keys, app_id, name, base_url)
+  return model_provider_key_in(keys, app_id, name, base_url, protocol, endpoint)
 
 
-def reveal_model_provider_key(app_id: int, name: str, base_url: str) -> str | None:
-  """The value an app's declared model runtime sends to ``base_url``.
+def reveal_model_provider_key(
+  app_id: int, name: str, base_url: str,
+  protocol: str = "responses", endpoint: str | None = None,
+) -> str | None:
+  """The value an app's declared model runtime sends to ``endpoint`` under ``base_url``.
 
   The platform itself (not the app's code) reads it; the vault logs the read
   as ``platform:app-<id>``.
   """
-  key = model_provider_key_sync(app_id, name, base_url)
+  key = model_provider_key_sync(app_id, name, base_url, protocol, endpoint)
   if key is None:
     return None
   try:
@@ -485,7 +547,7 @@ def _own_provider_sites(provider: dict | None, name: str) -> list[dict]:
   """The sites a new own key ``name`` starts with: its provider's, if any."""
   if provider is None or provider.get("secret_name") != name:
     return []
-  site = provider_site(provider.get("base_url"))
+  site = provider_site(provider.get("base_url"), provider.get("protocol", "responses"))
   return [site] if site else []
 
 
@@ -558,6 +620,41 @@ def _read_ledger(root: Path) -> dict:
     return {}
 
 
+# The importer and the deprecated DELETE route both add entries; each re-reads
+# the ledger under this lock, so neither writes back a copy missing the other's.
+_ledger_lock = threading.Lock()
+
+
+def _record_in_ledger(root: Path, entry: str, outcome) -> bool:
+  """Settle one legacy file for good unless it already is; whether this did.
+
+  ``outcome`` is the vault name it moved to, ``{"superseded_by": <name>}``
+  when the app had saved the secret again before the import reached it, or
+  ``{"deleted_by_app": true}``.
+  """
+  with _ledger_lock:
+    ledger = _read_ledger(root)
+    if entry in ledger:
+      return False
+    ledger[entry] = outcome
+    _write_ledger(root / _IMPORT_LEDGER, ledger)
+    return True
+
+
+def withdraw_legacy_secret(app_id: int, name: str) -> bool:
+  """Keep an app's not-yet-imported secret ``name``, which it just deleted,
+  from ever being imported; whether there was one.
+
+  The caller holds the app's lock, as the importer does for each file.
+  """
+  if not _LEGACY_NAME_RE.fullmatch(name):
+    return False
+  root = _legacy_root()
+  if not (root / str(int(app_id)) / name).is_file():
+    return False
+  return _record_in_ledger(root, f"{int(app_id)}/{name}", {"deleted_by_app": True})
+
+
 def _pending_legacy_secrets(root: Path, ledger: dict) -> list[tuple[int, Path]]:
   """Saved values not yet moved, as (app id, file); cheap, no vault needed."""
   if not root.is_dir():
@@ -581,10 +678,14 @@ async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
   next to the old files records what moved, so a key the owner later deletes
   is never re-imported; unreadable values are retried on the next start. The
   old ciphertext stays in place for one release as a fallback copy.
+
+  The app may use the deprecated routes before the import reaches its file:
+  a value it saved since then is newer, so the old one is recorded as
+  superseded rather than written over it, and one it deleted
+  (``withdraw_legacy_secret``) is never brought back.
   """
   root = _legacy_root()
-  ledger = _read_ledger(root)
-  pending = _pending_legacy_secrets(root, ledger)
+  pending = _pending_legacy_secrets(root, _read_ledger(root))
   if not pending:
     return {}
   fernet = _legacy_fernet()
@@ -595,19 +696,24 @@ async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
     entry = f"{app_id}/{secret.name}"
     try:
       # A purge removes the file under the same lock, so a file still present
-      # here belongs to the app that is live now.
+      # here belongs to the app that is live now. The deprecated routes save
+      # and delete under it too.
       async with for_live_app(app_id):
-        if not secret.is_file():
+        if not secret.is_file() or entry in _read_ledger(root):
+          continue
+        newer = owned_key_in((await vault_call("GET", "/keys"))["keys"], app_id, secret.name)
+        if newer is not None:
+          _record_in_ledger(root, entry, {"superseded_by": newer["name"]})
           continue
         value = fernet.decrypt(secret.read_bytes()).decode()
-        ledger[entry] = await store_app_key(app_id, secret.name, value)
+        name = await store_app_key(app_id, secret.name, value)
+        _record_in_ledger(root, entry, name)
     except AppGone:
       continue
     except Exception as exc:  # unreadable or refused: retried on the next start
       log.warning("key vault: could not import secret %s: %s", entry, type(exc).__name__)
       continue
-    moved[entry] = ledger[entry]
-    _write_ledger(root / _IMPORT_LEDGER, ledger)
+    moved[entry] = name
   if moved:
     log.info("key vault: imported %d app secret(s) into the vault", len(moved))
   return moved
