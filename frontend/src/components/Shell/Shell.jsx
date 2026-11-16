@@ -237,6 +237,7 @@ import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
+import { KEYS_QUERY } from '../SettingsView/keysQueries.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -267,6 +268,7 @@ const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 // render site wraps its surface in LazySurface, which keeps a failed download
 // local to that surface and holds the launch cover while a visible one loads.
 const AppCanvas = lazy(() => import('../AppCanvas/AppCanvas.jsx'))
+const AppKeyRequestCard = lazy(() => import('../AppCanvas/AppKeyRequestCard.jsx'))
 const ProjectsDirectory = lazy(() => import('../Projects/ProjectsDirectory.jsx'))
 const ProjectWorkspace = lazy(() => import('../Projects/ProjectWorkspace.jsx'))
 const AppSourceWorkspace = lazy(() => import('../Projects/AppSourceWorkspace.jsx'))
@@ -3672,6 +3674,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Keeping this behind the notification-center interface prevents the
       // shell event switch from learning preview implementation details.
       onNotificationCreated()
+      // A new key request always notifies, so the cards over apps (and
+      // Settings › Keys) re-read the vault's requests; only mounted, enabled
+      // readers refetch.
+      void queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
     }
   }, [
     applyChatRenameEvent,
@@ -5334,6 +5340,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onShellShortcut={runShellShortcut}
               />
             </LazySurface>
+            {/* An app's key request waits over the app while the owner looks at it. */}
+            {!isSharedBrowserAccess && (
+              <Suspense fallback={null}>
+                <AppKeyRequestCard appId={id} visible={appRuntimeVisible} />
+              </Suspense>
+            )}
           </div>
           )
         })}

@@ -5,38 +5,18 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { Key, Plus, X } from '@openai/apps-sdk-ui/components/Icon'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, jsonOrThrow } from '../../api/client.js'
-import { appQueries } from '../../hooks/queries.js'
 import {
-  distinctAppNames, appLabel, relativeTime, savedByApp, replaceWarning, siteLine, sentAs, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestWording, usageSentence,
+  appLabel, relativeTime, savedByApp, replaceWarning, siteLine, sentAs, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageSentence,
   REQUESTS_SHOWN,
 } from '../../lib/keysSettingsText.js'
+import KeyRequest, { BEARER } from './KeyRequest.jsx'
+import { KEYS_QUERY, useAppNames, useKeys } from './keysQueries.js'
 import './KeysSection.css'
 
-const KEYS_QUERY = ['settings', 'keys']
 const DEFAULT_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
-const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
 // Enough history to know when each app last used the key; the page lists fewer.
 const USAGE_FETCHED = 50
 const ACTIVITY_SHOWN = 8
-
-function useKeys() {
-  return useQuery({
-    queryKey: KEYS_QUERY,
-    queryFn: async ({ signal }) => jsonOrThrow(await api.keys.list({ signal }), 'Keys'),
-    staleTime: 0,
-  })
-}
-
-/** Installed apps by numeric id: names and slugs can be reused. */
-function useAppNames() {
-  const appsQuery = appQueries.list.useQuery()
-  const apps = distinctAppNames((appsQuery.data || [])
-    .filter(app => Number.isInteger(app.id))
-    // The installation, because a removed app's id can be reused.
-    .map(app => ({ id: app.id, name: app.name || app.slug || `App ${app.id}`, installation: app.storage_generation })))
-    .sort((a, b) => a.name.localeCompare(b.name))
-  return { apps, names: Object.fromEntries(apps.map(app => [app.id, app.name])) }
-}
 
 /** One PUT carrying the key's current record with ``changes`` applied. */
 function recordFor(key, changes = {}) {
@@ -76,9 +56,6 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
   const data = keysQuery.data
   const keys = data?.keys || []
   const pending = (data?.requests || []).filter(request => request.status === 'pending')
-  // A switched-off app asking for more websites stays off after Allow; the card says so.
-  const pausedApp = request => Boolean((keys.find(key => key.name === request.key)?.grants?.apps || [])
-    .find(grant => grant.id === request.app)?.paused)
   const denied = (data?.requests || []).filter(request => request.status === 'denied')
   const refresh = () => queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
 
@@ -112,7 +89,7 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
       {shownRequests(pending, showAll).map(request => (
         <KeyRequest
           key={requestFormKey(request)}
-          request={{ ...request, app_paused: pausedApp(request) }}
+          request={{ ...request, app_paused: requestAppPaused(keys, request) }}
           names={names}
           onAnswered={refresh}
         />
@@ -146,111 +123,6 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
         </div>
       )}
     </section>
-  )
-}
-
-function Lead({ segments }) {
-  return segments.map((segment, index) => (
-    typeof segment === 'string'
-      ? <span key={index}>{segment}</span>
-      : <strong key={index}>{segment.text}</strong>
-  ))
-}
-
-function KeyRequest({ request, names, onAnswered }) {
-  const [value, setValue] = useState('')
-  const [busy, setBusy] = useState('')
-  const [error, setError] = useState('')
-  const words = requestWording(request, names)
-  // The requester only proposes: Allow grants exactly what this card shows.
-  // An app's sites go to that app's own grant; an agent's to the sites for
-  // the owner and agents.
-  const inject = request.inject || BEARER
-  const sites = request.sites || []
-
-  async function answer(kind) {
-    setBusy(kind)
-    setError('')
-    try {
-      const response = kind === 'approve'
-        ? await api.keys.approve(request.id, {
-          ticket: request.ticket, sites, ...(words.needsValue ? { value, inject } : {}),
-        })
-        : await api.keys.deny(request.id, request.ticket)
-      await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Not now')
-      onAnswered()
-    } catch (err) {
-      setError(err.message)
-      setBusy('')
-    }
-  }
-
-  const denyButton = (
-    <button
-      type="button"
-      className={`settings__btn settings__btn--sm${words.allowHidden ? '' : ' settings__btn--outline'}`}
-      onClick={() => answer('deny')}
-      disabled={Boolean(busy)}
-    >
-      Not now
-    </button>
-  )
-  const allowButton = (label, primary) => (
-    <button
-      type="button"
-      className={`settings__btn settings__btn--sm${primary ? '' : ' settings__btn--outline'}`}
-      onClick={() => answer('approve')}
-      disabled={Boolean(busy) || (words.needsValue && !value)}
-    >
-      {busy === 'approve' ? 'Allowing…' : label}
-    </button>
-  )
-
-  return (
-    <div className="settings-keys__request" role="group" aria-label={`${words.who} asks to use ${request.key}`}>
-      <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
-      {request.reason && <p className="settings-keys__muted settings-keys__reason">“{request.reason}”</p>}
-      {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
-      <p className="settings-keys__muted">{words.note}</p>
-      {words.needsValue && (
-        <input
-          className="settings-keys__input"
-          type="password"
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          placeholder="Paste the key"
-          aria-label="Key value"
-          autoComplete="new-password"
-          spellCheck={false}
-        />
-      )}
-      <details className="settings-keys__details">
-        <summary>Details</summary>
-        <ul className="settings-keys__details-list">
-          {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
-          {words.needsValue && <li>Sent as <code>{sentAs(inject)}</code></li>}
-          <li>Saved as “{request.key}”</li>
-        </ul>
-      </details>
-      {words.allowHidden && (
-        <details className="settings-keys__details">
-          <summary>Use {words.savedBy}'s key anyway</summary>
-          <div className="settings-keys__details-body">
-            <p className="settings-keys__muted">
-              {words.who}'s requests would be signed with {words.savedBy}'s account, and {words.savedBy} can change that key at any time.
-            </p>
-            <div className="settings-keys__actions settings-keys__actions--start">
-              {allowButton(`Use ${words.savedBy}'s key`, false)}
-            </div>
-          </div>
-        </details>
-      )}
-      {error && <Alert color="danger" variant="soft" description={error} />}
-      <div className="settings-keys__actions">
-        {denyButton}
-        {!words.allowHidden && allowButton('Allow', true)}
-      </div>
-    </div>
   )
 }
 

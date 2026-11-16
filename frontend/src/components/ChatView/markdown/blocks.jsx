@@ -8,6 +8,8 @@ import { useMathHtml } from './math.js'
 import { highlightSync, highlightCode } from './highlight.js'
 import AppBlock from './AppBlock.jsx'
 import { appBlockFromToken } from './appBlock.js'
+import KeyRequestBlock from './KeyRequestBlock.jsx'
+import { keyRequestBlockFromToken } from '../../../lib/keyRequestPlaces.js'
 import { followTableScrollbarPointer, tableScrollbarThumb } from './tableScrollbar.js'
 
 /**
@@ -305,7 +307,11 @@ export function BlockToken({ token, onInternalNav, mediaDimensions, allowAppBloc
       // Only the owner's assistant replies opt in; peer notes, documents,
       // errors and every other Markdown surface keep the fence as plain code.
       const block = allowAppBlocks ? appBlockFromToken(token) : null
-      return block ? <AppBlock block={block} onInternalNav={onInternalNav} /> : <CodeBlock token={token} />
+      if (block) return <AppBlock block={block} onInternalNav={onInternalNav} />
+      const keyRequest = allowAppBlocks ? keyRequestBlockFromToken(token) : null
+      return keyRequest
+        ? <KeyRequestBlock block={keyRequest} onInternalNav={onInternalNav} />
+        : <CodeBlock token={token} />
     }
     case 'table': return (
       <Table

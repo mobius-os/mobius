@@ -207,6 +207,38 @@ export function requestAppName(request, names) {
   return names[request.app] || request.app_name || `App ${request.app}`
 }
 
+/** A switched-off app asking for more websites stays off after Allow; its card says so. */
+export function requestAppPaused(keys, request) {
+  return Boolean(((keys || []).find(key => key.name === request.key)?.grants?.apps || [])
+    .find(grant => grant.id === request.app)?.paused)
+}
+
+/** Who a request speaks for, mid-sentence: "your agent" or the app's name. */
+function askerInSentence(request, names) {
+  return request.requester === 'agent' ? 'your agent' : requestAppName(request, names)
+}
+
+/**
+ * The owner's answer as one sentence: ``kind`` is ``'approve'`` or
+ * ``'deny'``. ``message`` is what the chat card posts as the owner's own
+ * message so the asking agent resumes ("Allowed: your agent may send maps to
+ * tiles.example.com."); ``line`` is what the answered card then says. Both
+ * name the key and its websites, never a value.
+ */
+export function keyAnswerWords(request, kind, names) {
+  const who = askerInSentence(request, names)
+  const hosts = hostList((request.sites || []).map(site => site.host))
+  const key = request.key
+  if (kind === 'approve') {
+    return hosts
+      ? { message: `Allowed: ${who} may send ${key} to ${hosts}.`, line: `You allowed ${who} to send ${key} to ${hosts}.` }
+      : { message: `Allowed: ${who} may use ${key}.`, line: `You allowed ${who} to use ${key}.` }
+  }
+  return hosts
+    ? { message: `Not now: ${who} may not send ${key} to ${hosts}.`, line: `You said no to ${who} sending ${key} to ${hosts}.` }
+    : { message: `Not now: ${who} may not use ${key}.`, line: `You said no to ${who} using ${key}.` }
+}
+
 /**
  * What the request asks for. A key another app saved for itself is not the
  * owner's (``savedBy`` names that app), also when this app already uses it

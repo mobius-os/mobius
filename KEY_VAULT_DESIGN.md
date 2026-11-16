@@ -73,6 +73,12 @@ Status: draft for review.
 2. **Approve.** The owner sees the app's name, reason, requested sites,
    methods and paths and, for a new key, how it would be sent, in Settings ›
    Keys, and approves or denies; only the owner's own input can approve. The
+   same card also waits where it was asked, answered through the same
+   owner-only routes: an agent's in the chat that asked (the vault keeps that
+   chat, the agent ends its turn with a `mobius-key-request` block naming the
+   request, and the owner's answer there is posted to that chat as their own
+   message, which resumes the agent), and an app's over the app's window while
+   the owner has it open. The
    request only proposes: approval applies the sites and slot the owner's
    answer carries (a new key answered without a slot is sent as
    `Authorization: Bearer`). The sites go to that app's own grant. An existing

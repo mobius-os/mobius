@@ -67,7 +67,7 @@ instead of writing your own: `["python3",
 [--prefix TEXT]` or `--query NAME` when the service does not take
 `Authorization: Bearer`). Save it without sites: the first time you borrow it
 for a site, ask the owner with `POST /api/keys/requests` and they approve that
-site on a card. Add `--site api.example.com:GET,POST:/v1/*` only when the
+site on a card (below). Add `--site api.example.com:GET,POST:/v1/*` only when the
 owner told you where the key goes. The owner then sees and manages it in
 Settings › Keys. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
@@ -77,6 +77,18 @@ ask the owner whether to replace it and add `--replace` only when they said
 so. After a failed receipt, check the list again before asking the owner a
 second time. It writes to the vault directly, so the owner gets no
 notification of a replacement: tell them yourself.
+
+When `POST /api/keys/requests` answers `pending` (or `sites_request` is
+`pending`), end your turn with one block per request, holding only the
+answer's `id`, and one sentence saying a card is waiting here:
+
+```mobius-key-request
+{"id":"agent-NAME"}
+```
+
+The owner answers that card in this chat (Settings › Keys lists it too);
+their answer arrives as a message ("Allowed: …" or "Not now: …") that
+resumes you, so do not poll.
 
 Use the key by borrowing it, not reading it: send the request through
 `mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and

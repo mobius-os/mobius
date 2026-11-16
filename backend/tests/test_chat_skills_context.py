@@ -810,3 +810,17 @@ def test_core_guidance_names_the_current_goal_completion_syntax():
     assert 'update_goal(complete: true, finished_claims: ["WORK_KEY"])' in text
     assert "A refusal is an answer; do not retry it through the script" in text
     assert "complete --finished" not in text
+
+
+def test_an_agents_pending_key_request_ends_the_turn_with_its_card_in_the_chat():
+  """An agent asking for a key puts the owner's card in its own chat and is
+  resumed by the owner's answer, so the skills name the block and the answer
+  message rather than sending the owner to Settings and polling."""
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  for name in ("building-apps.md", "secure-input.md"):
+    text = (seed_dir / name).read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert "```mobius-key-request\n{\"id\":\"agent-" in text, name
+    assert "one sentence saying a card is waiting here" in normalized, name
+    assert "(\"Allowed: …\" or \"Not now: …\") that resumes you" in normalized, name
