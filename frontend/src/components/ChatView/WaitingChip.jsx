@@ -4,6 +4,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 import { ChevronRight, Clock } from '@openai/apps-sdk-ui/components/Icon'
 import WaitingCard from './WaitingCard.jsx'
 import { HelperEventConversation, HelperRowLine } from './HelperResultCard.jsx'
+import { useHelperPreview } from './helperPreviewSlot.jsx'
 import { useCountdownNow } from './countdownClock.js'
 import { useDisclosureState } from './disclosureState.js'
 import {
@@ -215,7 +216,7 @@ export default function WaitingChip({
   // request, and the helper whose conversation is open.
   const [expanded, setExpanded] = useState({ key: null, command: false })
   const [stops, stopWait] = useWaitStops(onCancel)
-  const [openHelper, setOpenHelper] = useState(null)
+  const [openHelper, setOpenHelper] = useHelperPreview()
   const [listOpen, setListOpen] = useDisclosureState(chatId, HANDOFF_LIST_DISCLOSURE)
   // The reader owns the preview lifetime, not the transient list membership.
   // Keep the latest row snapshot; the conversation endpoint owns live status

@@ -10,6 +10,7 @@ import { helperPresentation, isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { useHelperPreview } from './helperPreviewSlot.jsx'
 import { helperTitle } from './helperTitle.js'
 import { modelDisplayName } from './chatUsageFormat.js'
 import { modelQueries } from '../../hooks/queries.js'
@@ -111,16 +112,17 @@ export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
   </div>
 }
 
-// A transcript row stays where it was launched, so it owns its dialog.
+// A transcript row stays where it was launched, so it renders its dialog; the
+// pane decides which one row's preview is open.
 export function HelperRow({ event, chatId, onInternalNav }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useHelperPreview()
   const rowRef = useRef(null)
   return <HelperRowLine ref={rowRef} event={event} chatId={chatId} onOpen={() => setOpen(true)}>
     {open && <HelperEventConversation
       event={event}
       chatId={chatId}
       host={rowRef.current?.closest('.chat')}
-      onClose={() => setOpen(false)}
+      onClose={() => setOpen(null)}
       onInternalNav={onInternalNav}
     />}
   </HelperRowLine>

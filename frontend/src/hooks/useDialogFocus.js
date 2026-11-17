@@ -78,6 +78,14 @@ function unlockBodyScroll() {
   }
 }
 
+// A normal modal blocks every branch up to body; a local one only the branches
+// inside its boundary; a non-modal dialog without a boundary blocks nothing.
+function blockedElements(container, modal, boundaryRef) {
+  if (modal) return dialogSiblingElements(container)
+  const boundary = boundaryRef?.current
+  return boundary ? dialogSiblingElements(container, boundary) : []
+}
+
 /** Focus trap, Escape handling, restoration, and sibling inerting for dialogs. */
 export default function useDialogFocus({
   open = true,
@@ -102,6 +110,10 @@ export default function useDialogFocus({
   closeOnEscapeRef.current = closeOnEscape
   const shouldCloseOnEscapeRef = useRef(shouldCloseOnEscape)
   shouldCloseOnEscapeRef.current = shouldCloseOnEscape
+  const inertBoundaryRefRef = useRef(inertBoundaryRef)
+  inertBoundaryRefRef.current = inertBoundaryRef
+  // What the open dialog currently blocks: { container, boundaryRef, elements }.
+  const blockedRef = useRef(null)
 
   useEffect(() => {
     if (!open) return undefined
@@ -118,19 +130,10 @@ export default function useDialogFocus({
     // A normal modal inerts sibling branches all the way to body. A local
     // modal stops at its explicit boundary, so only the owning surface is
     // blocked and sibling workspace panes remain interactive.
-    const boundary = inertBoundaryRef?.current
-    const siblings = []
-    if (modal) {
-      dialogSiblingElements(container).forEach(element => {
-        siblings.push(element)
-        holdInert(element)
-      })
-    } else if (boundary) {
-      dialogSiblingElements(container, boundary).forEach(element => {
-        siblings.push(element)
-        holdInert(element)
-      })
-    }
+    const boundaryRef = inertBoundaryRefRef.current
+    const blocked = { container, boundaryRef, elements: blockedElements(container, modal, boundaryRef) }
+    blocked.elements.forEach(holdInert)
+    blockedRef.current = blocked
 
     const focusInitial = () => {
       if (
@@ -185,7 +188,8 @@ export default function useDialogFocus({
       document.removeEventListener('keydown', onKeyDown, true)
       const stackIndex = dialogStack.lastIndexOf(stackEntry)
       if (stackIndex !== -1) dialogStack.splice(stackIndex, 1)
-      siblings.forEach(releaseInert)
+      blocked.elements.forEach(releaseInert)
+      if (blockedRef.current === blocked) blockedRef.current = null
       if (lockScroll) unlockBodyScroll()
       if (shouldRestoreFocus?.() === false) return
       if (explicitRestoreTarget) {
@@ -194,5 +198,25 @@ export default function useDialogFocus({
         previouslyFocused?.focus?.({ preventScroll: true })
       }
     }
-  }, [open, containerRef, initialFocusRef, restoreFocusRef, shouldRestoreFocus, lockScroll, modal, inertBoundaryRef])
+  }, [open, containerRef, initialFocusRef, restoreFocusRef, shouldRestoreFocus, lockScroll, modal])
+
+  // A local dialog's blocked area may change while it stays open: a helper
+  // preview docks beside a wide chat and covers a narrow one. Swapping the
+  // boundary only re-inerts; it never redoes focus capture and restore. Focus
+  // that the new block would strand moves into the dialog.
+  useEffect(() => {
+    const blocked = blockedRef.current
+    if (!blocked || blocked.boundaryRef === inertBoundaryRef) return
+    const { container } = blocked
+    const next = blockedElements(container, modal, inertBoundaryRef)
+    const active = document.activeElement
+    const stranded = !!active && !container.contains(active) && next.some(element => element.contains(active))
+    next.forEach(holdInert)
+    blocked.elements.forEach(releaseInert)
+    Object.assign(blocked, { boundaryRef: inertBoundaryRef, elements: next })
+    if (stranded && dialogStack.at(-1)?.container === container) {
+      const target = initialFocusRef?.current || dialogFocusableElements(container)[0] || container
+      target?.focus?.({ preventScroll: true })
+    }
+  }, [modal, inertBoundaryRef, initialFocusRef])
 }

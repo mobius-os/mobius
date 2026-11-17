@@ -1,4 +1,4 @@
-/* HelperConversation shows one helper agent's own conversation, read-only, over its parent chat. */
+/* HelperConversation shows one helper agent's own conversation, read-only, beside or over its parent chat. */
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -32,8 +32,9 @@ async function readConversation(chatId, taskId, signal) {
   }
 }
 
-// The dialog draws its own overlay (HelperConversation.css); `host` is the
-// chat pane it covers.
+// The dialog draws its own overlay (HelperConversation.css). `host` is the chat
+// pane it belongs to: a pane wide enough for two columns keeps its chat usable
+// with the preview docked beside it; a narrower one is covered and blocked.
 export default function HelperConversation({
   chatId, taskId, name, status, host, onClose, onInternalNav,
 }) {
@@ -51,9 +52,10 @@ export default function HelperConversation({
   const refresh = !!currentStatus && !isTerminalHelperStatus(currentStatus) && state.phase !== 'unavailable'
   const running = presentation.state === 'working'
 
+  // Without a host the dialog is modal over the whole page. Docking only swaps
+  // what it blocks, so crossing the width threshold keeps focus where it is.
   useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose,
-    modal: !host && !docked, lockScroll: !host && !docked,
-    inertBoundaryRef: docked ? undefined : hostRef })
+    modal: !host, inertBoundaryRef: docked ? undefined : hostRef })
 
   useEffect(() => {
     const controller = new AbortController()
@@ -92,7 +94,7 @@ export default function HelperConversation({
         ref={dialogRef}
         className="helper-convo"
         role="dialog"
-        aria-modal={!host && !docked ? true : undefined}
+        aria-modal={host ? undefined : true}
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}
       >

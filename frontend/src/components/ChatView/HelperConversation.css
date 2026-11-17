@@ -37,7 +37,6 @@
 .helper-convo__open {
   flex: none;
   align-self: center;
-  color: var(--text);
   font-size: 13px;
   text-underline-offset: 3px;
 }
@@ -108,13 +107,26 @@
 .helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
 .helper-convo__text { font-size: 14px; }
 
+/* Links in the preview, its markdown and its Open chat action, use the
+   foreground colour rather than the parent chat's link accent: a preview is
+   read beside the chat, and accent links in a second column compete with it.
+   The underline keeps them recognisable. Scoped through .md-blocks so it
+   outranks the markdown link rule (.md-blocks a) by specificity, not by
+   stylesheet order. */
+.helper-convo .md-blocks a,
+.helper-convo__open { color: var(--text); }
 
-/* Dock only when this chat has room for two readable columns. Narrow workspace
-   panes keep the overlay even when the overall desktop window is wide. */
+/* Dock only when this chat has room for two readable columns
+   (useHelperPreviewDocked). Narrow workspace panes keep the overlay even when
+   the overall desktop window is wide. */
 .chat:has(> .helper-convo__overlay--docked) > .chat__scroll { width: calc(50% + 32px); }
 .chat:has(> .helper-convo__overlay--docked) > .chat__foot { right: 50%; }
 .helper-convo__overlay--docked {
   inset: 0 0 0 50%;
+  /* A column of the chat, not a dialog over it: chat-level overlays the chat
+     stays usable for (the chat summary at 210, the diff viewer at 220) open
+     above it. Still above the chat's own layers (file-drop target at 90). */
+  z-index: 200;
   padding: 0;
   background: var(--bg);
   place-items: stretch;
@@ -129,4 +141,3 @@
   background: var(--bg);
   box-shadow: none;
 }
-.helper-convo a { color: var(--text); }

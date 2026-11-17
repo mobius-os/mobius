@@ -3,6 +3,7 @@ import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import './SubagentChips.css'
 import { toolActivityLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { useHelperPreview } from './helperPreviewSlot.jsx'
 import { agentHelperEntries, elapsedLabel } from './toolTasks.js'
 
 // Helper ROWS for a delegating turn's background subagents, rendered inside an
@@ -85,8 +86,8 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
     return () => clearInterval(id)
   }, [anyRunning])
 
-  // { taskId, host }: the open helper and the chat pane its dialog covers.
-  const [opened, setOpened] = useState(null)
+  // { taskId, host }: the open helper and the chat pane it belongs to.
+  const [opened, setOpened] = useHelperPreview()
 
   if (helpers.length === 0) return null
   const openHelper = opened && helpers.find(([taskId]) => taskId === opened.taskId)?.[1]
