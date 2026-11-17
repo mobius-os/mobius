@@ -285,8 +285,7 @@ def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when another provider owns `model` and `provider` does not.
 
   Ownership is the (provider, model) pair: an id that two providers both list
-  (an app provider accepted before Codex discovery listed the same id) stays
-  valid for each of them. Use this to reject cross-provider mismatches without
+  (an app declaration and Codex discovery, say) stays valid for each of them. Use this to reject cross-provider mismatches without
   blocking unknown / future model names — the SDK is the authority on what it
   accepts; we only intercept sending a Codex model to Claude or vice versa."""
   if model in known_model_ids(provider):
@@ -1841,16 +1840,14 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
-  # Collisions are checked when a declaration is accepted. Built-in, Möbius and
-  # earlier app ids always collide. Claude/Codex discovery only blocks ids an
-  # app had not already been accepted with: discovery that later lists the same
-  # id shares it by (provider, model) rather than evicting a live provider and
-  # orphaning its chats.
-  claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
-  claimed_models.update(known_model_ids("mobius"))
-  discovered_models: set[str] = set()
-  for provider_id in ("claude", "codex"):
-    discovered_models.update(known_model_ids(provider_id))
+  # Built-in, Möbius and earlier apps' declared ids collide, exactly as for the
+  # Möbius catalogue. Claude/Codex discovery does not: an id both list is
+  # shared by (provider, model), so registration never depends on discovery
+  # timing and an app update cannot evict a live provider and orphan its chats.
+  claimed_models = {
+    mid for pid in ("claude", "codex", "mobius")
+    for mid in known_model_ids(pid, include_discovered=False)
+  }
   for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
@@ -1863,15 +1860,7 @@ def _apply_app_model_declarations(
       continue
     model_ids = [row.get("id") for row in models if isinstance(row, dict)]
     current = PROVIDERS.get(provider_id)
-    accepted = (
-      set(known_model_ids(provider_id))
-      if provider_id in _app_provider_ids and isinstance(current, AppModelProvider)
-      else set()
-    )
-    if len(model_ids) != len(models) or any(
-      mid in claimed_models or (mid in discovered_models and mid not in accepted)
-      for mid in model_ids
-    ):
+    if len(model_ids) != len(models) or any(mid in claimed_models for mid in model_ids):
       _model_registry_log.warning("app model provider %s has colliding model ids", provider_id)
       continue
     next_ids.add(provider_id)
