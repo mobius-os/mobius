@@ -5517,11 +5517,11 @@ export default function ChatView({
   // then just looks stopped. Detect the tail resumable block so the offscreen
   // nudge + SR status can name the recovery. A pause is terminal (the turn has
   // ended), so it only ever lives in `messages`, never in a live stream item.
-  const recoveryMessages = useMemo(() => combineRecoveryHistory(supersedeResumedPauseBlocks(messages, {
+  const recoveryMessages = useMemo(() => supersedeResumedPauseBlocks(messages, {
     running: serverRunning && !hasPendingQuestion,
     activeAssistantMessageId,
     streamAssistantMessageId,
-  })), [messages, serverRunning, hasPendingQuestion, activeAssistantMessageId, streamAssistantMessageId])
+  }), [messages, serverRunning, hasPendingQuestion, activeAssistantMessageId, streamAssistantMessageId])
   const pendingResumeBlock = tailResumableBlock(recoveryMessages)
   const resourcePause = isResourcePause(pendingResumeBlock)
     ? pendingResumeBlock
@@ -5907,12 +5907,19 @@ export default function ChatView({
     () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
     [settledMessages, activeSteerPrefix],
   )
-  const peerTimeline = usePeerTimeline(
+  const projectedTimeline = usePeerTimeline(
     chatId,
     displayedMessages,
     !hidden && transcriptPaintable,
     streamItems,
   )
+  // Settled pause history joins its resume notice only where the projected
+  // timeline draws nothing between them.
+  const peerTimeline = useMemo(() => {
+    const combined = combineRecoveryHistory(projectedTimeline.messages, projectedTimeline)
+    return combined === projectedTimeline.messages
+      ? projectedTimeline : { ...projectedTimeline, messages: combined }
+  }, [projectedTimeline])
   const committedReplyGroupsRef = useRef(null)
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0

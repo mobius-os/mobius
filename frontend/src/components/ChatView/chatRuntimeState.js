@@ -104,6 +104,15 @@ export const PAUSE_RECORD_BLOCK = 'pause_record'
 // when the work paused again immediately.
 const DELIBERATE_CONTINUATIONS = new Set(['manual', 'question_answer', 'helper_answer'])
 
+// A continuation marker, or a recovery run's answer carrying its projected
+// continuation reason, resumes whatever the previous visible row paused.
+const resumesPreviousRow = message => isContinuationMessage(message)
+  || (message?.role === 'assistant' && !!message.continuation_reason)
+
+// Nothing but lifecycle history would remain once the pause block is gone.
+const onlyLifecycle = (row, remainingBlocks) => remainingBlocks.length === 0
+  && !row.goal_summaries?.length && !row.wait_summaries?.length
+
 const samePause = (a, b) => (a?.pause?.kind ?? null) === (b?.pause?.kind ?? null)
   && (a?.code ?? null) === (b?.code ?? null)
 
@@ -138,9 +147,8 @@ export function supersedeResumedPauseBlocks(messages, {
     if (projected === messages) projected = [...messages]
     const remainingBlocks = blocks.slice(0, -1)
     const repeated = pauseResumedBy.get(index)
-    if (repeated && samePause(repeated, tail) && remainingBlocks.length === 0
-        && !DELIBERATE_CONTINUATIONS.has(previous.continuation_reason)
-        && !previous.goal_summaries?.length && !previous.wait_summaries?.length) {
+    if (repeated && samePause(repeated, tail) && onlyLifecycle(previous, remainingBlocks)
+        && !DELIBERATE_CONTINUATIONS.has(previous.continuation_reason)) {
       projected[index] = { ...previous, blocks: [], hidden: true }
       return repeated
     }
@@ -157,10 +165,7 @@ export function supersedeResumedPauseBlocks(messages, {
     }
     if (message?.hidden) continue
 
-    // A recovery run's answer carries its projected continuation reason.
-    const resumes = isContinuationMessage(message)
-      || (message?.role === 'assistant' && !!message.continuation_reason)
-    if (resumes && previousVisibleIndex >= 0) {
+    if (resumesPreviousRow(message) && previousVisibleIndex >= 0) {
       const settled = supersedePause(previousVisibleIndex)
       if (settled) pauseResumedBy.set(index, settled)
     }
@@ -177,10 +182,32 @@ export function supersedeResumedPauseBlocks(messages, {
   return projected
 }
 
-/** Combine adjacent settled interruption events for display only. Prose,
- * owner messages, questions and Goal/Wait outcomes remain hard boundaries.
- * Original rows and timestamps remain untouched for recovery and search. */
-export function combineRecoveryHistory(messages) {
+const EMPTY_TIMELINE = new Map()
+const combinedRecoveryRows = new WeakMap()
+const sameRecoveryEvent = (a, b) => a.type === b.type && a.source === b.source
+  && a.ts === b.ts && a.reason === b.reason
+
+// The same resumed row and events reuse one display copy, so the reply
+// projection's identity check keeps the rendered answer across recomputes.
+function withRecoveryEvents(row, events) {
+  const cached = combinedRecoveryRows.get(row)
+  if (cached?.recovery_events.length === events.length
+      && cached.recovery_events.every((event, index) => sameRecoveryEvent(event, events[index]))) {
+    return cached
+  }
+  const combined = { ...row, recovery_events: events }
+  combinedRecoveryRows.set(row, combined)
+  return combined
+}
+
+/** Fold a settled pause record into the notice of the row that resumed it, for
+ * display only. Runs on the peer-timeline projection: a peer note or helper
+ * result drawn between the two rows (in a slot, or positioned on the pause row
+ * or a hidden carrier between them) is a boundary like prose, questions and
+ * Goal/Wait outcomes, so the timeline keeps its order. A row left with nothing
+ * but lifecycle history is hidden and its earlier events carried forward.
+ * Source rows and timestamps stay untouched for recovery and search. */
+export function combineRecoveryHistory(messages, { slots = EMPTY_TIMELINE, positions = EMPTY_TIMELINE } = {}) {
   if (!Array.isArray(messages)) return messages
   let result = messages
   let previousIndex = -1
@@ -188,28 +215,36 @@ export function combineRecoveryHistory(messages) {
     if (result === messages) result = [...messages]
     result[index] = row
   }
+  const positioned = row => row?.id != null && !!positions.get(row.id)?.length
+  const timelineBetween = (from, to) => {
+    if (positioned(messages[from])) return true
+    for (let index = from + 1; index <= to; index += 1) {
+      if (slots.get(index)?.length || (index < to && positioned(messages[index]))) return true
+    }
+    return false
+  }
   for (let index = 0; index < messages.length; index += 1) {
-    const row = result[index]
-    if (row.hidden) continue
-    if ((isContinuationMessage(row) || row.continuation_reason) && previousIndex >= 0) {
-      const previous = result[previousIndex]
-      const blocks = previous.blocks || []
-      const pause = blocks.at(-1)
-      if (pause?.type === PAUSE_RECORD_BLOCK) {
-        const remaining = blocks.slice(0, -1)
-        const carriesHistory = remaining.length === 0 && !previous.content
-          && !previous.goal_summaries?.length && !previous.wait_summaries?.length
-        const events = [
-          ...(carriesHistory ? previous.recovery_events || [] : []),
-          // The answer's timestamp predates the pause; never present it as pause time.
-          { type: 'pause', source: pause.source, ts: pause.source.ts },
+    const row = messages[index]
+    if (row?.hidden) continue
+    const previous = result[previousIndex]
+    const pause = previous?.blocks?.at(-1)
+    if (resumesPreviousRow(row) && pause?.type === PAUSE_RECORD_BLOCK
+        && !timelineBetween(previousIndex, index)) {
+      const remaining = previous.blocks.slice(0, -1)
+      // A resumed row that paused again folds only when its own resume is
+      // already recorded; otherwise its notice would disappear.
+      const folds = onlyLifecycle(previous, remaining)
+        && (!previous.continuation_reason || !!previous.recovery_events)
+      if (folds || remaining.length) {
+        write(previousIndex, folds
+          ? { ...previous, blocks: [], hidden: true }
+          : { ...previous, blocks: remaining })
+        write(index, withRecoveryEvents(row, [
+          ...(folds ? previous.recovery_events || [] : []),
+          // The paused run's end; the row's own ts is when its answer began.
+          { type: 'pause', source: pause.source, ts: previous.run_ended_ts },
           { type: 'resume', reason: row.continuation_reason, ts: row.ts },
-        ]
-        write(previousIndex, {
-          ...previous, blocks: remaining,
-          ...(carriesHistory ? { hidden: true } : {}),
-        })
-        write(index, { ...row, recovery_events: events })
+        ]))
       }
     }
     previousIndex = index

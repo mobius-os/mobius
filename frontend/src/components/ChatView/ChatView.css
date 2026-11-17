@@ -2296,10 +2296,11 @@
   overflow: hidden;
 }
 
-/* A marker embedded in an answer needs the same separation as Goal history;
-   standalone marker rows already receive the message-list gap. */
-.chat__msg--assistant .chat__marker { margin-top: 10px; }
-.chat__answer-cause .chat__marker { margin-top: 0; }
+/* A marker that follows earlier content in an answer takes the same separation
+   as Goal history. Markers opening an answer, standalone rows and compaction
+   cards (nested in .chat__tools) keep their existing spacing; the answer cause
+   already owns the gap below it. */
+.chat__markdown-copy-surface > :not(.chat__answer-cause) + .chat__marker { margin-top: 10px; }
 .chat__recovery-events { list-style: none; margin: 8px 0 0; padding: 0; }
 .chat__recovery-events li {
   display: flex;
