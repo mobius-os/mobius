@@ -52,7 +52,7 @@ old version, a fresh decision.
 
 `--options` takes only the editable prompts (`review_prompt`, `merge_prompt`,
 plus `fix_prompt` and `max_rounds` in `review_fix_merge`) and the opt-ins
-`post_review`, `propose_verdict` and `agent_submits_verdict`. `presets` also
+`post_review` and `propose_verdict`. `presets` also
 returns `mandatory_instructions` for display; the platform sets those itself,
 so pass only the fields you change, never the whole presets object.
 
@@ -87,7 +87,9 @@ Repeating the same saved request returns its existing run.
 
 ## Execute the returned run
 
-Follow the returned `brief` and exact selected heads. The parent reports
+Follow the returned `brief` and exact selected heads. The owner's review
+prompt decides whether independent review children are used; review alone
+when it says so. The parent reports
 `/outcomes` with full-diff evidence and all six scope values. `review` records
 historical evidence against its pinned head/base even when the target base
 later moves; only `review_merge` requires live base proof. The guarded merge
@@ -133,6 +135,22 @@ another tap: the server submits the proposal right after the agent sends
 it, through the same guarded path. If GitHub refuses it, it waits for the
 owner. It is never available for `review_merge`, whose merge always follows
 the owner's own approval.
+
+Only the owner can turn it on, by choosing "Agent posts" in Contribute's
+review window. An agent's preview or start that asks for it is refused
+(403), whatever the owner said in chat and whatever an earlier run was
+granted: start the review with `propose_verdict` alone, so its verdict waits
+for the owner's Send in Contribute. When a review could not be sent because
+the PR moved, say so and let the owner start the next one there.
+
+In a run that has it, send the verdict: that choice is the owner's approval,
+so do not show the text or ask in chat first. In a run without it, the
+proposal waits in Contribute; do not ask in chat there either.
+
+Ask for changes only when a finding must be fixed before the PR merges. When
+every finding is a small note, add `"blocking": false` to the `needs_you`
+outcome: the proposal is then a plain COMMENT with the same findings, never a
+change request. `blocking` is frozen with the rest of the evidence.
 
 On the connected account's own PR nothing is proposed or posted, whatever
 the grant says: the result stays private for the owner to fix or set aside.

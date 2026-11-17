@@ -16,7 +16,11 @@ EVIDENCE_FIELDS = ("state", "summary", "scope", "tests", "tests_passed", "review
 
 
 def evidence(outcome):
-  return {field: outcome.get(field) for field in EVIDENCE_FIELDS}
+  frozen = {field: outcome.get(field) for field in EVIDENCE_FIELDS}
+  # Kept only when set, so evidence frozen before non-blocking findings existed still compares equal.
+  if outcome.get("blocking") is False:
+    frozen["blocking"] = False
+  return frozen
 
 
 def require_same_evidence(previous, proposed):
