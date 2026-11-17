@@ -824,6 +824,22 @@ async def forget_app(app_id: int) -> None:
     await vault_call("DELETE", f"/apps/{int(app_id)}", caller="platform:app-purge")
 
 
+async def forget_chat(chat_id: str) -> None:
+  """Withdraw the waiting key requests a deleted chat's agent made.
+
+  Only that chat's card could answer them, and a waiting request answers for
+  every later ask for its key, so left behind no chat could ask for the key
+  again. Deleting the chat never waits on the vault: if it can't be reached,
+  the request stays until the owner removes it on the key's page.
+  """
+  if not _vault_ever_used():
+    return
+  try:
+    await vault_call("DELETE", f"/chats/{chat_id}/requests", caller="platform:chat-delete")
+  except (VaultUnavailable, VaultTimeout, VaultRefused):
+    log.warning("Could not withdraw the key requests of deleted chat %s", chat_id, exc_info=True)
+
+
 async def _import_when_ready() -> None:
   """Run the one-time legacy import once the vault answers.
 

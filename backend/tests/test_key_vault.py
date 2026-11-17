@@ -1929,6 +1929,24 @@ def test_an_agents_request_names_the_chat_that_asked_and_another_chat_does_not_m
   assert {r["id"]: r["chat_id"] for r in reloaded.list_requests()} == chats
 
 
+def test_a_deleted_chat_takes_only_its_own_waiting_requests_with_it(vault, client):
+  """Its card was the only place to answer them; a refusal is the owner's
+  answer about the key and stays, as do other chats' and apps' requests."""
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-1")
+  vault.request_for_agents(_agent_ask(key="tiles"), actor="agent:chat-1")
+  vault.deny_request("agent-tiles")
+  vault.request_for_agents(_agent_ask(key="maps"), actor="agent:chat-2")
+  vault.request_access(9, ASK)
+  refused = client.delete("/chats/chat-1/requests", headers={"X-Vault-Caller": "app:9"})
+  assert refused.status_code == 403
+  forgot = client.delete("/chats/chat-1/requests", headers={"X-Vault-Caller": "platform:chat-delete"})
+  assert forgot.json() == {"forgotten": 1}
+  assert {r["id"]: r["status"] for r in vault.list_requests()} == {
+    "agent-tiles": "denied", "agent-maps": "pending", "9-maps": "pending",
+  }
+  assert "forgot request agents (chat deleted)" in vault.audit_path.read_text()
+
+
 def test_an_agent_asks_for_sites_over_the_socket(vault, client):
   agent = {"X-Vault-Caller": "agent:c1"}
   asked = client.post("/requests", json=_agent_ask(), headers=agent)

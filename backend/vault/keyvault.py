@@ -19,6 +19,7 @@ platform-issued token and passes the attested identity in ``X-Vault-Caller``
     GET    /keys/<key>/value                   reveal (never for app callers)
     POST   /requests                           an app or an agent asks to use a key
     POST   /requests/<id>/approve | /deny      the owner answers
+    DELETE /chats/<chat-id>/requests           a deleted chat's waiting asks go
 
 For a use, the vault checks the caller and the destination against the key's
 grants (default deny), injects the key into its one configured slot (a header
@@ -1448,6 +1449,22 @@ class Vault:
         self._audit_change(name, actor, f"revoked app:{app_id} (app purged)")
     return {"keys": keys, "deleted": deleted, "requests": len(requests)}
 
+  def forget_chat(self, chat: str, *, actor: str = "platform") -> int:
+    """Withdraw the waiting requests the agent of deleted chat ``chat`` made.
+
+    Such a request is answered only on that chat's card, and it answers for
+    every later ask for its key, so left waiting it could never be answered
+    and no other chat could ask. A refusal stays: it is the owner's answer
+    about the key, not the chat's.
+    """
+    with self._change():
+      waiting = [rid for rid, item in self._requests.items() if item["requester"] == "agent"
+                 and item.get("chat") == chat and item["status"] == "pending"]
+      for rid in waiting:
+        request = self._requests.pop(rid)
+        self._audit_change(request["key"], actor, f"forgot request {_asker_label(request)} (chat deleted)")
+    return len(waiting)
+
   def forget_request(self, request_id: str, *, actor: str = "owner") -> bool:
     with self._change():
       request = self._requests.pop(request_id, None)
@@ -1909,6 +1926,8 @@ class VaultHandler(BaseHTTPRequestHandler):
       self._send_json(200, vault.forget_app(int(parts[1]), actor=self._manager()))
     elif method == "DELETE" and len(parts) == 3 and parts[0] == "apps" and parts[1].isdigit() and parts[2] == "owned":
       self._send_json(200, {"deleted": vault.erase_owned(int(parts[1]))})
+    elif method == "DELETE" and len(parts) == 3 and parts[0] == "chats" and parts[2] == "requests":
+      self._send_json(200, {"forgotten": vault.forget_chat(parts[1], actor=self._manager())})
     elif method == "DELETE" and len(parts) == 2 and parts[0] == "requests":
       if not vault.forget_request(parts[1], actor=self._manager()):
         raise VaultError(404, "That request is gone.")

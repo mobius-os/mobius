@@ -2947,6 +2947,9 @@ async def delete_chat(
       log.exception(
         "Chat %s was deleted but claim dependencies were not nudged", chat_id,
       )
+  # Its agent's waiting key requests could only be answered on its cards.
+  from app import key_vault
+  await key_vault.forget_chat(str(chat_id))
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.
   _reclaim_expired_tombstones_after_chat_write(db)

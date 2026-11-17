@@ -205,8 +205,16 @@ async def request_key(
   answer = await agent_asks(ask, principal)
   if not key_request_cards.needs_owner(answer):
     return {"state": "answered_without_card", "answer": answer}
-  if await key_request_cards.asked_elsewhere(answer, chat_id):
-    return {"state": "answered_without_card", "answer": answer, "note": key_request_cards.ELSEWHERE_NOTE}
+  waiting = await key_request_cards.waiting_elsewhere(answer, chat_id)
+  if waiting is not None:
+    holder = waiting.get("chat_id")
+    title = db.query(models.Chat.title).filter(
+      models.Chat.id == holder, models.Chat.deleted_at.is_(None),
+    ).first() if holder else None
+    return {
+      "state": "answered_without_card", "answer": answer, "waiting_chat_id": holder,
+      "note": key_request_cards.elsewhere_note(holder, (title[0] or "Untitled chat") if title else None),
+    }
   return {
     **await save_owner_question(
       chat_id, key_request_cards.card_payload(answer),

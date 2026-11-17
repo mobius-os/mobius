@@ -2179,10 +2179,11 @@ async def delete_project(
           resource_name=project.name or "Untitled project",
         )
         db.commit()
-    from app import secure_inputs
+    from app import key_vault, secure_inputs
     for chat_id in chat_ids:
       questions.cancel(chat_id)
       secure_inputs.cancel_chat(chat_id)
+      await key_vault.forget_chat(chat_id)
       mark_chat_deleted(chat_id)
       try:
         await _finish_run(chat_id, terminal_status="stopped")

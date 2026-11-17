@@ -72,8 +72,8 @@ def card_payload(answer: dict) -> dict:
   }
 
 
-async def asked_elsewhere(answer: dict, chat_id: str) -> bool:
-  """Whether the request ``answer`` names was made outside ``chat_id``.
+async def waiting_elsewhere(answer: dict, chat_id: str) -> dict | None:
+  """The stored request ``answer`` names, when it was made outside ``chat_id``.
 
   A request already waiting answers for every later ask for its key, so a
   card for it belongs only in the chat whose agent asked: shown here, another
@@ -84,14 +84,25 @@ async def asked_elsewhere(answer: dict, chat_id: str) -> bool:
   except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
     raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
   request = next((item for item in requests if item.get("id") == answer.get("id")), None)
-  return request is not None and request.get("chat_id") != chat_id
+  return request if request is not None and request.get("chat_id") != chat_id else None
 
 
-ELSEWHERE_NOTE = (
-  "A request for this key from another chat (or one the owner answers in Settings › Keys) "
-  "is already waiting, so no card was saved here; answer.sites is what it asks. Tell the "
-  "owner, and ask again after they answer it."
-)
+def elsewhere_note(chat_id: str | None, title: str | None) -> str:
+  """What an agent hears when its ask joins a request waiting elsewhere.
+
+  It names where the owner answers it: the card in the chat that asked
+  (``title``, None when that chat is gone), or Settings › Keys for a request
+  that names no chat.
+  """
+  waiting = "A request for this key is already waiting"
+  after = "so no card was saved here; answer.sites is what it asks."
+  if chat_id is None:
+    return f"{waiting} in Settings › Keys, {after} Tell the owner to answer it there, and ask again after they do."
+  if title is None:
+    return (f"{waiting} from a chat that was deleted, {after} Tell the owner to remove it on the "
+            "key's page in Settings › Keys, and ask again after they do.")
+  return (f"{waiting} on a card in the chat \"{title}\" (waiting_chat_id), {after} Tell the "
+          "owner to answer it there, and ask again after they do.")
 
 
 def needs_owner(answer: dict) -> bool:
