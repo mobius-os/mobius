@@ -21,11 +21,3 @@ export function queuedHint({
   if (restarting || !online) return 'Will send when you reconnect'
   return 'Queued to send'
 }
-
-// A steer accepted mid-turn is already delivered: it renders inline below the
-// live output and the provider reads it at its next step boundary, so new work
-// keeps appearing above it until then. Without a caption it reads as ignored;
-// tray copy about sending would be wrong, since nothing is left to send.
-export function steerPendingHint() {
-  return 'Agent will read this after its current step'
-}
