@@ -75,7 +75,6 @@ SYSTEM_READ_PATHS = (
   "/lib32",
   "/lib64",
   "/etc",
-  "/opt",
   "/proc",
   "/sys",
   # The Python Möbius runs on, wherever it is installed (a virtualenv in

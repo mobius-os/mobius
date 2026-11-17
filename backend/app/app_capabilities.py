@@ -1072,9 +1072,13 @@ def diff_contracts(
       k in _EXACT_CEILING_PATHS and _exact_json(before[k]) != _exact_json(after[k])
     )
   )
+  paths = [*added, *removed, *changed]
   widens = any(
     _widens(path, before.get(path), after.get(path), after)
-    for path in [*added, *removed, *changed]
+    for path in paths if not path.startswith("agent.role.")
+  ) or (
+    any(path.startswith("agent.role.") for path in paths)
+    and _agent_role_widens(installed, candidate)
   ) or (
     # Transfer limits the runtime refuses disable the service, so they cannot
     # be ranked against anything, even when they compare equal or pruning made
@@ -1091,6 +1095,15 @@ def diff_contracts(
     "removed": removed,
     "changed": changed,
   }
+
+
+def _agent_role_widens(installed: dict[str, Any], candidate: dict[str, Any]) -> bool:
+  """Whether the app's agents reach more. Dropping a role is full access; its
+  reason is explanatory copy and grants nothing."""
+  from app.agent_roles import role_from_contract
+
+  old, new = role_from_contract(installed), role_from_contract(candidate)
+  return old is None or new is None or not old.covers(new)
 
 
 # Only these known contract paths have ordered grants. An unfamiliar field is

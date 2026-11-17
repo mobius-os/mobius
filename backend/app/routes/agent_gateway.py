@@ -232,7 +232,12 @@ async def app_screenshot(
   if app is None:
     raise HTTPException(status_code=404, detail="App not found.")
   owner = principal.owner
-  # Bound to this run, so it expires with it; only the capture browser holds it.
+  # An owner-level sign-in, bound to this run so it expires with it. Only the
+  # capture browser holds it, in the Möbius origin's storage; the app's own
+  # code (which an Editor may have written) runs in the standalone page's
+  # opaque frame and cannot read that storage. It could still navigate the
+  # browser, which the app's screenshot consent covers; a sign-in limited to
+  # the app is the planned narrowing.
   token = auth.create_agent_token(
     key.chat, owner.username, owner.token_epoch, run_id=key.run
   )

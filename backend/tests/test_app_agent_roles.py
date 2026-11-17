@@ -1489,3 +1489,28 @@ def test_a_confined_approval_claims_only_inside_its_own_app_and_chat(
     summary="Merge the PR",
   )
   assert other["owner_chat_id"] == "owner-chat"
+
+
+@pytest.mark.parametrize(
+  "before, after, widens",
+  [
+    (_role("editor", "web"), _role("viewer", "web"), False),
+    (_role("owner"), _role("explorer", "notify"), False),
+    (_role("viewer"), _role("viewer", why="Reworded reason."), False),
+    (_role("viewer"), _role("explorer"), False),
+    (_role("viewer"), _role("editor"), True),
+    (_role("explorer"), _role("viewer"), True),
+    (_role("viewer", "web"), _role("viewer", "notify"), True),
+    (_role("editor"), _role("owner"), True),
+    (_role("viewer"), None, True),
+  ],
+)
+def test_update_review_ranks_agent_roles(before, after, widens):
+  from app.app_capabilities import diff_contracts
+
+  def contract(role):
+    return contract_from_manifest(
+      _manifest(embeds_agent=True, **({"agent_role": role} if role else {}))
+    )
+
+  assert diff_contracts(contract(before), contract(after))["widens"] is widens

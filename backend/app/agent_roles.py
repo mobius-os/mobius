@@ -189,6 +189,17 @@ class AgentRole:
       or any(TOOLS[t].private_data for t in self.tools if t in TOOLS)
     )
 
+  def covers(self, other: AgentRole) -> bool:
+    """Whether this role reaches everything ``other`` does (Owner reaches all)."""
+    if not self.confined:
+      return True
+    data = (None, "read", "write")
+    return (
+      other.confined
+      and data.index(other.spec.data) <= data.index(self.spec.data)
+      and set(other.tools) <= set(self.tools)
+    )
+
   @property
   def grant(self) -> str:
     """What this role reaches, e.g. ``viewer+notify+web``; names its room."""
