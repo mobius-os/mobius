@@ -8,6 +8,7 @@ from tests.goal_fixtures import goal_run as make_goal_run, persist_goal_fixture
 import asyncio
 from contextlib import asynccontextmanager
 import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 import threading
 
@@ -35,9 +36,12 @@ from app.delegations import (
   limit_resume_delegation,
   mark_cancelled,
   parent_root_run_id,
+  helper_titles,
   policy_for_chat,
   serialize_background_helpers,
 )
+from app import chat_writer
+from app.chat_titles import apply_generated_title
 from test_app_fixtures import create_local_app
 
 
@@ -1007,7 +1011,9 @@ def test_helper_without_resumable_session_needs_parent_review(
   assert "DELEGATION_WRITE_REVIEW_REQUIRED" in str(final)
 
 
-def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
+def test_child_policy_is_integrity_checked_and_session_loss_needs_review(
+  client, owner_token, db,
+):
   app = models.App(
     slug="test-delegations-116",
     source_dir="/tmp/mobius-tests/test-delegations-116",
@@ -1080,6 +1086,21 @@ def test_child_policy_is_integrity_checked_and_session_loss_needs_review(db):
   status, _, result = derived_status(db, row)
   assert status == "needs_review"
   assert result == "Review before replaying."
+
+  # The preview must retain Needs review after its footer row disappears.
+  # Error markers classify status, but are not conversation/error disclosure.
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  response = client.get("/api/chats/parent/helpers/delegation", headers=headers)
+  assert response.status_code == 200, response.text
+  assert response.json()["status"] == "needs_review"
+  assert response.json()["blocks"] == [
+    {"role": "user", "content": "Make the bounded edit."},
+  ]
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in response.text
+  assert "Review before replaying." not in response.text
+  assert client.get(
+    "/api/chats/child/helpers/delegation", headers=headers,
+  ).status_code == 404
 
   mark_cancelled(db, row)
   mark_cancelled(db, row)
@@ -1283,7 +1304,8 @@ def test_background_helper_projection_owns_waiting_until_parent_wake(
     "items": [{
       "id": delegation_id,
       "task_key": "task-waiting-owner",
-      "title": "task-waiting-owner",
+      # The seeded helper's own chat is named "Child".
+      "title": "Child",
       "provider": "claude",
       "status": "running",
     }],
@@ -1439,7 +1461,7 @@ def _seed_idle_parent_wake_root(
 def test_direct_send_to_delegation_child_is_rejected(
   client, owner_token, db,
 ):
-  _, child_id, _ = _seed_delegation(db, suffix="send-gate")
+  parent_id, child_id, _ = _seed_delegation(db, suffix="send-gate")
 
   response = client.post(
     f"/api/chats/{child_id}/messages",
@@ -1448,7 +1470,70 @@ def test_direct_send_to_delegation_child_is_rejected(
   )
 
   assert response.status_code == 409, response.text
-  assert response.json()["detail"]["code"] == "delegation_managed"
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  # The refusal names the helper and its parent so the composer can link back,
+  # never the retired "evaluator chat ... parent workflow" wording.
+  assert detail["message"] == "This is a helper's chat. Message it from its parent chat."
+  assert detail["parent_chat_id"] == parent_id
+  assert "evaluator" not in response.text
+
+
+def test_ordinary_chat_send_is_not_delegation_managed(
+  client, owner_token, db,
+):
+  parent_id, _child, _ = _seed_delegation(db, suffix="send-gate-parent")
+
+  response = client.post(
+    f"/api/chats/{parent_id}/messages",
+    json={"content": "A parent chat still accepts owner messages."},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+  # The helper gate runs first; this fixture's parent then stops at the next
+  # gate, which proves the send got past the delegation refusal.
+  assert response.status_code == 409, response.text
+  assert response.json()["detail"]["code"] == "model_selection_required"
+
+
+def _direct_send(client, owner_token, chat_id):
+  return client.post(
+    f"/api/chats/{chat_id}/messages",
+    json={"content": "Can I talk to you directly?"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+
+def test_nested_helper_refusal_links_the_nearest_owner_chat(
+  client, owner_token, db,
+):
+  # A nested helper's parent is itself a helper chat, which also refuses
+  # owner sends, so the link skips up to the chat the owner can write in.
+  top_id, middle_id, _ = _seed_delegation(db, suffix="send-gate-top")
+  _, leaf_id, _ = _seed_delegation(db, suffix="send-gate-leaf", parent_id=middle_id)
+
+  response = _direct_send(client, owner_token, leaf_id)
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  assert detail["parent_chat_id"] == top_id
+
+
+def test_helper_refusal_omits_a_deleted_parent_chat(
+  client, owner_token, db,
+):
+  parent_id, child_id, _ = _seed_delegation(db, suffix="send-gate-deleted")
+  parent = db.get(models.Chat, parent_id)
+  parent.deleted_at = now_naive_utc()
+  db.commit()
+
+  response = _direct_send(client, owner_token, child_id)
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "delegation_managed"
+  assert "parent_chat_id" not in detail
 
 
 def _capture_activity_starts(monkeypatch):
@@ -2233,6 +2318,12 @@ class _ActivityCheckpointProvider:
 
   def build_env(self, **_kwargs):
     return {}
+
+  def measured_run_accounting(self, cost_usd, usage):
+    return cost_usd, usage
+
+  def resolve_selection(self, model, effort):
+    return model, effort
 
 
 def _run_activity_checkpoint(
@@ -3935,6 +4026,80 @@ def test_long_question_and_result_are_durable_but_automatic_notice_is_bounded(db
   assert "result_truncated" not in payload
 
 
+def test_helper_title_is_its_locked_chat_title_with_a_readable_fallback(
+  client, owner_token, db, monkeypatch,
+):
+  auth = {"Authorization": f"Bearer {owner_token}"}
+  parent_chat_id = _parent_with_run(client, owner_token, db)
+  starts = []
+
+  async def fake_start(**kwargs):
+    starts.append(kwargs)
+    return True
+
+  monkeypatch.setattr(
+    "app.routes.delegations.start_programmatic_chat_turn", fake_start,
+  )
+  body = {
+    "parent_chat_id": parent_chat_id, "task_key": "fix-tray.close_v2",
+    "prompt": "Fix the tray.", "provider": "codex", "scope": "write",
+    "title": "  Fixing the tray's\n closing conversation ",
+  }
+  created = client.post("/api/delegations", json=body, headers=auth)
+  assert created.status_code == 201, created.text
+  title = "Fixing the tray's closing conversation"
+  assert created.json()["title"] == title
+  row = db.get(models.Delegation, created.json()["id"])
+  child = db.get(models.Chat, row.child_chat_id)
+  assert (child.title, child.title_locked) == (title, True)
+
+  # The name is chosen at spawn: an attach, the first-message fallback and the
+  # helper's own chat checkpoint never rename it.
+  attached = client.post(
+    "/api/delegations", json={**body, "title": "Another"}, headers=auth,
+  )
+  assert attached.json()["attached"] is True
+  assert attached.json()["title"] == title
+  chat_writer._name_chat_from_first_message(child, "Fix the tray.")
+  assert not apply_generated_title(child, "A helper-chosen name")
+  assert helper_titles(db, [row]) == {row.id: title}
+
+  untitled = client.post("/api/delegations", json={
+    **body, "task_key": "audit-restart", "title": None,
+  }, headers=auth)
+  assert untitled.json()["title"] == "Audit restart"
+  listed = client.get(
+    f"/api/delegations?parent_chat_id={parent_chat_id}", headers=auth,
+  )
+  assert listed.status_code == 200, listed.text
+  assert {item["task_key"]: item["title"] for item in listed.json()["items"]} == {
+    "fix-tray.close_v2": title, "audit-restart": "Audit restart",
+  }
+
+  # A title is bounded by the chat title it is stored as: the longest one is
+  # kept whole, and a longer one is refused rather than cut.
+  longest = "T" * 256
+  bounded = client.post("/api/delegations", json={
+    **body, "task_key": "longest-title", "title": longest,
+  }, headers=auth)
+  assert bounded.status_code == 201, bounded.text
+  assert bounded.json()["title"] == longest
+  assert db.get(models.Chat, bounded.json()["child_chat_id"]).title == longest
+  refused = client.post("/api/delegations", json={
+    **body, "task_key": "too-long-title", "title": longest + "T",
+  }, headers=auth)
+  assert refused.status_code == 422
+  assert "256" in refused.text
+  assert db.query(models.Delegation).filter(
+    models.Delegation.task_key == "too-long-title",
+  ).count() == 0
+
+  # Helpers from before titles keep their generated chat name.
+  child.title = "Delegation · fix-tray.close_v2"
+  db.commit()
+  assert helper_titles(db, [row]) == {row.id: "Fix tray close v2"}
+
+
 def test_same_task_key_can_be_reused_by_a_new_goal_on_one_physical_run(db, chat):
   run = make_goal_run(db, id="one-run", root_run_id="one-run",
                       chat_id=chat.id, status="running", provider="codex",
@@ -4121,3 +4286,90 @@ def test_queued_helper_result_resolves_a_root_shared_by_several_helpers(db):
   queued = {"role": "user", "hidden": True, "kind": DELEGATION_RESULT_MESSAGE_KIND,
             "source_work_id": "q1", "cid": "delegation-result:x", "content": "r"}
   assert queued_continuation_root(db, "p3", queued) == "q1"
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+def test_footer_helper_union_counts_before_capping(db, monkeypatch, overlap):
+  from types import SimpleNamespace
+  from app import delegations
+
+  background = [SimpleNamespace(id=f"bg-{i}", task_key=f"Helper {i}",
+                                child_chat_id=f"child-{i}", provider="codex")
+                for i in range(20)]
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows",
+                      lambda *_: [(row, "running") for row in background])
+  monkeypatch.setattr(delegations, "_delegation_status_batch",
+                      lambda _db, rows, **_: ({row.id: "running" for row in rows}, {}))
+  nodes = [{"id": f"{'bg' if overlap else 'goal'}-{i}", "status": "running"}
+           for i in range(20)]
+  nodes[0]["children"] = [{"id": "nested", "status": "running"}]
+  nodes.append({"id": "settled", "status": "completed"})
+  goal = {"id": "goal", "status": "active", "plan": {"delegations": nodes}}
+  result = serialize_background_helpers(db, "parent", goal=goal)
+  assert result["count"] == 20  # Only background work owns automatic wake.
+  assert len(result["items"]) == 16
+  union = result["with_goal"]
+  assert union["goal_id"] == "goal"
+  assert union["count"] == (20 if overlap else 40)
+  assert len(union["items"]) == 16
+  assert len({row["id"] for row in union["items"]}) == 16
+  assert "with_goal" not in serialize_background_helpers(
+    db, "parent", goal={**goal, "status": "completed"},
+  )
+
+
+def test_footer_goal_helpers_do_not_invent_background_wake_ownership(db, monkeypatch):
+  from app import delegations
+
+  monkeypatch.setattr(delegations, "_self_resuming_helper_rows", lambda *_: [])
+  goal = {"id": "goal", "status": "paused", "plan": {"delegations": [
+    {"id": "direct", "task_key": "verify-build", "title": "Verify the build",
+     "helper_title": "Checking the release build", "status": "needs_input", "children": [
+      {"id": "nested", "status": "running"},
+    ]},
+    {"id": "settled", "status": "completed"},
+  ]}}
+  summary = serialize_background_helpers(db, "parent", goal=goal)
+  assert summary["count"] == 0
+  assert summary["items"] == []
+  assert summary["with_goal"]["count"] == 1
+  assert [row["id"] for row in summary["with_goal"]["items"]] == ["direct"]
+  # The tray names a Goal helper by its own title, not its plan task's.
+  assert summary["with_goal"]["items"][0]["title"] == "Checking the release build"
+
+
+@pytest.mark.parametrize("run_status,diagnostic,expected", [
+  ("failed", "DELEGATION_WRITE_REVIEW_REQUIRED: Review before replaying.", "needs_review"),
+  ("failed", "Ordinary failure.", "failed"),
+  ("completed", "", "completed"),
+])
+def test_footer_status_refines_failed_results_without_changing_wake_eligibility(
+  client, owner_token, db, run_status, diagnostic, expected,
+):
+  from app import delegations
+
+  parent, child, delegation = _seed_delegation(
+    db, suffix=f"footer-{expected}", child_status=run_status,
+    result_blocks=[{"type": "error", "message": diagnostic}] if diagnostic else [],
+  )
+  owed_before = delegations._self_resuming_helper_rows(db, {parent})
+  assert [row.id for row, _ in owed_before] == [delegation]
+  summary = serialize_background_helpers(db, parent)
+  assert summary["count"] == 1
+  assert summary["items"][0]["id"] == delegation
+  assert summary["items"][0]["status"] == expected
+  assert "DELEGATION_WRITE_REVIEW_REQUIRED" not in json.dumps(summary)
+  assert "Review before replaying." not in json.dumps(summary)
+  assert "Ordinary failure." not in json.dumps(summary)
+  assert [(row.id, status) for row, status in
+          delegations._self_resuming_helper_rows(db, {parent})] == [
+    (row.id, status) for row, status in owed_before
+  ]
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  detail = client.get(f"/api/chats/{parent}", headers=headers)
+  assert detail.status_code == 200
+  assert detail.json()["background_helpers"] == summary
+  preview = client.get(f"/api/chats/{parent}/helpers/{delegation}", headers=headers)
+  assert preview.status_code == 200
+  assert preview.json()["status"] == expected
+  assert client.get(f"/api/chats/{child}/helpers/{delegation}", headers=headers).status_code == 404
