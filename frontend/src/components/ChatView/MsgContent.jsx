@@ -7,7 +7,7 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
@@ -488,23 +488,15 @@ function MsgContentInner({
             data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? i : undefined}
           >
             {msg.role === 'assistant'
-              ? (isActiveAnswer || block.reply_text_owner
-                  ? <ProgressiveMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />
-                  : <StandardMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      renderFraction={block._coldRenderFraction}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />)
+              ? <StandardMarkdown
+                  text={text}
+                  markdownRange={block.markdown_range}
+                  isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
+                  renderFraction={block._coldRenderFraction}
+                  onInternalNav={onInternalNav}
+                  mediaDimensions={msg.media_dimensions}
+                  allowAppBlocks
+                />
               : msg.role === 'user'
                 ? <UserMessageText
                     text={text}
@@ -846,27 +838,18 @@ function MsgContentInner({
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
-          key={isActiveAnswer ? 0 : undefined}
           className={`chat__text chat__text--${msg.role}`}
           data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? 0 : undefined}
         >
           {msg.role === 'assistant'
-            ? (isActiveAnswer
-                ? <ProgressiveMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    isStreaming={isStreaming}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />
-                : <StandardMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />)
+            ? <StandardMarkdown
+                text={text}
+                markdownRange={msg.markdown_range}
+                isStreaming={isStreaming}
+                onInternalNav={onInternalNav}
+                mediaDimensions={msg.media_dimensions}
+                allowAppBlocks
+              />
             : msg.role === 'user'
               ? (msg.segments?.length > 1
                   ? <UserMessageSegments
