@@ -75,7 +75,9 @@ Status: draft for review.
    most ten open requests. A granted app that asks for sites its grant lacks
    keeps using what it has, is told which are missing (`sites_not_allowed`),
    and its ask for them waits for the owner like any request
-   (`sites_request`). A waiting request answers for every later ask for the
+   (`sites_request`). Asking again only for what it may already do answers
+   `granted` and leaves that request alone: it goes once the grant covers
+   its own sites, so a refusal stands until the owner lets it ask again. A waiting request answers for every later ask for the
    same key until the owner answers it, and every answer about it carries
    the `sites` and `reason` it stores, so whatever shows a request (an
    agent's card, the dialog over an app) shows exactly what approving it

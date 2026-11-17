@@ -1318,7 +1318,12 @@ class Vault:
         status = "paused" if grant.get("paused") else "granted"
         missing = sites_outside(grant["sites"], sites)
         if not missing:
-          self._requests.pop(request_id, None)
+          # The asker may already do this. Its stored request goes only once
+          # the grant covers that request's own sites: one for other sites
+          # still waits for the owner, and a refusal stands until the owner
+          # lets it ask again.
+          if existing is not None and not sites_outside(grant["sites"], existing["sites"]):
+            self._requests.pop(request_id, None)
           return {"status": status, "key": name}
         answer = {"status": status, "key": name, "id": request_id, "sites_not_allowed": missing}
         # A request already stored answers for any later ask until the owner

@@ -1988,3 +1988,43 @@ def test_an_agent_refused_a_key_is_pointed_to_asking_and_others_are_not(vault, c
   bad = client.get("/use/echo/echo.example.com/anything/%2e%2e/x", headers={"X-Vault-Caller": "agent:c1"})
   assert bad.status_code == 403 and "ask" not in bad.json()
   assert _Echo.hits == []
+
+
+OTHER_SITE = {"host": "other.example.com", "methods": ["GET"], "paths": ["/*"]}
+
+
+def _ask_echo(vault, asker, sites):
+  body = {"key": "echo", "reason": "Fetch", "sites": sites}
+  if asker == "app":
+    return vault.request_access(WEATHER, body)
+  return vault.request_for_agents(body, actor="agent:c1")
+
+
+@pytest.mark.parametrize("asker", ["app", "agent"])
+@pytest.mark.parametrize("answered", ["pending", "denied"])
+@pytest.mark.parametrize("again", ["covered", "empty"], ids=["covered-site", "no-site"])
+def test_asking_for_what_is_already_allowed_keeps_a_request_for_other_sites(vault, asker, answered, again):
+  """An asker allowed on one site asks for another and waits, or is refused.
+  Asking again for what it may already do answers granted, and never erases
+  that other request: a pending one still waits for the owner, and a refusal
+  stands until the owner lets it ask again."""
+  request_id = f"{WEATHER}-echo" if asker == "app" else "agent-echo"
+  assert _ask_echo(vault, asker, [OTHER_SITE])["sites_request"] == "pending"
+  if answered == "denied":
+    vault.deny_request(request_id)
+  before = next(r for r in vault.list_requests() if r["id"] == request_id)
+  assert _ask_echo(vault, asker, [ECHO_SITE] if again == "covered" else [])["status"] == "granted"
+  after = next((r for r in vault.list_requests() if r["id"] == request_id), None)
+  assert after is not None and (after["status"], after["ticket"]) == (before["status"], before["ticket"])
+  # Asking for the other site again reports the same request, never a fresh one.
+  again_other = _ask_echo(vault, asker, [OTHER_SITE])
+  assert again_other["sites_request"] == answered and not again_other.get("created")
+
+
+def test_a_request_the_grant_now_covers_is_settled_by_the_next_ask(vault):
+  """Once the owner allows the other site some other way, nothing is left to
+  answer, and the next ask clears the request."""
+  _ask_echo(vault, "app", [OTHER_SITE])
+  vault.put_key("echo", {"grants": _grants(apps=_apps(WEATHER, sites=[ECHO_SITE, OTHER_SITE]))})
+  assert _ask_echo(vault, "app", [ECHO_SITE])["status"] == "granted"
+  assert all(r["id"] != f"{WEATHER}-echo" for r in vault.list_requests())
