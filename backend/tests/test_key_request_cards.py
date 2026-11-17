@@ -145,17 +145,21 @@ def test_only_the_current_agent_run_asks_by_card(client, chat, auth, vault):
 
 
 def test_another_chats_waiting_request_never_shows_as_this_agents_card(
-  client, chat, other_chat, auth, agent_run, vault,
+  client, chat, other_chat, auth, start_agent_run, vault,
 ):
   """A request already waiting answers for later asks for its key, so an ask
   that joins another chat's request saves no card here, where it would read
   as this agent's own; the agent hears what is waiting and asks again later."""
   collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
-  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
-  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK)
+  waiting = client.post(f"/api/chats/{other_chat.id}/key-request", headers=start_agent_run(other_chat),
+                        json={**ASK, "reason": "Upload", "sites": [collect]})
+  assert waiting.json()["state"] == "waiting_for_owner"
+  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK)
   assert asked.status_code == 200, asked.text
   receipt = asked.json()
-  assert receipt["state"] == "answered_without_card" and 'the chat "Other chat"' in receipt["note"]
+  with SessionLocal() as db:
+    title = db.get(models.Chat, other_chat.id).title
+  assert receipt["state"] == "answered_without_card" and f'the chat "{title}"' in receipt["note"]
   assert receipt["waiting_chat_id"] == other_chat.id
   assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa",
                                "sites": [collect], "reason": "Upload"}
@@ -419,3 +423,46 @@ def test_a_withdrawal_reaching_the_vault_after_recovery_withdraws_nothing(client
   assert [r["id"] for r in vault.list_requests()] == ["agent-nasa"]
   # A later deletion of the same chat still withdraws its requests.
   assert vault.forget_chat(chat_id, deletion="a later deletion") == 1
+
+
+
+def test_a_card_that_could_not_be_saved_leaves_no_request_behind(client, chat, other_chat, start_agent_run, vault):
+  """The vault records the ask before the card is saved. If the turn stopped
+  in between, no card can answer the request, so it is withdrawn, and
+  another chat's ask gets its own card rather than a pointer to none."""
+  from app.chat_event_sink import get_active_sink
+  headers = start_agent_run(chat)
+  unregister_active_sink(chat.id, get_active_sink(chat.id))
+  stale = client.post(f"/api/chats/{chat.id}/key-request", headers=headers, json=ASK)
+  assert stale.status_code == 409, stale.text
+  assert _card(chat.id) == (None, []) and vault.list_requests() == []
+  receipt = client.post(f"/api/chats/{other_chat.id}/key-request", headers=start_agent_run(other_chat), json=ASK).json()
+  assert receipt["state"] == "waiting_for_owner"
+  assert [r["chat_id"] for r in vault.list_requests()] == [other_chat.id]
+
+
+def test_a_card_whose_save_failed_midway_leaves_no_request_behind(client, chat, monkeypatch, start_agent_run, vault):
+  """A save that fails while publishing (an uncertain save) withdraws the
+  request only when the chat shows no card for it."""
+  from app.chat_event_sink import ChatEventSink
+  headers = start_agent_run(chat)
+
+  async def broken(self, *args, **kwargs):
+    raise RuntimeError("disk full")
+  monkeypatch.setattr(ChatEventSink, "publish_question", broken)
+  failed = client.post(f"/api/chats/{chat.id}/key-request", headers=headers, json=ASK)
+  assert failed.status_code == 503, failed.text
+  assert vault.list_requests() == []
+
+
+def test_a_live_chats_request_with_no_card_is_withdrawn_by_the_next_ask(client, chat, other_chat, start_agent_run, vault):
+  """A request whose card was never saved (left by an older server, or a
+  save the vault never heard about) is answerable nowhere; the next ask
+  withdraws exactly that request and gets its own card."""
+  collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
+  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
+  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
+  assert receipt["state"] == "waiting_for_owner"
+  [card] = _card(chat.id)[1]
+  assert card["key_request"]["sites"] == [APOD]
+  assert [(r["chat_id"], r["sites"]) for r in vault.list_requests()] == [(chat.id, [APOD])]

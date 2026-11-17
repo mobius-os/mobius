@@ -1505,11 +1505,14 @@ class Vault:
       }
       self._undone_deletions[(chat, deletion)] = now
 
-  def forget_request(self, request_id: str, *, actor: str = "owner") -> bool:
+  def forget_request(self, request_id: str, *, ticket: str | None = None, actor: str = "owner") -> bool:
+    """Withdraw one request. With ``ticket``, only while it is still that
+    exact ask: a later ask under the same id has its own ticket and stays."""
     with self._change():
-      request = self._requests.pop(request_id, None)
-      if request is None:
+      request = self._requests.get(request_id)
+      if request is None or (ticket is not None and request.get("ticket") != ticket):
         return False
+      del self._requests[request_id]
       self._audit_change(request["key"], actor, f"forgot request {_asker_label(request)}")
     return True
 
@@ -1638,9 +1641,10 @@ def _count(item: dict, outcome: str, ts: str) -> None:
 
 
 def sent_nowhere(grants: dict) -> bool:
-  """No app may use the key and it has no site of its own: nothing sends it
-  yet, so the first request approved for it may still choose how it is sent."""
-  return not grants.get("apps") and not grants.get("sites")
+  """No site of its own and no app with a site: nothing can send the key yet
+  (an app saved or imported it with no site, say), so the first request
+  approved for it may still choose how it is sent."""
+  return not grants.get("sites") and not any(grant.get("sites") for grant in grants.get("apps") or [])
 
 
 def sets_inject(record: dict | None, request: dict) -> bool:
@@ -1991,7 +1995,7 @@ class VaultHandler(BaseHTTPRequestHandler):
       vault.undo_chat_deletion(parts[1], deletion)
       self._send_json(200, {"undone": deletion})
     elif method == "DELETE" and len(parts) == 2 and parts[0] == "requests":
-      if not vault.forget_request(parts[1], actor=self._manager()):
+      if not vault.forget_request(parts[1], ticket=query.get("ticket") or None, actor=self._manager()):
         raise VaultError(404, "That request is gone.")
       self._send_json(200, {"forgotten": parts[1]})
     else:

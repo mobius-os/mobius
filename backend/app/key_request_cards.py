@@ -72,6 +72,15 @@ def card_payload(answer: dict) -> dict:
   }
 
 
+async def stored_request(answer: dict) -> dict | None:
+  """The request ``answer`` names, as the vault stores it (with its chat and ticket)."""
+  try:
+    requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
+  except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
+    raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
+  return next((item for item in requests if item.get("id") == answer.get("id")), None)
+
+
 async def waiting_elsewhere(answer: dict, chat_id: str) -> dict | None:
   """The stored request ``answer`` names, when it was made outside ``chat_id``.
 
@@ -79,12 +88,22 @@ async def waiting_elsewhere(answer: dict, chat_id: str) -> dict | None:
   card for it belongs only in the chat whose agent asked: shown here, another
   chat's (or a chatless agent's) ask would read as this agent's own.
   """
-  try:
-    requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
-  except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
-    raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
-  request = next((item for item in requests if item.get("id") == answer.get("id")), None)
+  request = await stored_request(answer)
   return request if request is not None and request.get("chat_id") != chat_id else None
+
+
+def holds_open_card(db, chat_id: str, request_id: str) -> bool:
+  """Whether ``chat_id`` shows an unanswered card for vault request
+  ``request_id``: the only place an agent's request can be answered. A
+  deleted chat, or one whose card was never saved (its turn stopped between
+  the ask and the card), holds none, and the request is then answerable
+  nowhere."""
+  from app import models, questions
+  chat = db.get(models.Chat, chat_id, populate_existing=True)
+  if chat is None or chat.deleted_at is not None:
+    return False
+  card = questions.open_continuation_question(chat, chat.pending_question_id)
+  return card is not None and (card.get("key_request") or {}).get("id") == request_id
 
 
 def elsewhere_note(chat_id: str | None, title: str | None) -> str:
@@ -92,15 +111,15 @@ def elsewhere_note(chat_id: str | None, title: str | None) -> str:
 
   It names where the owner answers it: the card in the chat that asked
   (``title``), or Settings › Keys for a request that names no chat. ``title``
-  is None only when the asking chat is deleted and withdrawing its request
-  just failed; asking again retries that.
+  is None only when no card can answer it (its chat was deleted, or its card
+  was never saved) and withdrawing it just failed; asking again retries that.
   """
   waiting = "A request for this key is already waiting"
   after = "so no card was saved here; answer.sites is what it asks."
   if chat_id is None:
     return f"{waiting} in Settings › Keys, {after} Tell the owner to answer it there, and ask again after they do."
   if title is None:
-    return (f"{waiting} from a chat that was deleted and couldn't be withdrawn just now, {after} "
+    return (f"{waiting} with no card left to answer it, and it couldn't be withdrawn just now, {after} "
             "Ask again in a moment.")
   return (f"{waiting} on a card in the chat \"{title}\" (waiting_chat_id), {after} Tell the "
           "owner to answer it there, and ask again after they do.")

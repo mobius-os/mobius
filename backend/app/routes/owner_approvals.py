@@ -7,6 +7,7 @@ There is no human timeout, held request, new table, or approval executor.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from copy import deepcopy
 from typing import Annotated, Literal
@@ -217,29 +218,55 @@ async def request_key(
       return answer, None
     return answer, await key_request_cards.waiting_elsewhere(answer, chat_id)
 
-  answer, waiting = await ask_vault()
-  holder = waiting.get("chat_id") if waiting is not None else None
-  if holder and _live_chat_title(db, holder) is None:
-    # Left behind by a chat deleted while the vault was unreachable: no card
-    # can answer it now, so withdraw it as that deletion would have, and ask
-    # again so this chat gets its own card.
-    await key_vault.forget_chat(holder)
+  # One ask per key at a time, through to its card: a request waiting
+  # without a card is then never one whose card is still being saved.
+  async with _key_ask_lock(ask["key"]):
     answer, waiting = await ask_vault()
     holder = waiting.get("chat_id") if waiting is not None else None
-  if not key_request_cards.needs_owner(answer):
-    return {"state": "answered_without_card", "answer": answer}
-  if waiting is not None:
-    return {
-      "state": "answered_without_card", "answer": answer, "waiting_chat_id": holder,
-      "note": key_request_cards.elsewhere_note(holder, _live_chat_title(db, holder) if holder else None),
-    }
-  return {
-    **await save_owner_question(
-      chat_id, key_request_cards.card_payload(answer),
-      principal, db, closing_message=body.message,
-    ),
-    "answer": answer,
-  }
+    if holder and not key_request_cards.holds_open_card(db, holder, waiting["id"]):
+      # No card can answer it: its chat was deleted while the vault was
+      # unreachable, or its card was never saved. Withdraw it, and ask again
+      # so this chat gets its own card.
+      if _live_chat_title(db, holder) is None:
+        await key_vault.forget_chat(holder)
+      else:
+        await key_vault.withdraw_request(waiting["id"], waiting.get("ticket"))
+      answer, waiting = await ask_vault()
+      holder = waiting.get("chat_id") if waiting is not None else None
+    if not key_request_cards.needs_owner(answer):
+      return {"state": "answered_without_card", "answer": answer}
+    if waiting is not None:
+      answerable = holder is not None and key_request_cards.holds_open_card(db, holder, waiting["id"])
+      return {
+        "state": "answered_without_card", "answer": answer, "waiting_chat_id": holder,
+        "note": key_request_cards.elsewhere_note(holder, _live_chat_title(db, holder) if answerable else None),
+      }
+    try:
+      receipt = await save_owner_question(
+        chat_id, key_request_cards.card_payload(answer),
+        principal, db, closing_message=body.message,
+      )
+    except Exception:
+      # The turn stopped, or the card could not be saved: unless this chat
+      # still shows a card for it, the request is answerable nowhere.
+      db.rollback()
+      try:
+        stored = await key_request_cards.stored_request(answer)
+      except HTTPException:
+        stored = None  # the vault is down: the next ask for this key heals it
+      if (stored is not None and stored.get("chat_id") == chat_id
+          and not key_request_cards.holds_open_card(db, chat_id, answer["id"])):
+        await key_vault.withdraw_request(answer["id"], stored.get("ticket"))
+      raise
+    return {**receipt, "answer": answer}
+
+
+_key_ask_locks: dict[str, asyncio.Lock] = {}
+
+
+def _key_ask_lock(key: str) -> asyncio.Lock:
+  """The lock that keeps agents' asks for ``key`` one at a time."""
+  return _key_ask_locks.setdefault(key, asyncio.Lock())
 
 
 @router.post("/{chat_id}/restart-request", dependencies=[Depends(reject_cross_site)])

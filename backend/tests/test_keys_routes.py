@@ -2147,3 +2147,27 @@ def test_allow_sets_only_the_slot_the_request_proposed(client, auth, db, vault):
                         json={"ticket": card["ticket"], "sites": card["sites"], "inject": other})
   assert refused.status_code == 409
   assert vault.list_keys()[0]["inject"]["type"] == "header" and vault.list_keys()[0]["grants"]["apps"] == []
+
+
+@pytest.mark.parametrize("value", [DUMMY, MULTILINE], ids=["one-line", "multiline"])
+def test_a_key_an_app_saved_with_no_site_takes_the_slot_its_first_request_needs(client, auth, db, vault, value):
+  """An app's own or imported key starts granted to that app with no site,
+  so nothing can send it yet: the app's first request may still set the
+  slot, even a key with line breaks that can only go in the address."""
+  app = _app(db, "saver")
+  name = vault.save_owned(app.id, "api.key", value)["name"]
+  [record] = vault.list_keys()
+  assert record["grants"]["apps"][0]["sites"] == [] and record["inject"]["type"] == "header"
+  headers = _app_auth(db, app)
+  asked = client.post("/api/keys/requests", headers=headers,
+                      json={**ASK, "key": name, "sites": [SITE], "inject": QUERY_SLOT})
+  assert asked.status_code == 200, asked.text
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert card["inject"] == QUERY_SLOT and card["sets_inject"] is True
+  approved = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
+                         json={"ticket": card["ticket"], "sites": card["sites"], "inject": card["inject"]})
+  assert approved.status_code == 200, approved.text
+  assert vault.list_keys()[0]["inject"] == QUERY_SLOT
+  sent = client.get(f"/api/keys/use/{name}/api.example.com/v1/forecast", headers=headers)
+  assert sent.status_code == 200, sent.text
+  assert "api_key=" in sent.json()["path"] and "Authorization" not in sent.json()["headers"]

@@ -97,7 +97,13 @@ Status: draft for review.
    is the only place they could be answered, and a waiting request answers
    for every later ask for its key. If the vault can't be reached then,
    the next agent ask for that key withdraws the leftover request and gets
-   its own card. Recovering the chat (or its project) first waits for a
+   its own card. The same holds for a request whose card was never saved
+   (the vault records the ask first, and the turn can stop before its card
+   is saved): a failed save withdraws it, and an ask that finds another
+   live chat's request with no open card there withdraws that exact request
+   (by its ticket) and asks again. Asks for one key run one at a time
+   through to their card, so a request is never taken for cardless while
+   its card is still being saved. Recovering the chat (or its project) first waits for a
    withdrawal still on its way, then tells the vault that deletion was undone:
    each withdrawal names its deletion, and the vault ignores one for an undone
    deletion that reaches it late, so it never removes a request the recovered
@@ -112,8 +118,9 @@ Status: draft for review.
    request only proposes: approval applies the sites and slot the owner's
    answer carries (a new key answered without a slot is sent as
    `Authorization: Bearer`). The sites go to that app's own grant. An existing
-   key keeps its value, and its slot unless nothing sends it yet (no app and
-   no site of its own): then the request's proposed slot is shown on the card
+   key keeps its value, and its slot unless nothing can send it yet (no site
+   of its own and no app with a site, as with a key an app saved or that was
+   imported without sites): then the request's proposed slot is shown on the card
    and Allow sets it, which is how a key saved ahead of time (always as a
    bearer token) gets the slot its first user needs. A key already in use
    keeps its slot under it, and the card says so. Granting

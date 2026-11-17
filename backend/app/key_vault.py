@@ -849,6 +849,19 @@ async def forget_chat(chat_id: str, deletion: str | None = None) -> None:
 _withdrawals: dict[str, asyncio.Task] = {}
 
 
+async def withdraw_request(request_id: str, ticket: str | None) -> None:
+  """Withdraw one agent request no card can answer, while it is still the
+  exact ask (``ticket``) that was found without one. Best effort: if the
+  vault can't be reached, the next ask for its key tries again."""
+  path = f"/requests/{urllib.parse.quote(request_id, safe='')}"
+  if ticket:
+    path += f"?ticket={urllib.parse.quote(ticket, safe='')}"
+  try:
+    await vault_call("DELETE", path, caller="platform:key-request")
+  except (VaultUnavailable, VaultTimeout, VaultRefused):
+    log.warning("Could not withdraw key request %s that no card can answer", request_id, exc_info=True)
+
+
 def deletion_stamp(deleted_at) -> str | None:
   """One deletion of a chat, as the vault knows it: its ``deleted_at``."""
   return deleted_at.isoformat() if deleted_at is not None else None
