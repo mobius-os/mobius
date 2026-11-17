@@ -3230,15 +3230,6 @@
   overscroll-behavior: contain;
 }
 
-/* Keep wheel, touch, and keyboard scrolling, but give the rows the full
-   width of the popover instead of reserving a scrollbar track. */
-.composer-popover {
-  --shell-scrollbar-width: none;
-  --shell-scrollbar-display: none;
-  scrollbar-width: none;
-}
-.composer-popover::-webkit-scrollbar { display: none; }
-
 [data-theme="light"] .composer-popover {
   box-shadow: 0 12px 32px -8px rgba(15, 18, 25, 0.18);
 }

@@ -2958,14 +2958,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   // The one way the shell opens Settings for someone else (a mini-app, the
   // agent's open_item, a notification tap, a chat link): navigate there and
-  // focus a known section. Navigation only; every action inside Settings stays
-  // the owner's.
-  const openSettingsSection = useCallback((section) => {
-    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+  // focus a known section, or open a whole page such as one provider's.
+  // Navigation only; every action inside Settings stays the owner's.
+  const openSettingsSection = useCallback((section, { page = null } = {}) => {
+    setSettingsFocusTarget(section || page ? { section: section || null, page, nonce: Date.now() } : null)
     if (activeViewRef.current !== 'settings') navToRef.current('settings')
   }, [activeViewRef])
+  // The chat picker only offers built-in providers here (providerSetupTarget).
   const openProviderSettings = useCallback((providerId) => {
-    openSettingsSection(`provider:${providerId}`)
+    openSettingsSection(null, { page: providerId })
   }, [openSettingsSection])
 
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({

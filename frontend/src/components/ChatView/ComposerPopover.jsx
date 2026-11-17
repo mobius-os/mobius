@@ -325,6 +325,11 @@ export default function ComposerPopover({
     onOpenAppArtifact?.(app)
   }
 
+  function handleOpenProviderSettings(providerId) {
+    setOpen(false)
+    onOpenProviderSettings(providerId)
+  }
+
   function finishCurrentIconDrop() {
     setIconDropQueue(current => current.slice(1))
   }
@@ -491,7 +496,9 @@ export default function ComposerPopover({
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
-                onOpenProviderSettings={onOpenProviderSettings}
+                // An embedded chat cannot leave its host, so its logos stay plain.
+                onOpenProviderSettings={!embedded && onOpenProviderSettings ? handleOpenProviderSettings : undefined}
+                onOpenProviderApp={!embedded && onOpenAppArtifact ? handleOpenAppArtifact : undefined}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 providerUsage={providerUsage}

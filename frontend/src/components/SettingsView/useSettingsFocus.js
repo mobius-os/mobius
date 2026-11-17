@@ -2,18 +2,19 @@ import { useEffect, useRef } from 'react'
 import { settingsSectionPage } from '../../lib/settingsSections.js'
 
 // Where a request lands: the page to show (null for the overview) and the
-// section on it to focus (null when the request is the page itself). Chat
+// section on it to focus (null when the request is the page itself). A request
+// naming a page (`{ page }`, say one provider's) opens it whole. Chat
 // models live on each provider's page, so `models` opens the first connected
 // provider's, or the AI providers list while none is connected.
-export function settingsFocusDestination(section, modelsProvider) {
-  if (section?.startsWith('provider:')) return { page: section.slice(9), anchor: null }
+export function settingsFocusDestination({ section, page } = {}, modelsProvider = null) {
+  if (page) return { page, anchor: null }
   if (section === 'models') {
     return modelsProvider
       ? { page: modelsProvider, anchor: 'chat-models' }
       : { page: null, anchor: 'ai-providers' }
   }
-  const page = settingsSectionPage(section)
-  return page ? { page, anchor: null } : { page: null, anchor: section }
+  const sectionPage = settingsSectionPage(section)
+  return sectionPage ? { page: sectionPage, anchor: null } : { page: null, anchor: section }
 }
 
 /**
@@ -36,8 +37,8 @@ export function useSettingsFocus({
   const waiting = section === 'models' && !providerReady && !providersFailed
 
   useEffect(() => {
-    if (!section || waiting || taken.current?.request === focusTarget) return
-    taken.current = { request: focusTarget, ...settingsFocusDestination(section, providerReady ? modelsProvider : null) }
+    if (!(section || focusTarget?.page) || waiting || taken.current?.request === focusTarget) return
+    taken.current = { request: focusTarget, ...settingsFocusDestination(focusTarget, providerReady ? modelsProvider : null) }
     setDetailPage(taken.current.page)
   }, [focusTarget, section, waiting, providerReady, modelsProvider, setDetailPage])
 
