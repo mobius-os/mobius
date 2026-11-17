@@ -1,0 +1,33 @@
+/* A key request card outside Settings: in a chat reply and over an app's window. */
+/* The card itself is Settings' (KeyRequest.jsx brings KeysSection.css and
+   settingsButtons.css with it); only what differs outside Settings is here. */
+.key-request-place .settings-keys__request { margin: 0; }
+
+/* A one-line state: answered, gone, or answered elsewhere. */
+.key-request-place__line {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.key-request-place__note { margin: 6px 2px 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.key-request-place__link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-text, var(--accent));
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* -- in a chat reply ------------------------------------------------------ */
+.key-request-place--chat {
+  box-sizing: border-box;
+  width: min(100%, 640px);
+  margin: 10px auto;
+}

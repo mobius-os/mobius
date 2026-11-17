@@ -1,9 +1,9 @@
 # Secure input
 
 Use this skill when the owner needs to supply a password, API key, token,
-private username, or other value that should not pass through the LLM API or
-enter the chat transcript. The trusted card is an interactive live-chat
-primitive, not a background/scheduled-agent mechanism.
+private username, or other secret that must stay out of the LLM API and the
+chat transcript, including adding or saving a key in their key vault
+(Settings › Keys). The card is a live-chat primitive, not for background work.
 
 ## Default: saved sealed pause
 
@@ -58,6 +58,42 @@ environment, not the publishing agent's session. Do not depend on `AGENT_TOKEN`
 or other turn-only credentials. Prepare a self-contained narrow local operation;
 if it needs additional authority, resolve that before opening the card rather
 than saving credentials in its execution specification.
+
+## API keys and service tokens: save to the key vault, then borrow
+
+For an API key or token a service call needs, use the vault's consumer
+instead of writing your own: `["python3",
+"/data/platform/backend/scripts/store-key.py", "NAME"]` (add `--header NAME
+[--prefix TEXT]` or `--query NAME` when the service does not take
+`Authorization: Bearer`). Save it without sites: the first time you borrow it
+for a site, ask the owner with the `request_key` tool and they approve that
+site on its card (below). Add `--site api.example.com:GET,POST:/v1/*` only when the
+owner told you where the key goes. The owner then sees and manages it in
+Settings › Keys. It never replaces a key
+that already has that name: it leaves that key as it was and fails. A failed
+consumer's receipt does not say why and the submitted value is discarded, so
+before opening the card check `mapi /api/keys` for the name; if it exists,
+ask the owner whether to replace it and add `--replace` only when they said
+so. After a failed receipt, check the list again before asking the owner a
+second time. It writes to the vault directly, so the owner gets no
+notification of a replacement: tell them yourself.
+
+To use a key on a site it does not list yet, or a key the owner has not
+saved, call `request_key` with the key's name, a one-sentence `reason`, the
+exact `sites`, an optional `inject` for a new key, and your closing `message`.
+If you may already use it there, or the owner already said no, it answers at
+once with no card (`answered_without_card`, with `granted`, `paused` or
+`denied`) and your turn continues. Otherwise it saves a key card in this chat
+and ends your turn like any other owner card: the chat waits for the owner,
+nothing else tells them (no notification is sent), and their answer resumes
+you as **Allow** or **Not now**, so do not poll. A new key is pasted on that
+card, never into chat.
+
+Use the key by borrowing it, not reading it: send the request through
+`mapi /api/keys/use/NAME/api.example.com/v1/...` with any method, headers and
+body; the vault adds the key and redacts it from the answer. Read the value
+(`mapi /api/keys/NAME/value`) only when a tool genuinely needs the raw key,
+and never print it: anything a command prints stays in the chat log.
 
 Consumer execution has a two-minute safety limit. Stop cancels the operation
 without resuming the chat. A crash or restart during execution leaves its

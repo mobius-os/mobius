@@ -38,6 +38,9 @@ import {
   restartCardStatusLabel,
 } from './restartCard.js'
 import { questionActionCompleted } from './questionOpen.js'
+import { KEY_ALLOW } from './keyRequestCardState.js'
+import { earlyAnswerHint } from '../SettingsView/useKeyAnswerGuard.js'
+import KeyRequestDetails, { KeyPasteField } from './KeyRequestDetails.jsx'
 
 
 const CUSTOM_ANSWER_MAX_HEIGHT = 180
@@ -165,6 +168,8 @@ export default function QuestionCard({
   neededBy = [],
   onInternalNav,
   platformAction,
+  // An agent's key ask (KeyQuestionCard.jsx): the card answers the vault first.
+  keyCard = null,
   submittedOptions,
   attachments,
   onAnswer,
@@ -245,6 +250,11 @@ export default function QuestionCard({
   const respondedRestartAction = (
     writtenRestartAction && platformAction?.status === 'responded'
   )
+  // A key card takes only its choices: no typed reply and no files.
+  const choicesOnly = Boolean(platformAction || keyCard)
+  const chosenKeyOption = keyCard
+    ? (questions[0]?.options || []).find(option => option.label === answers[questions[0]?.question])?.id
+    : null
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -272,6 +282,8 @@ export default function QuestionCard({
     answers,
   )
   const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
+    && (!keyCard || (keyCard.state === 'pending' || keyCard.state === 'denied' || keyCard.state === 'gone')
+      && keyCard.ready(chosenKeyOption))
   // Incomplete cards stay tappable to reveal the first missing answer. Pending
   // uploads alone still disable submission until their durable IDs arrive.
   const unansweredLook = !allAnswered && !pendingFiles && !restartAction
@@ -356,6 +368,19 @@ export default function QuestionCard({
       return
     }
     preparedSubmissionRef.current = null
+    if (keyCard) {
+      // The owner's answer reaches the vault first; the card only records it.
+      setSubmitError('')
+      setSubmitting(true)
+      try {
+        await keyCard.settle(chosenKeyOption)
+      } catch (error) {
+        setSubmitError(error?.message || 'That answer didn’t save. Please try again.')
+        setSubmitting(false)
+        if (preparedSubmission) onCancelAnswer?.(preparedSubmission)
+        return
+      }
+    }
     const resolved = {}
     const lines = questions.map(q => {
       const own = readyFiles.filter(file => fileBelongsToQuestion(file.group, q.question, questions.length))
@@ -417,7 +442,7 @@ export default function QuestionCard({
   // answers: untagged ones on a grouped card (they predate per-answer files)
   // and restored draft files whose question left the card.
   const sentAttachments = attachments || localAnswer?.body?.attachments || submitted?.attachments || []
-  const fileTray = (owns, label) => platformAction ? null : (
+  const fileTray = (owns, label) => choicesOnly ? null : (
     <div className="qcard__answer-files" role="group" aria-label={label}>
       {selectionLocked
         ? <Attachments attachments={sentAttachments.filter(file => owns(file.question))} chatId={chatId} />
@@ -513,6 +538,7 @@ export default function QuestionCard({
               <div className="qcard__header"><InlineMarkdown text={q.header} /></div>
             )}
             <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} literalTags onInternalNav={onInternalNav} /></div>
+            {keyCard && !answered && <KeyRequestDetails card={keyCard} />}
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
@@ -606,14 +632,18 @@ export default function QuestionCard({
                 )
               })}
             </div>}
+            {keyCard && !answered && chosenKeyOption === KEY_ALLOW && (
+              <KeyPasteField card={keyCard} disabled={inactive} />
+            )}
             {(!completedAction || respondedRestartAction)
+              && !keyCard
               && (!restartAction || writtenRestartAction) && (
               <div className="qcard__answer-row">
                 {/* Each answer has its own paperclip on the left of its box.
                     It stays while the action row does, so Submit, queueing
                     and the Submitted state never move the card; once the
                     answer is locked it only stops taking files. */}
-                {!platformAction && showsAnswerControls && (
+                {!choicesOnly && showsAnswerControls && (
                   <button type="button" className="qcard__attach"
                     id={attachId}
                     aria-label={grouped ? 'Attach a photo or file to your answer to:' : 'Attach a photo or file'}
@@ -656,7 +686,7 @@ export default function QuestionCard({
         <DependencyBacklinks chats={neededBy} onInternalNav={onInternalNav} />
       </details>}
       {hasCardFiles && fileTray(cardLevel, 'Files for all answers')}
-      {!platformAction && showsAnswerControls && (
+      {!choicesOnly && showsAnswerControls && (
         <input ref={fileInputRef} type="file" multiple className="qcard__file-input"
           disabled={attachLocked}
           aria-label="Attach files to your answer"
@@ -681,12 +711,15 @@ export default function QuestionCard({
           {submitHint && (
             <div className="qcard__submit-hint" id={submitHintId}>{submitHint}</div>
           )}
+          {keyCard && keyCard.guard.early !== null && !answered && (
+            <div className="qcard__submit-hint" role="status">{earlyAnswerHint(keyCard.guard.early)}</div>
+          )}
           <button
             type="button"
             // A card stopped before it was answered keeps the quiet outline it had,
             // dimmed by :disabled, rather than turning into a dimmed primary.
             className={`qcard__submit${unansweredLook ? ' qcard__submit--incomplete' : ''}`}
-            aria-disabled={needsAnswers || undefined}
+            aria-disabled={needsAnswers || (keyCard && !keyCard.guard.active) || undefined}
             aria-describedby={submitHint ? submitHintId : undefined}
             onPointerDown={(event) => {
               if (needsAnswers) return
@@ -706,6 +739,12 @@ export default function QuestionCard({
               }
               const prepared = preparedSubmissionRef.current
               preparedSubmissionRef.current = null
+              // Submit on a key card wakes only once the card has been still
+              // and untouched for a moment, as every key answer does.
+              if (keyCard && !keyCard.guard.counts(event)) {
+                if (prepared) onCancelAnswer?.(prepared)
+                return
+              }
               handleSubmit(event.currentTarget.closest('.qcard'), prepared)
             }}
             disabled={(!canSubmit && !needsAnswers) || disabled || selectionLocked || submitting}

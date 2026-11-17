@@ -1,0 +1,170 @@
+/* Settings › Keys: the request card shared with chats and apps, and what the Keys pages add to the shared Settings blocks. */
+/* Layout comes from SettingsPage.css (settings-group, settings-list,
+   settings-item, settings-field, settings-input); this file
+   styles only what is key-specific. Settings' own stylesheet loads after this
+   one, so overrides of shared settings classes carry one extra class. */
+
+/* -- an app asking for a key -------------------------------------------- */
+.settings-keys__request {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 12px;
+  background: var(--surface);
+}
+.settings-keys__request-lead { margin: 0; font-size: 14px; line-height: 1.45; color: var(--text); }
+.settings-keys__request-lead strong { font-weight: 600; overflow-wrap: anywhere; }
+/* The requester's own words, set apart from what Möbius says. */
+.settings-keys__says {
+  margin: 0;
+  padding: 2px 0 2px 10px;
+  border-left: 3px solid var(--border);
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+/* "Details" and "Use <app>'s key anyway": the technical or risky part, one tap away. */
+.settings-keys__details summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+}
+.settings-keys__details-list {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 2px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.settings-keys__details-list code { font-family: inherit; }
+.settings-keys__details-body { display: grid; gap: 8px; margin-top: 6px; }
+.settings-keys__actions.settings-keys__actions--start { justify-content: flex-start; }
+
+/* Shared by the request card wherever it renders (Settings' sheets may not be loaded there). */
+.settings-keys__muted { margin: 0; font-size: 13px; line-height: 1.45; color: var(--muted); }
+.settings-keys__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.settings-keys__input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  outline: 0;
+}
+.settings-keys__input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+
+/* -- the Keys pages -------------------------------------------------------- */
+.settings-keys-page { display: grid; }
+.settings-keys-page > .alert { margin-bottom: 14px; }
+.settings-keys-page__lede { margin: 0 2px 22px; }
+.settings-keys-page__actions { margin-top: 12px; }
+.settings-keys-requests { display: grid; gap: 10px; }
+.settings-keys-requests .settings-keys__request { margin-bottom: 0; }
+.settings__btn.settings-keys__more { margin-top: 10px; }
+
+/* A row that only says something quiet (empty states). */
+.settings-item.settings-keys-quiet { min-height: 52px; }
+
+/* An "add" row: accent text, a plus in the icon slot. */
+.settings-item.settings-keys-add { color: var(--accent-text, var(--accent)); cursor: pointer; }
+.settings-keys-add .settings-item__title { font-weight: 500; }
+.settings-item__icon.settings-keys-add__icon { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text, var(--accent)); }
+@media (hover: hover) and (pointer: fine) {
+  .settings-item.settings-keys-add:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+}
+
+/* An app row: the left part opens its websites, the switch pauses it. */
+.settings-keys-expand {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin: -12px 0 -12px -16px;
+  padding: 12px 0 12px 16px;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.settings-keys-expand:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.settings-keys-expand .settings-item__chevron { margin-right: 4px; }
+.settings-item__icon.settings-keys-initial { font-size: 14px; font-weight: 600; }
+.settings-item-panel.settings-keys-panel { display: grid; gap: 12px; padding-left: 62px; }
+
+/* The key's value: masked dots, or the revealed key in mono. */
+.settings-keys-value__mask { letter-spacing: 0.08em; }
+.settings-keys__value {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+}
+.settings-actions.settings-keys-value__actions { flex: none; flex-wrap: nowrap; }
+
+.settings-keys__icon-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.settings-keys__icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.settings-keys__icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Recent activity: compact rows, when on the right. */
+.settings-item.settings-keys-activity { min-height: 48px; padding-top: 10px; padding-bottom: 10px; }
+.settings-keys-activity .settings-item__title { font-weight: 400; }
+.settings-keys-activity .settings-item__trail { font-size: 12.5px; white-space: nowrap; }
+.settings-keys__refused { color: var(--danger-text, var(--danger)); }
+.settings-keys__warn { color: var(--warning-text, var(--warning, #b7791f)); }
+
+/* Forms: a panel under a row, a form row inside a list, or the new-key card. */
+.settings-keys-form { display: grid; gap: 14px; }
+.settings-keys-form--row { padding: 14px 16px 16px; }
+.settings-keys-form--card { gap: 18px; padding: 18px; }
+.settings-keys-form__switches { display: grid; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+
+.settings__btn.settings-keys__danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+
+@container settings (max-width: 400px) {
+  .settings-item-panel.settings-keys-panel { padding-left: 14px; }
+  .settings-keys-form--card { padding: 14px; }
+  /* Show and Replace drop their icons so the masked value keeps its room. */
+  .settings-keys-value__actions svg { display: none; }
+  .settings-keys-value .settings-item__icon { display: none; }
+  .settings-keys-value .settings-item__sub { white-space: normal; }
+}

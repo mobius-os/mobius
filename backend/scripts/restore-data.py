@@ -77,9 +77,11 @@ hand recovery.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -94,7 +96,17 @@ import backup_lib as lib  # noqa: E402
 SECRET_FILE_MODE = 0o600
 SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
-SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push")
+SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push", ".vault")
+
+# The key vault program: a restore whose backup carries no vault keeps the
+# current vault and withdraws, with the vault's own purge step, every app
+# grant not proven to name the same app after the restore (KeptVault). It
+# resolves to /app/vault/keyvault.py in the image (the Dockerfile ships
+# backend/vault beside backend/scripts), never to agent-editable /data,
+# because a restore runs as root.
+VAULT_PROGRAM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "vault", "keyvault.py")
+DB_RELPATH = os.path.join("db", "ultimate.db")
 
 # Rough gz -> uncompressed expansion for the capacity preflight.
 EXPAND_FACTOR = 4
@@ -229,6 +241,119 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
+def app_identities(db_path):
+  """App id -> its installation (slug and token nonce) in a Möbius database,
+  or None when it can't be read.
+
+  The nonce changes when an id is reused by a new installation, so a purged
+  app whose id went to a new app with the same slug still counts as another
+  app. A database from before nonces existed is compared by slug alone.
+  """
+  if not os.path.isfile(db_path):
+    return None
+  try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+      columns = {row[1] for row in conn.execute("PRAGMA table_info(apps)")}
+      nonce = "token_nonce" if "token_nonce" in columns else "NULL"
+      rows = conn.execute(f"SELECT id, slug, {nonce} FROM apps").fetchall()
+    finally:
+      conn.close()
+  except sqlite3.Error:
+    return None
+  return {int(app_id): (slug, token_nonce) for app_id, slug, token_nonce in rows}
+
+
+def unproven_app_ids(named, before, after):
+  """The app ids among ``named`` whose grants the kept vault must withdraw:
+  every id the databases from before and after the restore don't both give
+  to the same installation (slug and token nonce).
+
+  App ids are reused, so a grant naming an id would let whichever app holds
+  it now borrow the key. A grant is kept only when it provably still names
+  the app it was given to; an unreadable database, or an id one of them
+  lacks, proves nothing and withdraws it.
+  """
+  if before is None or after is None:
+    return sorted(named)
+  return sorted(app_id for app_id in named
+                if app_id not in before or app_id not in after
+                or before[app_id] != after[app_id])
+
+
+class KeptVault:
+  """The current key vault, opened offline under its single-instance lock
+  for a restore that keeps it (the backup carries no vault).
+
+  Opened before the swap, so a vault that can't be updated stops the
+  restore while /data is unchanged, and held until the grants are
+  reconciled, so no vault starts on the folder in between.
+  """
+
+  def __init__(self, vault_dir):
+    spec = importlib.util.spec_from_file_location("mobius_restore_vault", VAULT_PROGRAM)
+    if spec is None or not os.path.isfile(VAULT_PROGRAM):
+      raise RuntimeError(f"vault program not found at {VAULT_PROGRAM}")
+    vault_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = vault_module  # its dataclasses resolve their own module
+    spec.loader.exec_module(vault_module)
+    from pathlib import Path
+    try:
+      self._lock = vault_module.hold_single_instance_lock(Path(vault_dir))
+    except SystemExit as exc:  # a vault is running on the folder
+      raise RuntimeError(str(exc)) from None
+    try:
+      self._vault = vault_module.Vault(Path(vault_dir))
+    except (SystemExit, Exception) as exc:  # SystemExit: the vault refuses its store
+      os.close(self._lock)
+      raise RuntimeError(str(exc)) from None
+
+  @classmethod
+  def open_if_any(cls, data_dir):
+    """The kept vault, or None when the current install has no vault state."""
+    vault_dir = os.path.join(data_dir, ".vault")
+    if not any(os.path.isfile(os.path.join(vault_dir, name))
+               for name in ("keys.json", "requests.json")):
+      return None
+    return cls(vault_dir)
+
+  def withdraw_unproven_grants(self, before, after):
+    """Withdraw the grants and requests of every app id not proven to be the
+    same app (``unproven_app_ids``) with the vault's own purge step
+    (``Vault.forget_app``, which also erases keys that app saved for
+    itself); return those ids. The agents' requests name no app and stay."""
+    named = {r["app"] for r in self._vault.list_requests() if r["app"] is not None}
+    for key in self._vault.list_keys():
+      named.update(grant["id"] for grant in key["grants"]["apps"])
+    stale = unproven_app_ids(named, before, after)
+    for app_id in stale:
+      self._vault.forget_app(app_id, actor="platform:restore")
+    return stale
+
+  def close(self):
+    os.close(self._lock)
+
+
+def reconcile_kept_vault(kept_vault, data_dir, before):
+  """After the swap of a restore that kept the current vault: withdraw every
+  app grant not proven to name the same app, and tell the owner to review.
+  Raises when the vault can't be updated; the caller undoes the restore."""
+  log("WARNING: the backup has no key vault, so the key vault (/data/.vault) "
+      "was KEPT from the current install. Its app grants refer to app ids "
+      "of the current install, which the restored database may give to "
+      "other apps.")
+  after = app_identities(os.path.join(data_dir, DB_RELPATH))
+  if before is None or after is None:
+    log("WARNING: could not read the apps from "
+        f"{'before' if before is None else 'after'} the restore, so no app "
+        "grant can be proven to name the same app; withdrawing every one.")
+  stale = kept_vault.withdraw_unproven_grants(before, after)
+  if stale:
+    log(f"withdrew key grants and requests for app ids {stale}: not proven "
+        "to be the same app after the restore.")
+  log("Review the remaining app grants in Settings › Keys.")
+
+
 def refuse_if_server_up(health_url, phase):
   """Refuses when a server answers at health_url — restoring under a live
   SQLite pool risks lost writes through stale fds."""
@@ -350,10 +475,16 @@ def main():
     die(f"insufficient space to stage restore: need ~{need}, have {free}",
         code=3)
 
+  # Which app each id names now, before the restored database replaces it.
+  # Read whatever the backup holds: only the swap tells whether a vault came
+  # with it (a secrets archive from before the vault has none).
+  apps_before = app_identities(os.path.join(data_dir, DB_RELPATH))
+
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
   rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
   preserve_rollback = False  # set only when rollback itself failed
+  kept_vault = None
   try:
     if "data.tar.gz" in art_names:
       safe_extract(os.path.join(backup_dir, "data.tar.gz"), staging)
@@ -373,6 +504,18 @@ def main():
       log("WARNING: backup has NO secrets (skipped at backup time); "
           ".secret-key + provider auth will NOT be restored — the owner "
           "may need to re-authenticate and JWTs will be re-signed")
+
+    # A backup without a vault (no secrets, or secrets from before the vault)
+    # keeps the current one, whose app grants name this install's app ids.
+    # Open it now: if it can't be updated, nothing is restored.
+    if ".vault" not in os.listdir(staging):
+      try:
+        kept_vault = KeptVault.open_if_any(data_dir)
+      except Exception as exc:  # noqa: BLE001 - refuse with the reason
+        die(f"the backup has no key vault, so the current one must be kept "
+            f"and its app grants checked, but it can't be opened ({exc}). "
+            f"Stop Möbius and its key vault, then restore again; /data "
+            f"unchanged.", code=4)
 
     # Re-probe just before the swap: a server that came back between the
     # early check and now must not have the DB swapped underneath it.
@@ -400,10 +543,30 @@ def main():
       die(f"restore failed mid-swap and was fully rolled back; /data "
           f"unchanged: {exc}", code=3)
     log(f"restored top-level entries: {moved}")
+    if kept_vault is not None:
+      # The restore and the kept vault's grants commit together: a grant
+      # left naming another app would let that app borrow the key.
+      try:
+        reconcile_kept_vault(kept_vault, data_dir, apps_before)
+      except Exception as exc:  # noqa: BLE001
+        try:
+          lib.undo_swap(data_dir, rollback_dir, moved, exc)
+        except lib.RollbackError as rbe:
+          preserve_rollback = True
+          die(f"could not update the key vault ({exc}), and undoing the "
+              f"restore was INCOMPLETE; {len(rbe.unrecovered)} original(s) "
+              f"preserved in {rbe.rollback_dir}: {rbe.unrecovered}. Recover "
+              f"them by hand and do NOT delete it; do not start Möbius "
+              f"until then.", code=5)
+        die(f"could not update the key vault ({exc}), so the restore was "
+            f"undone and /data is as it was. Any grant already withdrawn "
+            f"stays withdrawn; allow it again in Settings › Keys.", code=3)
     # Success: the displaced originals in rollback_dir are no longer
     # needed.
     shutil.rmtree(rollback_dir, ignore_errors=True)
   finally:
+    if kept_vault is not None:
+      kept_vault.close()
     shutil.rmtree(staging, ignore_errors=True)
     # Delete rollback_dir ONLY when it does not hold unrecovered originals
     # — the one case (RollbackError) where it must survive for hand

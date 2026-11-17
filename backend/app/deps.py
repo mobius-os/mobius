@@ -117,8 +117,6 @@ class Principal:
   via_agent_chat: str | None = None
   app_is_service: bool = False
   app_is_public_service: bool = False
-  # Signed supervised-job identity/grant; never copied into frame bearers.
-  app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
 
@@ -765,7 +763,6 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     via_agent_chat=payload.get("via_agent_chat") if app_id is not None else None,
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
-    app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
   )
 
 

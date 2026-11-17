@@ -14,9 +14,34 @@ from app.app_capabilities import contract_from_manifest
 from app.config import get_settings
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.routes import model_relay
-from app.routes.secrets import _write_secret
 
 REAL_KEY = "test-only-provider-key"
+
+# Model keys live in the key vault; these tests stand in for it, keyed by the
+# app id and the declared secret name, and record each successful read.
+_FAKE_VAULT: dict[tuple[int, str], str] = {}
+_REVEALS: list[int] = []
+
+
+def _write_secret(path: Path, value: str) -> None:
+  _FAKE_VAULT[(int(path.parent.name), path.name)] = value
+
+
+@pytest.fixture(autouse=True)
+def _fake_vault(monkeypatch):
+  from app import key_vault
+  _FAKE_VAULT.clear()
+  _REVEALS.clear()
+
+  def reveal(app_id, name, base_url, **_destination):
+    value = _FAKE_VAULT.get((app_id, name))
+    if value is not None:
+      _REVEALS.append(threading.get_ident())
+    return value
+
+  monkeypatch.setattr(key_vault, "model_provider_key_sync",
+                      lambda app_id, name, base_url, **_destination: name if (app_id, name) in _FAKE_VAULT else None)
+  monkeypatch.setattr(key_vault, "reveal_model_provider_key", reveal)
 
 
 def _manifest(**provider_changes):
@@ -214,7 +239,7 @@ def test_count_tokens_side_endpoint_reaches_the_provider(client, monkeypatch):
   monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
   monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
   monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
-  monkeypatch.setattr(adapter, "read_relay_key", lambda _data_dir: providers.RelayKeyRead(REAL_KEY, None))
+  monkeypatch.setattr(adapter, "read_relay_key", lambda _data_dir, **_: providers.RelayKeyRead(REAL_KEY, None))
   seen = []
   monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(
     lambda request: seen.append(request) or httpx.Response(200, json={"input_tokens": 3}),
@@ -227,6 +252,49 @@ def test_count_tokens_side_endpoint_reaches_the_provider(client, monkeypatch):
   assert response.status_code == 200 and response.json() == {"input_tokens": 3}
   assert str(seen[0].url) == "https://models.example.com/v1/messages/count_tokens"
   assert seen[0].headers["x-api-key"] == REAL_KEY
+
+
+def test_the_relay_checks_the_key_for_the_exact_endpoint_it_calls(client, monkeypatch):
+  """The key's sites are checked for the path each call reaches, by the same
+  endpoints the vault's provider site lists for the protocol."""
+  from app import key_vault
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  monkeypatch.setitem(providers.PROVIDERS, "app-4242", adapter)
+  monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
+  monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
+  checked = []
+
+  def read_relay_key(_data_dir, *, endpoint=None, **_):
+    checked.append(endpoint)
+    return providers.RelayKeyRead(REAL_KEY, None)
+  monkeypatch.setattr(adapter, "read_relay_key", read_relay_key)
+  monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(
+    lambda request: httpx.Response(200, json={}),
+  )))
+  for path in ("/v1/messages", "/v1/messages/count_tokens"):
+    response = client.post(
+      f"/api/model-relay/app-4242{path}",
+      json={"model": "example/flash", "messages": [{"role": "user", "content": "hi"}]},
+      headers={"x-api-key": adapter.relay_token()},
+    )
+    assert response.status_code == 200
+  assert checked == ["/v1/messages", "/v1/messages/count_tokens"]
+  for name, protocol in model_relay._PROTOCOLS.items():
+    assert key_vault.PROVIDER_ENDPOINTS[name][0] == protocol.upstream_path
+  assert "/v1/messages/count_tokens" in key_vault.PROVIDER_ENDPOINTS["anthropic_messages"]
+
+
+def test_an_anthropic_provider_is_available_only_on_its_own_endpoint(monkeypatch):
+  """Availability asks the vault about the protocol's main endpoint, not
+  the Responses path another protocol would call."""
+  from app import key_vault
+  adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
+  asked = []
+  monkeypatch.setattr(providers, "provider_enabled", lambda *_: True)
+  monkeypatch.setattr(key_vault, "model_provider_key_sync",
+                      lambda *args, **destination: asked.append(destination) or "k")
+  assert adapter.read_relay_key("/unused", authorize=False).unavailable is None
+  assert asked == [{"protocol": "anthropic_messages", "endpoint": None}]
 
 
 @pytest.mark.parametrize("inherited", ["ultracode", "xhigh"])
@@ -331,15 +399,7 @@ def test_relay_checks_token_then_forwards_normalized_body_with_real_key(
     return httpx.Response(200, headers={"content-type": "text/event-stream"},
                           content=b"event: message_stop\ndata: {}\n\n")
 
-  from app import app_secret_crypto
-  real_decrypt = app_secret_crypto.decrypt_app_secret
-  decrypt_threads = []
-
-  def decrypt_once(path):
-    decrypt_threads.append(threading.get_ident())
-    return real_decrypt(path)
-
-  monkeypatch.setattr(app_secret_crypto, "decrypt_app_secret", decrypt_once)
+  decrypt_threads = _REVEALS
   monkeypatch.setattr(model_relay, "_is_direct_loopback",
                       lambda _request: seen.update(relay_thread=threading.get_ident()) or True)
   monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
@@ -415,11 +475,11 @@ def test_store_model_relay_refuses_dormant_and_stale_access_before_using_saved_k
     app_consent.revoke(app)
     db.commit()
     # The registry still holds this object inside its one-second refresh window.
-    from app import app_secret_crypto
+    from app import key_vault
     decrypted = []
     with monkeypatch.context() as patch:
-      patch.setattr(app_secret_crypto, "decrypt_app_secret",
-                    lambda _path: decrypted.append(_path) or REAL_KEY)
+      patch.setattr(key_vault, "reveal_model_provider_key",
+                    lambda *args, **_: decrypted.append(args) or REAL_KEY)
       assert stale_provider.read_relay_key(data_dir).unavailable is not None
       assert relay().status_code == 403
     assert decrypted == []
@@ -789,7 +849,7 @@ def relay_connection(monkeypatch, tmp_path):
   async def no_registry_refresh(*_args, **_kwargs):
     return None
   monkeypatch.setattr(providers, "refresh_app_model_providers", no_registry_refresh)
-  monkeypatch.setattr(adapter, "read_relay_key", lambda *_: providers.RelayKeyRead(REAL_KEY, None))
+  monkeypatch.setattr(adapter, "read_relay_key", lambda *_, **__: providers.RelayKeyRead(REAL_KEY, None))
 
   async def receive():
     return {"type": "http.request", "body": b'{}', "more_body": False}

@@ -1147,6 +1147,31 @@ export const api = {
       { method: 'POST', body: JSON.stringify({}) },
     ),
   },
+  // Settings › Keys. Only reveal (the owner's Show) ever returns a value.
+  keys: {
+    list: (options = {}) => apiFetch('/keys', options),
+    put: (name, body) => apiFetch(`/keys/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+    revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    reveal: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/value`),
+    approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+    // The ticket names the exact request the owner saw, so a card left open
+    // never answers a newer request that reuses the same id.
+    deny: (requestId, ticket) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ticket ? { ticket } : {}),
+    }),
+    forgetRequest: (requestId) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}`, { method: 'DELETE' }),
+    usage: (name, limit = 8) => apiFetch(
+      `/keys/usage?${new URLSearchParams({ key: name, limit: String(limit) })}`,
+    ),
+  },
   apps: {
     list: (options = {}) => apiFetch('/apps/', options),
     // Apps in their 7-day recovery window (undo with `recover`, below).

@@ -2938,6 +2938,14 @@ async def delete_chat(
           "Chat %s was deleted but its durable run marker could not be cleared",
           chat_id,
         )
+      # Its agent's waiting key requests could only be answered on its cards.
+      # Started under the chat's transition lock, so a recovery waiting on it
+      # settles them first; awaited after it, so a vault that hangs never
+      # holds the lock.
+      from app import key_vault
+      withdrawal = key_vault.start_withdrawing_chat_requests(
+        [str(chat_id)], key_vault.deletion_stamp(chat.deleted_at if chat else None),
+      )
   # Destructive cleanup has settled before releasing transition ownership.
   # The tombstone and releases are already durable. Nudge exact-Goal delivery as a
   # best-effort layer; failure cannot roll back an owner-requested
@@ -2950,6 +2958,7 @@ async def delete_chat(
       log.exception(
         "Chat %s was deleted but claim dependencies were not nudged", chat_id,
       )
+  await withdrawal
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.
   _reclaim_expired_tombstones_after_chat_write(db)
@@ -2973,6 +2982,12 @@ async def recover_chat(
   db.rollback()
   async with serialize_project_lifecycle(project_id):
     async with chat_queue.get_transition_lock(chat_id):
+      # A deletion's key-request withdrawal still on its way would remove the
+      # requests the recovered chat makes next.
+      from app import key_vault
+      deletion = db.query(models.Chat.deleted_at).filter(models.Chat.id == chat_id).scalar()
+      await key_vault.settle_chat_withdrawals([str(chat_id)], key_vault.deletion_stamp(deletion))
+      db.rollback()
       with drawer_pins.serialized_write():
         db.rollback()
         chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()

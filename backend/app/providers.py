@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
+from urllib.parse import urlsplit
 
 from app.storage_io import atomic_write
 
@@ -1558,27 +1559,37 @@ class AppModelProvider(BaseProvider):
     # inactive, and the relay re-checks consent on every request.
     return self.read_relay_key(data_dir, authorize=False).unavailable
 
-  def read_relay_key(self, data_dir: str, *, authorize: bool = True) -> RelayKeyRead:
+  def read_relay_key(
+    self, data_dir: str, *, authorize: bool = True, endpoint: str | None = None,
+  ) -> RelayKeyRead:
     """Resolve current authorization and the saved key in one blocking read.
 
     The relay runs this in a worker; a stale registry object or failed consent
     read must be refused before touching the encrypted app secret.
+    ``endpoint`` is the path under ``base_url`` the relay is about to call
+    (the protocol's main endpoint when omitted): the key's sites must allow it.
     """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
     if authorize and not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
       return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    if not path.is_file():
-      return RelayKeyRead(None, f"Connect {self.name} in its app to use these models.")
-    try:
-      from app.app_secret_crypto import decrypt_app_secret
-      key = decrypt_app_secret(path).strip()
+    from app import key_vault
+    # The declared secret name is the vault key the app asked for; the owner's
+    # grant to this app, for the provider's own site, makes the models
+    # available. An availability check never reads the value itself.
+    secret, base_url = self.declaration["secret_name"], self.declaration["base_url"]
+    destination = {"protocol": self.protocol, "endpoint": endpoint}
+    if not authorize:
+      if key_vault.model_provider_key_sync(self.app_id, secret, base_url, **destination):
+        return RelayKeyRead(None, None)
+    else:
+      key = key_vault.reveal_model_provider_key(self.app_id, secret, base_url, **destination)
       if key:
         return RelayKeyRead(key, None)
-    except Exception:
-      pass
-    return RelayKeyRead(None, f"Reconnect {self.name} in its app; its saved key is unavailable.")
+    return RelayKeyRead(None, (
+      f"Connect {self.name} in its app, then approve its key request for "
+      f"{urlsplit(base_url).hostname} in Settings › Keys to use these models."
+    ))
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]

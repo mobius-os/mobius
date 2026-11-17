@@ -25,6 +25,8 @@ CANCEL_WAIT_TOOL_NAME = "cancel_wait"
 APPROVAL_TOOL_NAME = "request_approval"
 QUESTION_TOOL_NAME = "request_question"
 RESTART_TOOL_NAME = "request_restart"
+# An agent asks to use a key; saves a key card when the owner must answer.
+KEY_TOOL_NAME = "request_key"
 CHECKPOINT_CHAT_TOOL_NAME = "checkpoint_chat"
 NOTIFY_OWNER_TOOL_NAME = "notify_owner"
 OPEN_ITEM_TOOL_NAME = "open_item"
@@ -74,6 +76,7 @@ OWNER_CONTROL_TOOL_NAMES = (
   APPROVAL_TOOL_NAME,
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
+  KEY_TOOL_NAME,
   *WORK_OWNERSHIP_TOOL_NAMES,
   CHECKPOINT_CHAT_TOOL_NAME,
   NOTIFY_OWNER_TOOL_NAME,

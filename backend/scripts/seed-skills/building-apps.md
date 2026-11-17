@@ -821,33 +821,39 @@ await window.mobius.storage.pendingCount()  // unsynced writes — for sync logi
 
 Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). In the default opaque shell frame, use `window.mobius.storage`: raw IndexedDB/OPFS cannot open under an opaque origin. A future reviewed high-capability/per-app-origin architecture may add those APIs without weakening the shell-origin default; do not restore `allow-same-origin` to get them today.
 
-### Secrets — use the app-scoped encrypted store
+### Keys — ask once, then borrow through the vault
 
-Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs. The platform has a deliberately small encrypted secret surface: at most 16 named values per app and no listing endpoint. An app can store, replace, delete, or check its own values, but only the owner or owner-scoped chat agent can decrypt them.
+Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs, and never build a field that asks the owner to paste a key into the app. Keys live in the owner's key vault (**Settings › Keys**). The owner and the owner's agents may read them; **an app never receives a value**, not in its frame, service or job. An app borrows a key: it names the key and the destination, and Möbius sends the request with the key added.
+
+1. **Ask once.** `POST /api/keys/requests` with the app's own token. It answers `granted`, `pending` or `denied`, and asking again is how the app checks. Nothing notifies the owner: Möbius asks them in a dialog over your app while they have it open (straight away, or the next time they open it), so ask when the owner does something that needs the key. Describe exactly what the app needs: the sites, methods and paths, and how the key is sent (a header, with an optional prefix, or a query parameter; headers sites log as metadata, such as `User-Agent`, are refused). Name exact hosts: a request for `*.example.com` is refused, because on a shared domain (`*.workers.dev`, `*.vercel.app`, `*.supabase.co`) anyone can own a subdomain. Only the owner can allow every subdomain, on the key's page. The owner sees the app's name, your reason, the sites and methods and, for a new key, how it is sent; only what they approve takes effect, and the sites they approve are for your app alone. An app may hold at most ten open requests. If the app already has the key and asks for sites it lacks, the answer stays `granted` for the sites it has, lists the missing ones in `sites_not_allowed`, and reports the owner's answer on them in `sites_request` (`pending` or `denied`); asking again is how the app checks. If the owner switched the app off on the key's page, the answer is `paused` and borrows are refused until they switch it back on; tell the owner rather than asking again.
+2. **Borrow.** Send the ordinary HTTPS request to `/api/keys/use/<key>/<host>/<path>?<query>` with the app's token. Möbius identifies the app from that token, the vault checks the owner's grant and the sites approved for your app, adds the key, and returns the site's answer. HTTPS on port 443 only. Redirects come back unfollowed: the status is the site's 3xx and its target is in the `X-Vault-Location` header (there is no `Location`, so `fetch` never follows it). An echoed key is redacted. Answers stream back as they arrive, so server events and streamed model output work, though the last few hundred bytes of each piece wait for the next one (that hold-back is what keeps redaction safe), so an event can arrive slightly late. Of the site's answer headers only these reach the app: `Content-Type`, `Content-Language`, `Content-Disposition`, `ETag`, `Last-Modified`, `Expires`, `Vary`, `Retry-After` and the `RateLimit*` and `X-RateLimit-*` families. A service or job reads them all. The app's frame is a separate origin, so its `fetch` reads all but `Vary`, and of the rate-limit families only `RateLimit`, `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; any other (such as `X-RateLimit-Used`) reads as `null` there. Both read `X-Vault-Location` and `X-Vault-Denied`. A broken-off answer ends as a failed read, never as a short complete one. A borrow ends after 300 seconds. A busy vault answers 429, and so does a borrow while the same app already has 8 running: retry later.
 
 ```jsx
-await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'PUT',
-  headers: {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ value: key }),
-})
+const auth = { Authorization: `Bearer ${token}` }
+const asked = await (await fetch('/api/keys/requests', {
+  method: 'POST',
+  headers: { ...auth, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    key: 'openweather',
+    reason: 'Shows the forecast for your saved cities.',
+    sites: [{ host: 'api.openweathermap.org', methods: ['GET'], paths: ['/data/2.5/*'] }],
+    inject: { type: 'query', name: 'appid' },
+  }),
+})).json()
+if (asked.status !== 'granted') { /* show "Waiting for your approval": Möbius asks the owner over this app while it is open */ }
 
-const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'HEAD',
-  headers: { Authorization: `Bearer ${token}` },
-})).ok
+const res = await fetch('/api/keys/use/openweather/api.openweathermap.org/data/2.5/weather?q=Paris', { headers: auth })
+if (res.headers.get('X-Vault-Denied')) { /* not approved, or wrong site/path */ }
+const forecast = await res.json()
 ```
 
-`DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
+A service or job does the same with its `APP_TOKEN` against `$API_BASE_URL`. The app's Möbius token never travels to the third party; send any other headers the site needs, and choose a key slot other than `Authorization` only when the site authenticates that way. Answers are served with a sandboxing policy, so treat them as data, never as a page. Keep request bodies under 10 MiB and responses under 20 MiB.
 
-```bash
-KEY=$(mapi -f /api/apps/<app-id>/secrets/provider-key)
-```
+An agent setting an app up saves a key the owner provides through a sealed card (`python3 /data/platform/backend/scripts/store-key.py NAME --site HOST:METHODS:PATHS` as the consumer; it refuses to replace a key that already has that name unless you add `--replace`, which you do only when the owner asked to replace it; a failed receipt does not say why, so check `mapi /api/keys` for the name before opening the card) and tests it by borrowing it the same way (`mapi /api/keys/use/NAME/<host>/<path>`). Read the value (`GET /api/keys/<name>/value`) only when a tool needs the raw key, and never print it: command output stays in the chat log. Only the owner's own input can approve an app's request, add an app to a key, give an app or the agents more sites, or switch a paused app back on; the server refuses agents. When you need a key on a site it does not list, or a key the owner has not saved yet, your borrow is refused with an `ask` hint: ask the owner with the `request_key` tool (`key`, a one-sentence `reason`, exact `sites`, optional `inject` for a new key or one nothing sends yet, and your closing `message`). If you may already use the key there, or the owner already said no, it answers at once with no card (`answered_without_card` and the vault's `granted`, `paused` or `denied`) and your turn continues. Otherwise it saves a key card in this chat and ends your turn like any other owner card: the chat shows that it is waiting for the owner, who answers on that card (pasting a new key there, never into chat), and the answer resumes you as **Allow** or **Not now**, so do not poll. No notification is sent: the card is the ask. An agent that replaces a key's value or changes how it is sent through `/api/keys` notifies the owner; `store-key.py` writes to the vault directly and notifies no one, so tell the owner when you replace a key with it. To change one thing, send only that field with the key's `revision` (from the list): an omitted `inject` or `grants` keeps the current one. A key whose Agents switch is off can be neither borrowed nor read by agents, and only the owner can turn it back on. Delegated helpers may borrow a key but never read its value.
 
-Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
+The vault adds a key only as a header or a query parameter. A secret used any other way has no borrow path, so an app cannot use it: a webhook signing secret, HMAC or SigV4 request signing, an OAuth client secret sent in a form body, a private key. Do not work around that by asking the owner to paste it into the app.
+
+The old `/api/apps/{id}/secrets/{name}` routes still answer for one release, deprecated, on top of the vault: an app can save, check and delete its own values there, but nothing reads one back with an app token, including the app's own service and jobs. Code that read a value that way stops working when this vault ships; move it to the handshake above.
 
 ### Concurrent writers — compare-and-swap, not last-write-wins
 

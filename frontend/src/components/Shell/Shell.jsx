@@ -237,6 +237,8 @@ import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
+import { KEYS_QUERY, useKeys } from '../SettingsView/keysQueries.js'
+import { appsWaitingForKeys } from '../../lib/keyRequestPlaces.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -267,6 +269,7 @@ const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 // render site wraps its surface in LazySurface, which keeps a failed download
 // local to that surface and holds the launch cover while a visible one loads.
 const AppCanvas = lazy(() => import('../AppCanvas/AppCanvas.jsx'))
+const AppKeyRequestCard = lazy(() => import('../AppCanvas/AppKeyRequestCard.jsx'))
 const ProjectsDirectory = lazy(() => import('../Projects/ProjectsDirectory.jsx'))
 const ProjectWorkspace = lazy(() => import('../Projects/ProjectWorkspace.jsx'))
 const AppSourceWorkspace = lazy(() => import('../Projects/AppSourceWorkspace.jsx'))
@@ -2490,6 +2493,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       return next
     })
   }, [])
+  // Apps whose key request waits for the owner: the app list marks them as
+  // needing the owner, and the request is asked when they open the app.
+  const keysForApps = useKeys({ enabled: !isSharedBrowserAccess })
+  const keyWaitingAppIds = useMemo(() => appsWaitingForKeys(keysForApps.data), [keysForApps.data])
   const ownerInputChatIds = useMemo(() => {
     const next = new Set()
     for (const chat of chats) {
@@ -3676,6 +3683,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Keeping this behind the notification-center interface prevents the
       // shell event switch from learning preview implementation details.
       onNotificationCreated()
+    } else if (ev.type === 'key_requests_changed') {
+      // A new key request never notifies; this content-free nudge makes the
+      // dialog over a visible app, the chat cards and the app list's dots
+      // re-read the vault's requests. Exact: an open key page's activity
+      // (under the same prefix) has nothing new from it.
+      void queryClient.invalidateQueries({ queryKey: KEYS_QUERY, exact: true })
     }
   }, [
     applyChatRenameEvent,
@@ -5140,6 +5153,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onNowPlayingControl={handleNowPlayingControl}
         streamingChatIds={streamingChatIds}
         ownerInputChatIds={ownerInputChatIds}
+        keyWaitingAppIds={keyWaitingAppIds}
         failedChatIds={failureChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
@@ -5338,6 +5352,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onShellShortcut={runShellShortcut}
               />
             </LazySurface>
+            {/* An app's key request waits over the app while the owner looks at it. */}
+            {!isSharedBrowserAccess && (
+              <Suspense fallback={null}>
+                <AppKeyRequestCard appId={id} visible={appRuntimeVisible} />
+              </Suspense>
+            )}
           </div>
           )
         })}
