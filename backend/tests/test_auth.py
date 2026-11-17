@@ -986,6 +986,122 @@ def test_providers_models_returns_known_models_on_missing_creds(
       assert set(row).issubset({"id", "name", "tier"})
 
 
+def _mobius_receipt(issuer, instance_id):
+  from app.routes import auth as auth_routes
+
+  payload = base64.urlsafe_b64encode(json.dumps({
+    "sub": "mobius-test-account",
+    "instance_id": instance_id,
+    "iss": issuer,
+    "aud": auth_routes._MOBIUS_RECEIPT_AUDIENCE,
+    "exp": time.time() + 300,
+  }).encode()).decode().rstrip("=")
+  return f"header.{payload}.signature"
+
+
+def test_self_hosted_link_stays_pinned_to_the_canonical_issuer(monkeypatch):
+  from app.routes import auth as auth_routes
+
+  redirected = "https://redirected.example"
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", redirected)
+  pending = {"instance_id": "mob_self_testinstance"}
+
+  assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
+  auth_routes._validate_mobius_receipt_claims(
+    _mobius_receipt(auth_routes._MOBIUS_IDENTITY_ISSUER, pending["instance_id"]),
+    pending,
+  )
+  try:
+    auth_routes._validate_mobius_receipt_claims(
+      _mobius_receipt(redirected, pending["instance_id"]), pending,
+    )
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("a receipt from an environment override was accepted")
+
+
+def test_launcher_deployed_instance_keeps_the_canonical_issuer_by_default(
+  monkeypatch,
+):
+  from app.routes import auth as auth_routes
+
+  configure_managed_sso(monkeypatch)
+  monkeypatch.delenv("MOBIUS_IDENTITY_ISSUER", raising=False)
+  assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
+
+  # Pointing identity anywhere but the deploying launcher changes nothing.
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", "https://redirected.example")
+  assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
+
+
+def test_issuer_pin_accepts_case_only_for_the_deploying_launcher(monkeypatch):
+  from app.routes import auth as auth_routes
+
+  settings = configure_managed_sso(monkeypatch)
+  monkeypatch.setattr(settings, "mobius_sso_issuer", "https://launcher.example")
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", settings.mobius_sso_issuer.upper() + "/")
+  assert auth_routes._mobius_pinned_issuer() == settings.mobius_sso_issuer
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", settings.mobius_sso_issuer + "/unexpected")
+  assert auth_routes._mobius_pinned_issuer() == auth_routes._MOBIUS_IDENTITY_ISSUER
+
+
+def test_instance_pointed_at_its_deploying_launcher_links_only_with_it(monkeypatch):
+  import asyncio
+
+  from app.routes import auth as auth_routes
+
+  settings = configure_managed_sso(monkeypatch)
+  launcher = settings.mobius_sso_issuer
+  monkeypatch.setenv("MOBIUS_IDENTITY_ISSUER", launcher + "/")
+  pending = {
+    "instance_id": settings.mobius_sso_instance_id,
+    "verifier": "v" * 64,
+    "redirect_uri": "http://testserver/callback",
+    "public_key_jwk": {"kty": "OKP"},
+  }
+  posted = []
+
+  class ExchangeResponse:
+    def raise_for_status(self):
+      return None
+
+    def json(self):
+      return {"enrollment_receipt": _mobius_receipt(launcher, pending["instance_id"])}
+
+  class ExchangeClient:
+    def __init__(self, *args, **kwargs):
+      pass
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, *_args):
+      return None
+
+    async def post(self, url, **_kwargs):
+      posted.append(url)
+      return ExchangeResponse()
+
+  monkeypatch.setattr(auth_routes.httpx, "AsyncClient", ExchangeClient)
+
+  assert auth_routes._mobius_authorization_issuer() == launcher
+  _receipt, claims = asyncio.run(
+    auth_routes._exchange_mobius_receipt(pending, "launcher-code")
+  )
+  assert posted == [launcher + "/identity/token"]
+  assert claims["iss"] == launcher
+  try:
+    auth_routes._validate_mobius_receipt_claims(
+      _mobius_receipt(auth_routes._MOBIUS_IDENTITY_ISSUER, pending["instance_id"]),
+      pending,
+    )
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("a receipt from another launcher was accepted")
+
+
 def test_self_host_mobius_callback_uses_single_use_broker_state_without_auth_header(
   client, auth, monkeypatch,
 ):

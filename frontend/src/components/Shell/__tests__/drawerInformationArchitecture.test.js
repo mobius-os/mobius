@@ -2,105 +2,13 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  appTileLabel,
   buildDrawerSections,
   findDrawerMenuItem,
   nextPendingPinnedAt,
   projectPendingDrawerPins,
+  wheelRowScrollDelta,
 } from '../../Drawer/drawerInformationArchitecture.js'
-
-test('a never-opened project joins Recents at its creation, not its file edits', () => {
-  // An agent-created project the owner never opened must still be findable
-  // without pinning it; edits in its tree must not move it.
-  const unopened = {
-    id: 'p-unopened',
-    name: 'Agent-made project',
-    created_at: '2026-08-26T08:00:00',
-    updated_at: '2026-08-26T11:00:00',
-  }
-  const opened = {
-    id: 'p-opened',
-    name: 'Opened',
-    created_at: '2026-08-20T08:00:00',
-    updated_at: '2026-08-25T08:00:00',
-    last_opened_at: '2026-08-26T09:00:00',
-  }
-  const chat = { id: 'chat', has_messages: true, activity_at: '2026-08-26T10:00:00Z' }
-
-  const result = buildDrawerSections([chat], [], [unopened, opened])
-
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'chat:chat',
-    'project:p-opened',
-    'project:p-unopened',
-  ])
-})
-
-test('opening a project ranks it by that open rather than its creation', () => {
-  const project = {
-    id: 'p-1',
-    created_at: '2026-08-20T08:00:00',
-    last_opened_at: '2026-08-26T12:00:00+00:00',
-  }
-  const chat = { id: 'chat', has_messages: true, activity_at: '2026-08-26T10:00:00Z' }
-
-  const result = buildDrawerSections([chat], [], [project])
-
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'project:p-1',
-    'chat:chat',
-  ])
-})
-
-test('built artifacts join Recents only after they have been opened', () => {
-  const project = {
-    id: 'project-1', name: 'Album',
-    created_at: '2026-08-20T08:00:00', updated_at: '2026-08-26T08:00:00',
-    artifacts: [
-      { id: 'unopened', name: 'Unopened', status: 'ok', has_output: true },
-      {
-        id: 'opened', name: 'Opened', status: 'ok', has_output: true,
-        last_opened_at: '2026-08-26T10:00:00',
-      },
-    ],
-  }
-
-  const result = buildDrawerSections([], [], [project])
-
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'artifact:project-1:opened',
-    'project:project-1',
-  ])
-})
-
-test('a pinned project shares the combined pinned order and leaves Recents', () => {
-  const project = {
-    id: 'pinned-project',
-    name: 'Pinned project',
-    last_opened_at: '2026-08-26T09:00:00',
-    pinned_at: '2026-08-26T10:00:00',
-  }
-  const app = {
-    id: 7,
-    name: 'Pinned app',
-    pinned_at: '2026-08-26T09:00:00',
-  }
-
-  const result = buildDrawerSections([], [app], [project])
-
-  assert.deepEqual(result.pinned.map(row => `${row.kind}:${row.item.id}`), [
-    'app:7',
-    'project:pinned-project',
-  ])
-  assert.equal(result.recents.some(row => row.item.id === project.id), false)
-})
-
-test('the shared row menu resolves project identities', () => {
-  const project = { id: 'project-1', name: 'Project one' }
-  assert.equal(
-    findDrawerMenuItem({ kind: 'project', id: project.id }, [], [], [project]),
-    project,
-  )
-})
 
 test('a pending chat pin stays in Pinned across an older list snapshot', () => {
   const staleChat = {
@@ -143,8 +51,24 @@ test('a newer pending unpin wins over a stale pinned list snapshot', () => {
   )
 
   assert.equal(result.pinned.some(row => row.item.id === staleApp.id), false)
-  assert.deepEqual(result.recents.map(row => `${row.kind}:${row.item.id}`), [
-    'app:7',
+  assert.deepEqual(result.recentApps.map(app => app.id), [7])
+})
+
+// The Projects list renders this projection, so a project pin or unpin still
+// in flight is what the list shows, whatever an older list read says.
+test('a pending project pin or unpin overrides an older project list', () => {
+  const stalePinned = { id: 'p-1', name: 'Was pinned', pinned_at: '2026-09-12T12:01:00' }
+  const staleUnpinned = { id: 'p-2', name: 'Was unpinned', pinned_at: null }
+  const pending = new Map([
+    ['project:p-1', { pinned: false, pinnedAt: null }],
+    ['project:p-2', { pinned: true, pinnedAt: '2026-09-12T12:02:00.000Z' }],
+  ])
+
+  const { projects } = projectPendingDrawerPins([], [], [stalePinned, staleUnpinned], pending)
+
+  assert.deepEqual(projects.map(row => [row.id, row.pinned_at]), [
+    ['p-1', null],
+    ['p-2', '2026-09-12T12:02:00.000Z'],
   ])
 })
 
@@ -199,7 +123,49 @@ test('archived chats leave Pinned and Recents for Archived, newest archive first
   assert.deepEqual(result.archived.map(row => row.item.id), ['newer', 'older', 'stale-pin'])
 })
 
+test('project chats stay out of Recents but keep an explicit pin', () => {
+  const project = { id: 'p1', name: 'Thesis' }
+  const plain = { id: 'plain', has_messages: true, activity_at: '2026-11-05T09:00:00' }
+  const inProject = {
+    id: 'in-project', has_messages: true, activity_at: '2026-11-05T10:00:00', project,
+  }
+  const pinnedInProject = {
+    id: 'pinned-in-project', has_messages: true, project,
+    pinned_at: '2026-11-05T08:00:00',
+  }
+
+  const result = buildDrawerSections([plain, inProject, pinnedInProject], [], [])
+
+  assert.deepEqual(result.recents.map(row => row.item.id), ['plain'])
+  assert.deepEqual(result.pinned.map(row => row.item.id), ['pinned-in-project'])
+})
+
 test('an empty archive is an empty Archived section', () => {
   const result = buildDrawerSections([{ id: 'a', has_messages: true }], [], [])
   assert.deepEqual(result.archived, [])
+})
+
+// Screen readers hear the same status the Apps-row dot shows.
+test('an Apps-row icon is announced with the status its dot shows', () => {
+  assert.equal(appTileLabel('Notes'), 'Notes')
+  assert.equal(appTileLabel('Notes', { needsYou: true, fresh: true }), 'Notes, needs you')
+  assert.equal(appTileLabel('Notes', { fresh: true }), 'Notes, new')
+  assert.equal(appTileLabel('Notes', { needsYou: true, building: true }), 'Notes, needs you, building')
+  assert.equal(appTileLabel(''), 'App')
+})
+
+// A plain mouse wheel scrolls the collapsed Apps row sideways, but never traps
+// the wheel: at either end, and for sideways or zoom input, the browser keeps it.
+test('a mouse wheel scrolls the Apps row sideways until it reaches an end', () => {
+  const row = { clientWidth: 200, scrollWidth: 500, scrollLeft: 100 }
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, row), 40)
+  assert.equal(wheelRowScrollDelta({ deltaY: -40 }, row), -40)
+  assert.equal(wheelRowScrollDelta({ deltaY: 3, deltaMode: 1 }, row), 48, 'line steps become pixels')
+
+  assert.equal(wheelRowScrollDelta({ deltaY: -40 }, { ...row, scrollLeft: 0 }), 0, 'start: the sidebar scrolls')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, { ...row, scrollLeft: 300 }), 0, 'end: the sidebar scrolls')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40 }, { ...row, scrollWidth: 200 }), 0, 'nothing to scroll')
+  assert.equal(wheelRowScrollDelta({ deltaX: 30, deltaY: 10 }, row), 0, 'trackpad sideways stays native')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40, shiftKey: true }, row), 0, 'Shift+wheel stays native')
+  assert.equal(wheelRowScrollDelta({ deltaY: 40, ctrlKey: true }, row), 0, 'pinch zoom stays native')
 })

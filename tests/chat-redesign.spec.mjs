@@ -115,7 +115,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // The option buttons MUST be enabled (the regression was that
     // post-question tool_start events kept isStreaming=true →
     // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
+    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard').getByRole('radio')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
   })
 
@@ -241,13 +241,16 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const network = await disconnectDelivery(page)
     await network.reconnect()
     await expect.poll(() => answerAttempts).toBe(2)
-    // The card settles into its durable answered state once the retried
-    // answer commits: the choice stays recorded and read-only, and the
-    // action row (Submit/Queued/Submitted) retires entirely rather than
-    // showing a terminal "Submitted" label.
+    // The retried answer is delivered and the question is no longer pending.
+    // This mock never records the answer in the transcript, so the card stays
+    // in its delivered state: the choice recorded and read-only, and the action
+    // row in place and inert, so the card keeps its shape. A real transcript
+    // turns the same slot into a disabled "Submitted".
+    await expect(card.getByText('Your answer reached Möbius. Confirming this card…')).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
     await expect(careful).toBeDisabled()
-    await expect(card.locator('.qcard__submit')).toHaveCount(0)
+    await expect(submit).toHaveText('Confirming answer…')
+    await expect(submit).toBeDisabled()
   })
 
 

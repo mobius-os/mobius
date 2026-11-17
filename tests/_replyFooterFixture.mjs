@@ -52,8 +52,8 @@ export async function mountReplyFooter(page, base, {
   const replies = surface.locator('.chat__reply')
   await expect(replies).toHaveCount(2)
   const copy = replies.last().getByRole('button', { name: 'Copy message' })
-  if (running) await expect(copy).toBeHidden()
-  else await expect(copy).toBeVisible()
+  // The footer is transparent at rest; its Copy exists once the reply settles.
+  await expect(copy).toHaveCount(running ? 0 : 1)
   if (running) await expect(surface.locator('.chat__stop')).toBeVisible()
   if (pendingQuestion) await expect(surface.locator('.qcard')).toBeVisible()
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })

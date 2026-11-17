@@ -18,7 +18,7 @@ def test_real_gh_streams_public_body_over_stdin(tmp_path, monkeypatch):
   payload = tmp_path / 'payload.json'
   executable.write_text('#!/bin/sh\ncat > "$PAYLOAD_FILE"\nprintf \'{"id":5,"html_url":"review-url"}\'\n')
   executable.chmod(0o755)
-  monkeypatch.setattr(git, '_git_env', lambda cwd: {'PATH': f'{tmp_path}:/usr/bin:/bin', 'PAYLOAD_FILE': str(payload)})
+  monkeypatch.setattr(git, '_git_env', lambda cwd, **_k: {'PATH': f'{tmp_path}:/usr/bin:/bin', 'PAYLOAD_FILE': str(payload)})
   result = public.post_review(git._gh, tmp_path, ITEM, '😀' * 30_000)
   assert result.state == 'confirmed' and result.receipt['id'] == 5
   sent = json.loads(payload.read_text())
