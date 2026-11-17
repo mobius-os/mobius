@@ -3214,29 +3214,6 @@
   overscroll-behavior: contain;
 }
 
-/* Opts into a scrollbar unconditionally, not behind .chat__tool-diff-scroll's
-   hover/pointer gate: the model list overflows on touch clients too.
-   Keep the gutter stable, but reveal its thumb only during scrolling.
-   Opening the Brain must not flash a scrollbar before any movement. */
-.composer-popover {
-  --shell-scrollbar-width: thin;
-  --shell-scrollbar-display: block;
-  --composer-scrollbar-thumb: transparent;
-  scrollbar-color: var(--composer-scrollbar-thumb) transparent;
-}
-
-.composer-popover[data-scrolling] {
-  --composer-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
-}
-
-.composer-popover::-webkit-scrollbar { width: 10px; }
-.composer-popover::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: var(--composer-scrollbar-thumb);
-  background-clip: padding-box;
-}
-
 [data-theme="light"] .composer-popover {
   box-shadow: 0 12px 32px -8px rgba(15, 18, 25, 0.18);
 }

@@ -37,7 +37,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { subscribeShellLaunchTargets } from '../../lib/shellLaunchTargets.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
-import { requestedSettingsSection, settingsSectionOrNull } from '../../lib/settingsSections.js'
+import { requestedSettingsSection, settingsFocusRequest, settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -2958,12 +2958,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   // The one way the shell opens Settings for someone else (a mini-app, the
   // agent's open_item, a notification tap, a chat link): navigate there and
-  // focus a known section. Navigation only; every action inside Settings stays
-  // the owner's.
-  const openSettingsSection = useCallback((section) => {
-    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+  // focus a known section, or open a whole page such as one provider's.
+  // Navigation only; every action inside Settings stays the owner's.
+  const openSettingsSection = useCallback((section, { page = null } = {}) => {
+    setSettingsFocusTarget(settingsFocusRequest(section, { page }))
     if (activeViewRef.current !== 'settings') navToRef.current('settings')
   }, [activeViewRef])
+  // The chat picker only offers built-in providers here (providerSetupTarget).
+  const openProviderSettings = useCallback((providerId) => {
+    openSettingsSection(null, { page: providerId })
+  }, [openSettingsSection])
 
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
@@ -5473,6 +5477,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 loadTheme={loadTheme}
                 openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
+                onOpenProviderSettings={openProviderSettings}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
                 archived={archivedChatIds.has(String(chatId))}

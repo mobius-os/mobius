@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { useRef, renderHook } from '../../components/ChatView/hooks/__tests__/react-hook-shim.mjs'
 import { useSettingsFocus } from '../../components/SettingsView/useSettingsFocus.js'
+import { settingsFocusRequest } from '../settingsSections.js'
 
 // Animation frames the hook requests, run by hand with runFrames().
 function stubAnimationFrames(t) {
@@ -76,6 +77,29 @@ for (const [section, page] of [['mobius-account', 'mobius-account'], ['mobius-mo
     assert.equal(frames.size, 0)
   })
 }
+
+test('a provider page request (the chat picker logo) opens that page whole, without waiting for providers', t => {
+  const { frames } = stubAnimationFrames(t)
+  let detailPage = null
+  const view = renderHook(({ focusTarget }) => {
+    const setupFocusRefs = useRef({})
+    useSettingsFocus({ focusTarget, providerReady: false, modelsProvider: null, detailPage,
+      setDetailPage: next => { detailPage = next }, setupFocusRefs, setAttentionSection: () => {} })
+  }, { focusTarget: null })
+  t.after(() => view.unmount())
+  view.rerender({ focusTarget: settingsFocusRequest(null, { page: 'claude' }, 1) })
+  assert.equal(detailPage, 'claude')
+  assert.equal(frames.size, 0)
+  // A later request for another provider moves to its page.
+  view.rerender({ focusTarget: settingsFocusRequest(null, { page: 'codex' }, 2) })
+  assert.equal(detailPage, 'codex')
+})
+
+test('a Settings request is a section, a page, or nothing', () => {
+  assert.deepEqual(settingsFocusRequest('github', {}, 5), { section: 'github', page: null, nonce: 5 })
+  assert.deepEqual(settingsFocusRequest(null, { page: 'mobius' }, 5), { section: null, page: 'mobius', nonce: 5 })
+  assert.equal(settingsFocusRequest(null, {}, 5), null)
+})
 
 test('a models request opens the leading connected provider at its Chat models section, once', t => {
   const { runFrames } = stubAnimationFrames(t)

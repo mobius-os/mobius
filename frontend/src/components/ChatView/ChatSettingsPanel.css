@@ -101,45 +101,34 @@
 .csp-row {
   display: flex;
   align-items: center;
-  gap: 12px;
   width: 100%;
-  padding: 8px 10px;
-  border: 0;
-  background: none;
   border-radius: 8px;
-  cursor: pointer;
-  font: inherit;
   color: var(--text);
-  text-align: left;
-  transition: background 0.12s ease, border-color 0.12s ease;
+  transition: background 0.12s ease;
 }
-
+.csp-row--selected { background: color-mix(in srgb, var(--accent) 9%, var(--surface)); }
 @media (hover: hover) and (pointer: fine) {
   .csp-row:hover { background: var(--surface); }
+  .csp-row--selected:hover { background: color-mix(in srgb, var(--accent) 12%, var(--surface)); }
 }
-
-.csp-row--selected {
-  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+.csp-row__icon-button,
+.csp-row__model-button {
+  display: flex;
+  align-items: center;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
 }
-
-.csp-row:focus-visible,
-.csp__confirm-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-@media (hover: hover) and (pointer: fine) {
-  .csp-row--selected:hover {
-    background: color-mix(in srgb, var(--accent) 12%, var(--surface));
-  }
-}
-
-.csp-row--locked {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-@media (hover: hover) and (pointer: fine) {
-  .csp-row--locked:hover { background: none; }
-}
+.csp-row__icon-slot { display: flex; align-items: center; }
+.csp-row__icon-button,
+.csp-row__icon-slot { flex: none; padding: 8px 0 8px 10px; border-radius: 8px; }
+.csp-row__model-button { flex: 1; min-width: 0; gap: 12px; padding: 8px 10px 8px 12px; text-align: left; border-radius: 8px; }
+.csp-row__model-button:disabled { opacity: 0.4; cursor: not-allowed; }
+.csp-row__icon-button:focus-visible,
+.csp-row__model-button:focus-visible,
+.csp__confirm-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .csp-row__icon {
   width: 30px;
@@ -355,11 +344,10 @@
     margin-top: 3px;
   }
 
-  .csp-row {
-    min-height: 44px;
-    gap: 10px;
-    padding: 7px 8px;
-  }
+  .csp-row { min-height: 44px; }
+  .csp-row__icon-button,
+  .csp-row__icon-slot { padding: 7px 0 7px 8px; }
+  .csp-row__model-button { padding: 7px 8px 7px 10px; }
 
   .csp-row__icon {
     width: 28px;

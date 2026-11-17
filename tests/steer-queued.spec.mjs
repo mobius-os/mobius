@@ -1064,3 +1064,30 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
     expect(streamConnections).toBe(1)
   })
 })
+
+
+test('a late sibling edit cannot return a committed steer to the queue', async ({ page }) => {
+  const { installSteerQueueFixture } = await import('./_steerQueueFixture.mjs')
+  await setupChat(page)
+  const chat = await createTaggedChat(page, 'steer-snapshot-order')
+  await installSteerQueueFixture(page, {
+    ...chat, provider: 'claude', ...testChatAgentSettings(),
+  })
+  await page.goto(`${BASE}/shell/?chat=${chat.id}`, { waitUntil: 'domcontentloaded' })
+  const surface = page.locator('[data-chat-surface="painted"]')
+  await expect(surface.locator('.queued__row')).toHaveCount(2)
+  await surface.getByRole('button', { name: 'Edit queued message', exact: true }).nth(1).click()
+  const input = surface.getByRole('textbox', { name: 'Message Möbius…', exact: true })
+  await input.click()
+  await input.press('ControlOrMeta+A')
+  await input.pressSequentially('Keep this edited follow-up queued.')
+  await expectComposerValue(input, 'Keep this edited follow-up queued.')
+  await surface.getByRole('button', { name: 'Save queued message', exact: true }).click()
+  await page.waitForFunction(() => window.__steerFixture.patchRequested)
+  await surface.getByRole('button', { name: 'Send this queued message now', exact: true }).first().click()
+  await page.waitForFunction(() => window.__steerFixture.steerRequested)
+  await page.evaluate(() => window.__steerFixture.releasePatch())
+  await expect(surface.locator('.queued__row')).toHaveCount(1)
+  await expect(surface.locator('.queued__text')).toHaveText('Keep this edited follow-up queued.')
+  await expect(surface.locator('[data-cid="steer-repro-a"]')).toHaveCount(1)
+})
