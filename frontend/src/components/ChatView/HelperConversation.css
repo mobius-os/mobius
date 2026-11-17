@@ -27,6 +27,7 @@
   color: var(--text);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.3);
 }
+.helper-convo:focus { outline: none; } /* focused only by a click inside, never by Tab */
 .helper-convo__head {
   display: flex;
   align-items: flex-start;
@@ -37,7 +38,6 @@
 .helper-convo__open {
   flex: none;
   align-self: center;
-  color: var(--accent-text, var(--accent)); /* CONTRACT: link-coloured action in the dialog head */
   font-size: 13px;
   text-underline-offset: 3px;
 }
@@ -70,6 +70,8 @@
   padding-bottom: 18px;
   overscroll-behavior: contain;
 }
+.helper-convo__body:focus { outline: none; }
+.helper-convo__body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .helper-convo__blocks {
   display: flex;
   flex-direction: column;
@@ -107,3 +109,40 @@
 .helper-convo__task > :last-child > :last-child,
 .helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
 .helper-convo__text { font-size: 14px; }
+
+/* Preview links, in its markdown and its Open chat action, use the text
+   colour with an always-visible underline instead of the accent, so a second
+   column of purple links does not compete with the chat. Scoping through
+   .md-blocks outranks the markdown link rule (.md-blocks a) by specificity,
+   not stylesheet order. */
+.helper-convo .md-blocks a,
+.helper-convo__open {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* Dock only when this chat has room for two readable columns
+   (useHelperPreviewDocked). Narrow workspace panes keep the overlay even when
+   the overall desktop window is wide. */
+.chat:has(> .helper-convo__overlay--docked) > .chat__scroll { width: calc(50% + 32px); }
+.chat:has(> .helper-convo__overlay--docked) > .chat__foot { right: 50%; }
+.helper-convo__overlay--docked {
+  inset: 0 0 0 50%;
+  /* A column of the chat, not a dialog over it: chat-level overlays the chat
+     stays usable for (the chat summary at 210, the diff viewer at 220) open
+     above it. Still above the chat's own layers (file-drop target at 90). */
+  z-index: 200;
+  padding: 0;
+  background: var(--bg);
+  place-items: stretch;
+}
+.helper-convo__overlay--docked .helper-convo {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  border: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--bg);
+  box-shadow: none;
+}
