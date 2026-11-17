@@ -53,8 +53,11 @@ export async function checkHiddenReplyContinuity(page, chat, base, provider = 'c
   await page.waitForFunction(() => typeof window.__emitReplyFixture === 'function')
   const surface = page.locator('[data-chat-surface="painted"]')
   const paragraph = surface.locator('.chat__text p').filter({ hasText: prefix })
+  // While the answer continues its footer keeps References in place but held
+  // (inert and hidden); none may be usable until the answer settles.
+  const usableSources = surface.locator('.chat__sources:not(.chat__sources--held)')
   await expect(paragraph).toHaveText(prefix)
-  await expect(surface.locator('.chat__sources')).toHaveCount(0)
+  await expect(usableSources).toHaveCount(0)
   const firstKey = await paragraph.evaluate(element => {
     window.__originalReplyRow = element.closest('[data-key]')
     return window.__originalReplyRow.dataset.key
@@ -67,7 +70,7 @@ export async function checkHiddenReplyContinuity(page, chat, base, provider = 'c
     sealed_items: [{ type: 'text', content: prefix, text_item_id: 'reply-text' }],
     items: [], messages: [carrier], ts: carrier.ts,
   }), { firstId, nextId, carrier, prefix })
-  await expect(surface.locator('.chat__sources')).toHaveCount(0)
+  await expect(usableSources).toHaveCount(0)
   await page.evaluate(() => window.__emitReplyFixture({ type: 'text', content: 'This sentence', text_item_id: 'reply-next' }))
   await expect(paragraph).toHaveText(prefix)
   await page.evaluate(suffix => window.__emitReplyFixture({ type: 'text', content: suffix, text_item_id: 'reply-next' }), answer.slice('This sentence'.length))
@@ -76,7 +79,7 @@ export async function checkHiddenReplyContinuity(page, chat, base, provider = 'c
   await expect(surface.locator('.chat__text:not(.chat__text--user) p')).toHaveCount(1)
   expect(await page.evaluate(firstKey => window.__originalReplyRow === [...document.querySelectorAll('[data-chat-surface="painted"] [data-key]')].find(row => row.dataset.key === firstKey), firstKey)).toBe(true)
   const liveKey = await surface.locator('[data-active-assistant="true"]').getAttribute('data-key')
-  await expect(surface.locator('.chat__sources')).toHaveCount(0)
+  await expect(usableSources).toHaveCount(0)
   expect(sourceReads).toEqual([])
 
   messages = [...messages, { role: 'assistant', id: nextId, ts: 4, content: answer,

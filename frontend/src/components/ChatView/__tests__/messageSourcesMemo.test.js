@@ -25,3 +25,13 @@ test('references comparison reads an omitted source input as none', () => {
   assert.equal(sameMessageSourcesProps(bare, { ...bare, groups: [], refs: [] }), true)
   assert.equal(sameMessageSourcesProps(bare, { ...bare, groups: [[{ type: 'tool' }]] }), false)
 })
+
+test('an answer that continues after settling holds its References again', () => {
+  // A question answered in its reply's row turns a settled answer back into a
+  // continuing one with the same sources: held must still reach the section.
+  const blocks = [{ type: 'tool', sources: [{ url: 'https://example.com' }] }]
+  const settled = { chatId: 'chat', disclosureKey: 'reply:references', groups: [blocks], refs: [], held: false }
+  assert.equal(sameMessageSourcesProps(settled, { ...settled, held: true }), false)
+  assert.equal(sameMessageSourcesProps({ ...settled, held: true }, settled), false)
+  assert.equal(sameMessageSourcesProps(settled, { ...settled, held: undefined }), true)
+})
