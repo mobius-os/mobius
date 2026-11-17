@@ -987,6 +987,45 @@ def test_steer_cut_recency_uses_original_pending_provenance(
   assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == expected
 
 
+@pytest.mark.parametrize("hidden", [False, True])
+@pytest.mark.parametrize("removed_before_cut", [False, True])
+def test_steered_saved_question_answer_never_promotes_model_use(
+  client, auth, chat, db, hidden, removed_before_cut,
+):
+  """A card answer stays a continuation even at a deferred provider cut."""
+  from app.chat_writer import (
+    AppendPending, AppendSteeredUserMessage, CancelPending, get_writer,
+  )
+
+  owner = db.query(models.Owner).first()
+  owner.model_prefs_json = {"recent_ids": ["claude-sonnet-4-6", "claude-opus-4-7"]}
+  db.commit()
+  cid = f"steered-answer-{hidden}-{removed_before_cut}"
+  row = get_writer().submit(AppendPending(
+    chat_id=chat.id, run_token="", owner_input=True,
+    user_msg={"role": "user", "content": "saved answer", "cid": cid,
+              "hidden": hidden, "kind": "continuation",
+              "continuation_reason": "question_answer"},
+  )).result(timeout=5)["stored"]
+  assert row.get("_owner_input_at")
+  if removed_before_cut:
+    get_writer().submit(CancelPending(
+      chat_id=chat.id, run_token="", cid=cid,
+    )).result(timeout=5)
+
+  def cut():
+    return get_writer().submit(AppendSteeredUserMessage(
+      chat_id=chat.id, run_token="", user_msgs=[row],
+      consume_pending_cids=[cid], active_model="claude-opus-4-7",
+    )).result(timeout=5)
+
+  assert len(cut()["stored_messages"]) == 1
+  assert cut()["stored_messages"] == []
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "claude-sonnet-4-6", "claude-opus-4-7",
+  ]
+
+
 def test_first_send_freezes_model_before_later_global_picker_change(
   client, auth, chat, db, monkeypatch,
 ):

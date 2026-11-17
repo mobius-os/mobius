@@ -5166,6 +5166,7 @@ class ChatWriterActor:
     for row in raw_user_msgs:
       captured_by_cid.setdefault(cid_of(row), row)
     selected_cids = set(cmd.consume_pending_cids)
+    from app.continuations import continuation_reason
 
     def admitted_owner_row(cid):
       row = pending_by_cid.get(cid)
@@ -5173,6 +5174,7 @@ class ChatWriterActor:
         row = captured_by_cid.get(cid)
       return bool(
         row and row.get("_owner_input_at") and not row.get("hidden")
+        and continuation_reason(row) != "question_answer"
         and row.get("_initiated_by_app_id") is None
         and row.get("_browser_grant_id") is None
       )
@@ -5635,6 +5637,7 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = transcript_rows.read_all(db, chat)
     from app.continuations import (
+      continuation_reason,
       pending_message_group_key,
       product_result_run_token,
     )
@@ -5794,6 +5797,7 @@ class ChatWriterActor:
       and any(row.get("_owner_input_at")
               and row.get("_initiated_by_app_id") is None
               and not row.get("hidden")
+              and continuation_reason(row) != "question_answer"
               for row in promoted_group)
       and not db.query(models.Delegation.id).filter(
         models.Delegation.child_chat_id == chat.id,
