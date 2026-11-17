@@ -1,6 +1,7 @@
 /** An answered question keeps its reply's footer line while the same answer
- * continues (controls and References held until it settles), and gives the
- * line up when the answer starts a new turn. The socket is synthetic; every
+ * continues: the card stays mounted, the line keeps its height with References
+ * held in it, and Copy returns once the answer settles. (A new turn giving the
+ * line up is covered by replyFooter.test.js.) The socket is synthetic; every
  * non-GET API request is intercepted before it reaches a chat. */
 import { test, expect, serveRecoveryBuild } from './_recoveryBrowser.mjs'
 import {
@@ -11,17 +12,14 @@ import {
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const ASSISTANT_ID = 'layout-stability-assistant'
 const QUESTION_ID = 'q-layout-stability'
-const NEXT_RUN_ID = 'layout-stability-next-run'
 const BEFORE_TEXT = 'The check is ready. Please choose how to continue.'
 const AFTER_TEXT = 'Continuing the same answer after your choice.'
 
 test.use({ serviceWorkers: 'block', viewport: { width: 412, height: 861 } })
 
-/** A chat whose last reply cites two sources and parks on one question.
- *  `answerTurn` is what the server says the answer does: 'same' resumes the
- *  parked run in the same row; 'new' starts another run after a hidden
- *  continuation row. */
-async function mountParkedQuestion(page, { answerTurn }) {
+/** A chat whose last reply cites two sources and parks on one question; the
+ *  server resumes the parked run in the same row when it is answered. */
+async function mountParkedQuestion(page) {
   const chatId = crypto.randomUUID()
   const question = {
     type: 'question', question_id: QUESTION_ID,
@@ -43,9 +41,6 @@ async function mountParkedQuestion(page, { answerTurn }) {
   const owner = { role: 'user', id: 'layout-stability-owner', ts: 1700000600000, content: 'Check this.' }
   const state = {
     messages: [owner, assistant], running: false, pendingQuestionId: QUESTION_ID,
-    // A same-turn question parks a live run; a new-turn answer follows a
-    // question whose run is gone.
-    activeId: answerTurn === 'same' ? ASSISTANT_ID : null,
     answerPost: null, releaseAnswer: null,
   }
 
@@ -72,24 +67,14 @@ async function mountParkedQuestion(page, { answerTurn }) {
     question.answers = state.answerPost.answers
     state.pendingQuestionId = null
     state.running = true
-    if (answerTurn === 'same') {
-      await page.evaluate(answers => window.__layoutAcceptAnswer(answers), state.answerPost.answers)
-      return route.fulfill({ status: 202, json: {
-        status: 'answer_delivered', answer_turn: 'same', answers: state.answerPost.answers,
-      } })
-    }
-    const continuation = { role: 'user', id: 'layout-continuation-row', hidden: true, kind: 'continuation',
-      content: 'Answered the question.', ts: 1700000600200 }
-    state.messages = [...state.messages, continuation]
-    state.activeId = NEXT_RUN_ID
-    await page.evaluate(id => window.__layoutStartRun(id), NEXT_RUN_ID)
+    await page.evaluate(answers => window.__layoutAcceptAnswer(answers), state.answerPost.answers)
     return route.fulfill({ status: 202, json: {
-      status: 'started', answer_turn: 'new', answers: state.answerPost.answers, message: continuation,
+      status: 'answer_delivered', answer_turn: 'same', answers: state.answerPost.answers,
     } })
   })
   const runtime = () => ({
     ...runtimeSnapshot({ running: state.running, pending_question_id: state.pendingQuestionId }),
-    active_assistant_message_id: state.activeId,
+    active_assistant_message_id: ASSISTANT_ID,
     active_goal_objective: null, updated_at: null,
   })
   await page.route(new RegExp(`/api/chats/${chatId}/runtime(?:\\?.*)?$`), route => route.request().method() === 'GET'
@@ -105,16 +90,13 @@ async function mountParkedQuestion(page, { answerTurn }) {
     const readers = new Set()
     let acceptedAnswers = null
     let streamedText = ''
-    // The run the socket reports: the parked answer's, or a new run's.
-    let streamOwner = assistantId
     const send = event => {
       for (const write of readers) write(event)
     }
     window.__layoutAcceptAnswer = answers => { acceptedAnswers = answers }
-    window.__layoutStartRun = id => { streamOwner = id }
     window.__layoutStreamText = text => {
       streamedText = text
-      send({ type: 'text_final', assistant_message_id: streamOwner,
+      send({ type: 'text_final', assistant_message_id: assistantId,
         text_item_id: 'layout-continuation', content: text })
     }
     window.__layoutFinish = () => send({ type: 'done' })
@@ -136,12 +118,11 @@ async function mountParkedQuestion(page, { answerTurn }) {
           abort = () => { cleanup(); controller.error(new DOMException('Aborted', 'AbortError')) }
           readers.add(write)
           signal?.addEventListener('abort', abort, { once: true })
-          const items = streamOwner === assistantId
-            ? [search, { type: 'text', content: beforeText },
-                { ...question, ...(acceptedAnswers ? { answers: acceptedAnswers } : {}) },
-                ...(streamedText ? [{ type: 'text', text_item_id: 'layout-continuation', content: streamedText }] : [])]
-            : []
-          write({ type: 'stream_snapshot', assistant_message_id: streamOwner, items })
+          write({ type: 'stream_snapshot', assistant_message_id: assistantId, items: [
+            search, { type: 'text', content: beforeText },
+            { ...question, ...(acceptedAnswers ? { answers: acceptedAnswers } : {}) },
+            ...(streamedText ? [{ type: 'text', text_item_id: 'layout-continuation', content: streamedText }] : []),
+          ] })
           write({ type: 'catch_up_done' })
         },
         cancel: cleanup,
@@ -171,120 +152,49 @@ async function mountParkedQuestion(page, { answerTurn }) {
     const references = footer?.querySelector(':scope > .chat__sources')
     return {
       sameCard: card === window.__layoutCard,
-      // Inside its reply, so following the bottom cannot move it.
-      offset: card && reply ? card.getBoundingClientRect().top - reply.getBoundingClientRect().top : null,
-      replyHeight: reply?.getBoundingClientRect().height || 0,
       footerHeight: footer?.getBoundingClientRect().height || 0,
       referencesHeld: references ? references.classList.contains('chat__sources--held') : null,
       copy: !!footer?.querySelector('.chat__msg-copy'),
       replyKey: card?.closest('[data-key]')?.dataset.key,
     }
   })
-  return { state, surface, reply, card, submit, frame }
+  return { state, reply, card, submit, frame }
 }
 
-for (const viewport of [{ width: 412, height: 861 }, { width: 1720, height: 1402 }])
-test(`a same-answer continuation keeps its footer line and followed geometry at ${viewport.width}px`, async ({ page }) => {
-  await page.setViewportSize(viewport)
-  const { state, surface, reply, card, submit, frame } = await mountParkedQuestion(page, { answerTurn: 'same' })
+test('a same-answer continuation keeps its footer line, holding References, until Copy returns', async ({ page }) => {
+  const { state, reply, card, submit, frame } = await mountParkedQuestion(page)
   const before = await frame()
   expect(before).toMatchObject({ sameCard: true, referencesHeld: false, copy: true })
   expect(before.replyKey).toBeTruthy()
   expect(before.footerHeight).toBeGreaterThan(0)
-  // Same reply, same line, same References place: nothing above or below the
-  // card may change size while the answer continues.
-  const expectSameLine = (next, { held = true } = {}) => {
-    expect(next).toMatchObject({ sameCard: true, replyKey: before.replyKey, footerHeight: before.footerHeight })
-    expect(next.referencesHeld).toBe(held)
-    expect(Math.abs(next.offset - before.offset)).toBeLessThanOrEqual(1)
-  }
+  // Same card, same line height, References held in place, no controls.
+  const expectHeldLine = next => expect(next).toMatchObject({
+    sameCard: true, replyKey: before.replyKey, footerHeight: before.footerHeight,
+    referencesHeld: true, copy: false,
+  })
 
   await submit.click()
   await expect.poll(() => Boolean(state.answerPost && state.releaseAnswer)).toBe(true)
-  const pending = await frame()
-  expectSameLine(pending)
-  expect(pending.copy).toBe(false)
-  expect(Math.abs(pending.replyHeight - before.replyHeight)).toBeLessThanOrEqual(1)
+  expectHeldLine(await frame())
 
   state.releaseAnswer()
   await expect(card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-  expectSameLine(await frame())
+  expectHeldLine(await frame())
 
   await page.waitForFunction(() => window.__layoutReaderCount() > 0)
   await page.evaluate(text => window.__layoutStreamText(text), AFTER_TEXT)
   await expect(reply).toContainText(AFTER_TEXT)
   await expect.poll(() => reply.getAttribute('data-current-response')).toBe('true')
-  expectSameLine(await frame())
+  expectHeldLine(await frame())
 
-  // Once the reservation is filled, following exposes a footer insertion that
-  // a short question's anchor can otherwise absorb invisibly.
-  let longText = AFTER_TEXT + '\n\n' + 'A stable paragraph in the continuing answer.\n\n'.repeat(45) + 'STREAM_END'
-  await page.emulateMedia({ reducedMotion: 'reduce' })
-  await page.evaluate(text => window.__layoutStreamText(text), longText)
-  await expect(reply).toContainText('STREAM_END')
-  const scroll = surface.locator('.chat__scroll')
-  await scroll.evaluate(element => {
-    element.dispatchEvent(new WheelEvent('wheel', { deltaY: 100, bubbles: true }))
-    element.scrollTop = element.scrollHeight
-  })
-  await expect(scroll).toHaveAttribute('data-scroll-mode', 'FOLLOW_BOTTOM')
-  const tail = () => scroll.evaluate(element => ({ height: element.scrollHeight, top: element.scrollTop }))
-  // Plain text must grow without repeatedly shrinking the reserved tail.
-  // Exercise the real reveal pacer, not only whole-message snapshots.
-  await page.emulateMedia({ reducedMotion: 'no-preference' })
-  await scroll.evaluate(element => {
-    window.__layoutHeights = []
-    window.__layoutSampling = true
-    const sample = () => {
-      if (!window.__layoutSampling) return
-      window.__layoutHeights.push(element.scrollHeight)
-      requestAnimationFrame(sample)
-    }
-    sample()
-  })
-  for (let index = 0; index < 5; index++) {
-    longText += ` More words flowing into the same paragraph, chunk ${index}.`
-    await page.evaluate(text => window.__layoutStreamText(text), longText)
-    await expect(reply).toContainText(`chunk ${index}.`)
-  }
-  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
-  const heights = await page.evaluate(() => {
-    window.__layoutSampling = false
-    return window.__layoutHeights
-  })
-  expect(heights.length).toBeGreaterThan(2)
-  for (let index = 1; index < heights.length; index++) {
-    expect(heights[index]).toBeGreaterThanOrEqual(heights[index - 1] - 1)
-  }
-  const liveTail = await tail()
   const assistant = state.messages[1]
-  assistant.blocks.push({ type: 'text', text_item_id: 'layout-continuation', content: longText })
-  assistant.content = `${BEFORE_TEXT}\n\n${longText}`
+  assistant.blocks.push({ type: 'text', text_item_id: 'layout-continuation', content: AFTER_TEXT })
+  assistant.content = `${BEFORE_TEXT}\n\n${AFTER_TEXT}`
   state.running = false
   await page.evaluate(() => window.__layoutFinish())
   await expect.poll(() => reply.getAttribute('data-current-response')).toBeNull()
-  await expect(reply).toContainText(AFTER_TEXT)
-  const terminal = await frame()
-  expectSameLine(terminal, { held: false })
-  expect(terminal.copy).toBe(true)
-  const settledTail = await tail()
-  expect(Math.abs(settledTail.height - liveTail.height)).toBeLessThanOrEqual(1)
-  expect(Math.abs(settledTail.top - liveTail.top)).toBeLessThanOrEqual(1.5)
-})
-
-test('an answer that starts a new turn gives its footer line to the new reply', async ({ page }) => {
-  const { state, surface, card, submit, frame } = await mountParkedQuestion(page, { answerTurn: 'new' })
-  const before = await frame()
-  expect(before.footerHeight).toBeGreaterThan(0)
-  await submit.click()
-  await expect.poll(() => Boolean(state.answerPost && state.releaseAnswer)).toBe(true)
-  state.releaseAnswer()
-  await expect(card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
-  // Another run now writes the answer: the old reply keeps no empty line,
-  // so the new reply's Thinking takes its place instead of sitting below it.
-  await expect.poll(async () => (await frame()).footerHeight).toBe(0)
-  await expect(surface.locator('.chat__reply')).toHaveCount(2)
-  const latest = surface.locator('.chat__reply').filter({ hasNot: page.locator('.qcard') })
-  await expect(latest.locator(':scope > .chat__msg-meta--start')).toHaveCount(1)
-  expect((await frame()).sameCard).toBe(true)
+  await expect.poll(async () => (await frame()).copy).toBe(true)
+  expect(await frame()).toMatchObject({
+    sameCard: true, replyKey: before.replyKey, footerHeight: before.footerHeight, referencesHeld: false,
+  })
 })

@@ -5946,7 +5946,8 @@ export default function ChatView({
   // Answering a card starts the turn the moment it is submitted, before the
   // server acknowledges it; a failed answer ends it and the controls return
   // in the line the answer kept.
-  const turnStarting = turnActive || questionFollowHandoff != null
+  const questionPending = questionFollowHandoff != null
+  const turnStarting = turnActive || questionPending
   // The settled footer reply's end (see replyFooters). It is state set from a
   // committed render's layout effect, so a discarded render cannot name a
   // reply, and it updates before paint. Kept with its chat, so switching
@@ -5966,9 +5967,9 @@ export default function ChatView({
   const footers = useMemo(() => replyFooters({
     messages: peerTimeline.messages, replyGroups, liveIndex: footerLiveIndex,
     lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot,
-    questionPending: questionFollowHandoff != null,
+    questionPending,
   }), [peerTimeline.messages, replyGroups, footerLiveIndex,
-    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot, questionFollowHandoff])
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot, questionPending])
   const footerEnd = footers.current?.end ?? null
   useLayoutEffect(() => {
     if (!turnStarting) {

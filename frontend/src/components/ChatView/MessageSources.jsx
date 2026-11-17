@@ -26,7 +26,8 @@ function MessageSources({
   groups,
   refs,
   disclosureKey,
-  // Kept in place but hidden and unusable while its answer continues.
+  // Kept in place and unusable while its answer continues: hidden when
+  // closed, still shown when open (see ChatView.css).
   held = false,
 }) {
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
