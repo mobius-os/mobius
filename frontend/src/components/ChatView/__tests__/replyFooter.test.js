@@ -98,8 +98,10 @@ test('a stretch lists its References once, after its last reply', () => {
   assert.match(renderReply([turn], { stretchSourceRows: [sourced] }), /References/,
     'the stretch’s last reply lists the sources of the replies before it')
   assert.match(renderReply([sourced]), /References/, 'its own sources too')
-  assert.doesNotMatch(renderReply([sourced], { isStreaming: true }), /chat__sources/,
-    'only once the reply has settled')
+  assert.match(renderReply([sourced], { isStreaming: true }), /chat__sources chat__sources--held/,
+    'held in place, not usable, until the reply has settled')
+  assert.match(renderReply([sourced], { footer: 'working' }), /chat__sources chat__sources--held/,
+    'a continuing answer keeps its References where they were')
 })
 
 test('References sit after time, Copy and Branch inside the same autohiding footer', () => {
@@ -359,15 +361,49 @@ test('a stretch that reaches the loaded page’s first row may have begun earlie
   assert.equal(footerOf(messages).truncated, false, 'the whole chat is loaded')
 })
 
-test('a starting turn clears the footer; only a reply the turn writes reserves its line', () => {
+test('answering a question keeps the line, without controls, while the same answer continues', () => {
   const messages = [ownerRow, row('a')]
   const settledEnd = footerOf(messages).end
-  assert.equal(footerOf(messages, { turnStarting: true, settledEnd }).state, null,
-    'sending or answering a card clears the footer at once')
-  assert.equal(footerOf(messages, { turnStarting: true, settledEnd, liveIndex: 1 }).state, null,
-    'the live surface briefly reselecting the settled reply does not bring its line back')
-  const live = [...messages, ownerRow, { role: 'assistant', id: 'live', blocks: [] }]
-  const working = footerOf(live, { turnStarting: true, settledEnd, liveIndex: 3 })
+  const continuing = [
+    ['submitted, before any run is named', { questionPending: true }],
+    ['accepted by the run that wrote the answer', { questionPending: true, runningRoot: 'a' }],
+    ['streaming into the same row', { runningRoot: 'a', liveIndex: 1 }],
+  ]
+  for (const [moment, options] of continuing) {
+    const footer = footerOf(messages, { turnStarting: true, settledEnd, ...options })
+    assert.equal(footer.group.start, 1, moment)
+    assert.equal(footer.state, 'working', `${moment}: the line stays, empty`)
+    assert.equal(footerCopyParts(footer, { messages }), null, `${moment}: no Copy until it settles`)
+  }
+  assert.equal(footerOf(messages, { settledEnd }).state, 'settled',
+    'settling, or a failed answer, restores the controls in the same line')
+})
+
+test('a new turn leaves the old answer’s line to its own reply', () => {
+  const messages = [ownerRow, row('a')]
+  const settledEnd = footerOf(messages).end
+  for (const options of [{}, { liveIndex: 1 }, { questionPending: true }, { questionPending: true, liveIndex: 1 }]) {
+    assert.equal(footerOf(messages, { turnStarting: true, settledEnd, runningRoot: 'next', ...options }).state, null,
+      'another run is starting: its Thinking takes the line’s place, even if the live surface briefly reselects the old reply')
+  }
+  // A hidden trigger continues the stretch, so the new reply holds its footer
+  // and the earlier reply keeps none.
+  const live = [...messages, cardAnswer, { role: 'assistant', id: 'next', blocks: [] }]
+  const footers = replyFooters({ messages: live, replyGroups: assistantReplyGroups(live),
+    lastVisibleIndex: 3, liveIndex: 3, turnStarting: true, settledEnd, runningRoot: 'next' })
+  assert.deepEqual([...footers.byGroup.values()].map(footer => [footer.group.start, footer.state]), [[3, 'working']])
+})
+
+test('a visible owner send leaves the earlier answer complete, even under a stale live selection', () => {
+  const messages = [ownerRow, row('a'), ownerRow]
+  const replyGroups = assistantReplyGroups(messages)
+  for (const liveIndex of [-1, 1]) {
+    const footers = replyFooters({ messages, replyGroups, lastVisibleIndex: 2, liveIndex, turnStarting: true, settledEnd: 1 })
+    assert.equal(footers.current, null, 'no answer is current below the owner’s message')
+    assert.deepEqual([...footers.byGroup.values()].map(footer => footer.state), ['settled'])
+  }
+  const live = [...messages, { role: 'assistant', id: 'live', blocks: [] }]
+  const working = footerOf(live, { turnStarting: true, settledEnd: 1, liveIndex: 3, runningRoot: 'live' })
   assert.equal(working.group.start, 3)
   assert.equal(working.state, 'working')
 })
@@ -379,9 +415,11 @@ test('a turn continuing the reply that held the footer keeps its line reserved',
   const settled = [ownerRow, row('run')]
   const settledEnd = footerOf(settled).end
   const resumed = [...settled, steer, row('run:assistant:1')]
-  const footer = footerOf(resumed, { turnStarting: true, settledEnd, liveIndex: 3 })
-  assert.equal(footer.group.start, 1, 'the same reply')
-  assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
+  for (const runningRoot of [null, 'run']) {
+    const footer = footerOf(resumed, { turnStarting: true, settledEnd, liveIndex: 3, runningRoot })
+    assert.equal(footer.group.start, 1, 'the same reply')
+    assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
+  }
 })
 
 test('the answer before a visible steer stays working until its run settles', () => {

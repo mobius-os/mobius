@@ -5961,8 +5961,10 @@ export default function ChatView({
   }
 
   // Answering a card starts the turn the moment it is submitted, before the
-  // server acknowledges it; a failed answer clears this and the footer returns.
-  const turnStarting = turnActive || questionFollowHandoff != null
+  // server acknowledges it; a failed answer ends it and the controls return
+  // in the line the answer kept.
+  const questionPending = questionFollowHandoff != null
+  const turnStarting = turnActive || questionPending
   // The settled footer reply's end (see replyFooters). It is state set from a
   // committed render's layout effect, so a discarded render cannot name a
   // reply, and it updates before paint. Kept with its chat, so switching
@@ -5970,8 +5972,10 @@ export default function ChatView({
   const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
   const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
   // One footer per complete answer. Only the current answer follows the live
-  // surface; an answer a still-running run wrote (before a visible steer)
-  // stays working until that run settles.
+  // surface: it keeps its line, without controls, while the same answer
+  // continues (a question answered inside its row), and leaves it to the new
+  // reply when another turn starts. An answer a still-running run wrote
+  // (before a visible steer) stays working until that run settles.
   const footerLiveIndex = showActiveAssistantSurface
     ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
   const runningRoot = turnActive
@@ -5980,8 +5984,9 @@ export default function ChatView({
   const footers = useMemo(() => replyFooters({
     messages: peerTimeline.messages, replyGroups, liveIndex: footerLiveIndex,
     lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot,
+    questionPending,
   }), [peerTimeline.messages, replyGroups, footerLiveIndex,
-    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot])
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot, questionPending])
   const footerEnd = footers.current?.end ?? null
   useLayoutEffect(() => {
     if (!turnStarting) {
@@ -6088,8 +6093,10 @@ export default function ChatView({
       metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={groupFooter ? showMessageMeta : undefined}
       onFooterIntent={groupFooter?.truncated ? requestStretchStart : undefined}
-      // References sit in the answer footer, so they show once it settles.
-      stretchSourceRows={groupFooter?.state === 'settled' ? groupFooter.sourceRows : null}
+      // References sit in the answer footer. While the answer continues they
+      // keep their place, held and unusable, so submitting an answer cannot
+      // move the transcript; they are usable again once it settles.
+      stretchSourceRows={groupFooter?.state ? groupFooter.sourceRows : null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

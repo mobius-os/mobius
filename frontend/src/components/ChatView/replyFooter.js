@@ -43,17 +43,21 @@ function earlierReplyRows(groups) {
 /** Every complete answer's footer on the loaded page, and the current one.
  *
  *  The current answer is the live reply's group at `liveIndex` while one is
- *  shown (-1 otherwise), else the one holding the last visible row. `state`
- *  is 'settled' while no turn is starting or running. While one is, the
- *  current answer is 'working' (an empty, reserved line) when the turn writes
- *  it, and null when it is the answer that held the footer as the turn
- *  started, which the live surface can briefly reselect before the turn's
- *  reply exists. `settledEnd` (the absolute index of the settled footer
- *  reply's last row) tells them apart: a turn continuing that same reply adds
- *  a row after it. An earlier answer is settled unless the running run
- *  (`runningRoot`, its reply root) wrote part of it: a visible steer ends the
- *  answer before it while that run continues, so it stays working until the
- *  run settles.
+ *  shown (-1 otherwise), else the one holding the last visible row; an answer
+ *  with a visible row after it is never current, so a stale live selection
+ *  cannot keep it there. `state` is 'settled' while no turn is starting or
+ *  running. While one is, the current answer is:
+ *  - 'working' (its line kept, empty) while the same answer continues: the
+ *    running run (`runningRoot`, its reply root) wrote it, or, before any run
+ *    is named, an answered question of it (`questionPending`) is in flight.
+ *    Keeping the line means settling fills it instead of adding it back.
+ *  - 'working' when it is a reply the new turn writes: it ends after
+ *    `settledEnd`, the absolute index of the settled footer reply's last row.
+ *  - null when a new turn is leaving it, so the new reply's Thinking takes
+ *    the line's place; the live surface can briefly reselect it then.
+ *  An earlier answer is settled unless the running run wrote part of it: a
+ *  visible steer ends the answer before it while that run continues, so it
+ *  stays working until the run settles.
  *
  *  Each footer also lists `sourceRows`, the rows of its earlier replies whose
  *  References its last reply shows; `start` is the index of its first row
@@ -62,19 +66,21 @@ function earlierReplyRows(groups) {
  *  is at `offset`). */
 export function replyFooters({
   messages, replyGroups, liveIndex = -1, lastVisibleIndex, offset = 0,
-  turnStarting = false, settledEnd = null, runningRoot = null,
+  turnStarting = false, settledEnd = null, runningRoot = null, questionPending = false,
 }) {
-  const currentGroup = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
+  let currentGroup = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
+  if (currentGroup && currentGroup.end < lastVisibleIndex) currentGroup = null
   const byGroup = new Map()
   for (const [group, groups] of agentStretches(messages, replyGroups)) {
     let before = groups[0].start - 1
     while (before >= 0 && messages[before]?.hidden) before -= 1
     const end = offset + group.end
-    const runContinues = !!runningRoot && groups.some(item => item.rows.some(
+    const writtenByRun = !!runningRoot && groups.some(item => item.rows.some(
       row => assistantReplyRoot(row.message) === runningRoot))
-    const state = group !== currentGroup ? (runContinues ? 'working' : 'settled')
+    const continues = runningRoot ? writtenByRun : questionPending
+    const state = group !== currentGroup ? (writtenByRun ? 'working' : 'settled')
       : !turnStarting ? 'settled'
-        : liveIndex >= 0 && end !== settledEnd ? 'working' : null
+        : continues || (liveIndex >= 0 && end !== settledEnd) ? 'working' : null
     byGroup.set(group, {
       group, groups, state, end, start: before + 1,
       truncated: before < 0 && offset > 0,

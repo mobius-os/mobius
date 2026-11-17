@@ -94,3 +94,19 @@ test('new inline sources do not cancel or discard the same reply’s lazy source
  assert.equal(hook.result.current.complete, true)
  hook.unmount()
 })
+
+test('an unchanged answer reuses its parsed sources across re-renders', () => {
+ const blocks = [{ type: 'tool', sources: [source('https://a.example'), source('https://b.example')] }, { type: 'text', content: 'Answer' }]
+ const props = { chatId: 'chat', groups: [blocks], refs: [], open: false }
+ const hook = renderHook(useMessageSources, props)
+ const first = hook.result.current.sources
+ assert.deepEqual(first.map(s => s.url), ['https://a.example', 'https://b.example'])
+ // A streamed frame rebuilds the groups array around the same blocks.
+ hook.rerender({ ...props, groups: [blocks] })
+ assert.equal(hook.result.current.sources, first)
+ const live = [...blocks, { type: 'tool', sources: [source('https://c.example')] }]
+ hook.rerender({ ...props, groups: [live] })
+ assert.notEqual(hook.result.current.sources, first, 'changed blocks are read again')
+ assert.equal(hook.result.current.sources.length, 3)
+ hook.unmount()
+})

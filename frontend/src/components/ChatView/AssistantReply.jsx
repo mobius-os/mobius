@@ -84,14 +84,17 @@ function AssistantReply({
   const settled = footer === 'settled' && !isStreaming
   const endedAt = presentationRows.at(-1).message.run_ended_ts
   // A stretch lists its References once, in its last reply's footer, after
-  // time, Copy and Branch, so they show only with a settled footer.
+  // time, Copy and Branch, so References never show without a footer. While
+  // the answer continues they keep their place but are held, like the other
+  // controls: the line does not change size when the answer settles.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
-  const references = settled && referenceRows && <MessageSources
+  const references = footer && referenceRows && <MessageSources
     chatId={chatId}
     groups={referenceRows.map(message => message.blocks)}
     refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
     disclosureKey={`${rows[lastVisibleRow].key}:references`}
+    held={!settled}
   />
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"

@@ -222,6 +222,14 @@ test('message references use a bounded responsive two-column grid', () => {
     'long reference labels should cap their pill width on phones')
 })
 
+test('held References: closed ones are unseen, an open list stays shown', () => {
+  const css = stripComments(chatCss)
+  assert.match(css, /\.chat__sources--held:not\(\.chat__sources--open\)\s*\{\s*visibility:\s*hidden;\s*\}/,
+    'only a closed held disclosure is hidden, like the other working-footer controls')
+  assert.doesNotMatch(css, /\.chat__sources--held\s*\{[^}]*visibility/,
+    'an open held list is never hidden, so it leaves no list-sized gap')
+})
+
 test('transitions into Stop are sequential while Send to Steer stays immediate', () => {
   const css = stripComments(chatCss)
   const glyphStackRule = css.match(/\.chat__action-glyphs\s*\{[^}]*\}/)?.[0] || ''
