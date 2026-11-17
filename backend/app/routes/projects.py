@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -2179,11 +2180,10 @@ async def delete_project(
           resource_name=project.name or "Untitled project",
         )
         db.commit()
-    from app import key_vault, secure_inputs
+    from app import secure_inputs
     for chat_id in chat_ids:
       questions.cancel(chat_id)
       secure_inputs.cancel_chat(chat_id)
-      await key_vault.forget_chat(chat_id)
       mark_chat_deleted(chat_id)
       try:
         await _finish_run(chat_id, terminal_status="stopped")
@@ -2201,9 +2201,14 @@ async def delete_project(
       "chatIds": chat_ids,
     })
     publish_recovery_notification(recovery_notification_id)
-    return Response(status_code=204, headers={
-      "X-Recovery-Notification-Id": recovery_notification_id,
-    })
+  # Their agents' waiting key requests could only be answered on their cards.
+  # Withdrawn together and after the lifecycle lock, so a vault that hangs
+  # delays this response by one vault timeout, never one per chat or recovery.
+  from app import key_vault
+  await asyncio.gather(*(key_vault.forget_chat(chat_id) for chat_id in chat_ids))
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  })
 
 
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])

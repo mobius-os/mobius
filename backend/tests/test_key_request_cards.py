@@ -13,6 +13,7 @@ from app.broadcast import create_broadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
 from app.chat_writer import Barrier, StartTurn, get_writer
 from app.database import SessionLocal
+from app.timeutil import now_naive_utc
 from tests.test_keys_routes import DUMMY, nudges, vault  # noqa: F401 (fixtures)
 
 APOD = {"host": "api.nasa.gov", "methods": ["GET"], "paths": ["/planetary/apod"]}
@@ -143,17 +144,19 @@ def test_only_the_current_agent_run_asks_by_card(client, chat, auth, vault):
   assert refused.status_code == 403
 
 
-def test_another_chats_waiting_request_never_shows_as_this_agents_card(client, chat, auth, agent_run, vault):
+def test_another_chats_waiting_request_never_shows_as_this_agents_card(
+  client, chat, other_chat, auth, agent_run, vault,
+):
   """A request already waiting answers for later asks for its key, so an ask
   that joins another chat's request saves no card here, where it would read
   as this agent's own; the agent hears what is waiting and asks again later."""
   collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
-  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor="agent:other-chat")
+  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
   asked = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK)
   assert asked.status_code == 200, asked.text
   receipt = asked.json()
-  assert receipt["state"] == "answered_without_card" and "from a chat that was deleted" in receipt["note"]
-  assert receipt["waiting_chat_id"] == "other-chat"
+  assert receipt["state"] == "answered_without_card" and 'the chat "Other chat"' in receipt["note"]
+  assert receipt["waiting_chat_id"] == other_chat.id
   assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa",
                                "sites": [collect], "reason": "Upload"}
   marker, cards = _card(chat.id)
@@ -170,6 +173,45 @@ def test_the_agent_hears_which_chat_holds_the_waiting_card(client, chat, other_c
   assert receipt["state"] == "answered_without_card"
   assert receipt["waiting_chat_id"] == other_chat.id
   assert 'the chat "Weather"' in receipt["note"] and "Settings" not in receipt["note"]
+
+
+def _delete_while_the_vault_was_unreachable(chat_id):
+  """Tombstone a chat without the vault hearing of it, as when deleting it
+  could not reach the vault."""
+  with SessionLocal() as db:
+    db.get(models.Chat, chat_id).deleted_at = now_naive_utc()
+    db.commit()
+
+
+def test_the_next_ask_withdraws_a_request_a_deleted_chat_left_behind(
+  client, chat, other_chat, start_agent_run, vault,
+):
+  """No card can answer a deleted chat's request, and nowhere else lists it,
+  so the next ask for its key withdraws it and gets its own card."""
+  collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
+  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
+  _delete_while_the_vault_was_unreachable(other_chat.id)
+  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
+  assert receipt["state"] == "waiting_for_owner"
+  [card] = _card(chat.id)[1]
+  assert card["key_request"]["sites"] == [APOD]
+  assert [(r["chat_id"], r["sites"]) for r in vault.list_requests()] == [(chat.id, [APOD])]
+
+
+def test_a_leftover_request_that_could_not_be_withdrawn_says_to_ask_again(
+  client, chat, other_chat, agent_run, monkeypatch, vault,
+):
+  """Never a dead end: the note sends the agent back to ask, which retries."""
+  from app import key_vault
+
+  async def unreachable(chat_id):
+    return None
+  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [APOD]}, actor=f"agent:{other_chat.id}")
+  _delete_while_the_vault_was_unreachable(other_chat.id)
+  monkeypatch.setattr(key_vault, "forget_chat", unreachable)
+  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK).json()
+  assert receipt["state"] == "answered_without_card" and receipt["waiting_chat_id"] == other_chat.id
+  assert "Ask again in a moment" in receipt["note"] and "Settings" not in receipt["note"]
 
 
 def test_a_request_that_names_no_chat_is_answered_in_settings(client, chat, agent_run, vault):
@@ -252,3 +294,33 @@ def test_deleting_a_project_withdraws_its_chats_waiting_requests(client, auth, v
   vault.request_for_agents({"key": "nasa", "reason": "x", "sites": [APOD]}, actor=f"agent:{project_chat['id']}")
   assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
   assert vault.list_requests() == []
+
+
+def test_a_project_withdraws_its_chats_requests_together_after_its_lifecycle_lock(
+  client, auth, monkeypatch, vault,
+):
+  """A vault that hangs then costs one timeout, not one per chat, and never
+  holds the project's deletion or recovery."""
+  import asyncio
+
+  from app import key_vault
+  from app.project_retention import serialize_project_lifecycle
+  project = client.post("/api/projects", headers=auth, json={"name": "Site", "template_id": "blank"}).json()
+  chat_ids = {client.post(f"/api/projects/{project['id']}/chats", headers=auth, json={
+    "title": title, "recovery_request_id": f"{project['id']}:{title}",
+  }).json()["id"] for title in ("Plan", "Copy")}
+  started, released = [], []
+  everyone_asked = asyncio.Event()
+
+  async def slow_vault(chat_id):
+    started.append(chat_id)
+    if len(started) == len(chat_ids):
+      everyone_asked.set()
+    # Only reachable if no chat's withdrawal waits for another's to finish.
+    await asyncio.wait_for(everyone_asked.wait(), timeout=2)
+    async with asyncio.timeout(2):
+      async with serialize_project_lifecycle(project["id"]):
+        released.append(chat_id)
+  monkeypatch.setattr(key_vault, "forget_chat", slow_vault)
+  assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
+  assert set(released) == chat_ids

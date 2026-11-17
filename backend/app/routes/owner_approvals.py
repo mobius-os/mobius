@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
-from app import chat_queue, key_request_cards, models, questions, secure_inputs
+from app import chat_queue, key_request_cards, key_vault, models, questions, secure_inputs
 from app.chat_event_sink import get_active_sink
 from app.database import get_db
 from app.deps import Principal, get_agent_run_principal, reject_cross_site
@@ -185,6 +185,14 @@ async def request_approval(
      approval_summary=body.question[:500], closing_message=body.message)
 
 
+def _live_chat_title(db: Session, chat_id: str) -> str | None:
+  """``chat_id``'s title as an agent is told it, or None when that chat is deleted."""
+  row = db.query(models.Chat.title).filter(
+    models.Chat.id == chat_id, models.Chat.deleted_at.is_(None),
+  ).first()
+  return None if row is None else (row[0] or "Untitled chat")
+
+
 @router.post("/{chat_id}/key-request", dependencies=[Depends(reject_cross_site)])
 async def request_key(
   chat_id: str,
@@ -202,18 +210,28 @@ async def request_key(
   if principal.chat_id != chat_id:
     raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
   ask = body.model_dump(exclude={"message"}, exclude_none=True)
-  answer = await agent_asks(ask, principal)
+
+  async def ask_vault() -> tuple[dict, dict | None]:
+    answer = await agent_asks(ask, principal)
+    if not key_request_cards.needs_owner(answer):
+      return answer, None
+    return answer, await key_request_cards.waiting_elsewhere(answer, chat_id)
+
+  answer, waiting = await ask_vault()
+  holder = waiting.get("chat_id") if waiting is not None else None
+  if holder and _live_chat_title(db, holder) is None:
+    # Left behind by a chat deleted while the vault was unreachable: no card
+    # can answer it now, so withdraw it as that deletion would have, and ask
+    # again so this chat gets its own card.
+    await key_vault.forget_chat(holder)
+    answer, waiting = await ask_vault()
+    holder = waiting.get("chat_id") if waiting is not None else None
   if not key_request_cards.needs_owner(answer):
     return {"state": "answered_without_card", "answer": answer}
-  waiting = await key_request_cards.waiting_elsewhere(answer, chat_id)
   if waiting is not None:
-    holder = waiting.get("chat_id")
-    title = db.query(models.Chat.title).filter(
-      models.Chat.id == holder, models.Chat.deleted_at.is_(None),
-    ).first() if holder else None
     return {
       "state": "answered_without_card", "answer": answer, "waiting_chat_id": holder,
-      "note": key_request_cards.elsewhere_note(holder, (title[0] or "Untitled chat") if title else None),
+      "note": key_request_cards.elsewhere_note(holder, _live_chat_title(db, holder) if holder else None),
     }
   return {
     **await save_owner_question(

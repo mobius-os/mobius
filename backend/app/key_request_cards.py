@@ -91,16 +91,17 @@ def elsewhere_note(chat_id: str | None, title: str | None) -> str:
   """What an agent hears when its ask joins a request waiting elsewhere.
 
   It names where the owner answers it: the card in the chat that asked
-  (``title``, None when that chat is gone), or Settings › Keys for a request
-  that names no chat.
+  (``title``), or Settings › Keys for a request that names no chat. ``title``
+  is None only when the asking chat is deleted and withdrawing its request
+  just failed; asking again retries that.
   """
   waiting = "A request for this key is already waiting"
   after = "so no card was saved here; answer.sites is what it asks."
   if chat_id is None:
     return f"{waiting} in Settings › Keys, {after} Tell the owner to answer it there, and ask again after they do."
   if title is None:
-    return (f"{waiting} from a chat that was deleted, {after} Tell the owner to remove it on the "
-            "key's page in Settings › Keys, and ask again after they do.")
+    return (f"{waiting} from a chat that was deleted and couldn't be withdrawn just now, {after} "
+            "Ask again in a moment.")
   return (f"{waiting} on a card in the chat \"{title}\" (waiting_chat_id), {after} Tell the "
           "owner to answer it there, and ask again after they do.")
 

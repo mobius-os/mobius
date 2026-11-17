@@ -830,7 +830,8 @@ async def forget_chat(chat_id: str) -> None:
   Only that chat's card could answer them, and a waiting request answers for
   every later ask for its key, so left behind no chat could ask for the key
   again. Deleting the chat never waits on the vault: if it can't be reached,
-  the request stays until the owner removes it on the key's page.
+  the request stays until the next agent ask for its key withdraws it
+  (``request_key`` in routes/owner_approvals.py).
   """
   if not _vault_ever_used():
     return

@@ -91,7 +91,9 @@ Status: draft for review.
    way out. Settings › Keys answers only an agent's request that names no
    chat. Deleting a chat withdraws its agent's waiting requests: their card
    is the only place they could be answered, and a waiting request answers
-   for every later ask for its key. The card asks one thing at a time: whether to allow, then, for a
+   for every later ask for its key. If the vault can't be reached then,
+   the next agent ask for that key withdraws the leftover request and gets
+   its own card. The card asks one thing at a time: whether to allow, then, for a
    key the owner has no value for yet, the value. A chat only answers its own agent's request; an
    app's shown in a chat is read-only. Every card's answers wake only after
    the card has been still and untouched for about a second (since it
