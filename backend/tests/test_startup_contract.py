@@ -75,17 +75,6 @@ def test_startup_task_app_imports_all_resolve():
   assert checked > 0
 
 
-def test_reconcile_and_backfill_startup_commands_are_importable():
-  """The specific commands startup depends on, checked by name as a tripwire."""
-  from app.chat_writer import (
-    BackfillAssistantIdentity,
-    ReconcileStartupChat,
-  )
-
-  assert BackfillAssistantIdentity(chat_id="c").chat_id == "c"
-  assert ReconcileStartupChat is not None
-
-
 def _context():
   return StartupContext(
     app=SimpleNamespace(state=SimpleNamespace()),

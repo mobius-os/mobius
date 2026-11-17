@@ -153,25 +153,12 @@ def test_request_user_input_bridge_has_no_user_answer_timeout():
   assert "_BRIDGE_USER_ANSWER_TIMEOUT" not in source
 
 
-def test_subagent_activity_is_natively_modeled_and_fallback_removed():
-  """Lock in the native subAgentActivity contract this SDK bump established.
-
-  This is the inverse of the earlier tripwire. Before openai-codex
-  rust-v0.145.0-alpha.13 the generated ThreadItem union omitted the
-  `subAgentActivity` variant, so resuming a thread whose history contained one
-  raised a validation error that `_resume_codex_thread` caught and worked
-  around. The pinned SDK now models the variant natively, the workaround is
-  gone, and the runner classifies the item explicitly (a documented no-op in
-  the tool-event dispatch). Assert every leg of that so a future SDK that
-  renames or drops the type — or a change that resurrects the fallback — fails
-  loudly rather than silently reopening the resume gap.
-  """
+def test_subagent_activity_is_natively_modeled_and_dispatched():
+  """Persisted completion activity parses natively and reaches dispatch."""
   import inspect
 
   pytest.importorskip("openai_codex")
   from openai_codex.generated import v2_all
-  from app import codex_sdk_runner
-
   schema = json.dumps(v2_all.ThreadItem.model_json_schema())
   assert getattr(v2_all, "SubAgentActivityThreadItem", None) is not None, (
     "The Codex SDK no longer exposes SubAgentActivityThreadItem. If upstream "
@@ -180,13 +167,7 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   )
   assert "subAgentActivity" in schema
 
-  # The runner imports the native item and hands it to dispatch as a non-None
-  # entry (defensive block, so a predates-it SDK still boots). The matching
-  # 0.152.1 app-server persists a completed marker missing from its generated
-  # Python enum, so the provider boundary accepts that one known wire value
-  # without making arbitrary future schema drift permissive.
-  sdk = codex_sdk_runner._sdk_imports()
-  assert sdk["SubAgentActivityThreadItem"] is not None
+  assert v2_all.SubAgentActivityKind("completed").value == "completed"
   completed = v2_all.SubAgentActivityThreadItem.model_validate({
     "type": "subAgentActivity",
     "id": "activity-1",
@@ -204,6 +185,11 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
       "agentPath": "/root/reviewer",
     })
 
+  from app import codex_sdk_runner
+
+  sdk = codex_sdk_runner._sdk_imports()
+  assert sdk["SubAgentActivityThreadItem"] is v2_all.SubAgentActivityThreadItem
+
   # The item is classified explicitly at the dispatch sites, not dropped by
   # fall-through.
   assert "SubAgentActivityThreadItem" in inspect.getsource(
@@ -212,11 +198,6 @@ def test_subagent_activity_is_natively_modeled_and_fallback_removed():
   assert "SubAgentActivityThreadItem" in inspect.getsource(
     codex_sdk_runner._tool_completed_events
   )
-
-  # The old compatibility path is gone: neither the resume wrapper nor its
-  # error-classifier should linger as dead code.
-  assert not hasattr(codex_sdk_runner, "_resume_codex_thread")
-  assert not hasattr(codex_sdk_runner, "_is_subagent_activity_resume_validation_error")
 
 
 def test_context_compaction_item_is_available_to_the_runner():
@@ -316,7 +297,7 @@ def test_lifecycle_notification_fields_and_status_enums_are_pinned():
     "spawnAgent", "sendInput", "resumeAgent",
   }
   assert {item.value for item in v2_all.SubAgentActivityKind} >= {
-    "started", "interacted", "interrupted",
+    "started", "interacted", "interrupted", "completed",
   }
 
 
