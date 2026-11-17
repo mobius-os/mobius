@@ -333,33 +333,6 @@ def reset_theme_override(data_dir: str) -> dict:
   return {"reset": True, "backup": str(dst)}
 
 
-def _escape_for_style_tag(css: str) -> str:
-  """Escapes any closing </style> sequence inside CSS so it can't break
-  out of a <style> block. The HTML parser ends a <style> at the first
-  literal `</`, regardless of what follows; so any user-controlled CSS
-  injected verbatim is a stored-XSS vector. The CSS-spec-safe rewrite
-  is `<\\/` (backslash escape inside CSS strings/comments) but for
-  general CSS the simpler defense is to break the closing-tag pattern
-  with an HTML comment-friendly substitution that keeps the CSS
-  semantically identical: replace `</` with `<\\/` inside the embedded
-  block. Browsers parse `<\\/style>` as text inside the <style>, never
-  as a closing tag.
-
-  RETAINED after theme-as-data: the server no longer injects a <style>
-  block (the client paints theme.css into <style id="mobius-theme">), so
-  the stored-XSS surface moved to the client. This stays as the canonical
-  CSS `</`-escaper — the JSON-slot serializer in main.py applies an
-  equivalent `</` -> `<\\/` escape to keep embedded `</script>` from
-  breaking out of the slot's <script type="application/json"> wrapper.
-  """
-  return css.replace("</", "<\\/")
-
-
-def _is_safe_import_url(url: str) -> bool:
-  """Allow only http(s) URLs for @import — no javascript:, data:, etc."""
-  return url.startswith("https://") or url.startswith("http://")
-
-
 # =============================================================
 # GENERATED DEFAULTS (debugger pointer)
 # =============================================================
@@ -1288,8 +1261,7 @@ def theme_data(data_dir: str, bundle: "EffectiveTheme | None" = None) -> dict:
   old injection used and that `GET /api/theme` returns. It is passed
   through VERBATIM (no `</style>` escaping here): the client injects it
   via `<style>`.textContent, which the HTML parser never reparses, so the
-  `</style>`-breakout vector that `_escape_for_style_tag` guarded against
-  at server-render time no longer applies. The slot's own breakout vector
+  HTML-parser `</style>` breakout does not apply. The slot's own breakout vector
   (an embedded `</script>`) is closed by the JSON serializer's escape in
   `main.py`.
 
