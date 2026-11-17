@@ -6088,7 +6088,9 @@ export default function ChatView({
       // Each complete answer keeps its own footer; only one the running turn
       // is still writing, or briefly the one it is leaving, has no controls.
       footer={groupFooter?.state ?? null}
-      copy={footerHasCopy(groupFooter, { startRows: stretchStartRows, liveQuestionId: answerableQuestionId })
+      copy={footerHasCopy(groupFooter, {
+        startRows: stretchStartRows, messages: peerTimeline.messages, liveQuestionId: answerableQuestionId,
+      })
         ? copyAnswer : undefined}
       metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={groupFooter ? showMessageMeta : undefined}
@@ -6096,7 +6098,7 @@ export default function ChatView({
       // References sit in the answer footer. While the answer continues they
       // keep their place, held and unusable, so submitting an answer cannot
       // move the transcript; they are usable again once it settles.
-      stretchSourceRows={groupFooter?.state ? groupFooter.sourceRows : null}
+      stretchSourceRows={groupFooter?.sourceRows ?? null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

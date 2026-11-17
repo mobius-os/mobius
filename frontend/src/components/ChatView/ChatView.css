@@ -1886,7 +1886,6 @@
 @media (pointer: coarse) {
   .chat__sources-toggle,
   .chat__source-chip { min-height: 44px; }
-  .chat__msg-meta--start .chat__sources-toggle { min-height: 0; }
   .chat__msg-meta--start .chat__sources-toggle::after {
     content: '';
     position: absolute;

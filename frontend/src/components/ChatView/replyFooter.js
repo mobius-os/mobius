@@ -94,7 +94,7 @@ export function replyFooters({
  *  every group projected as AssistantReply projects it (`positions` are the
  *  peer timeline's), then read by `replyProse`. A prose part names the
  *  rendered row that shows it by `key`, with its `block`; a card part has
- *  its `markdown` and its `card` text. Copy's visibility and its text both come from here. */
+ *  its `markdown` and its `card` text. Copy's text comes from here. */
 export function stretchProse(groups, positions = new Map(), liveQuestionId = null) {
   return groups.flatMap(group => {
     const options = { positions }
@@ -104,21 +104,18 @@ export function stretchProse(groups, positions = new Map(), liveQuestionId = nul
   })
 }
 
-/** Copy's parts for `footer` (see replyFooters), or null while they are not
- *  known: the footer has not settled, or its stretch began before the loaded
- *  page and `startRows` (that start, see useStretchPrefix) is not read yet.
- *  `messages`, `slots` and `positions` are the transcript's peer timeline,
- *  `offset` its first row's index, `displayKeys` its row keys and
- *  `liveQuestionId` the chat's open question. A stretch
- *  wholly on the page uses the transcript's own reply groups; one with a read
- *  start is regrouped with that start before the loaded rows, with the same
- *  peer-note slots, so a reply split across the page's edge copies as one and
- *  both cases project exactly as the transcript does. */
-export function footerCopyParts(footer, {
-  startRows, messages, offset = 0, slots = new Map(), positions, displayKeys, liveQuestionId,
-}) {
+/** The replies Copy reads for `footer` (see replyFooters), or null while they
+ *  are not known: the footer has not settled, or its stretch began before the
+ *  loaded page and `startRows` (that start, see useStretchPrefix) is not read
+ *  yet. `messages` is the transcript's peer timeline, `offset` its first
+ *  row's index, `slots` its peer notes and `displayKeys` its row keys. A
+ *  stretch wholly on the page is the transcript's own reply groups; one with
+ *  a read start is regrouped with that start before the loaded rows, with the
+ *  same keys and peer-note slots, so a reply split across the page's edge
+ *  reads as one and both cases project exactly as the transcript does. */
+function stretchReplies(footer, { startRows, messages, offset = 0, slots = new Map(), displayKeys }) {
   if (footer?.state !== 'settled') return null
-  if (!footer.truncated) return stretchProse(footer.groups, positions, liveQuestionId)
+  if (!footer.truncated) return footer.groups
   if (!startRows) return null
   const shift = startRows.length
   const rows = [...startRows, ...messages.slice(0, footer.group.end + 1)]
@@ -126,30 +123,35 @@ export function footerCopyParts(footer, {
     offset: offset - shift, displayKeys,
     slots: new Map([...slots].map(([index, notes]) => [index + shift, notes])),
   })
-  return stretchProse([...new Set(groups.values())], positions, liveQuestionId)
+  return [...new Set(groups.values())]
 }
 
-/** Whether a settled answer offers Copy: the same prose reading Copy uses
- *  (replyProse) on the answer's stored rows, and, for an answer that began
- *  before the loaded page, only once its start (`startRows`) is read.
- *  Presentation only joins and regroups that prose, so it cannot decide
- *  whether there is any; the text itself is built when Copy is pressed (see
- *  footerCopyParts). replyProse reads only those messages and the open
- *  question, so the answer is remembered on exactly those: its rows' identity
- *  (unchanged while a later answer streams), the read start and the question. */
-const copyableByRows = new WeakMap()
-export function footerHasCopy(footer, { startRows = null, liveQuestionId = null } = {}) {
-  if (footer?.state !== 'settled') return false
-  if (footer.truncated && !startRows) return false
-  const rows = footer.groups.map(group => group.presentationRows)
-  const prefix = footer.truncated ? startRows : null
-  const prior = copyableByRows.get(footer.group.presentationRows)
-  if (prior && prior.prefix === prefix && prior.liveQuestionId === liveQuestionId
-    && prior.rows.length === rows.length && prior.rows.every((item, index) => item === rows[index])) {
-    return prior.copyable
-  }
-  const messages = [...(prefix || []), ...rows.flatMap(items => items.map(row => row.message))]
-  const copyable = replyProse(messages, { liveQuestionId }).length > 0
-  copyableByRows.set(footer.group.presentationRows, { rows, prefix, liveQuestionId, copyable })
+/** Copy's parts for `footer`, or null while its replies are not known (see
+ *  stretchReplies, which takes the rest of `context`). `positions` and
+ *  `liveQuestionId` (the chat's open question) are the peer timeline's. */
+export function footerCopyParts(footer, { positions, liveQuestionId, ...context }) {
+  const groups = stretchReplies(footer, context)
+  return groups && stretchProse(groups, positions, liveQuestionId)
+}
+
+/** Whether a settled answer offers Copy: the same replies Copy reads (see
+ *  stretchReplies), each read by replyProse on its stored rows. Presentation
+ *  only joins and regroups a reply's prose, so it cannot decide whether there
+ *  is any; the text itself is built when Copy is pressed (footerCopyParts).
+ *  The answer is remembered on exactly what that reads: its replies' rows
+ *  (unchanged while a later answer streams), or, for one that began before
+ *  the loaded page, the read start and the page's rows through the answer,
+ *  and the open question. */
+const copyableByAnswer = new WeakMap()
+export function footerHasCopy(footer, { startRows = null, messages, liveQuestionId = null } = {}) {
+  if (footer?.state !== 'settled' || (footer.truncated && !startRows)) return false
+  const inputs = footer.truncated ? [startRows, ...messages.slice(0, footer.group.end + 1)]
+    : footer.groups.map(group => group.presentationRows)
+  const prior = copyableByAnswer.get(footer.group.presentationRows)
+  if (prior && prior.liveQuestionId === liveQuestionId && prior.inputs.length === inputs.length
+    && prior.inputs.every((item, index) => item === inputs[index])) return prior.copyable
+  const copyable = stretchReplies(footer, { startRows, messages }).some(group => (
+    replyProse(group.presentationRows.map(row => row.message), { liveQuestionId }).length > 0))
+  copyableByAnswer.set(footer.group.presentationRows, { inputs, liveQuestionId, copyable })
   return copyable
 }
