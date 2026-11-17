@@ -855,6 +855,7 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
+    "category": text("category"),
     # The choice the editor shows (only an offered one), and what the
     # source declares now, so the owner can see a license the Store doesn't
     # offer, including one an already listed app keeps.

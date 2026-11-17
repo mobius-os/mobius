@@ -214,6 +214,24 @@ def test_saving_again_keeps_art_and_removes_art_no_longer_listed(client, auth):
   assert not (source / hero_path).exists()
 
 
+def test_the_store_category_is_set_kept_by_older_clients_and_removable(client, auth):
+  source = _source()
+  app_id = _create(client, auth, source)
+
+  def category():
+    return json.loads((source / "mobius.json").read_text(encoding="utf-8"))["store"].get("category")
+
+  assert _save(client, auth, app_id, **_complete_listing(category="action")).status_code == 200
+  assert category() == "action"
+  assert _preview(client, auth, app_id)["draft"]["category"] == "action"
+  # A client that does not know the field leaves the creator's choice alone.
+  assert _save(client, auth, app_id, **_complete_listing()).status_code == 200
+  assert category() == "action"
+  assert _save(client, auth, app_id, **_complete_listing(category="")).status_code == 200
+  assert category() is None
+  assert _save(client, auth, app_id, **_complete_listing(category="Not A Slug")).status_code == 422
+
+
 def test_art_from_an_older_listing_layout_moves_into_static_store(client, auth):
   source = _source()
   (source / "listing").mkdir()

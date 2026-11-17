@@ -154,6 +154,9 @@ class StoreListingIn(BaseModel):
   screenshots: list[StoreListingScreenshotIn] = Field(
     default_factory=list, max_length=MAX_STORE_SCREENSHOTS,
   )
+  # A Store category slug the Store app defines. Omitted keeps the current one;
+  # an empty string removes it.
+  category: str | None = Field(default=None, max_length=40, pattern=r"^(?:[a-z][a-z0-9-]*)?$")
   # An SPDX id from store_licenses.OFFERED_LICENSES. Omitted keeps the
   # current license; the save refuses any other value.
   license: str | None = Field(default=None, max_length=40)

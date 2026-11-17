@@ -2446,6 +2446,7 @@ async def save_store_listing(
   edit = store_listing_source.ListingEdit(
     tagline=body.tagline,
     description=body.description,
+    category=body.category,
     license=body.license,
     icon=_listing_image(body.icon, "app icon"),
     hero=_listing_image(body.hero, "banner image"),
