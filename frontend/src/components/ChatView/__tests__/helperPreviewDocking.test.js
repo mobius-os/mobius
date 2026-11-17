@@ -15,11 +15,12 @@ const vite = await createSsrRenderServer({ plugins: [{
   name: 'docking-http', enforce: 'pre',
   resolveId: (source, importer) => importer?.endsWith('/HelperConversation.jsx') && source.endsWith('/api/client.js') ? API_STUB : null,
   load: id => id === API_STUB
-    ? 'export const apiFetch = async () => ({ ok: true, status: 200, json: async () => ({ status: "completed", provider: "codex", blocks: [] }) })'
+    ? 'export const apiFetch = async (...args) => globalThis.__dockingRead ? globalThis.__dockingRead(...args) : ({ ok: true, status: 200, json: async () => ({ status: "completed", provider: "codex", blocks: [] }) })'
     : null,
 }] })
 after(() => vite.close())
 const { HelperRow } = await vite.ssrLoadModule('/src/components/ChatView/HelperResultCard.jsx')
+const { default: SubagentChips } = await vite.ssrLoadModule('/src/components/ChatView/SubagentChips.jsx')
 const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
 const { HelperPreviewProvider } = await vite.ssrLoadModule('/src/components/ChatView/helperPreviewSlot.jsx')
 const { default: useDialogFocus } = await vite.ssrLoadModule('/src/hooks/useDialogFocus.js')
@@ -38,7 +39,7 @@ beforeEach(() => {
     disconnect() { observers = observers.filter(observer => observer !== this) }
   }
 })
-afterEach(() => { unmountAll(); globalThis.ResizeObserver = priorObserver })
+afterEach(() => { unmountAll(); globalThis.ResizeObserver = priorObserver; delete globalThis.__dockingRead })
 
 const helper = (id, name, status = 'completed') => ({ id, delegation_id: id, task_key: name, provider: 'codex', status })
 const dialogs = () => document.body.querySelectorAll('[role="dialog"]')
@@ -46,10 +47,11 @@ const rowNamed = (root, name) => root.querySelectorAll('button').find(node => no
 const closeButton = () => dialogs()[0].querySelectorAll('button').find(node => node.getAttribute('aria-label') === 'Close helper conversation')
 const flush = () => act(async () => {})
 
-function mountPane(width, { transcript = [], foot = [] } = {}) {
+function mountPane(width, { transcript = [], foot = [], subagent = null } = {}) {
   const view = mount(h(HelperPreviewProvider, null, h('div', { className: 'chat' },
     h('div', { className: 'chat__scroll' },
-      transcript.map(event => h(HelperRow, { key: event.id, event, chatId: 'parent' }))),
+      transcript.map(event => h(HelperRow, { key: event.id, event, chatId: 'parent' })),
+      subagent && h(SubagentChips, { subagent, chatId: 'parent' })),
     h('div', { className: 'chat__foot' },
       h(WaitingChip, { chatId: 'parent', helpers: foot }),
       h('textarea', { 'aria-label': 'Message' })),
@@ -107,6 +109,47 @@ test('closing a preview that replaced another returns focus to the row that open
   click(closeButton())
   assert.ok(document.activeElement === draft, 'focus returns to Draft, not to the row of the preview it replaced')
 })
+
+// Each helper's read: its own transcript, or a failure for the one named.
+function readsByHelper(failing) {
+  globalThis.__dockingRead = async url => {
+    const id = decodeURIComponent(url.split('/').at(-1))
+    if (id === failing) return { ok: false, status: 500 }
+    return { ok: true, status: 200, json: async () => ({ status: 'completed', provider: 'codex', blocks: [
+      { type: 'tool', tool: 'Read', status: 'done', input: `notes-of-${id}.txt` },
+    ] }) }
+  }
+}
+
+for (const [caller, options, rowFor] of [
+  ['the in-progress list', { foot: [helper('one', 'Survey', 'running'), helper('two', 'Draft', 'running')] },
+    (pane, name) => rowNamed(pane, name)],
+  ['a background-helper list', { subagent: {
+    one: { description: 'Survey', status: 'done', summary: 'done' },
+    two: { description: 'Draft', status: 'done', summary: 'done' },
+  } }, (pane, name) => pane.querySelectorAll('button').find(node => node.getAttribute('aria-label') === `Open ${name} conversation`)],
+]) {
+  test(`switching helpers within ${caller} starts a fresh preview with the right transcript and return target`, async () => {
+    readsByHelper('two')
+    const { pane } = mountPane(1200, options)
+    const survey = rowFor(pane, 'Survey')
+    const draft = rowFor(pane, 'Draft')
+    survey.focus()
+    click(survey)
+    await flush()
+    assert.match(dialogs()[0].textContent, /Survey/)
+    assert.match(dialogs()[0].textContent, /notes-of-one/, 'the first helper\'s transcript loads')
+    draft.focus()
+    click(draft)
+    await flush()
+    assert.equal(dialogs().length, 1)
+    assert.match(dialogs()[0].textContent, /Draft/)
+    assert.doesNotMatch(dialogs()[0].textContent, /notes-of-one/, 'a failed read never leaves the previous helper\'s transcript under the new title')
+    assert.ok(dialogs()[0].querySelector('.helper-convo__state--error'), 'the failed read shows as an error')
+    click(closeButton())
+    assert.ok(document.activeElement === draft, 'closing returns focus to the row that opened this helper')
+  })
+}
 
 // A local dialog in another workspace pane, standing in for any pane-scoped
 // dialog (an update review, an image lightbox).

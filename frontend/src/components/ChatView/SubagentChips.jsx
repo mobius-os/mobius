@@ -142,7 +142,10 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
         )
       })}
       {openHelper && (
+        // Keyed per helper: switching helpers starts a fresh preview, never the
+        // previous helper's transcript, read state or return target.
         <HelperConversation
+          key={opened.taskId}
           chatId={chatId}
           taskId={opened.taskId}
           name={helperName(openHelper.description)}

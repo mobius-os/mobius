@@ -284,7 +284,10 @@ export default function WaitingChip({
         {waits.map(waitCard)}
       </>}
     </section>}
+    {/* Keyed per helper: switching helpers starts a fresh preview, never the
+        previous helper's transcript, read state or return target. */}
     {conversationHelper && <HelperEventConversation
+      key={conversationHelper.delegation_id}
       event={conversationHelper}
       chatId={chatId}
       host={openHelper.host}
