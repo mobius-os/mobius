@@ -497,6 +497,8 @@
 /* Expanded link titles must not contribute to the action row's track sizing;
    the body's inline-size container (below) keeps them out of it. */
 .chat__msg-meta--start .chat__sources-body { grid-column: 1 / -1; }
+/* While its answer continues, References hold their place, unseen. */
+.chat__sources--held { visibility: hidden; }
 .chat__msg-meta--start:has(> .chat__sources--open) {
   opacity: 1;
   visibility: inherit;

@@ -65,6 +65,10 @@ test('a reply spanning several messages still shows one References disclosure', 
   assert.equal(referencesCount(html), 1)
 })
 
-test('a streaming reply defers References until it settles', () => {
-  assert.equal(referencesCount(renderReply([searchedMessage('one', 'https://example.com/a')], true)), 0)
+test('a streaming reply holds its References in place until it settles', () => {
+  const html = renderReply([searchedMessage('one', 'https://example.com/a')], true)
+  assert.equal(referencesCount(html), 1, 'the line keeps its References, so settling cannot resize it')
+  assert.match(html, /<section class="chat__sources chat__sources--held" inert="" aria-hidden="true">/,
+    'unseen and unusable until the answer settles')
+  assert.doesNotMatch(renderReply([searchedMessage('one', 'https://example.com/a')]), /chat__sources--held/)
 })

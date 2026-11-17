@@ -26,6 +26,8 @@ function MessageSources({
   groups,
   refs,
   disclosureKey,
+  // Kept in place but hidden and unusable while its answer continues.
+  held = false,
 }) {
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const { sources, hasSources, count, failed, complete, retry } = useMessageSources({
@@ -45,7 +47,11 @@ function MessageSources({
   }
 
   return (
-    <section className={`chat__sources${open ? ' chat__sources--open' : ''}`}>
+    <section
+      className={`chat__sources${open ? ' chat__sources--open' : ''}${held ? ' chat__sources--held' : ''}`}
+      inert={held || undefined}
+      aria-hidden={held || undefined}
+    >
       <button
         ref={toggleRef}
         type="button"
