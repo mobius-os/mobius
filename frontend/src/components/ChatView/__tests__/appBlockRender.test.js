@@ -501,7 +501,7 @@ test('no rows and no visible action fold the block to one line, with a jump only
 
 test('compact inline blocks keep their action lane while work runs and put results where controls were', () => {
   const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
-    interaction: 'inline', expand: false, action: { label: 'Send', intent: 'send:one' },
+    interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' },
     items: [{ title: 'Exact change', intent: 'open:one' }] }) })
   const show = fields => {
     const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's',
@@ -530,8 +530,9 @@ test('compact inline blocks keep their action lane while work runs and put resul
   assert.match(footer, /aria-label="#42, Exact change, opens in a new tab"/)
   assert.match(footer, /aria-label="#43, Another change, opens in a new tab"/)
   assert.doesNotMatch(footer, /<button/, 'settled results cannot send again')
-  assert.doesNotMatch(show({ rows: [], actions: [{ key: 'send:one', hidden: true }] }), /<footer>/,
-    'a superseded, folded card still has no empty lane')
+  const folded = show({ rows: [], actions: [{ key: 'send:one', hidden: true }] })
+  assert.doesNotMatch(folded, /md-app-block--action-lane|<button/, 'a superseded, folded card has no empty lane')
+  assert.match(folded, /md-app-block--folded/)
 })
 
 test('jumping to the newest block moves focus there, without animation for reduced motion', async () => {
@@ -681,10 +682,30 @@ test('footer status removes the redundant header without dropping details or lif
   assert.doesNotMatch(folded, /<header>|md-app-block__open|md-app-block__items/)
 })
 
-test('a live footer-status report compacts existing cards while other apps retain their header', () => {
-  const html = appRowsView({ statusPlacement: 'footer', title: '1 pull request',
-    rows: [{ title: 'Exact change', meta: 'owner/repo' }] })
-  assert.doesNotMatch(html, /<header>|md-app-block__open/)
-  assert.match(html, /md-app-block__footer-status/)
-  assert.match(appRowsView({ statusPlacement: 'unknown', title: 'Example', rows: [] }), /<header>/)
+test('only the block opts in to the compact lane; other inline cards keep their header, caption and row links', () => {
+  const html = appRowsView({ title: '1 pull request', actions: [{ key: 'send-batch:sel-1', hidden: true }],
+    rows: [{ title: 'Exact change', links: [{ label: '#42', url: 'https://example.com/pull/42' }] }] })
+  assert.match(html, /<header>/)
+  assert.doesNotMatch(html, /md-app-block--action-lane|md-app-block--footer-status|md-app-block__results/)
+  const saved = appRowsView({})
+  assert.match(saved, /<p class="md-app-block__source">From this conversation<\/p>/)
+})
+
+test('an app report cannot hide the host-drawn app name, not even beside Confirm', () => {
+  const confirming = { statusPlacement: 'footer', title: 'Approve now',
+    actions: [{ key: 'send-batch:sel-1', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] }
+  const ordinary = appRowsView(confirming)
+  assert.match(ordinary, /<header>[^]*<span class="md-app-block__sr-only">Open in <\/span>Example/,
+    'a live report cannot switch the placement')
+  assert.match(ordinary, />Confirm<\/button>/)
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' } }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', ...confirming,
+    actions: [{ key: 'send:one', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] },
+  's', new Set(['send:one']), new Set(), 'example')
+  const compact = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+    locked: false, confirmArmed: true, onEvent() {} }))
+  const footer = compact.split('<footer>')[1]
+  assert.match(footer, /^<div class="md-app-block__footer-status"><span class="md-app-block__footer-app">Example<\/span>/)
+  assert.match(footer, /<strong>Approve now<\/strong>[^]*>Confirm<\/button>/, 'the app name sits in the same footer as Confirm')
 })

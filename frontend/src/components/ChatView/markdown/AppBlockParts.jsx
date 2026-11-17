@@ -158,12 +158,14 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   // An app that reports no rows and shows no control folds its block to one
   // quiet line (for example "Continued below" on an earlier card).
   const folded = block.appRows && !block.items.length && !action && !toggle && !summary
-  // Compact inline blocks keep one action lane throughout their lifecycle.
-  // Hiding a control must not collapse it; row results take the same place.
-  const actionLane = !folded && block.session && !block.expand && Boolean(block.action)
+  // `status_placement: footer` is the block's own opt-in (appBlock.js), never
+  // an app report. Such a compact inline block keeps one action lane
+  // throughout its lifecycle: hiding a control must not collapse it, and row
+  // results take the same place.
+  const footerStatus = block.statusPlacement === 'footer'
+  const actionLane = footerStatus && !folded && block.session && !block.expand && Boolean(block.action)
   const linksInFooter = actionLane && block.appRows
   const results = linksInFooter ? block.items.filter(item => item.live?.links.length) : []
-  const footerStatus = block.statusPlacement === 'footer'
   const status = <>
       <TitleMark tone={block.titleTone} busy={block.titleBusy} />
       <strong>{!block.inline
@@ -190,7 +192,11 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
     <Facts facts={block.facts} />
     <BlockItems items={block.items} onInternalNav={onInternalNav} actionFor={actionFor} listEdgeRefs={listEdgeRefs} linksInFooter={linksInFooter} />
     {footerStatus || actionLane || action || toggle ? <footer>
-      {footerStatus ? <div className="md-app-block__footer-status">{status}</div> : null}
+      {/* With no header, the host still names the app beside the app's own
+          title, so Confirm is never labelled only by app-chosen text. */}
+      {footerStatus ? <div className="md-app-block__footer-status">
+        <span className="md-app-block__footer-app">{app ? app.name : block.app}</span>
+        <span className="md-app-block__footer-sep" aria-hidden="true">·</span>{status}</div> : null}
       {footerStatus ? jump : null}
       {results.length ? <div className="md-app-block__results">{results.map((item, i) =>
         <ExternalLinks key={i} links={item.live.links} context={item.title} />)}</div> : null}

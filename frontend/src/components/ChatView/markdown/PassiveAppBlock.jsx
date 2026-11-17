@@ -158,7 +158,7 @@ function SessionHost({ app, session }) {
       <AppCanvas appId={app.id} appName={app.name} appSlug={app.slug} version={appFrameVersion(app)}
         storageGeneration={app.storage_generation} offlineCapable={app.offline_capable === true}
         capabilityContract={app.capability_contract || null} active={false} visible={false} interactive={false}
-        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event}
+        navigationTarget={false} blockSession={session.blockSession} blockEvent={session.event} blockRefresh={session.blockRefresh}
         onBlockState={session.onBlockState} onBlockCapability={session.onBlockCapability} />
     </Suspense>
   </div>
@@ -218,6 +218,6 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
     ask={ask ? <AskControl status={chat.askState({ fingerprint: blockFingerprint(block), refs: ask.refs })} locked={sessionLocked(session, admitted)}
       onAsk={() => session.requestAsk(current => { void chat.ask({ message: askMessage(block.app, current), fingerprint: blockFingerprint(block), refs: current.refs }) })} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
-    {session.frameMounted ? <SessionHost key={session.documentScope} app={app} session={session} /> : null}
+    {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>
 }

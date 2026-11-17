@@ -4,7 +4,9 @@
    document generation that negotiated support. A new document resets idle
    controls; releasing an idle offscreen frame discards its authority. Its last
    idle presentation stays visible without restarting on scroll. A tap wakes
-   a read-only preparation; only a current report can authorize dispatch.
+   a read-only preparation; only a complete report from the mounted document
+   authorizes dispatch. A mounted document is never swapped for a refresh or
+   a context change: it gets the documented refresh hint or a new init.
 
    When Confirm may be pressed is decided by useConfirmArming. An unsupported
    negotiation belongs to one applied revision: a newer revision is tried
@@ -26,18 +28,17 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
   // Presentation is not session authority: never replay it into the app or
   // use it for retention, confirmation, asks or dispatch. Scope it to this
   // exact block, applied revision and host-attested chat position.
-  const presentationScope = JSON.stringify([block, revision, context?.chatId, context?.latest, admitted])
+  const blockScope = useMemo(() => JSON.stringify(block), [block])
+  const presentationScope = JSON.stringify([blockScope, revision, context?.chatId ?? null, context?.latest !== false, admitted])
   const [presentation, setPresentation] = useState(null)
   const refreshSeq = refresh?.seq ?? 0
-  const executionScope = JSON.stringify([presentationScope, refreshSeq])
   const saved = presentation?.scope === presentationScope ? presentation : null
   const [activation, setActivation] = useState(null)
   const activationRef = useRef(null)
   const requestedActivation = activation?.scope === presentationScope ? activation : null
-  const reportedRef = useRef(false)
-  const reportedScope = useRef(null)
-  const reportedRefresh = useRef(null)
-  const generationScope = useRef(null)
+  // The generation whose latest report was complete (not `loading`). Only
+  // that document may take an owner event.
+  const [authority, setAuthority] = useState(null)
   const [event, setEvent] = useState(null)
   const eventRef = useRef(null)
   const [negotiation, setNegotiation] = useState(UNNEGOTIATED)
@@ -50,15 +51,14 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
   // `ask-v1` is advertised, and an ask accepted, only for an app admitted to
   // `chat.blocks.ask` (appBlockSession.js passiveAskAllowed).
   const features = useMemo(() => ask ? [...SESSION_FEATURES, ASK_FEATURE] : SESSION_FEATURES, [ask])
-  const authoritative = reportedRef.current && reportedScope.current === presentationScope && reportedRefresh.current === refreshSeq
+  const authoritative = negotiation.supported === true && authority !== null && authority === negotiation.generation
   const arming = useConfirmArming({ state: authoritative ? state : null, generation: negotiation.generation, supported: negotiation.supported,
     confirmView, listStartView, listEndView })
   const { disarm, noteReport, mayConfirm } = arming
   const retained = sessionRetained(state, event)
-  const [documentScope, setDocumentScope] = useState(executionScope)
-  useEffect(() => { if (!retained) setDocumentScope(executionScope) }, [retained, executionScope])
   // Viewport entry starts the first read, not another read of an idle card.
-  // A refresh invalidates the observation even while no document is mounted.
+  // A refresh marks a sleeping card's saved display stale, so its next entry
+  // reads again; a mounted document gets the refresh hint instead.
   const wantsFrame = near && (!saved || saved.refreshSeq !== refreshSeq || negotiation.generation !== null || Boolean(requestedActivation))
   const frameWanted = wantsFrame && granted || retained
   // An unsupported document still keeps unresolved ownership mounted.
@@ -71,17 +71,6 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     eventRef.current = null
     setEvent(null)
   }, [])
-
-  // An idle confirmation has no external outcome to recover. Invalidating
-  // its observation cancels that showing; only unresolved effects retain the
-  // old document until it settles.
-  useEffect(() => {
-    if (documentScope === executionScope || sessionDocumentReset(state, eventRef.current)) return
-    disarm()
-    reportedRef.current = false
-    setState(null)
-    clearEvent()
-  }, [documentScope, executionScope, state, disarm, clearEvent])
 
   // A newer applied revision may support sessions: forget an unsupported
   // verdict from the previous one (an unresolved retained session is kept).
@@ -99,7 +88,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
   useEffect(() => {
     if (frameWanted || negotiationRef.current.supported === false) return
     disarm()
-    reportedRef.current = false
+    setAuthority(null)
     negotiationRef.current = UNNEGOTIATED
     setNegotiation(UNNEGOTIATED)
     setState(null)
@@ -109,7 +98,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
   const onBlockCapability = useCallback((supported, { generation, reset }) => {
     if (generation !== negotiationRef.current.generation || reset) {
       disarm()
-      reportedRef.current = false
+      setAuthority(null)
     }
     if (reset) {
       // Capture before clearing: the updater may run after the ref changes.
@@ -117,36 +106,33 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
       setState(current => sessionDocumentReset(current, previous))
       clearEvent()
     }
-    generationScope.current = documentScope
     const next = { generation, supported }
     negotiationRef.current = next
     setNegotiation(next)
-  }, [clearEvent, disarm, documentScope])
+  }, [clearEvent, disarm])
 
   const onBlockState = useCallback((message, { generation }) => {
     const current = negotiationRef.current
-    if (current.supported !== true || generation !== current.generation
-      || generationScope.current !== executionScope && !retained) return
+    if (current.supported !== true || generation !== current.generation) return
     const safe = sessionState(message, sessionId, keys, intents, block.app, { ask })
     if (!safe) return
-    const currentObservation = generationScope.current === executionScope
-    reportedScope.current = currentObservation ? presentationScope : null
-    reportedRefresh.current = currentObservation ? refreshSeq : null
-    reportedRef.current = !safe.loading
+    setAuthority(safe.loading ? null : generation)
     if (sessionRetained(safe, null)) setPresentation(null)
-    else if (!safe.loading && currentObservation) setPresentation({ scope: presentationScope, refreshSeq, state: sessionStateUpdate(null, safe) })
+    else if (!safe.loading) setPresentation({ scope: presentationScope, refreshSeq, state: sessionStateUpdate(null, safe) })
     noteReport(safe)
     setState(previous => sessionStateUpdate(previous, safe))
     if (!safe.checkpointInvalid && safe.ackNonce && safe.ackNonce === eventRef.current?.nonce) clearEvent()
-  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport, presentationScope, refreshSeq, retained, executionScope])
+  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport, presentationScope, refreshSeq])
 
   // Reserve synchronously: a second click before React commits, or before
   // the app acknowledges this exact nonce, cannot send another event.
   const dispatch = useCallback((key, kind) => {
     const current = negotiationRef.current
     // Withdrawn admission: the session keeps settling, but takes no new event.
-    if (!admittedRef.current || !reportedRef.current || reportedScope.current !== presentationScope
-      || reportedRefresh.current !== refreshSeq || context?.latest === false || eventRef.current || current.supported !== true || !keys.has(key)) return false
+    // Whether an older card of its kind stays live is the app's decision
+    // (`context.latest`), so it is not refused here.
+    if (!admittedRef.current || eventRef.current || current.supported !== true
+      || current.generation === null || authority !== current.generation || !keys.has(key)) return false
     if (kind === 'confirm' && !mayConfirm(key)) return false
     // Every owner event ends the showing, Confirm included: a press spends
     // it, so another confirm needs a new showing and a fresh visible delay.
@@ -156,7 +142,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     eventRef.current = message
     setEvent(message)
     return true
-  }, [sessionId, keys, disarm, mayConfirm, presentationScope, refreshSeq, context?.latest])
+  }, [sessionId, keys, disarm, mayConfirm, authority])
 
   // Only a read-only activation can cross a sleeping document boundary.
   // Confirmation, cancellation and asks always require current authority.
@@ -219,9 +205,24 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     ...(chatId ? { context: { chatId, latest, intent: blockIntent } } : {}),
   }), [sessionId, actions, items, features, retained, recoveryError, checkpointId, checkpointData, chatId, latest, blockIntent])
 
+  // A refresh hint reaches only a document that is mounted and supported when
+  // the hint is raised; a document that loads later reads on its own start.
+  const [blockRefresh, setBlockRefresh] = useState(null)
+  const frameMountedRef = useRef(frameMounted)
+  frameMountedRef.current = frameMounted
+  const refreshReason = refresh?.reason ?? ''
+  const seenRefreshRef = useRef(refreshSeq)
+  useEffect(() => {
+    if (refreshSeq === seenRefreshRef.current) return
+    seenRefreshRef.current = refreshSeq
+    const current = negotiationRef.current
+    if (current.supported !== true || !frameMountedRef.current) return
+    setBlockRefresh({ seq: refreshSeq, reason: refreshReason, sessionId, generation: current.generation })
+  }, [refreshSeq, refreshReason, sessionId])
+
   return {
-    sessionId, state, displayState: state && (retained || reportedScope.current === presentationScope && !state.loading) ? state : saved?.state || null,
-    wantsFrame, requestEvent, requestAsk, documentScope, authoritative,
+    sessionId, state, displayState: state && (retained || !state.loading) ? state : saved?.state || null,
+    wantsFrame, requestEvent, requestAsk, authoritative, blockRefresh,
     canWake: admitted && Boolean(saved) && !state && !requestedActivation && negotiation.supported !== false,
     event, awaitingAck: event !== null || Boolean(requestedActivation), supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,
     generation: negotiation.generation, retained, frameMounted, blockSession,
