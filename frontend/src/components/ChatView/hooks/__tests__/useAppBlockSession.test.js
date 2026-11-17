@@ -2,11 +2,12 @@
    document generation and lets exactly one owner event be in flight. */
 import assert from 'node:assert/strict'
 import test, { mock } from 'node:test'
-import { renderHook } from './react-hook-shim.mjs'
+import { renderHook, useEffect, useState } from './react-hook-shim.mjs'
 import useAppBlockSession, { CONFIRM_ARM_MS } from '../useAppBlockSession.js'
 import { appBlockFromToken } from '../../markdown/appBlock.js'
 import { createBlockDocuments, forwardBlockState } from '../../../AppCanvas/appBlockSessionHost.js'
 import { appBlockRoute, passiveBlockMode } from '../../markdown/blockOwnership.js'
+import { createPassiveSlots, usePassiveSlot } from '../../markdown/passiveSlots.js'
 
 const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({
   app: 'example', intent: 'open:a', title: 'Fix', interaction: 'inline',
@@ -736,3 +737,72 @@ test('negotiation alone, or a loading report, never grants authority; a complete
   report({}, 1)
   assert.equal(h.result.current.authoritative, false, 'an older document cannot grant the new one authority')
 })
+
+/* Four blocks of one app with a cap of three idle frames, wired as
+   PassiveAppBlock wires them: the session's wish for a frame and a pending
+   tap go to the slot store, and its grant comes back. */
+function crowded(withAsk = false) {
+  const slots = createPassiveSlots(3)
+  const context = { chatId: 'chat-1', latest: true }
+  const h = renderHook(({ near }) => near.map((isNear, i) => {
+    const [wantsFrame, setWantsFrame] = useState(true)
+    const [waking, setWaking] = useState(false)
+    const [retained, setRetained] = useState(false)
+    const granted = usePassiveSlot(1, { wanted: isNear && wantsFrame, retained, distance: i, waking }, slots)
+    const session = useAppBlockSession({ block, near: isNear, granted, context, ask: true })
+    useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
+    useEffect(() => setWaking(session.waking), [session.waking])
+    useEffect(() => setRetained(session.retained), [session.retained])
+    return session
+  }), { near: [false, false, false, true] })
+  const ask = { refs: [{ id: 'row-1', code: 'needs_review', rev: 'abc1234' }] }
+  const ready = (i, generation) => {
+    h.result.current[i].onBlockCapability(true, { generation, reset: true })
+    h.result.current[i].onBlockState({ type: 'moebius:app-block-state', sessionId: h.result.current[i].sessionId,
+      actions: [{ key: 'send:b', label: 'Send' }], ...(withAsk ? { ask } : {}) }, { generation })
+  }
+  // The fourth block reads once, then sleeps on its display while the three
+  // nearer blocks take every idle frame and keep them on screen.
+  ready(3, 1)
+  h.rerender({ near: [false, false, false, false] })
+  h.rerender({ near: [true, true, true, false] })
+  for (const i of [0, 1, 2]) ready(i, 1)
+  h.rerender({ near: [true, true, true, true] })
+  return { h, ready, ask }
+}
+
+test('with every idle frame taken, a tap on a sleeping block gets a frame at once and is sent there', () => {
+  const { h, ready } = crowded()
+  assert.deepEqual(h.result.current.map(session => session.frameMounted), [true, true, true, false])
+  assert.ok(h.result.current[3].displayState, 'the frameless block shows its saved display')
+  assert.equal(h.result.current[3].requestEvent('send:b', 'activate'), true)
+  h.rerender({ near: [true, true, true, true] })
+  assert.equal(h.result.current[3].frameMounted, true, 'the tap is not queued behind idle frames')
+  ready(3, 2)
+  h.rerender({ near: [true, true, true, true] })
+  assert.equal(h.result.current[3].event?.event, 'activate')
+  assert.equal(h.result.current[3].event.generation, 2)
+})
+
+for (const path of ['activate', 'ask']) {
+  test('a pending tap is dropped when its block leaves the viewport area, never sent on a later visit: ' + path, () => {
+    const { h, ready } = crowded(path === 'ask')
+    const sent = []
+    if (path === 'ask') assert.equal(h.result.current[3].requestAsk(value => sent.push(value)), true)
+    else assert.equal(h.result.current[3].requestEvent('send:b', 'activate'), true)
+    h.rerender({ near: [true, true, true, false] })
+    assert.equal(h.result.current[3].awaitingAck, false, 'the card is not left waiting')
+    assert.equal(h.result.current[3].requestEvent('send:b', 'activate'), false, 'no tap is taken away from the viewport')
+    assert.equal(h.result.current[3].requestAsk(value => sent.push(value)), false)
+    h.rerender({ near: [true, true, true, true] })
+    assert.equal(h.result.current[3].frameMounted, false, 'returning does not resume the dropped tap')
+    h.rerender({ near: [true, true, true, true] })
+    assert.equal(h.result.current[3].event, null)
+    assert.deepEqual(sent, [])
+    // Even if a document became ready later, nothing from the old tap fires.
+    if (h.result.current[3].frameMounted) ready(3, 3)
+    h.rerender({ near: [true, true, true, true] })
+    assert.equal(h.result.current[3].event, null)
+    assert.deepEqual(sent, [])
+  })
+}

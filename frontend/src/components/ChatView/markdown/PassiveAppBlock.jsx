@@ -47,9 +47,11 @@ export function sessionLocked(session, admitted) {
 }
 
 
-/** Host-drawn controls for one app action. Before this document reports,
- *  saved actions are history, not controls. Confirm takes the action's own
- *  fixed-size place; "Not now" sits beside it. An `open` action is a plain
+/** Host-drawn controls for one app action. The block's saved actions are
+ *  history until a document reports. An action from the app's saved display
+ *  can only wake the block (useAppBlockSession requestEvent), never confirm
+ *  or cancel. Confirm takes the action's own fixed-size place; "Not now"
+ *  sits beside it. An `open` action is a plain
  *  link to the block in its app (`openHref`) and sends no event. */
 export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent,
   openHref = '', onInternalNav = null }) {
@@ -90,7 +92,9 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
 }
 
 /** The ask this block may draw now, or null: only one its admitted app
- *  reported in this document (never a saved snapshot), on the newest block of
+ *  reported, live or as the block's saved display (a tap on a saved ask is
+ *  checked against the woken document's ask before anything is sent,
+ *  useAppBlockSession requestAsk), on the newest block of
  *  its kind in the chat the transcript attests, outside recovery. The parser
  *  already drops an ask while an action confirms or is busy. */
 export function blockAsk({ state, admitted, allowed, context }) {
@@ -196,9 +200,11 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   const listEdgeRefs = { start: listStartRef, end: listEndRef }
   const [retained, setRetained] = useState(false)
   const [wantsFrame, setWantsFrame] = useState(true)
+  const [waking, setWaking] = useState(false)
   const [staticOpen, setStaticOpen] = useState(false)
-  // Without admission no new frame starts; a retained one keeps its own.
-  const granted = usePassiveSlot(app.id, { wanted: admitted && near && wantsFrame && !staticOpen, retained, distance })
+  // Without admission no new frame starts; a retained one keeps its own. A
+  // tapped sleeping block gets a frame ahead of idle ones (passiveSlots.js).
+  const granted = usePassiveSlot(app.id, { wanted: admitted && near && wantsFrame && !staticOpen, retained, distance, waking })
   const askAllowed = passiveAskAllowed(app)
   const session = useAppBlockSession({ block, near: admitted && near && !staticOpen, granted,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
@@ -206,6 +212,7 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
   useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
+  useEffect(() => setWaking(session.waking), [session.waking])
   const ask = blockAsk({ state: session.displayState, admitted, allowed: askAllowed, context: chat.context })
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}

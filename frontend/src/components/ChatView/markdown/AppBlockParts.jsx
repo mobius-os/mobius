@@ -159,18 +159,17 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
   // quiet line (for example "Continued below" on an earlier card).
   const folded = block.appRows && !block.items.length && !action && !toggle && !summary
   // `status_placement: footer` is the block's own opt-in (appBlock.js), never
-  // an app report. Such a compact inline block keeps one action lane
-  // throughout its lifecycle: hiding a control must not collapse it, and row
-  // results take the same place.
-  const footerStatus = block.statusPlacement === 'footer'
-  const actionLane = footerStatus && !folded && block.session && !block.expand && Boolean(block.action)
+  // an app report, and applies only to an inline session block with an action
+  // and no inline view (building-apps.md). Such a compact block keeps one
+  // action lane throughout its lifecycle: hiding a control must not collapse
+  // it, and row results take the same place.
+  const footerStatus = block.statusPlacement === 'footer' && block.session && !block.expand && Boolean(block.action)
+  const actionLane = footerStatus && !folded
   const linksInFooter = actionLane && block.appRows
   const results = linksInFooter ? block.items.filter(item => item.live?.links.length) : []
   const status = <>
       <TitleMark tone={block.titleTone} busy={block.titleBusy} />
-      <strong>{!block.inline
-        ? <AppLink className="md-app-block__title-link" href={block.href} onInternalNav={onInternalNav}>{block.title}</AppLink>
-        : block.title}</strong>
+      <strong>{block.title}</strong>
       <Badges badges={block.badges} />
     </>
   const jump = folded && onJump ? <button type="button" className="md-app-block__jump" onClick={onJump}>
@@ -179,7 +178,7 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
     {footerStatus ? null : <header>
       {status}{jump}
       {/* A folded line that jumps to its newest sibling needs no second link. */}
-      {!block.inline || (folded && onJump) ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
+      {folded && onJump ? null : <AppLink className="md-app-block__open" href={block.href} onInternalNav={onInternalNav}>
         {app ? <><span className="md-app-block__sr-only">Open in </span>{app.name}</> : 'Open'}
         <ChevronRight width={16} height={16} aria-hidden="true" /></AppLink>}
     </header>}

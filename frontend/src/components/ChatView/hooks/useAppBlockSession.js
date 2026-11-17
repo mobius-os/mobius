@@ -38,7 +38,13 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
   const requestedActivation = activation?.scope === presentationScope ? activation : null
   // The generation whose latest report was complete (not `loading`). Only
   // that document may take an owner event.
-  const [authority, setAuthority] = useState(null)
+  // Callbacks read it synchronously, like the event reservation.
+  const [authority, setAuthorityState] = useState(null)
+  const authorityRef = useRef(null)
+  const setAuthority = useCallback(value => {
+    authorityRef.current = value
+    setAuthorityState(value)
+  }, [])
   const [event, setEvent] = useState(null)
   const eventRef = useRef(null)
   const [negotiation, setNegotiation] = useState(UNNEGOTIATED)
@@ -93,7 +99,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     setNegotiation(UNNEGOTIATED)
     setState(null)
     clearEvent()
-  }, [frameWanted, clearEvent, disarm])
+  }, [frameWanted, clearEvent, disarm, setAuthority])
 
   const onBlockCapability = useCallback((supported, { generation, reset }) => {
     if (generation !== negotiationRef.current.generation || reset) {
@@ -109,7 +115,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     const next = { generation, supported }
     negotiationRef.current = next
     setNegotiation(next)
-  }, [clearEvent, disarm])
+  }, [clearEvent, disarm, setAuthority])
 
   const onBlockState = useCallback((message, { generation }) => {
     const current = negotiationRef.current
@@ -122,7 +128,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     noteReport(safe)
     setState(previous => sessionStateUpdate(previous, safe))
     if (!safe.checkpointInvalid && safe.ackNonce && safe.ackNonce === eventRef.current?.nonce) clearEvent()
-  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport, presentationScope, refreshSeq])
+  }, [sessionId, keys, intents, block.app, ask, clearEvent, noteReport, presentationScope, refreshSeq, setAuthority])
 
   // Reserve synchronously: a second click before React commits, or before
   // the app acknowledges this exact nonce, cannot send another event.
@@ -132,7 +138,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     // Whether an older card of its kind stays live is the app's decision
     // (`context.latest`), so it is not refused here.
     if (!admittedRef.current || eventRef.current || current.supported !== true
-      || current.generation === null || authority !== current.generation || !keys.has(key)) return false
+      || current.generation === null || authorityRef.current !== current.generation || !keys.has(key)) return false
     if (kind === 'confirm' && !mayConfirm(key)) return false
     // Every owner event ends the showing, Confirm included: a press spends
     // it, so another confirm needs a new showing and a fresh visible delay.
@@ -142,50 +148,54 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
     eventRef.current = message
     setEvent(message)
     return true
-  }, [sessionId, keys, disarm, mayConfirm, authority])
+  }, [sessionId, keys, disarm, mayConfirm])
 
   // Only a read-only activation can cross a sleeping document boundary.
   // Confirmation, cancellation and asks always require current authority.
+  // A waking tap belongs to this visit: it is dropped, never sent later, if
+  // the block leaves the viewport area before its document is ready.
   const requestEvent = useCallback((key, kind) => {
     if (authoritative) return dispatch(key, kind)
     const action = saved?.state.actions.find(item => item.key === key)
-    if (kind !== 'activate' || !admitted || !keys.has(key) || !action || action.disabled
+    if (kind !== 'activate' || !near || !admitted || !keys.has(key) || !action || action.disabled
       || action.hidden || action.open || activationRef.current || eventRef.current) return false
     const request = { key, scope: presentationScope }
     activationRef.current = request
     setActivation(request)
     return true
-  }, [dispatch, saved, admitted, keys, presentationScope, authoritative])
+  }, [dispatch, saved, near, admitted, keys, presentationScope, authoritative])
 
   const requestAsk = useCallback(onReady => {
     if (!admitted || activationRef.current || eventRef.current) return false
     if (authoritative && context?.latest !== false && state?.ask && !state.recoveryPending) { onReady(state.ask); return true }
-    if (!saved?.state.ask || state?.loading) return false
+    if (!near || !saved?.state.ask || state?.loading) return false
     const request = { scope: presentationScope, ask: saved.state.ask, onReady }
     activationRef.current = request
     setActivation(request)
     return true
-  }, [admitted, state, saved, presentationScope, authoritative, context?.latest])
+  }, [near, admitted, state, saved, presentationScope, authoritative, context?.latest])
 
   useEffect(() => {
     if (!activation) return
-    if (activation.scope !== presentationScope || !admitted || negotiation.supported === false) {
+    if (activation.scope !== presentationScope || !near || !admitted || negotiation.supported === false) {
       activationRef.current = null
       setActivation(null)
       return
     }
     if (!authoritative || !state || state.loading) return
-    activationRef.current = null
-    setActivation(null)
+    // Reserve the event before the tap is released, so the block never
+    // looks idle (and gives up its frame) between the two.
     if (activation.ask) {
       if (!state.recoveryPending && !state.recoveryError && state.ask
         && JSON.stringify(state.ask) === JSON.stringify(activation.ask)) activation.onReady(state.ask)
-      return
+    } else {
+      const action = state.actions.find(item => item.key === activation.key)
+      if (!state.ask && !state.recoveryPending && !state.recoveryError && action && !action.disabled
+        && !action.hidden && !action.open && !action.busy && !action.confirming) dispatch(activation.key, 'activate')
     }
-    const action = state.actions.find(item => item.key === activation.key)
-    if (!state.ask && !state.recoveryPending && !state.recoveryError && action && !action.disabled
-      && !action.hidden && !action.open && !action.busy && !action.confirming) dispatch(activation.key, 'activate')
-  }, [activation, presentationScope, admitted, negotiation.supported, state, dispatch, authoritative])
+    activationRef.current = null
+    setActivation(null)
+  }, [activation, presentationScope, near, admitted, negotiation.supported, state, dispatch, authoritative])
 
   // Scalar dependencies: the parser copies envelopes on every message even
   // when their observational data is unchanged.
@@ -222,7 +232,7 @@ export default function useAppBlockSession({ block, near, granted = true, revisi
 
   return {
     sessionId, state, displayState: state && (retained || !state.loading) ? state : saved?.state || null,
-    wantsFrame, requestEvent, requestAsk, authoritative, blockRefresh,
+    wantsFrame, requestEvent, requestAsk, authoritative, blockRefresh, waking: Boolean(requestedActivation),
     canWake: admitted && Boolean(saved) && !state && !requestedActivation && negotiation.supported !== false,
     event, awaitingAck: event !== null || Boolean(requestedActivation), supported: negotiation.supported, confirmArmed: arming.armed, showing: arming.showing,
     generation: negotiation.generation, retained, frameMounted, blockSession,

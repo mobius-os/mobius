@@ -510,8 +510,9 @@ most 16384.
   while the control is hidden (for example while your title reports work),
   your rows' `links` are drawn in that footer in place of the control, and
   the "From this conversation" caption is kept for assistive technology only.
-  Only the block sets this; an app report cannot. Older hosts ignore it and
-  draw the ordinary card.
+  Only the block sets this; an app report cannot. On any other block (no
+  `action`, an inline view, or not `"interaction": "inline"`) it is ignored,
+  as it is by older hosts: they draw the ordinary card.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -535,7 +536,7 @@ runs a hidden, inert instance of the app; it cannot navigate, open chats or
 apps, or use other host requests, and it never reads or writes the app's saved
 shell place. At most 3 idle hidden instances run per app (the blocks nearest
 the viewport, measured as the page scrolls); further blocks stay static with
-an explicit open, and an instance that reports `retain` always keeps its frame.
+an explicit open unless they have a saved display (below), and an instance that reports `retain` always keeps its frame.
 An idle instance is released when its block leaves the viewport, but the block
 keeps showing your last complete (not `loading`) report, read-only, for the
 same block, app revision, chat and `latest` verdict. Scrolling back does not
@@ -543,7 +544,9 @@ start your app again; it reads again on the next entry after a refresh hint it
 did not answer, or when that saved display no longer applies. A tap on a
 saved action starts a new document and sends `activate` only once that
 document has reported the action as available; Confirm, Cancel and asks are
-never sent from a saved display.
+never sent from a saved display. A tapped block gets a hidden instance at
+once, even when the idle ones are taken. If the block leaves the viewport
+area before that instance is ready, the tap is dropped, never sent later.
 A view the reader opened in a static block stays open until they close it,
 even if a slot frees up. Module startup and
 session hydration must be read-only. The host draws every control; the app

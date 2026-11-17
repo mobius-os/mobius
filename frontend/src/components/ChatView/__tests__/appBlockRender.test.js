@@ -43,11 +43,10 @@ test('an action and the expand control only name views the reader can open', () 
   assert.doesNotMatch(html, /md-app-block__view/)
 })
 
-test('link-only blocks open the same app intent through their title, without duplicate navigation', () => {
+test('link-only blocks have no expand control or action', () => {
   const html = render({ ...base, inline: false, action: { label: 'Send', intent: 'send:1' } })
   assert.doesNotMatch(html, /md-app-block__toggle|md-app-block__action/)
-  assert.match(html, /<strong><a class="md-app-block__title-link" href="\/shell\/\?app=example&amp;intent=open%3Aitem-42">Item 42<\/a><\/strong>/)
-  assert.doesNotMatch(html, /md-app-block__open|<iframe/)
+  assert.match(html, /<span class="md-app-block__sr-only">Open in <\/span>Example/)
 })
 
 test('items render as generic linked rows with their own badges, facts and actions', () => {
@@ -689,6 +688,22 @@ test('only the block opts in to the compact lane; other inline cards keep their 
   assert.doesNotMatch(html, /md-app-block--action-lane|md-app-block--footer-status|md-app-block__results/)
   const saved = appRowsView({})
   assert.match(saved, /<p class="md-app-block__source">From this conversation<\/p>/)
+})
+
+test('status_placement applies only to an inline session block with an action and no inline view', () => {
+  const compact = { ...base, interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' } }
+  const show = value => {
+    const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify(value) })
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state: null,
+      locked: false, confirmArmed: false, onEvent() {} }))
+  }
+  assert.match(show(compact), /md-app-block--footer-status/)
+  for (const value of [{ ...compact, action: undefined }, { ...compact, expand: true }, { ...compact, interaction: undefined }]) {
+    const html = show(value)
+    assert.doesNotMatch(html, /md-app-block--footer-status|md-app-block--action-lane/, JSON.stringify(value))
+    assert.match(html, /<header>[^]*<span class="md-app-block__sr-only">Open in <\/span>Example/)
+  }
+  assert.match(render({ ...compact, inline: false }), /<header>[^]*Open in <\/span>Example/, 'a link-only block keeps its header')
 })
 
 test('an app report cannot hide the host-drawn app name, not even beside Confirm', () => {
