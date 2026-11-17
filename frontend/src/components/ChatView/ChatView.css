@@ -2337,11 +2337,29 @@
    from the old `.chat__compaction*` selectors (compaction is the first
    marker, so its look is the default). */
 .chat__marker {
+  width: 100%;
+  min-width: 0;
+  align-self: stretch;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the marker card */
   background: color-mix(in srgb, var(--accent) 4%, transparent); /* CONTRACT: faint accent tint — sits on the opaque message-list fill beneath, not a standalone surface */
   overflow: hidden;
 }
+
+/* A marker that follows earlier content in an answer takes the same separation
+   as Goal history. Markers opening an answer, standalone rows and compaction
+   cards (nested in .chat__tools) keep their existing spacing; the answer cause
+   already owns the gap below it. */
+.chat__markdown-copy-surface > :not(.chat__answer-cause) + .chat__marker { margin-top: 10px; }
+.chat__recovery-events { list-style: none; margin: 8px 0 0; padding: 0; }
+.chat__recovery-events li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 4px 0;
+}
+.chat__recovery-events time { color: var(--muted); font-size: 12px; }
 
 .chat__marker-header {
   display: flex;
@@ -3262,29 +3280,6 @@
      the keyboard or scroll the chat behind it. */
   touch-action: pan-y;
   overscroll-behavior: contain;
-}
-
-/* Opts into a scrollbar unconditionally, not behind .chat__tool-diff-scroll's
-   hover/pointer gate: the model list overflows on touch clients too.
-   Keep the gutter stable, but reveal its thumb only during scrolling.
-   Opening the Brain must not flash a scrollbar before any movement. */
-.composer-popover {
-  --shell-scrollbar-width: thin;
-  --shell-scrollbar-display: block;
-  --composer-scrollbar-thumb: transparent;
-  scrollbar-color: var(--composer-scrollbar-thumb) transparent;
-}
-
-.composer-popover[data-scrolling] {
-  --composer-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
-}
-
-.composer-popover::-webkit-scrollbar { width: 10px; }
-.composer-popover::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: var(--composer-scrollbar-thumb);
-  background-clip: padding-box;
 }
 
 [data-theme="light"] .composer-popover {
