@@ -1106,14 +1106,9 @@ def _new_chat(
   project_id: str | None = None,
 ) -> models.Chat:
   # Provider follows the last-selected model (the single source of truth),
-  # matching owner chat creation.
-  provider = providers.owner_default_provider(
+  # from the same single settings read as owner chat creation.
+  provider, agent_settings = providers.snapshot_owner_chat_choice(
     get_settings().data_dir, owner.provider if owner else None,
-  )
-  agent_settings = providers.snapshot_chat_agent_settings(
-    get_settings().data_dir,
-    provider,
-    fallback_model=providers.DEFAULT_MODELS.get(provider),
   )
   return chat_writer.create_chat(
     id=chat_id,

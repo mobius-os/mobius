@@ -50,6 +50,12 @@ preflight; do not demand a duplicate approval click. Changed head/base,
 model, prompt or scope needs a new preview and, when consent was pinned to the
 old version, a fresh decision.
 
+`--options` takes only the editable prompts (`review_prompt`, `merge_prompt`,
+plus `fix_prompt` and `max_rounds` in `review_fix_merge`) and the opt-ins
+`post_review`, `propose_verdict` and `agent_submits_verdict`. `presets` also
+returns `mandatory_instructions` for display; the platform sets those itself,
+so pass only the fields you change, never the whole presets object.
+
 `review_merge` needs `--options` with `{"post_review": true,
 "propose_verdict": true}`: it merges only after the owner submits the
 proposed approval. A takeover of someone else's PR needs `--takeover-reason`
@@ -185,7 +191,10 @@ neither may the agent.
 
 Edit only the server-provided checkout and frozen file scope. Ordinary
 fast-forward commits and one merge of the fetched `refs/mobius/target-base`
-are supported; never rebase or force-push. A moved target base requires fresh
+are supported; never rebase or force-push. Every repair commit, the merge
+included, ends with the trailer
+`Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>`;
+`/repairs` refuses a commit without it. A moved target base requires fresh
 independent review of the new combined result, not reuse of old evidence.
 
 The dedicated checkout protects cooperative agents from accidental scope

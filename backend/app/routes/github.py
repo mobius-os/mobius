@@ -129,6 +129,7 @@ from app.github_contribution_git import (
   _assert_fresh,
 )
 from app.storage_io import atomic_write
+from app.terminal_output import readable_output
 from app.github_contributions import (
   ContributionSubmitError,
   RETIRED_CHAT_REVIEW_SUBMITTER,
@@ -2462,10 +2463,24 @@ def _stage_inputs(
       )
   base_ref = body.base_sha or parent_head
   if not base_ref:
-    upstream_sha = fetch_upstream_head(
-      repo_path, repo_slug, _upstream_default_branch(repo_path, repo_slug),
-    )
-    base_ref = _git(repo_path, "merge-base", upstream_sha, branch).stdout.strip()
+    upstream_branch = _upstream_default_branch(repo_path, repo_slug)
+    upstream_sha = fetch_upstream_head(repo_path, repo_slug, upstream_branch)
+    found = _git(repo_path, "merge-base", upstream_sha, branch, check=False)
+    # git answers "no common ancestor" with a silent exit 1.
+    if found.returncode == 1:
+      raise ContributionSubmitError(
+        f"{branch} shares no history with upstream {upstream_branch}, so there "
+        "is nothing to review it against. Rebuild the branch on the current "
+        f"upstream {upstream_branch}, then stage it again.",
+        code="unrelated_history",
+      )
+    if found.returncode:
+      raise ContributionSubmitError(
+        "Could not find where this branch starts from upstream, so nothing was staged.",
+        code="upstream_merge_unavailable",
+        detail=readable_output(found.stderr or found.stdout or ""),
+      )
+    base_ref = found.stdout.strip()
   source_repo = _safe_equivalence_source_path(
     body.source_repo_path
     or plan.get("source_repo_path")
