@@ -44,30 +44,28 @@ def test_unknown_models_still_belong_to_the_explicit_provider(tmp_path, monkeypa
   )["model"] == model
 
 
-def test_new_chat_choice_never_splits_a_concurrent_picker_write(tmp_path, monkeypatch):
+def test_a_pick_after_the_single_settings_read_does_not_tear_the_pair(
+  tmp_path, monkeypatch,
+):
   data_dir = str(tmp_path)
   path = tmp_path / "shared" / "agent-settings.json"
   path.parent.mkdir()
-  path.write_text(json.dumps({"provider": "claude", "model": "old-undiscovered-id"}))
+  path.write_text(json.dumps({"provider": "codex", "model": "old-undiscovered-id"}))
   original = providers.owner_default_provider
-  calls = []
 
-  def resolve_then_pick(*args):
-    provider = original(*args)
-    calls.append(provider)
-    if len(calls) == 1:
-      # A real pick from another thread lands between provider resolution and
-      # the model snapshot; the first read pair is torn and must be retried.
-      with ThreadPoolExecutor(max_workers=1) as pool:
-        assert pool.submit(providers.write_agent_settings, data_dir, {
-          "provider": "codex", "model": "new-undiscovered-id",
-        }).result()
+  def resolve_then_pick(*args, **kwargs):
+    provider = original(*args, **kwargs)
+    # A real pick from another thread lands between provider resolution and
+    # the model snapshot. Both steps use the one read taken before it.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      assert pool.submit(providers.write_agent_settings, data_dir, {
+        "provider": "claude", "model": "new-undiscovered-id",
+      }).result()
     return provider
 
   monkeypatch.setattr(providers, "owner_default_provider", resolve_then_pick)
   provider, settings = providers.snapshot_owner_chat_choice(data_dir, "claude")
-  assert calls == ["claude", "codex"]
-  assert (provider, settings["model"]) == ("codex", "new-undiscovered-id")
+  assert (provider, settings["model"]) == ("codex", "old-undiscovered-id")
 
 
 def test_new_chat_choice_refreshes_apps_outside_the_settings_lock(tmp_path, monkeypatch):

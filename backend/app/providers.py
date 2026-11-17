@@ -188,10 +188,6 @@ DEFAULT_EFFORT = "medium"
 # behavior if a deployment rolled back to an older binary.
 _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
 _AGENT_SETTINGS_LOCK = threading.RLock()
-# A sequence counter bumped under the lock before and after every in-process
-# settings write: odd while a write is in flight. A reader that sees the same
-# even value before and after its reads saw one revision without the lock.
-_agent_settings_revision = 0
 
 
 
@@ -435,17 +431,13 @@ def write_agent_settings(data_dir: str, settings: dict) -> bool:
   caller is responsible for retry / re-marking the source as dirty
   so the mirror isn't silently lost.
   """
-  global _agent_settings_revision
   path = Path(data_dir) / "shared" / "agent-settings.json"
   with _AGENT_SETTINGS_LOCK:
-    _agent_settings_revision += 1
     try:
       atomic_write(path, json.dumps(settings, indent=2) + "\n")
       return True
     except OSError:
       return False
-    finally:
-      _agent_settings_revision += 1
 
 
 def update_agent_settings(data_dir: str, updater) -> bool:
@@ -468,6 +460,8 @@ def effective_agent_settings(
   data_dir: str,
   chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
+  *,
+  file_layer: dict | None = None,
 ) -> dict:
   """Merge per-chat choices on top of the owner's latest picker choices.
 
@@ -503,7 +497,7 @@ def effective_agent_settings(
   # provider switch — without this, a brand-new empty chat would lose
   # the user's previously-picked Claude effort the moment they
   # switched to Codex in the panel (and vice versa).
-  file_layer = _load_agent_settings(data_dir)
+  file_layer = file_layer if file_layer is not None else _load_agent_settings(data_dir)
   if file_layer.get("effort") is not None:
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
@@ -546,6 +540,7 @@ def snapshot_chat_agent_settings(
   model: str | None = None,
   effort: str | None = None,
   fallback_model: str | None = None,
+  file_layer: dict | None = None,
 ) -> dict | None:
   """Freeze one coherent, explicit runtime choice onto a new chat.
 
@@ -574,7 +569,7 @@ def snapshot_chat_agent_settings(
   if isinstance(effort, str) and effort.strip():
     overrides["effort"] = effort.strip()
   effective = effective_agent_settings(
-    data_dir, overrides or None, provider=provider,
+    data_dir, overrides or None, provider=provider, file_layer=file_layer,
   )
   if provider == "mobius" and chosen_model and not effective.get("model"):
     return None
@@ -601,32 +596,21 @@ def snapshot_owner_chat_choice(
 ) -> tuple[str, dict | None]:
   """Freeze provider and model from one picker revision for a new owner chat.
 
-  A pick landing between provider resolution and the model snapshot would
-  split a valid pair, especially for a future model absent from the offline
-  catalog. Both reads therefore come from one settings revision. The app
-  registry refresh (a database read) and the provider sign-in checks stay
-  outside ``_AGENT_SETTINGS_LOCK``, which the async ``update_chat`` takes on
-  the event loop: the reads run unlocked and repeat if a pick landed between
-  them. Only a pick storm falls back to resolving under the lock.
+  Resolving the provider and snapshotting the model each used to read the
+  settings file, so a pick landing between the two reads could split a valid
+  pair, especially for a future model absent from the offline catalog. The
+  file is read once here (``atomic_write`` makes one read a whole revision)
+  and that dict feeds both steps. No lock is held: the app registry refresh is
+  a database read and the provider checks read sign-in files.
   """
   sync_app_model_providers(data_dir)
-
-  def resolve() -> tuple[str, dict | None]:
-    provider = owner_default_provider(data_dir, configured_provider)
-    return provider, snapshot_chat_agent_settings(
-      data_dir, provider,
-      fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
-    )
-
-  for _ in range(3):
-    revision = _agent_settings_revision
-    if revision % 2:
-      continue
-    choice = resolve()
-    if revision == _agent_settings_revision:
-      return choice
-  with _AGENT_SETTINGS_LOCK:
-    return resolve()
+  settings = _load_agent_settings(data_dir)
+  provider = owner_default_provider(data_dir, configured_provider, settings=settings)
+  return provider, snapshot_chat_agent_settings(
+    data_dir, provider,
+    fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
+    file_layer=settings,
+  )
 
 
 def _background_default_choice(
@@ -2022,6 +2006,8 @@ def provider_of_model(
 def owner_default_provider(
   data_dir: str,
   configured_provider: str | None = None,
+  *,
+  settings: dict | None = None,
 ) -> str:
   """The provider from the owner's latest atomic picker choice.
 
@@ -2051,9 +2037,9 @@ def owner_default_provider(
 
   Background agents are deliberately NOT routed here: they carry their own
   configured provider/model block, a separate selection from the interactive
-  last-used model.
+  last-used model. ``settings`` lets a caller reuse one file read.
   """
-  settings = _load_agent_settings(data_dir)
+  settings = settings if settings is not None else _load_agent_settings(data_dir)
   model = settings.get("model")
   prov = provider_of_model(model, preferred=settings.get("provider"))
   if prov is not None and provider_selectable(data_dir, prov):
