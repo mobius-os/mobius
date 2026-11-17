@@ -841,6 +841,42 @@ async def forget_chat(chat_id: str) -> None:
     log.warning("Could not withdraw the key requests of deleted chat %s", chat_id, exc_info=True)
 
 
+# Withdrawals of deleted chats' requests still on their way to the vault, by
+# chat id. Recovery waits for them (``settle_chat_withdrawals``): a withdrawal
+# that lands after a chat is back would remove the requests it makes then.
+_withdrawals: dict[str, asyncio.Task] = {}
+
+
+def start_withdrawing_chat_requests(chat_ids) -> asyncio.Future:
+  """Start ``forget_chat`` for each deleted chat, and return them together.
+
+  Call it while still holding the deletion's lifecycle gate, so a recovery
+  waiting on that gate always finds the withdrawals it must settle first;
+  await the result after releasing the gate, so a vault that hangs never
+  holds the gate.
+  """
+  tasks = []
+  for chat_id in chat_ids:
+    task = asyncio.ensure_future(forget_chat(chat_id))
+    _withdrawals[chat_id] = task
+    task.add_done_callback(
+      lambda done, chat_id=chat_id: _withdrawals.pop(chat_id, None) if _withdrawals.get(chat_id) is done else None
+    )
+    tasks.append(task)
+  return asyncio.gather(*tasks)
+
+
+async def settle_chat_withdrawals(chat_ids) -> None:
+  """Wait until no withdrawal for these chats is still on its way.
+
+  Recovering a chat calls this before restoring it. It waits at most one
+  vault timeout, and only while the vault is slow to answer a deletion.
+  """
+  pending = [task for chat_id in chat_ids if (task := _withdrawals.get(str(chat_id))) is not None]
+  if pending:
+    await asyncio.gather(*pending, return_exceptions=True)
+
+
 async def _import_when_ready() -> None:
   """Run the one-time legacy import once the vault answers.
 

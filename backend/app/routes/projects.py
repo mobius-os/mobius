@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
@@ -2201,11 +2200,13 @@ async def delete_project(
       "chatIds": chat_ids,
     })
     publish_recovery_notification(recovery_notification_id)
-  # Their agents' waiting key requests could only be answered on their cards.
-  # Withdrawn together and after the lifecycle lock, so a vault that hangs
-  # delays this response by one vault timeout, never one per chat or recovery.
-  from app import key_vault
-  await asyncio.gather(*(key_vault.forget_chat(chat_id) for chat_id in chat_ids))
+    # Their agents' waiting key requests could only be answered on their cards.
+    # Started under the lifecycle gate, so a recovery waiting on it settles
+    # them first; awaited together after it, so a vault that hangs delays this
+    # response by one vault timeout, never one per chat, and never the gate.
+    from app import key_vault
+    withdrawals = key_vault.start_withdrawing_chat_requests(chat_ids)
+  await withdrawals
   return Response(status_code=204, headers={
     "X-Recovery-Notification-Id": recovery_notification_id,
   })
@@ -2219,6 +2220,13 @@ async def recover_project(
   db: Session = Depends(get_db),
 ):
   async with serialize_project_lifecycle(project_id):
+    # A deletion's key-request withdrawal still on its way would remove the
+    # requests the recovered chats make next.
+    from app import key_vault
+    await key_vault.settle_chat_withdrawals([
+      chat_id for (chat_id,) in db.query(models.Chat.id).filter(models.Chat.project_id == project_id)
+    ])
+    db.rollback()
     completed_at = None
     already_completed = False
     with PROJECT_LIFECYCLE_LOCK:

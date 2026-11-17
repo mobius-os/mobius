@@ -324,3 +324,66 @@ def test_a_project_withdraws_its_chats_requests_together_after_its_lifecycle_loc
   monkeypatch.setattr(key_vault, "forget_chat", slow_vault)
   assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
   assert set(released) == chat_ids
+
+
+def test_recovery_waits_for_a_deletion_withdrawal_still_on_its_way(monkeypatch):
+  """A withdrawal that landed after recovery would remove the requests the
+  recovered chat makes next, including a new ask that joins its old request,
+  so its card could never Allow. Only that chat's recovery waits."""
+  import asyncio
+
+  from app import key_vault
+
+  async def scenario():
+    release = asyncio.Event()
+    order = []
+
+    async def slow_forget(chat_id):
+      await release.wait()
+      order.append(f"withdrew {chat_id}")
+    monkeypatch.setattr(key_vault, "forget_chat", slow_forget)
+    deletion = key_vault.start_withdrawing_chat_requests(["deleted"])
+
+    async def recover():
+      await key_vault.settle_chat_withdrawals(["deleted"])
+      order.append("recovered")
+    recovery = asyncio.create_task(recover())
+    await asyncio.wait_for(key_vault.settle_chat_withdrawals(["another"]), timeout=1)
+    await asyncio.sleep(0.05)
+    assert order == [] and not recovery.done()
+    release.set()
+    await asyncio.wait_for(asyncio.gather(deletion, recovery), timeout=2)
+    assert order == ["withdrew deleted", "recovered"]
+    assert key_vault._withdrawals == {}
+  asyncio.run(scenario())
+
+
+def _settled_while_deleted(monkeypatch):
+  """Record each recovery's settle call, and whether its chats were still
+  deleted when it was made."""
+  from app import key_vault
+  settled = []
+
+  async def settle(chat_ids):
+    with SessionLocal() as db:
+      settled.append({str(chat_id): db.get(models.Chat, chat_id).deleted_at is not None for chat_id in chat_ids})
+  monkeypatch.setattr(key_vault, "settle_chat_withdrawals", settle)
+  return settled
+
+
+def test_recovering_a_chat_settles_its_withdrawal_before_restoring_it(client, chat, auth, monkeypatch, vault):
+  settled = _settled_while_deleted(monkeypatch)
+  assert client.delete(f"/api/chats/{chat.id}", headers=auth).status_code == 204
+  assert client.post(f"/api/chats/{chat.id}/recover", headers=auth).status_code == 200
+  assert settled == [{chat.id: True}]
+
+
+def test_recovering_a_project_settles_its_chats_withdrawals_before_restoring_them(client, auth, monkeypatch, vault):
+  project = client.post("/api/projects", headers=auth, json={"name": "Site", "template_id": "blank"}).json()
+  project_chat = client.post(f"/api/projects/{project['id']}/chats", headers=auth, json={
+    "title": "Site plan", "recovery_request_id": f"{project['id']}:Site plan",
+  }).json()
+  settled = _settled_while_deleted(monkeypatch)
+  assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
+  assert client.post(f"/api/projects/{project['id']}/recover", headers=auth).status_code == 200
+  assert settled == [{project_chat["id"]: True}]
