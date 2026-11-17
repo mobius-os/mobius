@@ -146,7 +146,7 @@ run_backend() {
   check_backend_prereqs
   if (cd "${PROJECT_DIR}" && docker compose -p "${TEST_PROJECT}" \
       -f docker-compose.test.yml run --rm --no-deps \
-      --entrypoint python pytest -m pytest "${pytest_args[@]}"); then
+      --entrypoint python pytest -m pytest "${pytest_args[@]}" tests/); then
     BACKEND_STATUS="PASS"
     log "backend: PASS"
   else

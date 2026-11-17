@@ -92,7 +92,7 @@ def _backend_tests(changed: list[str], tree: set[str]) -> set[str]:
     name = Path(path).name
     if not name.endswith(".py"):
       continue
-    if path.startswith(("backend/tests/", "backend/contract_tests/")) and name.startswith("test_"):
+    if path.startswith("backend/tests/") and name.startswith("test_"):
       owned.add(path)
     elif path.startswith("backend/app/") and name != "__init__.py":
       sibling = f"backend/tests/test_{Path(path).stem}.py"

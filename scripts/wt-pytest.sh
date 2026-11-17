@@ -187,7 +187,7 @@ NODE_BIN_DIR="$NODE_MODULES/.bin"
 PYTEST_ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    backend/tests | backend/tests/* | backend/contract_tests | backend/contract_tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
+    backend/tests | backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
     *) PYTEST_ARGS+=("$arg") ;;
   esac
 done

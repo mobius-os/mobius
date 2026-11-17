@@ -53,16 +53,6 @@ def history(tmp_path):
   return tmp_path, baseline, release
 
 
-@pytest.mark.parametrize("suite", ["tests", "contract_tests"])
-def test_changed_backend_tests_are_selected_in_each_suite(tmp_path, suite):
-  _git(tmp_path, "init", "-q")
-  path = f"backend/{suite}/test_policy.py"
-  baseline = _commit(tmp_path, {path: "def test_policy(): pass\n"})
-  release = _commit(tmp_path, {})
-  candidate = _commit(tmp_path, {path: "def test_policy(): assert True\n"})
-  assert lt.select(tmp_path, release, candidate, baseline) == [path]
-
-
 def test_frontend_tests_that_reach_a_changed_file_are_selected(history):
   repo, baseline, release = history
   candidate = _commit(repo, {

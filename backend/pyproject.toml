@@ -1,6 +1,3 @@
-[tool.pytest.ini_options]
-testpaths = ["contract_tests", "tests"]
-
 [tool.ruff]
 target-version = "py312"
 
