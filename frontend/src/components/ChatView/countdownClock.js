@@ -23,9 +23,16 @@ function sharedClock(tickMs, { refreshOnShow = false } = {}) {
   const onVisible = () => { if (document.visibilityState === 'visible') tick() }
   const subscribe = listener => {
     listeners.add(listener)
+    // A reader joining reads the time now, not the last tick: the clock may
+    // have slept while nothing read it, or ticked up to `tickMs` ago (a reply
+    // that just settled must not read as a minute old). Readers re-render only
+    // when the time actually moved.
+    const time = Date.now()
+    if (time !== now) {
+      now = time
+      listeners.forEach(each => each())
+    }
     if (!timer) {
-      // The clock slept while nothing read it; catch up at once.
-      now = Date.now()
       timer = setInterval(tick, tickMs)
       if (refreshOnShow) document.addEventListener('visibilitychange', onVisible)
     }

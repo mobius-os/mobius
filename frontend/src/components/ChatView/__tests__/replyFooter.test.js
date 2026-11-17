@@ -347,6 +347,8 @@ test('earlier completed answers retain one footer each while a newer answer runs
   assert.deepEqual(stretchProse(footers[1].groups).map(part => part.markdown), ['c'])
   assert.deepEqual(footers[0].sourceRows.map(message => message.id), ['a'],
     'an answer lists the References of its earlier replies with its last one')
+  // A recompute over the same groups (a streamed frame) keeps that array.
+  assert.equal([...replyFooters(options).byGroup.values()][0].sourceRows, footers[0].sourceRows)
   assert.deepEqual([...replyFooters({ ...options, liveIndex: -1, lastVisibleIndex: 6 }).byGroup.values()]
     .map(footer => footer.state), ['settled', 'settled', 'settled'],
     'a submitted owner row cannot remove earlier complete footers')
@@ -436,6 +438,30 @@ test('the answer before a visible steer stays working until its run settles', ()
     [['run', 'settled'], ['run:assistant:1', 'working']], 'another run leaves a complete answer complete')
   const working = [...replyFooters({ ...options, runningRoot: 'run' }).byGroup.values()][0]
   assert.equal(footerCopyParts(working, { messages }), null, 'nothing to copy until it settles')
+})
+
+test('whether Copy shows agrees with the displayed text for answers joined across a steer or a continuation', () => {
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const text = content => ({ type: 'text', content })
+  const tool = { type: 'tool', name: 'Bash', input: { command: 'ls' }, output: 'x' }
+  const reply = (id, ...blocks) => ({ role: 'assistant', id, ts: turn.ts, blocks })
+  const limit = 'Usage limit reached'
+  const answers = {
+    'a steer replaying the sealed prose': [ownerRow, reply('run', text('The frame')), steer,
+      reply('run:assistant:1', text('The framework survives.'))],
+    'a steer whose continuation only works': [ownerRow, reply('run', text('Checking.')), steer, reply('run:assistant:1', tool)],
+    'a steer between tool-only rows': [ownerRow, reply('run', tool), steer, reply('run:assistant:1', tool)],
+    'a continuation after an answered card': [ownerRow, reply('a', text('First part.')), cardAnswer, reply('b', tool)],
+    'a continuation that only repeats its error': [ownerRow, reply('a', tool), cardAnswer,
+      reply('b', text(limit), { type: 'error', message: limit })],
+    'a continuation adding prose after tools': [ownerRow, reply('a', tool), cardAnswer, reply('b', text('Done.'))],
+  }
+  for (const [shape, messages] of Object.entries(answers)) {
+    const replyGroups = assistantReplyGroups(messages)
+    const { current } = replyFooters({ messages, replyGroups, lastVisibleIndex: messages.length - 1 })
+    const parts = footerCopyParts(current, { messages }) || []
+    assert.equal(footerHasCopy(current), parts.length > 0, shape)
+  }
 })
 
 test('Copy shows for a settled answer with prose, and only once an earlier start is read', () => {

@@ -7,7 +7,7 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
@@ -37,6 +37,9 @@ import {
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
+import { helperCanRetry } from './helperRecovery.js'
+import { ParentChatLink } from './HelperChatSendNotice.jsx'
+import { HELPER_CHAT_SEND_LINK_TEXT } from './sendFailure.js'
 import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -231,6 +234,10 @@ function MsgContentInner({
   // Only the installation owner may bypass the storage or process floor; the
   // server refuses Continue anyway from anyone else, who keeps plain Resume.
   canContinueAnyway = false,
+  // A helper's chat retries only its own usage-limit park through its
+  // delegation; every other recovery action is the parent chat's.
+  helperChat = false,
+  helperParentChatId = null,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -481,23 +488,15 @@ function MsgContentInner({
             data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? i : undefined}
           >
             {msg.role === 'assistant'
-              ? (isActiveAnswer || block.reply_text_owner
-                  ? <ProgressiveMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />
-                  : <StandardMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      renderFraction={block._coldRenderFraction}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />)
+              ? <StandardMarkdown
+                  text={text}
+                  markdownRange={block.markdown_range}
+                  isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
+                  renderFraction={block._coldRenderFraction}
+                  onInternalNav={onInternalNav}
+                  mediaDimensions={msg.media_dimensions}
+                  allowAppBlocks
+                />
               : msg.role === 'user'
                 ? <UserMessageText
                     text={text}
@@ -624,7 +623,7 @@ function MsgContentInner({
         // remains. Not while an update restores edits or awaits a restart: the
         // server reports those for a resource wait as the handoff's reason.
         const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
-        const continueAnywayAvailable = recoveryOwner && canContinueAnyway
+        const continueAnywayAvailable = recoveryOwner && canContinueAnyway && !helperChat
           && !!continueAnywayCopy
           && ['automatic', 'recovery'].includes(handoff?.kind)
           && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
@@ -633,6 +632,9 @@ function MsgContentInner({
         const manualResumeAvailable = recoveryOwner
           && !continueAnywayAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
+          && (!helperChat || helperCanRetry(block))
+        // The server would refuse these actions here, so name where they live.
+        const parentOwnsRecovery = recoveryOwner && helperChat && !manualResumeAvailable
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
@@ -697,6 +699,13 @@ function MsgContentInner({
             )}
             {continueAnywayAvailable && (
               <span className="chat__recovery-copy">{continueAnywayCopy}</span>
+            )}
+            {parentOwnsRecovery && (
+              <span className="chat__recovery-copy">
+                This helper continues from its {helperParentChatId
+                  ? <ParentChatLink parentChatId={helperParentChatId} onInternalNav={onInternalNav} />
+                  : HELPER_CHAT_SEND_LINK_TEXT}.
+              </span>
             )}
             {(manualResumeAvailable || continueAnywayAvailable) && (
               <button
@@ -829,27 +838,18 @@ function MsgContentInner({
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
-          key={isActiveAnswer ? 0 : undefined}
           className={`chat__text chat__text--${msg.role}`}
           data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? 0 : undefined}
         >
           {msg.role === 'assistant'
-            ? (isActiveAnswer
-                ? <ProgressiveMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    isStreaming={isStreaming}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />
-                : <StandardMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />)
+            ? <StandardMarkdown
+                text={text}
+                markdownRange={msg.markdown_range}
+                isStreaming={isStreaming}
+                onInternalNav={onInternalNav}
+                mediaDimensions={msg.media_dimensions}
+                allowAppBlocks
+              />
             : msg.role === 'user'
               ? (msg.segments?.length > 1
                   ? <UserMessageSegments
@@ -893,6 +893,8 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onRefusalModelChoice === next.onRefusalModelChoice
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
     && prev.canContinueAnyway === next.canContinueAnyway
+    && prev.helperChat === next.helperChat
+    && prev.helperParentChatId === next.helperParentChatId
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

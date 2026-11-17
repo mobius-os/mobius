@@ -22,87 +22,14 @@ export function InlineMarkdown({ text }) {
 
 
 /**
- * ProgressiveMarkdown — active-answer mode.
- * Re-lexes on every update; only changed blocks re-render thanks to
- * React.memo comparison on token.raw. The same component stays mounted when
- * the active answer switches from its DB partial to live SSE data; streaming
- * affordances are props, not a second markdown subtree.
- */
-export function ProgressiveMarkdown({
-  text,
-  markdownRange,
-  isStreaming = false,
-  onInternalNav,
-  mediaDimensions,
-  allowAppBlocks = false,
-}) {
-  // Counted because `text` grows by a few characters per reveal commit while
-  // this re-tokenises the ENTIRE answer each time, making live streaming cost
-  // grow with answer length. Labelled apart from the settled renderer below so
-  // a report can tell "streaming is expensive" from "the transcript is
-  // expensive" - those have different fixes.
-  const tokens = useMemo(
-    () => groupMarkdownImages(markdownRange ? markdownRangeTokens(markdownRange) : tokenize(text)),
-    [text, markdownRange],
-  )
-
-  return (
-    <>
-      <div
-        className="progressive-markdown md-blocks"
-        data-is-streaming={isStreaming ? 'true' : undefined}
-        aria-live={isStreaming ? 'polite' : undefined}
-        aria-atomic={isStreaming ? 'false' : undefined}
-      >
-        {tokens.map((token, i) => {
-          const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
-          if (appCard) {
-            return <AppLinkCard key={i} card={appCard} onInternalNav={onInternalNav} />
-          }
-          if (token.type === 'blockKatex') {
-            return <MathBlock key={i} tex={token.text} />
-          }
-          if (token.type === 'imageGallery') {
-            return (
-              <ImageGallery
-                key={i}
-                images={token.images}
-                mediaDimensions={mediaDimensions}
-              />
-            )
-          }
-          return (
-            <MemoBlock
-              key={i}
-              token={token}
-              onInternalNav={onInternalNav}
-              mediaDimensions={mediaDimensions}
-              allowAppBlocks={allowAppBlocks}
-            />
-          )
-        })}
-        {isStreaming && (
-          <span className="chat__cursor" aria-hidden="true" />
-        )}
-      </div>
-    </>
-  )
-}
-
-
-/**
- * StandardMarkdown — history mode.
- *
- * Settled blocks normally render once. A pathological cold transcript can
- * prepare one long block over several hidden frames; `renderFraction` reveals
- * token prefixes while one memoized token tree keeps already-prepared DOM.
- * `writtenByOwner` and `literalTags` select the rules described in
- * markdownParser.js.
- * `math={false}` renders plain Markdown with no TeX (agent-written notes).
+ * Saved and live content share a tree so liveness changes preserve existing DOM.
+ * Cold history can reveal token prefixes with renderFraction; owner text and
+ * literal tags use the markdownParser rules, and math=false disables TeX.
  */
 export function StandardMarkdown({
   text,
   markdownRange,
+  isStreaming = false,
   renderFraction,
   writtenByOwner = false,
   literalTags = false,
@@ -111,11 +38,7 @@ export function StandardMarkdown({
   allowAppBlocks = false,
   math = true,
 }) {
-  // The settled-transcript renderer, so this is the one that matters for "a
-  // stopped chat still feels slow". `useMemo` only holds while the component
-  // stays mounted; if anything remounts messages this re-tokenises every
-  // message, which the probe surfaces as a burst of calls with no stream
-  // running.
+  // Cursor and liveness changes reuse the already-tokenized content.
   const tokens = useMemo(
     () => groupMarkdownImages(markdownRange
       ? markdownRangeTokens(markdownRange)
@@ -128,7 +51,12 @@ export function StandardMarkdown({
     : tokens
 
   return (
-    <div className="standard-markdown md-blocks">
+    <div
+      className="standard-markdown md-blocks"
+      data-is-streaming={isStreaming ? 'true' : undefined}
+      aria-live={isStreaming ? 'polite' : undefined}
+      aria-atomic={isStreaming ? 'false' : undefined}
+    >
       {visibleTokens.map((token, i) => {
         const appCard = appLinkCardFromParagraph(token, globalThis.window?.location?.href)
         if (appCard) {
@@ -156,6 +84,9 @@ export function StandardMarkdown({
           />
         )
       })}
+      {isStreaming && (
+        <span className="chat__cursor" aria-hidden="true" />
+      )}
     </div>
   )
 }

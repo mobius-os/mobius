@@ -995,6 +995,11 @@ def _chat_detail_response(
   )
   goal = presented_goal(db, chat.id, include_foreign_context=expose_session)
   run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
+  # Parent metadata is foreign context: embedded chat surfaces never see it.
+  helper = None
+  if expose_session:
+    from app.routes.chats_stream import helper_chat_ref
+    helper = helper_chat_ref(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -1042,6 +1047,10 @@ def _chat_detail_response(
     # project files activates only for a chat that belongs to a live project.
     "project": _project_ref_for_chat(db, chat),
     "branch_origin": _branch_origin_ref(db, chat),
+    # Retry the existing delegated attempt, never an independent owner turn;
+    # anything else a helper's recovery card needs is done in its parent.
+    "helper_delegation_id": (helper or {}).get("delegation_id"),
+    "helper_parent_chat_id": (helper or {}).get("parent_chat_id"),
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.

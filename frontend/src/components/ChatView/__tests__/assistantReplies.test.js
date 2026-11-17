@@ -142,10 +142,9 @@ test('suffix-only and settled short messages stay lossless, never guessed into p
  }
 })
 
-test('fused prose keeps its Markdown surface but no cursor while later activity runs', () => {
+test('fused prose shows no cursor while later activity runs', () => {
  const current = assistant('Prefix suffix', 1, { blocks: [{ type: 'text', content: 'Prefix suffix' }, { type: 'tool', tool: 'Bash', status: 'running' }] })
  const shown = presentAssistantReply(rows([assistant('Prefix'), carrier(), current]), { activeIndex: 1 })
- assert.equal(shown[0].message.blocks[0].reply_text_owner, true)
  assert.equal(shown[0].message.blocks[0].reply_live_text, false)
  assert.equal(shown[1].message.blocks[1].status, 'running')
 })

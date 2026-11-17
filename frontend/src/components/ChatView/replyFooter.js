@@ -25,6 +25,21 @@ export function agentStretches(messages, replyGroups) {
   return stretches
 }
 
+/** The stored rows of an answer's earlier replies, whose References its last
+ *  reply lists. The same array while those replies' rows keep their identity,
+ *  so an unchanged answer's reply is not re-rendered by a recompute. */
+const earlierRowsByAnswer = new WeakMap()
+function earlierReplyRows(groups) {
+  const earlier = groups.slice(0, -1).map(group => group.presentationRows)
+  const key = groups.at(-1).presentationRows
+  const prior = earlierRowsByAnswer.get(key)
+  if (prior && prior.earlier.length === earlier.length
+    && prior.earlier.every((rows, index) => rows === earlier[index])) return prior.messages
+  const messages = earlier.flatMap(rows => rows.map(row => row.message))
+  earlierRowsByAnswer.set(key, { earlier, messages })
+  return messages
+}
+
 /** Every complete answer's footer on the loaded page, and the current one.
  *
  *  The current answer is the live reply's group at `liveIndex` while one is
@@ -69,7 +84,7 @@ export function replyFooters({
     byGroup.set(group, {
       group, groups, state, end, start: before + 1,
       truncated: before < 0 && offset > 0,
-      sourceRows: groups.slice(0, -1).flatMap(item => item.rows.map(row => row.message)),
+      sourceRows: earlierReplyRows(groups),
     })
   }
   return { byGroup, current: byGroup.get(currentGroup) || null }
