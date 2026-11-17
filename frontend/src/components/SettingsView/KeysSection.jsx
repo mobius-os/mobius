@@ -6,12 +6,12 @@ import { useId, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import {
-  ChevronDown, Code, EditPencil, Eye, EyeOff, Globe, Key, Plus, Sparkles, Trash, X,
+  ChevronDown, EditPencil, Eye, EyeOff, Globe, Key, Plus, Sparkles, Trash, X,
 } from '@openai/apps-sdk-ui/components/Icon'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
-  relativeTime, savedByApp, replaceWarning, siteLine, sentAs, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
+  relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
   REQUESTS_SHOWN,
 } from '../../lib/keysSettingsText.js'
 import KeyRequest, { BEARER } from './KeyRequest.jsx'
@@ -26,32 +26,23 @@ const GUEST_LINE = 'Only the owner of this Möbius can see and manage keys.'
 const ICON = { width: 18, height: 18, 'aria-hidden': true }
 const BUTTON_ICON = { width: 15, height: 15, 'aria-hidden': true }
 
-/** One PUT carrying the key's current record with ``changes`` applied. */
+/**
+ * One PUT carrying the key's current record with ``changes`` applied.
+ * Settings mostly narrows a key: how it is sent, which apps may use it and
+ * where the owner's agents may send it are set by the agent or app that asks,
+ * and approved on that ask's card. Here the owner pauses, removes, replaces,
+ * and adds a website for an app that already has the key, the one widening
+ * left to Settings: an app that never asks (such as one whose saved keys moved
+ * into the vault without sites) has no other way to get one.
+ */
 function recordFor(key, changes = {}) {
   return {
-    inject: changes.inject || key.inject,
+    inject: key.inject,
     grants: { ...key.grants, ...(changes.grants || {}) },
     // The vault refuses a save made from a stale copy of the key.
     revision: key.revision,
     ...(changes.value ? { value: changes.value } : {}),
-    ...(changes.installations ? { installations: changes.installations } : {}),
   }
-}
-
-/** "How it's sent" as an editable draft, and back. */
-function draftFromInject(inject = BEARER) {
-  return {
-    slot: inject.type,
-    headerName: inject.type === 'header' ? inject.name : 'Authorization',
-    prefix: inject.type === 'header' ? (inject.prefix || '') : 'Bearer ',
-    queryName: inject.type === 'query' ? inject.name : 'api_key',
-  }
-}
-
-function injectFromDraft(draft) {
-  return draft.slot === 'query'
-    ? { type: 'query', name: draft.queryName.trim() }
-    : { type: 'header', name: draft.headerName.trim(), prefix: draft.prefix }
 }
 
 /** A titled Settings section: quiet title and description above its own list. */
@@ -313,23 +304,16 @@ function useSaveKey(name) {
 }
 
 function KeyDetail({ keyRecord: key, onDeleted }) {
-  const { apps, names } = useAppNames()
+  const { names } = useAppNames()
   const { save, error, busy } = useSaveKey(key.name)
   const usageQuery = useKeyUsage(key.name)
   const usage = usageQuery.data?.usage || []
   const grantedApps = key.grants?.apps || []
-  const grantedIds = grantedApps.map(grant => grant.id)
-  const ungranted = apps.filter(app => !grantedIds.includes(app.id))
   const rows = usedByRows(key, names, lastUseByCaller(usage))
   const setGrants = grants => save(recordFor(key, { grants }))
   const updateApp = (id, change) => setGrants({
     apps: grantedApps.map(grant => (grant.id === id ? { ...grant, ...change } : grant)),
   })
-  // A new app starts with no sites; its own row under Used by adds the ones it may reach.
-  const grantApp = app => save(recordFor(key, {
-    grants: { apps: [...grantedApps, { id: app.id, sites: [] }] },
-    installations: { [app.id]: app.installation },
-  }))
 
   return (
     <div className="settings-keys-page">
@@ -368,24 +352,6 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
               aria-label="Your agents can use it"
             />
           </div>
-          {ungranted.length > 0 && (
-            <label className="settings-item settings-keys-add">
-              <span className="settings-item__icon settings-keys-add__icon" aria-hidden="true"><Plus {...ICON} /></span>
-              <select
-                className="settings-keys-add__select"
-                value=""
-                onChange={e => {
-                  const app = ungranted.find(item => item.id === Number(e.target.value))
-                  if (app) grantApp(app)
-                }}
-                disabled={busy}
-                aria-label="Let an app use this key"
-              >
-                <option value="">Let an app use it…</option>
-                {ungranted.map(app => <option key={app.id} value={app.id}>{app.name}</option>)}
-              </select>
-            </label>
-          )}
         </div>
       </Group>
 
@@ -395,17 +361,8 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
             sites={key.grants?.sites || []}
             onChange={sites => setGrants({ sites })}
             busy={busy}
-            empty="None yet. You and your agents can't send it until you add one or approve your agent's request."
+            empty="None yet. Your agent asks you the first time it needs to send it somewhere."
           />
-        </div>
-      </Group>
-
-      <Group
-        title="How it's sent"
-        desc={key.multiline ? 'This key has several lines, so it can be sent only in the address, never as a header.' : undefined}
-      >
-        <div className="settings-list">
-          <SentAs keyRecord={key} save={save} busy={busy} />
         </div>
       </Group>
 
@@ -455,6 +412,7 @@ function AppRow({ grant, row, busy, onSwitch, onSites, onRemove }) {
               onChange={onSites}
               busy={busy}
               empty={`No websites yet. ${label} can't send this key until you add one.`}
+              canAdd
             />
           </div>
           <div className="settings-actions">
@@ -584,8 +542,11 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
   )
 }
 
-/** Website rows inside a list, with an Add row that opens a small form in place. */
-function SitesRows({ sites, onChange, busy, empty }) {
+/**
+ * Website rows inside a list; each can be removed. ``canAdd`` adds an Add row
+ * that opens a small form in place (only an app's own list has one).
+ */
+export function SitesRows({ sites, onChange, busy, empty, canAdd = false }) {
   const [adding, setAdding] = useState(false)
   const [host, setHost] = useState('')
   const [paths, setPaths] = useState('/*')
@@ -627,7 +588,7 @@ function SitesRows({ sites, onChange, busy, empty }) {
           </button>
         </div>
       ))}
-      {adding ? (
+      {canAdd && (adding ? (
         <form className="settings-keys-form settings-keys-form--row" onSubmit={add} autoComplete="off">
           <label className="settings-field" htmlFor={hostId}>
             <span className="settings-field__label">Website</span>
@@ -648,80 +609,7 @@ function SitesRows({ sites, onChange, busy, empty }) {
           <span className="settings-item__icon settings-keys-add__icon" aria-hidden="true"><Plus {...ICON} /></span>
           <span className="settings-item__title">Add a website</span>
         </button>
-      )}
-    </>
-  )
-}
-
-/** Header or address parameter, as a controlled draft (see draftFromInject). */
-function InjectFields({ draft, onChange }) {
-  const set = change => onChange({ ...draft, ...change })
-  const nameId = useId()
-  const prefixId = useId()
-  return (
-    <>
-      <div className="settings-seg" role="radiogroup" aria-label="Sent as">
-        {[['header', 'Header'], ['query', 'In the address']].map(([value, label]) => (
-          <button
-            key={value}
-            type="button"
-            role="radio"
-            aria-checked={draft.slot === value}
-            className={`settings-seg__option${draft.slot === value ? ' settings-seg__option--on' : ''}`}
-            onClick={() => set({ slot: value })}
-          >{label}</button>
-        ))}
-      </div>
-      {draft.slot === 'header' ? (
-        <div className="settings-keys-form__pair">
-          <label className="settings-field" htmlFor={nameId}>
-            <span className="settings-field__label">Header name</span>
-            <input id={nameId} className="settings-input" value={draft.headerName} onChange={e => set({ headerName: e.target.value })} />
-          </label>
-          <label className="settings-field" htmlFor={prefixId}>
-            <span className="settings-field__label">Before the key</span>
-            <input id={prefixId} className="settings-input" value={draft.prefix} onChange={e => set({ prefix: e.target.value })} placeholder="Nothing" />
-          </label>
-        </div>
-      ) : (
-        <label className="settings-field" htmlFor={nameId}>
-          <span className="settings-field__label">Parameter name</span>
-          <input id={nameId} className="settings-input" value={draft.queryName} onChange={e => set({ queryName: e.target.value })} />
-        </label>
-      )}
-    </>
-  )
-}
-
-function SentAs({ keyRecord: key, save, busy }) {
-  const inject = key.inject || BEARER
-  const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState(() => draftFromInject(inject))
-
-  async function submit(event) {
-    event.preventDefault()
-    if (await save(recordFor(key, { inject: injectFromDraft(draft) }))) setOpen(false)
-  }
-
-  return (
-    <>
-      <button type="button" className="settings-item" aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span className="settings-item__icon" aria-hidden="true"><Code {...ICON} /></span>
-        <span className="settings-item__body">
-          <span className="settings-item__title">{inject.type === 'query' ? 'In the address' : 'As a header'}</span>
-          <code className="settings-item__sub settings-keys-code">{sentAs(inject)}</code>
-        </span>
-        <ChevronDown width={16} height={16} className="settings-item__chevron" aria-hidden="true" />
-      </button>
-      {open && (
-        <form className="settings-item-panel settings-keys-form" onSubmit={submit} autoComplete="off">
-          <InjectFields draft={draft} onChange={setDraft} />
-          <div className="settings-actions">
-            <button type="submit" className="settings__btn settings__btn--sm" disabled={busy}>Save</button>
-            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => { setOpen(false); setDraft(draftFromInject(inject)) }}>Cancel</button>
-          </div>
-        </form>
-      )}
+      ))}
     </>
   )
 }
@@ -796,8 +684,8 @@ function DeleteKey({ name, onDeleted }) {
 
 /**
  * Adding a key is a paste and an optional name. It is sent nowhere until an
- * app or the owner's agent first needs it and the owner approves the website;
- * "I already know which website it's for" covers the owner who already knows.
+ * app or the owner's agent first needs it: that ask sets where it goes and how,
+ * and the owner approves it on the ask's card.
  */
 function NewKey({ existingNames, onCreated }) {
   const queryClient = useQueryClient()
@@ -805,16 +693,11 @@ function NewKey({ existingNames, onCreated }) {
   const [value, setValue] = useState('')
   const [multiline, setMultiline] = useState(false)
   const [agents, setAgents] = useState(true)
-  const [choosingSite, setChoosingSite] = useState(false)
-  const [host, setHost] = useState('')
-  const [draft, setDraft] = useState(() => draftFromInject(BEARER))
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const valueId = useId()
   const nameId = useId()
-  const hostId = useId()
   const chosen = newKeyName(typedName, value, existingNames)
-  const site = choosingSite ? host.trim().toLowerCase() : ''
   const nameProblem = typedName.trim() !== '' && !chosen.valid
     ? 'Use letters, numbers, - or _, starting with a letter.'
     : chosen.taken ? `You already have a key called ${chosen.name}.` : ''
@@ -824,11 +707,11 @@ function NewKey({ existingNames, onCreated }) {
     setBusy(true)
     setError('')
     try {
-      const sites = site ? [{ host: site, methods: DEFAULT_METHODS, paths: ['/*'] }] : []
       await jsonOrThrow(await api.keys.put(chosen.name, {
         value,
-        inject: site ? injectFromDraft(draft) : BEARER,
-        grants: { apps: [], agents, sites },
+        // The first ask for it sets where it really goes.
+        inject: BEARER,
+        grants: { apps: [], agents, sites: [] },
         // Never overwrite a key that took this name meanwhile.
         create_only: true,
       }), 'Save key')
@@ -871,24 +754,8 @@ function NewKey({ existingNames, onCreated }) {
           <SwitchRow title="It has several lines" sub="A certificate or key file" checked={multiline} onChange={setMultiline} />
         </div>
 
-        {choosingSite ? (
-          <div className="settings-keys-form__where">
-            <label className="settings-field" htmlFor={hostId}>
-              <span className="settings-field__label">Website</span>
-              <input id={hostId} className="settings-input" value={host} onChange={e => setHost(e.target.value)} placeholder="api.example.com" inputMode="url" autoFocus />
-            </label>
-            {site && <InjectFields draft={draft} onChange={setDraft} />}
-          </div>
-        ) : (
-          <button type="button" className="settings-link settings-keys-form__link" onClick={() => setChoosingSite(true)}>
-            I already know which website it's for
-          </button>
-        )}
-
         <p className="settings-field__hint">
-          {site
-            ? `Saved encrypted and sent only to ${site}.`
-            : "Saved encrypted and sent nowhere yet. The first time an app or your agent needs it, you'll be asked where it may go."}
+          Saved encrypted and sent nowhere yet. The first time an app or your agent needs it, you'll be asked where it may go.
         </p>
         {error && <Alert color="danger" variant="soft" description={error} />}
         <div className="settings-actions">

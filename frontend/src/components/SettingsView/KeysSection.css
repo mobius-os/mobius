@@ -1,6 +1,6 @@
 /* Settings › Keys: the request card shared with chats and apps, and what the Keys pages add to the shared Settings blocks. */
 /* Layout comes from SettingsPage.css (settings-group, settings-list,
-   settings-item, settings-field, settings-input, settings-seg); this file
+   settings-item, settings-field, settings-input); this file
    styles only what is key-specific. Settings' own stylesheet loads after this
    one, so overrides of shared settings classes carry one extra class. */
 
@@ -94,21 +94,6 @@
 @media (hover: hover) and (pointer: fine) {
   .settings-item.settings-keys-add:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
 }
-.settings-keys-add__select {
-  flex: 1;
-  min-width: 0;
-  min-height: 34px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  outline: 0;
-}
-.settings-keys-add__select option { color: var(--text); background: var(--surface); }
 
 /* An app row: the left part opens its websites, the switch pauses it. */
 .settings-keys-expand {
@@ -144,7 +129,6 @@
   user-select: all;
 }
 .settings-actions.settings-keys-value__actions { flex: none; flex-wrap: nowrap; }
-.settings-keys-code { font-family: var(--mono); font-size: 12px; }
 
 .settings-keys__icon-btn {
   display: grid;
@@ -172,17 +156,12 @@
 .settings-keys-form { display: grid; gap: 14px; }
 .settings-keys-form--row { padding: 14px 16px 16px; }
 .settings-keys-form--card { gap: 18px; padding: 18px; }
-.settings-keys-form__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .settings-keys-form__switches { display: grid; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
-.settings-keys-form__where { display: grid; gap: 12px; }
-.settings-link.settings-keys-form__link { justify-self: start; color: var(--accent-text, var(--accent)); }
-.settings-link.settings-keys-form__link:hover { text-decoration: underline; }
 
 .settings__btn.settings-keys__danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 
 @container settings (max-width: 400px) {
   .settings-item-panel.settings-keys-panel { padding-left: 14px; }
-  .settings-keys-form__pair { grid-template-columns: minmax(0, 1fr); }
   .settings-keys-form--card { padding: 14px; }
   /* Show and Replace drop their icons so the masked value keeps its room. */
   .settings-keys-value__actions svg { display: none; }

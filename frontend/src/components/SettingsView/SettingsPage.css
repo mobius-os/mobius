@@ -480,29 +480,6 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
 .settings-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 .settings-input[aria-invalid="true"] { border-color: var(--danger); }
 .settings-input--multiline { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 13px; line-height: 1.4; }
-.settings-seg {
-  display: inline-flex;
-  align-self: flex-start;
-  justify-self: start;
-  flex-wrap: wrap;
-  gap: 2px;
-  padding: 3px;
-  border-radius: 10px;
-  background: var(--surface-2);
-}
-.settings-seg__option {
-  min-height: 32px;
-  padding: 0 12px;
-  border: 0;
-  border-radius: 8px;
-  background: none;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-.settings-seg__option--on { background: var(--surface); color: var(--text); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18); }
-.settings-seg__option:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .settings-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .settings-switch-row__title { display: block; color: var(--text); font-size: 13.5px; line-height: 1.35; }
 .settings-switch-row__sub { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }

@@ -4,9 +4,13 @@ Status: draft for review.
 
 ## Contract
 
-- The owner manages keys in **Settings › Keys**: values, how each key is sent,
-  the sites, methods and paths the owner and agents may send it to, which apps
-  may borrow it, and whether agents may use it. **Each app grant has its own
+- The owner manages keys in **Settings › Keys**: values, which apps may
+  borrow each one and where, and whether agents may use it. Settings there
+  mostly narrows: how a key is sent, which apps may borrow it, and the sites the
+  owner and agents may send it to are set by the agent's or app's request and
+  approved on its card. The one widening Settings keeps is adding a site to an
+  app that already holds the key, for an app that never asks (such as one whose
+  saved keys moved in without sites). **Each app grant has its own
   sites**, so approving sites for one app never widens another app or the
   agents. The owner's top-level agents may manage keys too, but only the
   owner's own input lets an app use a key or reach more sites (approving a

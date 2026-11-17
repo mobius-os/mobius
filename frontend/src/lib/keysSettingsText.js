@@ -41,7 +41,7 @@ export function savedByApp(key, names) {
 export function replaceWarning(key, names) {
   const app = savedByApp(key, names)
   return app
-    ? `${app} saved this key. A new value makes it yours, and ${app} stops using it until you let it again under Advanced › Let an app use it.`
+    ? `${app} saved this key. A new value makes it yours, and ${app} stops using it until it asks again and you allow it.`
     : null
 }
 
