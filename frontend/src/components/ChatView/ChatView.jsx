@@ -82,6 +82,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { sendRecoveryResume } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
@@ -2155,13 +2156,16 @@ export default function ChatView({
   }, [chatId, committedSteerKeyboardDismiss, inputValueRef])
   // The composer clears before this boundary, so a slow picker save delays
   // transport without swallowing text entered after Send.
-  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+  const settingsSaved = useCallback(async () => {
     await settingsSaveTailRef.current
     if (chatIdStaleRef.current) {
       throw new Error('This chat is no longer open.')
     }
+  }, [])
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaved()
     return streamSend(text, attachments, options)
-  }, [streamSend])
+  }, [settingsSaved, streamSend])
 
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
@@ -4410,15 +4414,19 @@ export default function ChatView({
     !activationSettledRef.current
     || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
+  const helperDelegationId = chatInfo?.helper_delegation_id || null
+  const helperParentChatId = chatInfo?.helper_parent_chat_id || null
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
     resumeRequestRef.current = request
     try {
-      return await sendAfterSettingsSaved(text, attachments, options)
+      return await sendRecoveryResume({
+        helperDelegationId, settingsSaved, request: apiFetch, send: sendAfterSettingsSaved,
+      }, text, attachments, options)
     } finally {
       if (resumeRequestRef.current === request) resumeRequestRef.current = null
     }
-  }, [chatId, sendAfterSettingsSaved])
+  }, [chatId, helperDelegationId, sendAfterSettingsSaved, settingsSaved])
   const { resume: handleResume, state: resumeState } = useResume({
     chatId,
     runId: recoveryRunId,
@@ -6050,6 +6058,8 @@ export default function ChatView({
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       canContinueAnyway={canStartFreshSession}
+      helperChat={!!helperDelegationId}
+      helperParentChatId={helperParentChatId}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}

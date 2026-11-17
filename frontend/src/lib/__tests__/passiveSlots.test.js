@@ -28,3 +28,12 @@ test('the slot store grants per app and frees a slot when a block leaves', () =>
   assert.equal(slots.granted(7, two), true)
   assert.ok(notified >= 4)
 })
+
+test('a tapped sleeping block gets a frame beyond the idle cap; an untapped or far-off one does not', () => {
+  const idle = ['a', 'b', 'c'].map((id, i) => ({ id, wanted: true, retained: false, distance: i }))
+  const entries = [...idle,
+    { id: 'tapped', wanted: true, retained: false, waking: true, distance: 900 },
+    { id: 'quiet', wanted: true, retained: false, distance: 800 },
+    { id: 'gone', wanted: false, retained: false, waking: true, distance: 1 }]
+  assert.deepEqual([...grantedSlots(entries)].sort(), ['a', 'b', 'c', 'tapped'])
+})

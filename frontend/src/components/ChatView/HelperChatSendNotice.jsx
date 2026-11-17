@@ -9,15 +9,22 @@ import {
 
 const [beforeLink, afterLink] = HELPER_CHAT_SEND_MESSAGE.split(HELPER_CHAT_SEND_LINK_TEXT)
 
-function HelperChatSendNotice({ parentChatId, onInternalNav }) {
+/** The words "parent chat", linked to the chat that owns this helper. */
+export function ParentChatLink({ parentChatId, onInternalNav }) {
   const href = `/shell?chat=${encodeURIComponent(parentChatId)}`
-  return <>
-    {beforeLink}
+  return (
     <a
       className="chat__offline-note-link"
       href={href}
       onClick={event => openInternalLink(event, href, onInternalNav)}
     >{HELPER_CHAT_SEND_LINK_TEXT}</a>
+  )
+}
+
+function HelperChatSendNotice({ parentChatId, onInternalNav }) {
+  return <>
+    {beforeLink}
+    <ParentChatLink parentChatId={parentChatId} onInternalNav={onInternalNav} />
     {afterLink}
   </>
 }
