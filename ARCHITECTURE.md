@@ -2192,7 +2192,9 @@ validation leaves that prior session unchanged. Verified proof admission expires
 within 60 seconds; old pending rows are pruned on subsequent starts.
 
 A recipient can leave without waiting for the owner. Shared with me carries a
-`leave_url` to a confirmation page in the sharing instance's shared shell.
+`leave_url` for every share and invitation, to a confirmation page in the
+sharing instance's shared shell. A sharing instance that predates leaving
+shows a page that cannot complete it.
 Its Leave button is a same-origin POST to `/session/account/leave/start`, so
 a cross-site link alone ends nothing; that runs the same proof flow under a
 separate pending cookie. The cookie that matches the callback state decides

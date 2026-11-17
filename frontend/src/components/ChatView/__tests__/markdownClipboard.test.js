@@ -12,7 +12,7 @@ import {
   queueClipboardTextUndoably,
   unwrapEnclosingStructure,
 } from '../markdownClipboard.js'
-import { renderedReplyClipboard } from '../messageCopy.js'
+import { stretchClipboard } from '../messageCopy.js'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
@@ -254,17 +254,17 @@ test('whole-reply Copy keeps a one-item list and a one-cell table', () => {
   }
   const list = element('div', [element('ol', [element('li', [text('Do this')], { value: '1' })])])
   assert.deepEqual(
-    renderedReplyClipboard(reply([list]), ['row-1'], [{ message: 0, block: 0, markdown: '1. Do this' }]),
+    stretchClipboard([{ key: 'row-1', block: 0, markdown: '1. Do this' }], reply([list])),
     { markdown: '1. Do this', plainText: '1. Do this' },
   )
   const bullet = element('div', [element('ul', [element('li', [text('note')])])])
-  assert.equal(renderedReplyClipboard(reply([bullet]), ['row-1'],
-    [{ message: 0, block: 0, markdown: '- note' }]).plainText, '- note')
+  assert.equal(stretchClipboard([{ key: 'row-1', block: 0, markdown: '- note' }],
+    reply([bullet])).plainText, '- note')
   const table = element('div', [element('table', [element('tbody', [
     element('tr', [element('th', [text('only')])]),
   ])])], {}, ['md-table-wrap'])
-  assert.equal(renderedReplyClipboard(reply([table]), ['row-1'],
-    [{ message: 0, block: 0, markdown: '| only |\n| --- |' }]).plainText, 'only')
+  assert.equal(stretchClipboard([{ key: 'row-1', block: 0, markdown: '| only |\n| --- |' }],
+    reply([table])).plainText, 'only')
   // Unwrapped, the table would still read "only": the list cases above are
   // the ones whose marker a wrongly unwrapped whole reply loses.
 })

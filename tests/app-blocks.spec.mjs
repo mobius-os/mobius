@@ -84,6 +84,24 @@ async function seeConfirmationEnds(block) {
   }
 }
 
+/** Keep a newly drawn list's first row from entering the viewport before its
+ * showing's intersection observer runs. Scrolling after a count assertion is
+ * too late: the first row has already been visible and is intentionally
+ * remembered by the host. */
+async function parkNewConfirmationAtFooter(block, count) {
+  await block.evaluate((section, expected) => {
+    const observer = new MutationObserver(() => {
+      if (section.querySelectorAll('.md-app-block__items > li').length !== expected) return
+      const button = section.querySelector('footer .md-app-block__action')
+      if (button?.textContent !== 'Confirm') return
+      observer.disconnect()
+      button.scrollIntoView({ block: 'end' })
+      section.dataset.confirmationParked = String(expected)
+    })
+    observer.observe(section, { childList: true, subtree: true })
+  }, count)
+}
+
 /** Include container reflow in failures of the action's same-slot contract. */
 async function actionLayout(action) {
   return action.evaluate(button => Object.fromEntries([
@@ -203,12 +221,13 @@ test('with the action at the bottom edge, Confirm arms only after the first row 
   const action = block.locator('footer .md-app-block__action')
   await expect(action).toHaveText('Send all')
   await action.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await parkNewConfirmationAtFooter(block, 12)
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
   await expect(confirm).toHaveText('Confirm')
+  await expect(block).toHaveAttribute('data-confirmation-parked', '12')
   // The rows are drawn above the footer: the last one sits beside Confirm,
   // the first is above the viewport.
-  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
   await expect(block.locator('.md-app-block__list-edge.is-end')).toBeInViewport()
   await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
   // Long past the delay, the unseen start keeps Confirm disabled.
@@ -230,6 +249,7 @@ test('a list replaced after Confirm armed must have its own ends seen (no borrow
   const block = chat.locator('.md-app-block')
   const action = block.locator('footer .md-app-block__action')
   await expect(action).toHaveText('Send all')
+  await parkNewConfirmationAtFooter(block, 256)
   await action.click()
   const confirm = block.locator('footer .md-app-block__action')
   // One target: both its ends are on screen, so Confirm arms.
@@ -237,7 +257,7 @@ test('a list replaced after Confirm armed must have its own ends seen (no borrow
   await expect(confirm).toBeEnabled()
   // The app replaces it with 256 targets while the old row was visible.
   await expect(block.locator('.md-app-block__items > li')).toHaveCount(256)
-  await confirm.evaluate(button => button.scrollIntoView({ block: 'end' }))
+  await expect(block).toHaveAttribute('data-confirmation-parked', '256')
   await expect(block.locator('.md-app-block__list-edge.is-start')).not.toBeInViewport()
   await page.waitForTimeout(900)
   await expect(confirm).toBeDisabled()

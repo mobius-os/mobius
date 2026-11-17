@@ -412,13 +412,9 @@ def test_shared_directory_rebuilds_link_and_rejects_unsafe_origin(client, auth, 
   instance = response.json()["instances"][0]
   assert instance["name"] == "<b>not HTML</b>"
   assert instance["open_url"] == "https://other.example/api/connect/browser-access/session/account/start?grant_id=" + "g" * 32
-  # Without the directory's word that the sharing instance supports leaving,
-  # there is no Leave link to a page it may not have.
-  assert "leave_url" not in instance
-  for said in ("yes", 1, None):
-    monkeypatch.setattr(account, "issuer_request", _directory_of({**row, "leave": said}))
-    assert "leave_url" not in client.get("/api/connect/browser-access/shared", headers=auth).json()["instances"][0]
-  monkeypatch.setattr(account, "issuer_request", _directory_of({**row, "leave": True}))
+  # Every share offers Leave (Decline, for an invitation); no directory flag gates it.
+  assert instance["leave_url"] == "https://other.example/shell/shared#account-leave=" + "g" * 32
+  monkeypatch.setattr(account, "issuer_request", _directory_of({**row, "status": "accepted", "leave": False}))
   instance = client.get("/api/connect/browser-access/shared", headers=auth).json()["instances"][0]
   assert instance["leave_url"] == "https://other.example/shell/shared#account-leave=" + "g" * 32
   # One unsafe or malformed row is skipped; it never hides the valid ones.
