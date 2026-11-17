@@ -14,7 +14,7 @@ retain their saved provider/model selection but
 cannot run it while the provider app is absent; Möbius does not silently send
 those chats to a different company.
 
-An app-secret declaration names its wire protocol with optional `protocol`:
+A vault-key declaration names its wire protocol with optional `protocol`:
 
 - `responses` (the default) — **OpenAI Responses-compatible HTTPS**, driven by
   the Codex agent runtime; `/responses` is appended to `base_url` (commonly
@@ -153,7 +153,7 @@ removes a provider from pickers and blocks new turns without deleting chats.
 - App models are currently manifest-declared, not discovered live. An app can
   publish an update when its upstream model list changes. A later version can
   add an app-owned model-discovery service without changing picker consumers.
-- One provider per app, one protocol per provider, and one bearer-key secret.
+- One provider per app, one protocol per provider, and one vault key.
   OAuth, provider-specific headers, multiple endpoints per app, and further
   protocols (such as Chat Completions, which Codex no longer speaks) need
   separate reviewed contracts, not ad-hoc fields.
