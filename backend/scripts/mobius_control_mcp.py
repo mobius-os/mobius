@@ -1704,7 +1704,8 @@ _TOOL_DEFINITIONS = {
       "(granted, paused or denied), and your turn continues. The same happens, "
       "with a note and status pending, when a request for that key is already "
       "waiting elsewhere: answer.sites is what it asks and the note says where "
-      "the owner answers it (waiting_chat_id names that chat); tell the owner "
+      "the owner answers it (Settings › Keys, and the card in the chat "
+      "waiting_chat_id names, if that chat still shows one); tell the owner "
       "and ask again after they answer it. Otherwise it "
       "saves a key card in this chat and returns a receipt, NOT an answer. "
       f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
@@ -1726,11 +1727,12 @@ _TOOL_DEFINITIONS = {
             "type": "object",
             "properties": {
               "host": {"type": "string", "description": "e.g. api.nasa.gov"},
-              "methods": {"type": "array", "items": {"type": "string"}},
-              "paths": {"type": "array", "items": {"type": "string"},
+              "methods": {"type": "array", "minItems": 1, "items": {"type": "string"},
+                          "description": "e.g. [\"GET\"]"},
+              "paths": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"type": "string"},
                         "description": "e.g. /planetary/apod or /v1/*"},
             },
-            "required": ["host"], "additionalProperties": False,
+            "required": ["host", "methods", "paths"], "additionalProperties": False,
           },
         },
         "inject": {

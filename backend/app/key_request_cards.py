@@ -94,10 +94,8 @@ async def waiting_elsewhere(answer: dict, chat_id: str) -> dict | None:
 
 def holds_open_card(db, chat_id: str, request_id: str) -> bool:
   """Whether ``chat_id`` shows an unanswered card for vault request
-  ``request_id``: the only place an agent's request can be answered. A
-  deleted chat, or one whose card was never saved (its turn stopped between
-  the ask and the card), holds none, and the request is then answerable
-  nowhere."""
+  ``request_id``. A deleted chat, or one whose turn stopped before the owner
+  answered, holds none; its request then waits in Settings › Keys alone."""
   from app import models, questions
   chat = db.get(models.Chat, chat_id, populate_existing=True)
   if chat is None or chat.deleted_at is not None:
@@ -106,23 +104,16 @@ def holds_open_card(db, chat_id: str, request_id: str) -> bool:
   return card is not None and (card.get("key_request") or {}).get("id") == request_id
 
 
-def elsewhere_note(chat_id: str | None, title: str | None) -> str:
-  """What an agent hears when its ask joins a request waiting elsewhere.
+def elsewhere_note(title: str | None) -> str:
+  """What an agent hears when its ask joins a request already waiting.
 
-  It names where the owner answers it: the card in the chat that asked
-  (``title``), or Settings › Keys for a request that names no chat. ``title``
-  is None only when no card can answer it (its chat was deleted, or its card
-  was never saved) and withdrawing it just failed; asking again retries that.
+  The owner answers it in Settings › Keys, which lists every waiting
+  request, and on the card in the chat that asked (``title``) while that
+  chat still shows one.
   """
-  waiting = "A request for this key is already waiting"
-  after = "so no card was saved here; answer.sites is what it asks."
-  if chat_id is None:
-    return f"{waiting} in Settings › Keys, {after} Tell the owner to answer it there, and ask again after they do."
-  if title is None:
-    return (f"{waiting} with no card left to answer it, and it couldn't be withdrawn just now, {after} "
-            "Ask again in a moment.")
-  return (f"{waiting} on a card in the chat \"{title}\" (waiting_chat_id), {after} Tell the "
-          "owner to answer it there, and ask again after they do.")
+  where = f"on a card in the chat \"{title}\" (waiting_chat_id) and in Settings › Keys" if title else "in Settings › Keys"
+  return (f"A request for this key is already waiting for the owner {where}, so no card was saved "
+          "here; answer.sites is what it asks. Tell the owner to answer it there, and ask again after they do.")
 
 
 def needs_owner(answer: dict) -> bool:
@@ -137,32 +128,27 @@ async def check_answer(card: dict, selections: dict | None) -> None:
   Allow needs the key to exist with your agents allowed on every one of them.
   Not now needs the card's request refused, or no longer waiting without the
   key being allowed there (removed in Settings, say), so a card always has an
-  honest answer and the agent is never told Allow for nothing. A card saved
-  before cards kept their sites is judged by its request alone. Anything
+  honest answer and the agent is never told Allow for nothing. Anything
   else, a typed reply included, is refused: the owner answers on the card.
   """
   key_request = card.get("key_request") or {}
   request_id = key_request.get("id")
   chosen = (selections or {}).get(QUESTION_ID)
-  if not isinstance(request_id, str) or chosen not in ([ALLOW], [DENY]):
-    raise HTTPException(409, detail="Answer this key request with Allow or Not now on its card.")
   sites = key_request.get("sites")
+  if not isinstance(request_id, str) or not isinstance(sites, list) or chosen not in ([ALLOW], [DENY]):
+    raise HTTPException(409, detail="Answer this key request with Allow or Not now on its card.")
   try:
     requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
-    keys = (await key_vault.vault_call("GET", "/keys"))["keys"] if isinstance(sites, list) else []
+    keys = (await key_vault.vault_call("GET", "/keys"))["keys"]
   except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
     raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
   request = next((item for item in requests if item.get("id") == request_id), None)
   # The request this card shows, if it still waits or was refused as asked.
-  own = request if request is not None and (not isinstance(sites, list) or request.get("sites") == sites) else None
-  if not isinstance(sites, list):
-    status = own.get("status") if own else None
-    covered = status not in ("pending", "denied")
-  else:
-    record = next((item for item in keys if item.get("name") == key_request.get("key")), None)
-    covered = record is not None and bool(record["grants"].get("agents")) and not (
-      key_vault.sites_outside(record["grants"].get("sites") or [], sites)
-    )
+  own = request if request is not None and request.get("sites") == sites else None
+  record = next((item for item in keys if item.get("name") == key_request.get("key")), None)
+  covered = record is not None and bool(record["grants"].get("agents")) and not (
+    key_vault.sites_outside(record["grants"].get("sites") or [], sites)
+  )
   if own is not None and own.get("status") == "pending":
     raise HTTPException(409, detail="Your key vault hasn't recorded this answer. Reload Möbius and answer the card again.")
   if chosen == [ALLOW] and not covered:

@@ -15,8 +15,9 @@ being external attackers reaching the public HTTPS endpoint.
   their owner through managed sign-in instead.
 - **PKCE OAuth:** Server-side token exchange for CLI provider auth.
   No client-side token exposure.
-- **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
-  derived from SECRET_KEY.
+- **Encryption at rest:** keys in Settings › Keys are sealed with AES-GCM
+  under the key vault's own master key (`.vault/master.key`), never under
+  SECRET_KEY; connector credentials use Fernet keys derived from SECRET_KEY.
 - **TLS and response headers:** Caddy auto-provisions HTTPS certificates, while
   the backend owns standard response headers and scoped document CSPs so direct
   Railway and self-hosted proxy paths cannot drift. The primary Caddy host
@@ -164,9 +165,11 @@ provider key starts on the paths that provider's protocol calls). It stops
 being the app's, and the app loses its grant, once the owner or an agent
 stores a new value in it.
 App ids are reused after a purge, so a purge removes that app's grants and,
-like a data wipe, erases the keys it saved for itself. Backups carry the vault only in the
-encrypted secrets archive (skipped when no backup recipient is configured),
-and agents are guided to borrow keys through the vault rather than read them,
+like a data wipe, erases the keys it saved for itself; a restore that can't
+prove an id still names the same app only withdraws its grants, keeping every
+value. Backups carry the vault only in the secrets archive (skipped when no
+backup recipient is configured): encrypted by default, but a
+`--plaintext-secrets` backup holds every key in readable form. Agents are guided to borrow keys through the vault rather than read them,
 so values stay out of chat logs.
 
 Known limitation: app *browser* code cannot reach a value, but an app's

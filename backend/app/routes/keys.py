@@ -14,7 +14,7 @@
   calling from that token, so an app cannot borrow another app's grant.
 - A top-level agent that needs a key on a new site asks with the
   ``request_key`` control, which saves an owner card in its chat; the owner
-  answers there.
+  answers there or in Settings › Keys, which lists every waiting request.
 
 Validation and storage belong to the vault; this module authenticates callers
 and relays.
@@ -162,7 +162,7 @@ def _agent_changes(existing: dict, body: dict) -> list[str]:
 # -- the owner's view ---------------------------------------------------------
 
 @router.get("", dependencies=owner_only)
-async def list_keys() -> dict:
+async def list_keys(db: Session = Depends(get_db)) -> dict:
   try:
     keys = (await key_vault.vault_call("GET", "/keys"))["keys"]
     requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
@@ -171,7 +171,21 @@ async def list_keys() -> dict:
     keys, requests, available = [], [], False
   except key_vault.VaultRefused as exc:
     raise HTTPException(exc.status, exc.reason) from exc
+  _name_request_chats(db, requests)
   return {"available": available, "keys": keys, "requests": requests}
+
+
+def _name_request_chats(db: Session, requests: list[dict]) -> None:
+  """Give each agent request its chat's title (``chat_title``), or None when
+  that chat is gone, so Settings › Keys can say where it was asked."""
+  chat_ids = {request["chat_id"] for request in requests if request.get("chat_id")}
+  titles = dict(db.query(models.Chat.id, models.Chat.title).filter(
+    models.Chat.id.in_(chat_ids), models.Chat.deleted_at.is_(None),
+  ).all()) if chat_ids else {}
+  for request in requests:
+    chat_id = request.get("chat_id")
+    if chat_id:
+      request["chat_title"] = (titles[chat_id] or "Untitled chat") if chat_id in titles else None
 
 
 @router.get("/usage", dependencies=owner_only)
@@ -265,8 +279,7 @@ async def approve_request(
 
   Letting an app use a key is the owner's own decision, so agents are refused.
   """
-  if not is_owner_input_principal(principal):
-    raise HTTPException(403, "Only you can let an app use a key, from Settings › Keys.")
+  _refuse_unless_owners_own_input(principal)
   allowed = {k: body[k] for k in ("value", "inject", "sites", "ticket") if k in body}
   return await _relay("POST", f"/requests/{quote(request_id, safe='')}/approve", allowed,
                       caller=_caller(principal))
@@ -277,7 +290,11 @@ async def deny_request(
   request_id: str, body: dict = Body(default={}),
   principal: Principal = Depends(get_principal),
 ) -> dict:
-  """Refuse an ask; a ``ticket`` names the exact request the owner saw."""
+  """Refuse an ask; a ``ticket`` names the exact request the owner saw.
+
+  A refusal is the owner's answer about the key, so agents are refused.
+  """
+  _refuse_unless_owners_own_input(principal)
   allowed = {k: body[k] for k in ("ticket",) if k in body}
   return await _relay("POST", f"/requests/{quote(request_id, safe='')}/deny", allowed,
                       caller=_caller(principal))
@@ -285,7 +302,18 @@ async def deny_request(
 
 @router.delete("/requests/{request_id}", dependencies=[*owner_only, Depends(reject_cross_site)])
 async def forget_request(request_id: str, principal: Principal = Depends(get_principal)) -> dict:
+  """Remove a request, or let an asker the owner refused ask again: the
+  owner's own choice, never an agent's."""
+  _refuse_unless_owners_own_input(principal)
   return await _relay("DELETE", f"/requests/{quote(request_id, safe='')}", caller=_caller(principal))
+
+
+def _refuse_unless_owners_own_input(principal: Principal) -> None:
+  """Answering or removing a key request is the owner's own decision: an
+  agent could otherwise refuse another chat's request, close its card, or
+  undo the owner's refusal of an app."""
+  if not is_owner_input_principal(principal):
+    raise HTTPException(403, "Only you can answer or remove a key request, from Settings › Keys.")
 
 
 # -- the app handshake --------------------------------------------------------
@@ -296,8 +324,7 @@ async def request_key(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> dict:
-  """An app, or a top-level agent, asks to use a key; asking again reports
-  the current answer.
+  """An app asks to use a key; asking again reports the current answer.
 
   The answer is ``granted``, ``paused`` (an app the owner switched off on the
   key), ``pending`` or ``denied``. A granted asker wanting sites it lacks
@@ -307,9 +334,12 @@ async def request_key(
   """
   if principal.browser is not None:
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
-  payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   if principal.app_id is None:
-    return await agent_asks(payload, principal)
+    # An agent's ask is saved as a card in its chat, so it never waits where
+    # the owner can't answer it.
+    raise HTTPException(403, "Only apps ask here. An agent asks with the request_key tool, which shows "
+                        "the owner a card in its chat; you manage keys in Settings › Keys.")
+  payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
   app = db.query(models.App).filter(
     models.App.id == principal.app_id, models.App.deleted_at.is_(None),
   ).first()

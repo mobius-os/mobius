@@ -204,6 +204,16 @@ def _agent_auth(db):
   return {"Authorization": f"Bearer {token}"}
 
 
+def _agent_asks(db, ask, chat_id="chat-keys"):
+  """A top-level agent asks, as the request_key card route does for it."""
+  import asyncio
+
+  from app.deps import Principal
+  from app.routes.keys import agent_asks
+  principal = Principal(owner=db.query(models.Owner).first(), app_id=None, chat_id=chat_id)
+  return asyncio.run(agent_asks(dict(ask), principal))
+
+
 def _helper_auth(db):
   """A delegated helper's bearer, for a live delegation."""
   from app.chat_writer import create_chat
@@ -2012,21 +2022,28 @@ def test_a_top_level_agent_asks_by_card_in_its_chat(client, auth, db, vault, pus
   refused = client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent)
   assert refused.status_code == 403 and refused.json()["ask"] == "the request_key tool"
   ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
-  first = client.post("/api/keys/requests", headers=agent, json=ask)
-  assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps",
-                          "sites": [TILES], "reason": "Fetch map tiles"}, first.text
-  assert client.post("/api/keys/requests", headers=agent, json=ask).json()["status"] == "pending"
+  first = _agent_asks(db, ask)
+  assert first == {"status": "pending", "key": "maps", "id": "agent-maps",
+                   "sites": [TILES], "reason": "Fetch map tiles"}
+  assert _agent_asks(db, ask)["status"] == "pending"
   # The card waits in the agent's chat; nothing notifies the owner.
   assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
   [card] = client.get("/api/keys", headers=auth).json()["requests"]
   assert (card["requester"], card["app"], card["app_name"]) == ("agent", None, "Your agent")
-  # Answering is the owner's own decision.
+  # Answering, refusing and removing it are the owner's own decisions.
   assert client.post("/api/keys/requests/agent-maps/approve", headers=agent,
                      json={"ticket": card["ticket"], "sites": card["sites"]}).status_code == 403
+  # The server refuses before the vault, which refuses agents again.
+  for refused in (
+    client.post("/api/keys/requests/agent-maps/deny", headers=agent, json={"ticket": card["ticket"]}),
+    client.delete("/api/keys/requests/agent-maps", headers=agent),
+  ):
+    assert refused.status_code == 403 and "Only you can answer or remove" in refused.text
+  assert vault.list_requests()[0]["status"] == "pending"
   approved = client.post("/api/keys/requests/agent-maps/approve", headers=auth,
                          json={"ticket": card["ticket"], "sites": card["sites"]})
   assert approved.status_code == 200, approved.text
-  assert client.post("/api/keys/requests", headers=agent, json=ask).json() == {"status": "granted", "key": "maps"}
+  assert _agent_asks(db, ask) == {"status": "granted", "key": "maps"}
   assert client.get("/api/keys/use/maps/tiles.example.com/a.png", headers=agent).status_code == 200
 
 
@@ -2035,7 +2052,7 @@ def test_a_key_request_never_notifies_and_keeps_the_asking_chat(client, auth, db
   an app's over the app, so no request sends a push or a bell entry: each new
   ask only nudges an open shell to re-read the requests."""
   ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
-  client.post("/api/keys/requests", headers=_agent_auth(db), json=ask)
+  _agent_asks(db, ask)
   weather = _app(db, "weather")
   client.post("/api/keys/requests", headers=_app_auth(db, weather), json=ASK)
   assert pushes == [] and len(nudges) == 2
@@ -2046,8 +2063,7 @@ def test_a_key_request_never_notifies_and_keeps_the_asking_chat(client, auth, db
 def test_an_agents_partial_ask_waits_for_the_missing_site(client, auth, db, vault, pushes, nudges):
   vault.put_key("maps", {"value": DUMMY, "inject": ASK["inject"],
                          "grants": {"apps": [], "agents": True, "sites": [SITE]}})
-  answer = client.post("/api/keys/requests", headers=_agent_auth(db),
-                       json={"key": "maps", "reason": "Tiles too", "sites": [SITE, TILES]}).json()
+  answer = _agent_asks(db, {"key": "maps", "reason": "Tiles too", "sites": [SITE, TILES]})
   assert answer["status"] == "granted" and answer["sites_request"] == "pending"
   assert answer["sites_not_allowed"] == [TILES]
   assert pushes == [] and nudges == [{"type": "key_requests_changed"}]
@@ -2055,15 +2071,16 @@ def test_an_agents_partial_ask_waits_for_the_missing_site(client, auth, db, vaul
   assert request["sites"] == [TILES]
 
 
-def test_only_top_level_agents_and_apps_ask_by_card(client, auth, db, vault, pushes):
+def test_only_apps_ask_here_and_agents_ask_by_card(client, auth, db, vault, pushes):
+  """An agent's ask is saved as a card in its chat (the request_key tool), so
+  it never waits where the owner can't answer it; this route is for apps."""
   from app.browser_access import BrowserLineage
   from app.deps import Principal, get_principal
   from app.main import app as server
   ask = {"key": "maps", "reason": "x", "sites": [TILES]}
-  helper = client.post("/api/keys/requests", headers=_helper_auth(db), json=ask)
-  assert helper.status_code == 403 and "Delegated helpers" in helper.text
-  owner = client.post("/api/keys/requests", headers=auth, json=ask)
-  assert owner.status_code == 403 and "Settings › Keys" in owner.text
+  for headers in (_agent_auth(db), _helper_auth(db), auth):
+    refused = client.post("/api/keys/requests", headers=headers, json=ask)
+    assert refused.status_code == 403 and "request_key tool" in refused.text
   db_owner = db.query(models.Owner).first()
   server.dependency_overrides[get_principal] = lambda: Principal(
     owner=db_owner, app_id=None, chat_id="guest-chat", browser=BrowserLineage("g" * 32, "s" * 32))
@@ -2097,9 +2114,12 @@ def test_the_first_request_allowed_for_a_key_saved_ahead_sets_how_it_is_sent(cli
   })
   assert saved.status_code in (200, 201), saved.text
   headers = _app_auth(db, _app(db, "ahead")) if asker == "app" else _agent_auth(db)
-  asked = client.post("/api/keys/requests", headers=headers,
-                      json={**ASK, "key": "ahead", "sites": [SITE], "inject": QUERY_SLOT})
-  assert asked.status_code == 200, asked.text
+  ahead = {**ASK, "key": "ahead", "sites": [SITE], "inject": QUERY_SLOT}
+  if asker == "app":
+    asked = client.post("/api/keys/requests", headers=headers, json=ahead)
+    assert asked.status_code == 200, asked.text
+  else:
+    _agent_asks(db, {k: v for k, v in ahead.items() if k != "app_name"})
   [card] = client.get("/api/keys", headers=auth).json()["requests"]
   assert card["sets_inject"] is True and card["inject_kept"] is False
   assert card["inject"] == QUERY_SLOT

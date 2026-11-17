@@ -18,6 +18,8 @@ import stat
 import sys
 import tempfile
 import threading
+import time
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -232,9 +234,23 @@ def test_a_granted_app_can_ask_for_more_sites_for_itself_only(vault):
 def test_one_app_cannot_crowd_out_other_apps_requests(vault):
   for index in range(kv.MAX_REQUESTS_PER_APP):
     vault.request_access(9, {**ASK, "key": f"k{index}"})
-  with pytest.raises(kv.VaultError, match="This app has too many"):
+  with pytest.raises(kv.VaultError, match="This app has 10 key requests waiting"):
     vault.request_access(9, {**ASK, "key": "one-more"})
   assert vault.request_access(10, ASK)["status"] == "pending"
+
+
+def test_a_refusal_never_counts_against_the_limit_on_waiting_requests(vault):
+  """Only waiting requests count: the owner's refusals stand, but they never
+  keep an asker from asking for another key."""
+  for index in range(kv.MAX_REQUESTS_PER_APP):
+    vault.request_access(9, {**ASK, "key": f"k{index}"})
+    vault.deny_request(f"9-k{index}")
+  for index in range(kv.MAX_REQUESTS_PER_APP):
+    vault.request_for_agents(_agent_ask(key=f"a{index}"), actor=f"agent:c{index}")
+    vault.deny_request(f"agent-a{index}")
+  assert vault.request_access(9, {**ASK, "key": "one-more"})["status"] == "pending"
+  assert vault.request_for_agents(_agent_ask(key="one-more"), actor="agent:other")["status"] == "pending"
+  assert vault.request_access(9, {**ASK, "key": "k0"})["status"] == "denied"
 
 
 def test_an_app_learns_nothing_about_key_names_it_was_not_given(vault):
@@ -1891,7 +1907,7 @@ def test_a_waiting_request_answers_for_later_asks_and_says_what_approving_grants
 def test_the_owners_agents_together_hold_at_most_ten_open_requests(vault):
   for index in range(kv.MAX_REQUESTS_PER_APP):
     vault.request_for_agents(_agent_ask(key=f"k{index}"), actor=f"agent:c{index}")
-  with pytest.raises(kv.VaultError, match="Your agents have too many") as refused:
+  with pytest.raises(kv.VaultError, match="Your agents have 10 key requests waiting") as refused:
     vault.request_for_agents(_agent_ask(key="one-more"), actor="agent:other")
   assert refused.value.status == 429
   # Apps keep their own allowance.
@@ -1938,14 +1954,88 @@ def test_a_deleted_chat_takes_only_its_own_waiting_requests_with_it(vault, clien
   vault.deny_request("agent-tiles")
   vault.request_for_agents(_agent_ask(key="maps"), actor="agent:chat-2")
   vault.request_access(9, ASK)
-  refused = client.delete("/chats/chat-1/requests", headers={"X-Vault-Caller": "app:9"})
+  later = "2999-01-01T00:00:00Z"
+  refused = client.delete(f"/chats/chat-1/requests?before={later}", headers={"X-Vault-Caller": "app:9"})
   assert refused.status_code == 403
-  forgot = client.delete("/chats/chat-1/requests", headers={"X-Vault-Caller": "platform:chat-delete"})
+  by_agent = client.delete(f"/chats/chat-1/requests?before={later}", headers={"X-Vault-Caller": "agent:chat-2"})
+  assert by_agent.status_code == 403
+  unstamped = client.delete("/chats/chat-1/requests", headers={"X-Vault-Caller": "platform:chat-delete"})
+  assert unstamped.status_code == 400
+  forgot = client.delete(f"/chats/chat-1/requests?before={later}", headers={"X-Vault-Caller": "platform:chat-delete"})
   assert forgot.json() == {"forgotten": 1}
   assert {r["id"]: r["status"] for r in vault.list_requests()} == {
     "agent-tiles": "denied", "agent-maps": "pending", "9-maps": "pending",
   }
   assert "forgot request agents (chat deleted)" in vault.audit_path.read_text()
+
+
+def test_a_deleted_chat_withdraws_only_what_it_asked_before_its_deletion(vault):
+  """A withdrawal names when the chat was deleted. Whatever the chat asks
+  once recovered is newer, including a re-ask that joins its own request
+  still waiting, so a withdrawal that reaches the vault late leaves it."""
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-1")
+  vault.request_for_agents(_agent_ask(key="tiles"), actor="agent:chat-1")
+  deleted_at = datetime.now(timezone.utc).isoformat()
+  time.sleep(0.002)
+  vault.request_for_agents(_agent_ask(key="tiles"), actor="agent:chat-1")  # recovered, asks again
+  vault.request_for_agents(_agent_ask(key="roads"), actor="agent:chat-1")  # and asks anew
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-2")  # another chat joining asks nothing anew
+  assert vault.forget_chat("chat-1", before=deleted_at) == 1
+  assert sorted(r["id"] for r in vault.list_requests()) == ["agent-roads", "agent-tiles"]
+
+
+def test_only_the_owner_or_the_platform_answers_or_removes_a_request(vault, client):
+  """A refusal is the owner's answer about a key, and removing a request (a
+  refusal included) is the owner's choice or the platform's tidying: an agent
+  can neither, for its own chat's request or another's."""
+  vault.request_for_agents(_agent_ask(), actor="agent:chat-1")
+  vault.request_access(9, ASK)
+  vault.deny_request("9-maps")
+  for caller in ("agent:chat-2", "agent", "app:9"):
+    denied = client.post("/requests/agent-echo/deny", json={}, headers={"X-Vault-Caller": caller})
+    assert denied.status_code == 403, caller
+    for rid in ("agent-echo", "9-maps"):
+      removed = client.delete(f"/requests/{rid}", headers={"X-Vault-Caller": caller})
+      assert removed.status_code == 403, (caller, rid)
+  assert {r["id"]: r["status"] for r in vault.list_requests()} == {"agent-echo": "pending", "9-maps": "denied"}
+  withdrawn = client.delete("/requests/agent-echo", headers={"X-Vault-Caller": "platform:key-request"})
+  assert withdrawn.status_code == 200
+  assert client.delete("/requests/9-maps", headers={"X-Vault-Caller": "owner"}).status_code == 200
+
+
+def test_withdrawing_apps_keeps_the_keys_they_saved_for_themselves(vault):
+  """A restore that can't prove an id still names the same app withdraws
+  its grants and requests, never a value: a key the app saved for itself
+  becomes the owner's, and every id goes in one change."""
+  saved = vault.save_owned(9, "WEATHER_KEY", "dummy-weather-0123456789")["name"]
+  vault.put_key("shared", {"value": "dummy-shared-0123456789", "inject": dict(kv.DEFAULT_INJECT),
+                           "grants": _grants(apps=_apps(9) + _apps(10) + _apps(11))})
+  vault.request_access(10, ASK)
+  withdrawn = vault.withdraw_apps([9, 10], actor="platform:restore", why="restore")
+  assert sorted(withdrawn["keys"]) == sorted([saved, "shared"]) and withdrawn["requests"] == 1
+  keys = {key["name"]: key for key in vault.list_keys()}
+  assert keys[saved]["grants"]["apps"] == [] and not keys[saved].get("origin")
+  assert [g["id"] for g in keys["shared"]["grants"]["apps"]] == [11]
+  assert vault.reveal(saved, ("owner", "")) == "dummy-weather-0123456789"
+  assert vault.list_requests() == []
+
+
+def test_withdrawing_apps_changes_nothing_when_it_cannot_be_saved(vault, monkeypatch):
+  """Every id goes in one change, so a store that can't be written leaves
+  every grant and request as it was, rather than some ids withdrawn."""
+  vault.put_key("shared", {"value": "dummy-shared-0123456789", "inject": dict(kv.DEFAULT_INJECT),
+                           "grants": _grants(apps=_apps(9) + _apps(10))})
+  vault.request_access(10, ASK)
+
+  def disk_full(_payload):
+    raise OSError(28, "No space left on device")
+  monkeypatch.setattr(vault, "_write_store", disk_full)
+  with pytest.raises(OSError):
+    vault.withdraw_apps([9, 10], why="restore")
+  def shared_apps(store):
+    return [g["id"] for k in store.list_keys() if k["name"] == "shared" for g in k["grants"]["apps"]]
+  assert shared_apps(vault) == [9, 10] and shared_apps(kv.Vault(vault.dir)) == [9, 10]
+  assert [r["id"] for r in vault.list_requests()] == ["10-maps"]
 
 
 def test_an_agent_asks_for_sites_over_the_socket(vault, client):
@@ -2021,10 +2111,11 @@ def test_asking_for_what_is_already_allowed_keeps_a_request_for_other_sites(vaul
   assert again_other["sites_request"] == answered and not again_other.get("created")
 
 
-def test_a_request_the_grant_now_covers_is_settled_by_the_next_ask(vault):
+def test_a_request_the_grant_now_covers_is_settled_when_the_grant_widens(vault):
   """Once the owner allows the other site some other way, nothing is left to
-  answer, and the next ask clears the request."""
+  answer: the change that widens the grant settles the request itself."""
   _ask_echo(vault, "app", [OTHER_SITE])
+  assert any(r["id"] == f"{WEATHER}-echo" for r in vault.list_requests())
   vault.put_key("echo", {"grants": _grants(apps=_apps(WEATHER, sites=[ECHO_SITE, OTHER_SITE]))})
-  assert _ask_echo(vault, "app", [ECHO_SITE])["status"] == "granted"
   assert all(r["id"] != f"{WEATHER}-echo" for r in vault.list_requests())
+  assert _ask_echo(vault, "app", [ECHO_SITE])["status"] == "granted"
