@@ -503,6 +503,16 @@ most 16384.
 - Every block is captioned "From this conversation": its title, facts and
   badges are the agent's words, not status the app verified. The caption is
   hidden only while a passive session shows the app's own confirmation rows.
+- `"status_placement": "footer"` opts an inline block with an `action` and
+  `"expand": false` in to a compact card: there is no header row, and the
+  title, its mark and badges sit in the footer beside the control, under the
+  app's name, which the host always draws there. The footer keeps its height
+  while the control is hidden (for example while your title reports work),
+  your rows' `links` are drawn in that footer in place of the control, and
+  the "From this conversation" caption is kept for assistive technology only.
+  Only the block sets this; an app report cannot. On any other block (no
+  `action`, an inline view, or not `"interaction": "inline"`) it is ignored,
+  as it is by older hosts: they draw the ordinary card.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -526,7 +536,17 @@ runs a hidden, inert instance of the app; it cannot navigate, open chats or
 apps, or use other host requests, and it never reads or writes the app's saved
 shell place. At most 3 idle hidden instances run per app (the blocks nearest
 the viewport, measured as the page scrolls); further blocks stay static with
-an explicit open, and an instance that reports `retain` always keeps its frame.
+an explicit open unless they have a saved display (below), and an instance that reports `retain` always keeps its frame.
+An idle instance is released when its block leaves the viewport, but the block
+keeps showing your last complete (not `loading`) report, read-only, for the
+same block, app revision, chat and `latest` verdict. Scrolling back does not
+start your app again; it reads again on the next entry after a refresh hint it
+did not answer, or when that saved display no longer applies. A tap on a
+saved action starts a new document and sends `activate` only once that
+document has reported the action as available; Confirm, Cancel and asks are
+never sent from a saved display. A tapped block gets a hidden instance at
+once, even when the idle ones are taken. If the block leaves the viewport
+area before that instance is ready, the tap is dropped, never sent later.
 A view the reader opened in a static block stays open until they close it,
 even if a slot frees up. Module startup and
 session hydration must be read-only. The host draws every control; the app
@@ -559,7 +579,9 @@ same app and that `intent` (check `intent` before relying on `latest` as
 `false` (in a new `app-block-init`) as soon as a newer one appears. Use
 `chatId` to scope what the block shows to that chat's own data, so a block
 printed in one chat can never act on another chat's records; use `latest` to
-let only the newest block of a kind stay live. The host also posts
+let only the newest block of a kind stay live. The host does not lock older
+blocks itself: their controls still send events, so report them `hidden` or
+`open` when your app wants only the newest one to act. The host also posts
 window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
@@ -579,6 +601,7 @@ window messages; read them with `subscribe` or a `message` listener that checks
   settled) or `visible` (the tab became visible again). It is sent only to a
   mounted document of a visible chat, carries no data and grants nothing.
   Read cheaply (local storage); leave network checks to an owner action.
+  The document is not reloaded for it; report again if your state changed.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -697,6 +720,12 @@ included.
   `chat.blocks.passive`, accepted by the owner and applied; without it the host
   neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
+- `loading: true`: this report is an incomplete read, not an empty result
+  (for example while you read local storage after a refresh). The host keeps
+  showing your last complete report and sends no owner event until a report
+  without it arrives, so always follow up with `loading: false` (or omit it),
+  including when the read failed, or the failure stays hidden behind the old
+  display. Older hosts ignore it and draw the report as it is.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
 - `retain: true` while you own a confirmation, an operation in progress or an

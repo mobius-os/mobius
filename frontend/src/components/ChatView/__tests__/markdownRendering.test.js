@@ -14,7 +14,7 @@ const { default: InlineContent } = await vite.ssrLoadModule(
 const { BlockToken } = await vite.ssrLoadModule(
   '/src/components/ChatView/markdown/blocks.jsx',
 )
-const { StandardMarkdown, ProgressiveMarkdown } = await vite.ssrLoadModule(
+const { StandardMarkdown } = await vite.ssrLoadModule(
   '/src/components/ChatView/markdown/BlockRenderer.jsx',
 )
 
@@ -63,11 +63,11 @@ test('app blocks render only where the caller opts in, including nested containe
       action: { label: 'Send', intent: 'send:a' } }) + '\n```'
     const render = (Component, props) => renderToStaticMarkup(React.createElement(QueryClientProvider,
       { client: new QueryClient() }, React.createElement(Component, { text: fence, ...props })))
-    for (const Component of [StandardMarkdown, ProgressiveMarkdown]) {
-      const plain = render(Component, {})
+    for (const isStreaming of [false, true]) {
+      const plain = render(StandardMarkdown, { isStreaming })
       assert.match(plain, /<pre[^]*&quot;app&quot;:&quot;example&quot;/)
       assert.doesNotMatch(plain, /md-app-block/)
-      const owned = render(Component, { allowAppBlocks: true })
+      const owned = render(StandardMarkdown, { allowAppBlocks: true, isStreaming })
       assert.match(owned, /class="md-app-block"/)
       assert.doesNotMatch(owned, /<pre/)
     }
