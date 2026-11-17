@@ -562,3 +562,75 @@ def test_conflict_resolver_chat_resume_restarts_the_stalled_resolver(client, aut
   assert resumed.status_code == 200 and resumed.json()["started"] is True
   assert opened.status_code == 200
   assert calls == ["resume", "create"]
+
+
+def test_overlay_finish_requires_owner(client):
+  response = client.post(
+    "/api/platform/overlay-finish", json={"target_sha": "a" * 40},
+  )
+  assert response.status_code == 401
+
+
+def test_overlay_finish_answers_admission_with_its_operation(client, auth, monkeypatch):
+  captured = {}
+
+  async def fake_finish(**request):
+    captured.update(request)
+    return {
+      "plan_id": "b" * 64, "target_sha": request["target_sha"],
+      "image_digest": None, "phase": "preparing", "active": True,
+      "error": None, "updated_at": 1.0, "operation": "overlay_finish",
+      "result": None,
+    }
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.finish_platform_overlay_update", fake_finish,
+  )
+  response = client.post(
+    "/api/platform/overlay-finish", headers=auth,
+    json={"target_sha": "a" * 40, "retry_operation_id": "b" * 64},
+  )
+
+  assert response.status_code == 202
+  assert response.json()["plan_id"] == "b" * 64
+  assert response.json()["operation"] == "overlay_finish"
+  assert captured == {"target_sha": "a" * 40, "retry_operation_id": "b" * 64}
+
+
+def test_overlay_finish_refusal_names_its_reason(client, auth, monkeypatch):
+  from app.platform_update import PlatformUpdateError
+
+  reasons = iter([
+    "Stage every intended resolution before continuing the update.",
+    "platform_update_in_progress",
+  ])
+
+  async def refuse(**_request):
+    raise PlatformUpdateError(next(reasons))
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.finish_platform_overlay_update", refuse,
+  )
+  unstaged = client.post(
+    "/api/platform/overlay-finish", headers=auth, json={"target_sha": "a" * 40},
+  )
+  busy = client.post(
+    "/api/platform/overlay-finish", headers=auth, json={"target_sha": "a" * 40},
+  )
+
+  assert unstaged.status_code == 409
+  assert unstaged.json()["detail"] == {
+    "code": "overlay_finish_refused",
+    "message": "Stage every intended resolution before continuing the update.",
+  }
+  assert busy.status_code == 409
+  assert busy.json()["detail"]["code"] == "platform_update_in_progress"
+  assert "repeat this same request shortly" in busy.json()["detail"]["message"]
+
+
+def test_overlay_finish_rejects_a_malformed_operation(client, auth):
+  response = client.post(
+    "/api/platform/overlay-finish", headers=auth,
+    json={"target_sha": "a" * 40, "retry_operation_id": "not-an-operation"},
+  )
+  assert response.status_code == 422
