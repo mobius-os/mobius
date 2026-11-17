@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import re
 import sys
 import threading
@@ -849,7 +850,57 @@ def test_model_prefs_default_is_curated(client, auth):
   from app import providers
   res = client.get("/api/owner/model-prefs", headers=auth)
   assert res.status_code == 200
-  assert res.json() == {"hidden_ids": providers.hidden_model_ids(None)}
+  assert res.json() == {"hidden_ids": providers.hidden_model_ids(None), "recent_ids": [], "selected_agent": None}
+
+
+def test_model_prefs_seed_empty_history_from_explicit_global_pick(client, auth, db):
+  """Upgraded owners see their last saved choice first, not a runtime default."""
+  from app import models, providers
+
+  providers.update_agent_settings(
+    os.environ["DATA_DIR"],
+    lambda current: {**current, "provider": "claude", "model": "claude-opus-4-7"},
+  )
+  owner = db.query(models.Owner).first()
+  owner.model_prefs_json = {"hidden_ids": ["custom-hidden"]}
+  db.commit()
+
+  response = client.get("/api/owner/model-prefs", headers=auth)
+  assert response.status_code == 200
+  assert response.json() == {
+    "hidden_ids": ["custom-hidden"], "recent_ids": ["claude-opus-4-7"],
+    "selected_agent": {"provider": "claude", "model": "claude-opus-4-7", "effort": "medium"},
+  }
+  db.refresh(owner)
+  assert owner.model_prefs_json == {"hidden_ids": ["custom-hidden"]}
+
+  owner.model_prefs_json = {"hidden_ids": ["custom-hidden"], "recent_ids": ["gpt-5.4"]}
+  db.commit()
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == ["gpt-5.4"]
+
+
+def test_app_picker_can_read_saved_agent_without_reading_owner_settings(client, auth, db, tmp_path):
+  from app import models, providers
+  from app.auth import create_app_token
+
+  owner = db.query(models.Owner).first()
+  app = models.App(name="Picker test", slug="picker-test", source_dir=str(tmp_path / "picker-test"))
+  db.add(app)
+  db.commit()
+  providers.update_agent_settings(os.environ["DATA_DIR"], lambda current: {
+    **current, "provider": "codex", "model": "gpt-5.4", "effort": "high",
+    "unrelated_setting": "not-for-apps",
+  })
+  token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce)
+  headers = {"Authorization": f"Bearer {token}"}
+  response = client.get("/api/owner/model-prefs", headers=headers)
+  assert response.status_code == 200
+  assert response.json()["selected_agent"] == {
+    "provider": "codex", "model": "gpt-5.4", "effort": "high",
+  }
+  assert "unrelated_setting" not in response.text
+  assert client.get("/api/settings", headers=headers).status_code == 403
+  assert client.patch("/api/owner/model-prefs", headers=headers, json={"hidden": {}}).status_code == 403
 
 
 def _hide(client, auth, changes):
@@ -867,11 +918,11 @@ def test_model_prefs_change_applies_to_the_curated_default_set(client, auth, db)
   res = _hide(client, auth, {defaults[0]: False, "test-extra-model": True})
   assert res.status_code == 200
   expected = [*defaults[1:], "test-extra-model"]
-  assert res.json() == {"hidden_ids": expected}
+  assert res.json() == {"hidden_ids": expected, "recent_ids": []}
   owner = db.query(models.Owner).first()
   assert owner.model_prefs_json == {"hidden_ids": expected}
   assert client.get("/api/owner/model-prefs", headers=auth).json() == {
-    "hidden_ids": expected,
+    "hidden_ids": expected, "recent_ids": [], "selected_agent": None,
   }
 
 
@@ -884,11 +935,11 @@ def test_model_prefs_showing_every_default_saves_an_explicit_empty_set(client, a
   defaults = providers.hidden_model_ids(None)
   res = _hide(client, auth, {model_id: False for model_id in defaults})
   assert res.status_code == 200
-  assert res.json() == {"hidden_ids": []}
+  assert res.json() == {"hidden_ids": [], "recent_ids": []}
   db.refresh(owner)
   assert owner.model_prefs_json == {"hidden_ids": []}
   assert client.get("/api/owner/model-prefs", headers=auth).json() == {
-    "hidden_ids": [],
+    "hidden_ids": [], "recent_ids": [], "selected_agent": None,
   }
 
 
@@ -900,6 +951,37 @@ def test_model_prefs_one_change_keeps_every_other_saved_choice(client, auth):
   assert "page-b-model" in res.json()["hidden_ids"]
   assert "page-a-model" not in res.json()["hidden_ids"]
   assert res.json()["hidden_ids"].count("page-b-model") == 1
+
+
+def test_visibility_change_preserves_confirmed_model_recency(client, auth, db):
+  from app import models
+
+  owner = db.query(models.Owner).first()
+  owner.model_prefs_json = {"recent_ids": ["claude-opus-4-7"]}
+  db.commit()
+  response = _hide(client, auth, {"page-model": True})
+  assert response.status_code == 200
+  assert response.json()["recent_ids"] == ["claude-opus-4-7"]
+  db.refresh(owner)
+  assert owner.model_prefs_json["recent_ids"] == ["claude-opus-4-7"]
+
+
+def test_distinct_chat_choices_merge_recent_models_under_owner_lock(client, auth):
+  """Different chat transition locks must not lose owner MRU updates."""
+  from app.database import SessionLocal
+  from app.routes.chats import _remember_owner_model_choice
+
+  model_ids = [f"model-{n}" for n in range(8)]
+
+  def remember(model_id):
+    with SessionLocal() as session:
+      _remember_owner_model_choice(session, model_id, "claude")
+
+  with ThreadPoolExecutor(max_workers=8) as pool:
+    list(pool.map(remember, model_ids))
+  recent = client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"]
+  assert set(recent) == set(model_ids)
+  assert len(recent) == len(model_ids)
 
 
 def test_model_prefs_concurrent_changes_all_land(client, auth):

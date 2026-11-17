@@ -202,7 +202,7 @@ export function visibleGoalTasks(goalPlan) {
 export function progressRailViewModel(
   goal,
   buildPhases,
-  { turnActive = false } = {},
+  { turnActive = false, directHelpersInTray = false } = {},
 ) {
   const items = []
   const presentation = normalizeGoalPresentation(goal)
@@ -214,7 +214,7 @@ export function progressRailViewModel(
     const planned = Number.isInteger(completed) && Number.isInteger(total)
     const activeTasks = visibleGoalTasks(goalPlan)
     const activeLabels = activeTasks.map(progressLabel).filter(Boolean)
-    const statusLabel = goalHelperWaitingLabel(presentation, { turnActive }) || goalStatusLabel(presentation)
+    const statusLabel = goalHelperWaitingLabel(presentation, { turnActive, directHelpersInTray }) || goalStatusLabel(presentation)
     const progressSummary = planned ? `${completed}/${total}` : goalObjective
     items.push({
       key: 'goal',

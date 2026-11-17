@@ -312,6 +312,10 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
     json={"value": "purge-me"},
   ).status_code == 204
   secret_dir = Path(get_settings().data_dir) / "app-secrets" / str(app_id)
+  # An app model provider's engine home (threads, transcripts) is id-keyed.
+  engine_home = Path(get_settings().data_dir) / "cli-auth" / f"app-{app_id}"
+  (engine_home / "claude").mkdir(parents=True)
+  (engine_home / "claude" / "transcript.jsonl").write_text("{}")
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
 
   # Age the tombstone past the TTL, then a list call sweeps it.
@@ -325,6 +329,7 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation):
   assert db.query(models.App).filter(models.App.id == app_id).first() is None
   assert not data_file.exists()
   assert not secret_dir.exists()
+  assert not engine_home.exists()
 
 
 def test_provider_app_purge_detaches_but_preserves_native_project(

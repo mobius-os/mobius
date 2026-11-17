@@ -1,9 +1,6 @@
 /* Project disjoint source spans through ONE full Markdown parse. Never lex a suffix. */
-import { Marked } from 'marked'
-import { mathTokens } from './mathTokens.js'
+import { md } from './markdownParser.js'
 
-const md = new Marked()
-md.use(mathTokens())
 const segmenter = typeof Intl !== 'undefined' && Intl.Segmenter
   ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null
 const reference = /^&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});/

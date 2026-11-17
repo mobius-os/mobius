@@ -860,6 +860,35 @@ def require_installation_owner_control(principal: Principal) -> None:
   raise HTTPException(403, "Only the installation owner can manage this access.")
 
 
+def require_owner_or_full_access_control(
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """``require_installation_owner_control``, or a shared-browser guest (or
+  their top-level work) whose grant has Full access, read on every request.
+
+  The only gate Full access lifts, on routes a test pins (see the Full
+  access rule in ARCHITECTURE.md). No route on it may mint or use a
+  credential, spend or choose the owner's credit or provider, make the
+  owner's own decision, manage sharing, forge the owner's records, or start
+  work under the owner's lineage that would outlive the grant. A delegated
+  helper's bearer never passes it."""
+  if principal.delegation_id is None and principal.browser is not None:
+    with SessionLocal() as db:
+      if browser_access.has_full_access(db, principal.browser, principal.owner.id):
+        return
+  require_installation_owner_control(principal)
+
+
+def get_current_owner_for_full_access_control(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """``get_current_owner_for_lifecycle_control`` behind
+  ``require_owner_or_full_access_control``."""
+  owner = _owner_principal_or_403(principal)
+  require_owner_or_full_access_control(principal)
+  return owner
+
+
 def get_owner_or_delegated_owner_for_app_token(
   principal: Principal = Depends(get_principal),
 ) -> Principal:
