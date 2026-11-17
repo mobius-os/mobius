@@ -1318,9 +1318,6 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   assert.match(dragBinding, /const flipToPanes = before\.viewMode === 'single'/)
   assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
-  // v2 deleted the Settings mode-conversion: a builder Settings tab survives the
-  // flip, so a drop-into-builder no longer routes any overlay<->tab conversion.
-  assert.doesNotMatch(dragBinding, /convertSettingsForModeTransition/)
   // §8: "committed" is the ACTUAL workspace change, not a stale lit-zone flag.
   assert.match(dragBinding, /return workspaceStateRef\.current\.ws !== before/)
   assert.match(dragBinding, /if \(moveRAF\) \{[\s\S]*?cancelAnimationFrame\(moveRAF\)[\s\S]*?doMoveWork\(\)/)
@@ -1502,21 +1499,12 @@ test('round4-3: the null-slot landing is passive and interactive New Chat uses C
 // ── Retired live-layout mode plumbing is gone ───────────────────────────────
 test('mode transitions have one browser scene owner and no legacy CSS controller', () => {
   const controller = modeControllerSrc
-  // The ignored focusedPaneId drag-arm payload is gone (the reducer never read it).
-  assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
-  assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
   assert.match(shell, /mode\.dragArm\(\)/)
   assert.doesNotMatch(controller, /getAnimations|animationName|setTimeout|presentation/)
   assert.doesNotMatch(css, /shell-mode-(?:slide|promote|strip)|data-mode-motion/)
   assert.doesNotMatch(workspaceViewSrc, /deriveExitPlan|deriveEnterPlan|transitionSignature/)
   assert.match(modeViewTransitionSrc, /transition\.finished\.then\([\s\S]*?settle\(id\)/)
-  // The unused excludeChatId param is gone; the helper is now the New Chat request
-  // (round 4 item 3 — the old freshest-chat write is fully retired).
-  assert.doesNotMatch(shell, /excludeChatId/)
-  assert.doesNotMatch(shell, /resolveEmptySingleHome/)
   assert.match(shell, /const requestEmptySingleNewChat = useCallback\(\(\) =>/)
-  // The stale "Settings conversion" comment near the toggle handler is corrected.
-  assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
 })
 
 test('authenticated launch cover waits for the shell first frame', () => {

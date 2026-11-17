@@ -71,14 +71,14 @@ test('picker exposes configured providers without leaking unavailable registry r
   expect(chat?.id).toBeTruthy()
   await openPicker(page, chat.id)
 
-  const configuredRows = page.locator('button.csp-row:not([disabled])')
+  const configuredRows = page.locator('button.csp-row__model-button:not([disabled])')
     .filter({ hasText: 'OpenAI Codex' })
   await expect(configuredRows).toHaveCount(2)
 
   // If Claude happens to be the owner's saved provider, its one selected row
   // may remain for context. The other registry rows must stay hidden and the
   // retained row must be disabled and clearly marked unavailable.
-  const unavailableRows = page.locator('button.csp-row').filter({ hasText: 'Claude Code' })
+  const unavailableRows = page.locator('button.csp-row__model-button').filter({ hasText: 'Claude Code' })
   const unavailableCount = await unavailableRows.count()
   expect(unavailableCount).toBeLessThanOrEqual(1)
   if (unavailableCount === 1) {
@@ -150,7 +150,7 @@ test('model and effort choices stay interactive while saves remain ordered', asy
 
   await openPicker(page, chat.id)
 
-  const rows = page.locator('button.csp-row').filter({ hasText: providerLabel })
+  const rows = page.locator('button.csp-row__model-button').filter({ hasText: providerLabel })
   await expect(rows).toHaveCount(3)
   const first = rows.filter({ hasText: 'Test model 1' })
   const second = rows.filter({ hasText: 'Test model 2' })

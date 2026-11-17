@@ -418,6 +418,7 @@ export default function ChatView({
   builtAppsReady = false,
   onOpenApp,
   onInternalNav,
+  onOpenProviderSettings,
   onMessageStart,
   onOwnerActivity,
   // True while this chat is filed under Archived; the notice offers Restore.
@@ -2095,10 +2096,7 @@ export default function ChatView({
       // The rows have now genuinely left `chat.pending_messages`, so retire the
       // tray entries the deferred-cut window kept durably queued but hidden.
       // The cut is the one place that owns the hand-off for both providers.
-      for (const msg of steeredMessages) {
-        const cid = cidOf(msg)
-        if (cid != null) pendingQueue.cancelByCid(cid)
-      }
+      pendingQueue.completeByCid(steeredMessages.map(cidOf))
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
       // This event is the backend's authoritative transcript commit. Refresh
       // the shell's chat list here so a deferred steer advances drawer recency
@@ -4571,8 +4569,10 @@ export default function ChatView({
       )
       const data = await jsonOrThrow(res, 'Queued-message edit failed')
       if (data.updated && Array.isArray(data.pending_messages)) {
-        // Reconcile the edited text from server truth.
-        pendingQueue.hydrate(data.pending_messages)
+        // This edit confirms only its own row, not the pre-cut snapshot of
+        // siblings. A concurrent steer must not be undone by that old list.
+        const serverMsg = data.pending_messages.find(row => cidOf(row) === cid)
+        if (serverMsg) pendingQueue.confirmQueued(cid, { serverMsg })
         return 'saved'
       }
       // updated:false — a racing promotion or cancel already pulled this row
@@ -6640,6 +6640,7 @@ export default function ChatView({
                   embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={mergeChatInfo}
+                onOpenProviderSettings={onOpenProviderSettings}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
