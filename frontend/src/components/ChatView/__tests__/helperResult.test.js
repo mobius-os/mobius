@@ -21,18 +21,18 @@ test('a settled helper is one quiet row with how it ended and how long it took',
   const html = render()
   assert.match(html, /chat__helper-row/)
   assert.doesNotMatch(html, /chat__helper-working/)
-  assert.match(html, /Opus 4.8 · Helper finished/)
+  assert.match(html, /Opus 4.8 · Finished/)
   assert.match(html, /1m 38s/)
   assert.match(html, /chat__subagent-dot--done/)
   assert.match(html, /aria-label="Review: [^"]*Open its conversation"/)
 })
 
 test('a helper is tagged with the model name the picker shows, or its raw id when unnamed', () => {
-  assert.match(render(), /Opus 4\.8 · Helper finished/)
+  assert.match(render(), /Opus 4\.8 · Finished/)
   assert.doesNotMatch(render(), /claude-opus-4-8/)
-  assert.match(render({ provider: 'mobius', model: 'flow' }), /Flow \(GLM 5\.3 Flash\) · Helper finished/)
-  assert.match(render({ model: 'claude-opus-9' }), /Claude · claude-opus-9 · Helper finished/)
-  assert.match(render({ provider: 'codex', model: null }), /Codex · Helper finished/)
+  assert.match(render({ provider: 'mobius', model: 'flow' }), /Flow \(GLM 5\.3 Flash\) · Finished/)
+  assert.match(render({ model: 'claude-opus-9' }), /Claude · claude-opus-9 · Finished/)
+  assert.match(render({ provider: 'codex', model: null }), /Codex · Finished/)
 })
 
 test('the row never shows the result text or claims what the agent did with it', () => {
@@ -52,7 +52,7 @@ test('a helper paused on its question waits for its coordinating agent, not the 
   const html = render({ status: 'needs_input' })
   assert.match(html, /· Waiting for coordinating agent/)
   assert.doesNotMatch(html, /Needs an answer|Waiting for you/)
-  assert.doesNotMatch(html, /Helper finished|Failed|Stopped/)
+  assert.doesNotMatch(html, /Finished|Failed|Stopped/)
   assert.doesNotMatch(html, /chat__subagent-dot--(done|failed)/)
   assert.doesNotMatch(html, /chat__helper-working/)
 })

@@ -35,6 +35,9 @@ class _Provider:
   def build_env(self, **_kwargs):
     return {}
 
+  def resolve_selection(self, model, effort):
+    return model, effort
+
 
 async def _run_turn(
   monkeypatch, provider_id: str, provider_name: str, *, retired: bool,
