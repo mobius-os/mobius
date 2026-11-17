@@ -212,13 +212,17 @@ export default function useDialogFocus({
 
   // A local dialog's blocked area may change while it stays open: a helper
   // preview docks beside a wide chat and covers a narrow one. Swapping the
-  // boundary only re-inerts; it never redoes focus capture and restore. Focus
-  // that the new block would strand moves into the dialog.
+  // boundary only re-inerts; it never redoes focus capture and restore. A
+  // branch holding a dialog opened since (a chat summary over the docked
+  // preview) stays live: blocking it would freeze that dialog under this one.
+  // Focus that the new block would strand moves into the dialog.
   useEffect(() => {
     const blocked = blockedRef.current
     if (!blocked || blocked.boundaryRef === inertBoundaryRef) return
     const { container } = blocked
+    const newer = dialogStack.slice(dialogStack.findIndex(entry => entry.container === container) + 1)
     const next = blockedElements(container, modal, inertBoundaryRef)
+      .filter(element => !newer.some(entry => element.contains(entry.container)))
     const active = document.activeElement
     const stranded = !!active && !container.contains(active) && next.some(element => element.contains(active))
     next.forEach(holdInert)

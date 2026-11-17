@@ -4,7 +4,7 @@
    width are stubbed; no backend or browser layout is involved. */
 import { after, afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { act, useRef } from 'react'
+import { act, useRef, useState } from 'react'
 import { click, h, mount, unmountAll } from './mountedRender.js'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
@@ -47,8 +47,9 @@ const rowNamed = (root, name) => root.querySelectorAll('button').find(node => no
 const closeButton = () => dialogs()[0].querySelectorAll('button').find(node => node.getAttribute('aria-label') === 'Close helper conversation')
 const flush = () => act(async () => {})
 
-function mountPane(width, { transcript = [], foot = [], subagent = null } = {}) {
+function mountPane(width, { transcript = [], foot = [], subagent = null, panel = null } = {}) {
   const view = mount(h(HelperPreviewProvider, null, h('div', { className: 'chat' },
+    panel,
     h('div', { className: 'chat__scroll' },
       transcript.map(event => h(HelperRow, { key: event.id, event, chatId: 'parent' })),
       subagent && h(SubagentChips, { subagent, chatId: 'parent' })),
@@ -150,6 +151,38 @@ for (const [caller, options, rowFor] of [
     assert.ok(document.activeElement === draft, 'closing returns focus to the row that opened this helper')
   })
 }
+
+// A chat-level panel such as the chat summary: modal, opened on demand.
+let openPanel = () => {}
+function ChatPanel() {
+  const [shown, setShown] = useState(false)
+  openPanel = () => setShown(true)
+  return shown ? h(ChatPanelDialog) : null
+}
+function ChatPanelDialog() {
+  const containerRef = useRef(null)
+  const closeRef = useRef(null)
+  useDialogFocus({ containerRef, initialFocusRef: closeRef, onClose: () => {} })
+  return h('div', { className: 'chat-summary__overlay' },
+    h('div', { ref: containerRef, role: 'dialog', 'aria-label': 'Chat summary' },
+      h('button', { ref: closeRef, type: 'button' }, 'Close summary')))
+}
+
+test('narrowing the pane never blocks a chat panel opened over the docked preview', async () => {
+  const { pane, resize } = mountPane(1200, { transcript: [helper('one', 'Survey')], panel: h(ChatPanel) })
+  click(rowNamed(pane, 'Survey'))
+  await flush()
+  act(() => openPanel())
+  await flush()
+  const summary = pane.querySelector('.chat-summary__overlay')
+  const summaryClose = summary.querySelector('button')
+  assert.ok(document.activeElement === summaryClose, 'the summary takes focus over the docked preview')
+  assert.equal(pane.querySelector('.helper-convo__overlay').inert, true, 'the summary blocks the preview')
+  await resize(900)
+  assert.notEqual(summary.inert, true, 'the narrowed preview leaves the newer summary usable')
+  assert.equal(pane.querySelector('.chat__scroll').inert, true, 'while still covering the rest of its chat')
+  assert.ok(document.activeElement === summaryClose, 'focus stays in the summary')
+})
 
 // A local dialog in another workspace pane, standing in for any pane-scoped
 // dialog (an update review, an image lightbox).
