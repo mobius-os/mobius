@@ -4,13 +4,13 @@ import useKeyRequestCard from './useKeyRequestCard.js'
 
 /**
  * The wrapper carries the key answer guard (useKeyAnswerGuard.js): it hears
- * every press on the card and tracks where the card sits, so Submit wakes
- * only once the card has been still and untouched for a moment.
+ * every press and key on the card and tracks where the card sits, so Submit
+ * wakes only once the card has been seen, still and untouched for a moment.
  */
 export default function KeyQuestionCard({ keyRequest, ...props }) {
   const keyCard = useKeyRequestCard(keyRequest, { live: !props.answeredMap && !props.disabled })
   return (
-    <div ref={keyCard.guard.cardRef} onPointerDownCapture={keyCard.guard.onPressCapture}>
+    <div {...keyCard.guard.cardProps}>
       <QuestionCard {...props} keyCard={keyCard} />
     </div>
   )

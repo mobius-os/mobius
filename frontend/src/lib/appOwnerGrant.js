@@ -6,7 +6,6 @@
 // grant, it just repeats its normal request afterwards.
 import { api } from '../api/client.js'
 
-export const OWNER_GRANT_ARM_MS = 500
 const MAX_BODY_CHARS = 64 * 1024
 const MAX_SCOPE_KEYS = 16
 const MAX_SCOPE_VALUE_CHARS = 256

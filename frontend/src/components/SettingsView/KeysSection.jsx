@@ -12,7 +12,7 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
   BEARER, relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
-  REQUESTS_SHOWN,
+  REQUESTS_SHOWN, VAULT_DOWN,
 } from '../../lib/keysSettingsText.js'
 import KeyRequest from './KeyRequest.jsx'
 import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
@@ -82,7 +82,7 @@ function QuietRow({ children }) {
  */
 function summaryOf(data) {
   if (!data) return { title: 'Checking…', detail: 'Apps borrow a key without ever seeing it' }
-  if (!data.available) return { title: "The key vault isn't running", detail: 'A restart usually brings it back' }
+  if (!data.available) return { title: 'The key vault isn’t running', detail: 'A restart usually brings it back' }
   const keys = data.keys || []
   if (keys.length === 0) return { title: 'No keys yet', detail: 'Apps borrow a key without ever seeing it' }
   const title = `${keys.length} ${keys.length === 1 ? 'key' : 'keys'}`
@@ -152,7 +152,7 @@ export function KeysPage({ onOpenKey, onAddKey }) {
       </p>
       {keysQuery.error && <Alert color="danger" variant="soft" description={keysQuery.error.message} />}
       {data && !data.available && (
-        <Alert color="warning" variant="soft" description="The key vault isn't running. It starts with Möbius; a restart usually brings it back." />
+        <Alert color="warning" variant="soft" description={VAULT_DOWN} />
       )}
 
       {pending.length > 0 && (
@@ -236,7 +236,7 @@ function DeniedRequest({ request, names, onAnswered }) {
       setBusy(false)
     }
   }
-  const who = request.requester === 'agent' ? 'Your agent' : requestAppName(request, names)
+  const who = requestAppName(request, names)
   return (
     <div className="settings-item">
       <span className="settings-item__body">

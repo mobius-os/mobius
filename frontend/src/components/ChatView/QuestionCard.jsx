@@ -40,7 +40,8 @@ import {
 import { questionActionCompleted } from './questionOpen.js'
 import { KEY_ALLOW } from './keyRequestCardState.js'
 import { earlyAnswerHint } from '../SettingsView/useKeyAnswerGuard.js'
-import KeyRequestDetails, { KeyPasteField } from './KeyRequestDetails.jsx'
+import KeyRequestDetails from './KeyRequestDetails.jsx'
+import { KeyPasteField } from '../SettingsView/KeyRequest.jsx'
 
 
 const CUSTOM_ANSWER_MAX_HEIGHT = 180
@@ -282,8 +283,7 @@ export default function QuestionCard({
     answers,
   )
   const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
-    && (!keyCard || (keyCard.state === 'pending' || keyCard.state === 'denied' || keyCard.state === 'gone')
-      && keyCard.ready(chosenKeyOption))
+    && (!keyCard || ['pending', 'denied', 'allowed', 'gone'].includes(keyCard.state) && keyCard.ready(chosenKeyOption))
   // Incomplete cards stay tappable to reveal the first missing answer. Pending
   // uploads alone still disable submission until their durable IDs arrive.
   const unansweredLook = !allAnswered && !pendingFiles && !restartAction
@@ -488,9 +488,13 @@ export default function QuestionCard({
         const selected = answers[q.question]
         const isMulti = q.multiSelect
         const options = q.options || []
+        // Allow on another app's key waits behind "Use <app>'s key anyway",
+        // unless it is already the owner's choice.
         const visibleOptions = writtenRestartAction
           ? options.filter(opt => opt.id === platformAction.restart_option_id)
-          : options
+          : keyCard?.hidesAllow && chosenKeyOption !== KEY_ALLOW
+            ? options.filter(opt => opt.id !== KEY_ALLOW)
+            : options
         const hasOptions = visibleOptions.length > 0
         const selectedArr = isMulti
           ? (Array.isArray(selected) ? selected : [])
@@ -632,8 +636,8 @@ export default function QuestionCard({
                 )
               })}
             </div>}
-            {keyCard && !answered && chosenKeyOption === KEY_ALLOW && (
-              <KeyPasteField card={keyCard} disabled={inactive} />
+            {keyCard?.state === 'pending' && keyCard.needsValue && !answered && chosenKeyOption === KEY_ALLOW && (
+              <KeyPasteField answer={keyCard.answer} disabled={inactive} />
             )}
             {(!completedAction || respondedRestartAction)
               && !keyCard

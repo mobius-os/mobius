@@ -269,7 +269,6 @@ const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
 // render site wraps its surface in LazySurface, which keeps a failed download
 // local to that surface and holds the launch cover while a visible one loads.
 const AppCanvas = lazy(() => import('../AppCanvas/AppCanvas.jsx'))
-const AppKeyRequestCard = lazy(() => import('../AppCanvas/AppKeyRequestCard.jsx'))
 const ProjectsDirectory = lazy(() => import('../Projects/ProjectsDirectory.jsx'))
 const ProjectWorkspace = lazy(() => import('../Projects/ProjectWorkspace.jsx'))
 const AppSourceWorkspace = lazy(() => import('../Projects/AppSourceWorkspace.jsx'))
@@ -5326,6 +5325,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // Reaching for the drawer holds whatever a leave would hold, so a
                 // heavy game cannot starve the drawer and its sound stops first.
                 covered={modalDrawerOpen || drawerOpening}
+                // An app's key request waits over the app while the owner looks at it.
+                keyRequests={!isSharedBrowserAccess}
                 version={versionForApp(id)}
                 storageGeneration={app?.storage_generation}
                 appName={app?.name}
@@ -5352,12 +5353,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 onShellShortcut={runShellShortcut}
               />
             </LazySurface>
-            {/* An app's key request waits over the app while the owner looks at it. */}
-            {!isSharedBrowserAccess && (
-              <Suspense fallback={null}>
-                <AppKeyRequestCard appId={id} visible={appRuntimeVisible} />
-              </Suspense>
-            )}
           </div>
           )
         })}

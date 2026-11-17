@@ -1,11 +1,106 @@
-/* One app's or agent's key request card, as Settings › Keys, a chat and an app's window show it. */
-import { useState } from 'react'
+/* One app's or agent's key request card, and the parts every place that asks one shares: Settings › Keys, the dialog over an app, and an agent's saved card in a chat (KeyQuestionCard.jsx). */
+import { useId, useRef, useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
+import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
 import { approvalBody, requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
+
+/**
+ * Answering one request, wherever its card is: the words it asks with
+ * (``words``), the answer guard every card wears (``guard``), the value
+ * pasted for a key the owner has no value for yet, and ``send(kind)``, which
+ * answers the vault through the owner-only routes with the request's ticket:
+ * ``'allow'`` grants exactly what the card shows, ``'deny'`` refuses it. A
+ * pasted value goes only to the approve route, never anywhere else; it throws
+ * when the vault refuses. ``request`` is null while there is nothing to
+ * answer, and the guard then sleeps.
+ */
+export function useKeyAnswer(request, names) {
+  const [value, setValue] = useState('')
+  const guard = useKeyAnswerGuard({ enabled: Boolean(request) })
+  async function send(kind) {
+    const response = kind === 'allow'
+      ? await api.keys.approve(request.id, approvalBody(request, value))
+      : await api.keys.deny(request.id, request.ticket)
+    await jsonOrThrow(response, kind === 'allow' ? 'Allow' : 'Not now')
+    setValue('')
+  }
+  return { words: request ? requestWording(request, names) : null, guard, value, setValue, send }
+}
+
+/**
+ * What a request asks, under its question: the requester's own reason, a
+ * warning, where the key goes (``note``, unless the card says it in its own
+ * words) and, one tap away, the technical details.
+ */
+export function KeyRequestBody({ request, words, note = true }) {
+  const sites = request.sites || []
+  return (
+    <>
+      {request.reason && (
+        <p className="settings-keys__says">
+          <span className="settings-keys__muted">{words.says}</span> {request.reason}
+        </p>
+      )}
+      {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
+      {note && <p className="settings-keys__muted">{words.note}</p>}
+      <details className="settings-keys__details">
+        <summary>Details</summary>
+        <ul className="settings-keys__details-list">
+          {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
+          {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
+          {words.keptSlot && (
+            <li>
+              Sent as <code>{sentAs(words.keptSlot.kept)}</code>, not <code>{sentAs(words.keptSlot.asked)}</code> as
+              asked, since something already uses it
+            </li>
+          )}
+          <li>Saved as “{request.key}”</li>
+        </ul>
+      </details>
+    </>
+  )
+}
+
+/** Allowing another app's key, kept one deliberate step away (``words.anyway``). */
+export function KeyAnyway({ anyway, onOpen, children }) {
+  return (
+    <details className="settings-keys__details" onToggle={event => { if (event.currentTarget.open) onOpen?.() }}>
+      <summary>{anyway.label}</summary>
+      <div className="settings-keys__details-body">
+        <p className="settings-keys__muted">{anyway.note}</p>
+        {children}
+      </div>
+    </details>
+  )
+}
+
+/** Where the owner pastes the value of a key they have not saved yet. */
+export function KeyPasteField({ answer, disabled, autoFocus = false }) {
+  const id = useId()
+  return (
+    <div className="settings-keys__paste">
+      <label className="settings-keys__request-lead" htmlFor={id}><strong>{answer.words.pasteTitle}</strong></label>
+      <input
+        id={id}
+        className="settings-keys__input"
+        type="password"
+        value={answer.value}
+        onChange={event => answer.setValue(event.target.value)}
+        placeholder="Paste the key"
+        aria-describedby={`${id}-note`}
+        autoComplete="new-password"
+        spellCheck={false}
+        disabled={disabled}
+        autoFocus={autoFocus}
+      />
+      <p className="settings-keys__muted" id={`${id}-note`}>{answer.words.pasteNote}</p>
+    </div>
+  )
+}
 
 function Lead({ segments }) {
   return segments.map((segment, index) => (
@@ -16,36 +111,27 @@ function Lead({ segments }) {
 }
 
 /**
- * One question at a time. The card asks whether to allow the request; a key
- * the owner has no value for yet takes a second step, after Continue, that
- * asks only for the value (Back returns). Not now / Allow (Save and allow)
- * answer through the owner-only routes with the request's ticket; a pasted
- * value goes only to the approve route, never anywhere else.
- * ``onAnswered`` hears ``'approve'`` or ``'deny'`` once the vault accepted it.
- * ``readOnly`` shows what is asked without the paste field or answers, for a
- * card the owner answers elsewhere.
+ * The card Settings › Keys and the dialog over an app show. One question at
+ * a time: it asks whether to allow the request; a key the owner has no value
+ * for yet takes a second step, after Continue, that asks only for the value
+ * (Back returns). ``onAnswered`` hears ``'allow'`` or ``'deny'`` once the
+ * vault accepted it. As the ``dialog`` over an app it is modal: it takes the
+ * keyboard from the app's frame, starting on Not now, and Escape is Not now.
+ * ``children`` follow the answers.
  */
-export default function KeyRequest({ request, names, onAnswered, readOnly = false }) {
-  const [value, setValue] = useState('')
+export default function KeyRequest({ request, names, onAnswered, dialog = false, children }) {
+  const answer = useKeyAnswer(request, names)
+  const { words, guard } = answer
   const [pasting, setPasting] = useState(false)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
-  const words = requestWording(request, names)
-  // The requester only proposes: Allow grants exactly what this card shows.
-  // An app's sites go to that app's own grant; an agent's to the sites for
-  // the owner and agents.
-  const sites = request.sites || []
-  const guard = useKeyAnswerGuard({ enabled: !readOnly })
+  const denyRef = useRef(null)
 
-  async function answer(kind) {
+  async function respond(kind) {
     setBusy(kind)
     setError('')
     try {
-      const response = kind === 'approve'
-        ? await api.keys.approve(request.id, approvalBody(request, value))
-        : await api.keys.deny(request.id, request.ticket)
-      await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Not now')
-      setValue('')
+      await answer.send(kind)
       setPasting(false)
       onAnswered(kind)
     } catch (err) {
@@ -53,13 +139,20 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
       setBusy('')
     }
   }
+  useDialogFocus({
+    open: dialog,
+    containerRef: guard.cardProps.ref,
+    initialFocusRef: denyRef,
+    onClose: () => { if (guard.active && !busy) respond('deny') },
+  })
 
   const denyButton = (
     <button
       type="button"
+      ref={denyRef}
       className={`settings__btn settings__btn--sm${words.allowHidden ? '' : ' settings__btn--outline'}`}
       aria-disabled={guard.active ? undefined : 'true'}
-      onClick={event => { if (guard.counts(event)) answer('deny') }}
+      onClick={event => { if (guard.counts(event)) respond('deny') }}
       disabled={Boolean(busy)}
     >
       Not now
@@ -70,106 +163,71 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
       type="button"
       className={`settings__btn settings__btn--sm${primary ? '' : ' settings__btn--outline'}`}
       aria-disabled={guard.active ? undefined : 'true'}
-      onClick={event => { if (guard.counts(event)) answer('approve') }}
-      disabled={Boolean(busy) || (words.needsValue && !value)}
+      onClick={event => { if (guard.counts(event)) respond('allow') }}
+      disabled={Boolean(busy) || (words.needsValue && !answer.value)}
     >
-      {busy === 'approve' ? 'Allowing…' : label}
+      {busy === 'allow' ? 'Allowing…' : label}
     </button>
+  )
+  const notices = (
+    <>
+      {error && <Alert color="danger" variant="soft" description={error} />}
+      {guard.early !== null && <p className="settings-keys__muted" role="status">{earlyAnswerHint(guard.early)}</p>}
+    </>
   )
 
   // Continue answers nothing, so it needs no guard; the second step's new
   // size wakes the guard again, so a double tap never lands on Save and allow.
-  const twoSteps = words.needsValue && !readOnly
-  if (twoSteps && pasting) {
-    return (
-      <div
-        ref={guard.cardRef}
-        className="settings-keys__request"
-        role="group"
-        aria-label={words.pasteTitle}
-        onPointerDownCapture={guard.onPressCapture}
-      >
-        <p className="settings-keys__request-lead"><strong>{words.pasteTitle}</strong></p>
-        <input
-          className="settings-keys__input"
-          type="password"
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          placeholder="Paste the key"
-          aria-label="Key value"
-          autoComplete="new-password"
-          spellCheck={false}
-          autoFocus
-        />
-        <p className="settings-keys__muted">{words.pasteNote}</p>
-        {error && <Alert color="danger" variant="soft" description={error} />}
-        {guard.early !== null && <p className="settings-keys__muted" role="status">{earlyAnswerHint(guard.early)}</p>}
-        <div className="settings-keys__actions">
-          <button
-            type="button"
-            className="settings__btn settings__btn--sm settings__btn--outline"
-            onClick={() => { setPasting(false); setError('') }}
-            disabled={Boolean(busy)}
-          >
-            Back
-          </button>
-          {allowButton('Save and allow', true)}
-        </div>
-      </div>
-    )
-  }
-
+  const second = words.needsValue && pasting
   return (
     <div
-      ref={guard.cardRef}
       className="settings-keys__request"
-      role="group"
-      aria-label={`${words.who} asks to use ${request.key}`}
-      onPointerDownCapture={guard.onPressCapture}
+      {...(dialog ? { role: 'dialog', 'aria-modal': 'true' } : { role: 'group' })}
+      aria-label={second ? words.pasteTitle : `${words.who} asks to use ${request.key}`}
+      {...guard.cardProps}
     >
-      <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
-      {request.reason && (
-        <p className="settings-keys__says">
-          <span className="settings-keys__muted">{words.says}</span> {request.reason}
-        </p>
-      )}
-      {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
-      <p className="settings-keys__muted">{words.note}</p>
-      <details className="settings-keys__details">
-        <summary>Details</summary>
-        <ul className="settings-keys__details-list">
-          {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
-          {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
-          <li>Saved as “{request.key}”</li>
-        </ul>
-      </details>
-      {words.allowHidden && !readOnly && (
-        <details className="settings-keys__details">
-          <summary>Use {words.savedBy}'s key anyway</summary>
-          <div className="settings-keys__details-body">
-            <p className="settings-keys__muted">
-              {words.who}'s requests would be signed with {words.savedBy}'s account, and {words.savedBy} can change that key at any time.
-            </p>
-            <div className="settings-keys__actions settings-keys__actions--start">
-              {allowButton(`Use ${words.savedBy}'s key`, false)}
-            </div>
+      {second ? (
+        <>
+          <KeyPasteField answer={answer} disabled={Boolean(busy)} autoFocus />
+          {notices}
+          <div className="settings-keys__actions">
+            <button
+              type="button"
+              className="settings__btn settings__btn--sm settings__btn--outline"
+              onClick={() => { setPasting(false); setError('') }}
+              disabled={Boolean(busy)}
+            >
+              Back
+            </button>
+            {allowButton('Save and allow', true)}
           </div>
-        </details>
+        </>
+      ) : (
+        <>
+          <p className="settings-keys__request-lead"><Lead segments={words.lead} /></p>
+          <KeyRequestBody request={request} words={words} />
+          {words.allowHidden && (
+            <KeyAnyway anyway={words.anyway}>
+              <div className="settings-keys__actions settings-keys__actions--start">
+                {allowButton(`Use ${words.savedBy}'s key`, false)}
+              </div>
+            </KeyAnyway>
+          )}
+          {notices}
+          <p className="settings-keys__muted">{words.denyNote}</p>
+          <div className="settings-keys__actions">
+            {denyButton}
+            {words.needsValue
+              ? (
+                <button type="button" className="settings__btn settings__btn--sm" onClick={() => setPasting(true)} disabled={Boolean(busy)}>
+                  Continue
+                </button>
+              )
+              : !words.allowHidden && allowButton('Allow', true)}
+          </div>
+        </>
       )}
-      {error && <Alert color="danger" variant="soft" description={error} />}
-      {guard.early !== null && !readOnly && <p className="settings-keys__muted" role="status">{earlyAnswerHint(guard.early)}</p>}
-      {!readOnly && (
-        <div className="settings-keys__actions">
-          {denyButton}
-          {twoSteps
-            ? (
-              <button type="button" className="settings__btn settings__btn--sm" onClick={() => setPasting(true)} disabled={Boolean(busy)}>
-                Continue
-              </button>
-            )
-            : !words.allowHidden && allowButton('Allow', true)}
-        </div>
-      )}
+      {children}
     </div>
   )
 }

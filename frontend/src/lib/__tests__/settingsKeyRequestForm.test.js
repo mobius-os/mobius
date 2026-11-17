@@ -117,7 +117,9 @@ test("an app asking for the owner's existing key asks whether to let it, naming 
   const words = requestWording({ ...weatherAsk, key_exists: true, key_origin: null }, appNames)
   assert.equal(leadText(words), 'Let Weather use your openweather key on api.openweathermap.org?')
   assert.equal(words.says, 'Weather says:')
-  assert.equal(words.note, 'It will only ever be sent to api.openweathermap.org. Weather never sees the key itself.')
+  // The website the app names may be its author's own: the question is whether to trust it with the key.
+  assert.equal(words.note, 'Weather wants your openweather key sent to api.openweathermap.org. Allow only if you trust that website with it.')
+  assert.equal(words.denyNote, "Not now is a no: Weather can't ask for openweather again until you let it in Settings › Keys.")
   assert.equal(words.needsValue, false)
   assert.equal(words.allowHidden, false)
 })
@@ -137,6 +139,7 @@ test('an app asking for more websites lists the new ones', () => {
     ...weatherAsk, key_exists: true, granted: true, sites: [site('a.example.com'), site('b.example.com')],
   }, appNames)
   assert.equal(leadText(words), 'Let Weather use openweather on more websites: a.example.com and b.example.com?')
+  assert.equal(words.note, 'Weather wants openweather sent to a.example.com and b.example.com too. Allow only if you trust those websites with it.')
 })
 
 test("the owner's agent asking reads as the agent sending the key to a website", () => {
@@ -163,7 +166,11 @@ test("another app's key keeps Allow behind an explicit 'anyway' and warns whose 
   assert.equal(words.allowHidden, true)
   assert.equal(words.savedBy, 'Modelapp')
   assert.match(words.warning, /^This key belongs to Modelapp, not you/)
-  assert.match(words.warning, /Weather's requests with Modelapp's key/)
+  assert.match(words.warning, /Weather's requests with Modelapp's key\.$/)
+  // Nothing the owner could not do: an app asks for the key it asks for.
+  assert.doesNotMatch(words.warning, /add a key of yours/)
+  assert.equal(words.anyway.label, "Use Modelapp's key anyway")
+  assert.match(words.anyway.note, /signed with Modelapp's account/)
 })
 
 test("more websites on another app's key is still kept behind 'anyway'", () => {
@@ -300,7 +307,10 @@ test("an agent asking for a key an app saved sees that it is the app's key, behi
   assert.equal(words.kind, 'agent')
   assert.equal(words.allowHidden, true)
   assert.match(words.warning, /belongs to Notes, not you/)
-  assert.match(words.warning, /lets your agents send Notes's key/)
+  assert.match(words.warning, /lets your agents read Notes's key and send it/)
+  // An agent can ask for another key, so the owner is told how to get one.
+  assert.match(words.warning, /choose Not now and tell your agent which one\.$/)
+  assert.equal(words.denyNote, "Not now is a no: your agent can't ask for app7-notion again until you let it in Settings › Keys.")
 })
 
 test("an agent's ask names where the key would go, and claims no site when it names none", () => {
@@ -325,11 +335,13 @@ test('a switched-off app asking for more websites is told it stays off', () => {
 const querySlot = { type: 'query', name: 'appid' }
 const slotAsk = { ...weatherAsk, ticket: 't1', inject: querySlot, key_origin: null }
 
-test('a card that sets how a key is sent says so, and Allow sends exactly that slot', () => {
+// How a key is sent is a detail under Details, not part of the question.
+test('a card that sets how a key is sent says so under Details, and Allow sends exactly that slot', () => {
   const card = { ...slotAsk, key_exists: true, sets_inject: true, inject_kept: false }
   const words = requestWording(card, appNames)
   assert.deepEqual(words.slot, querySlot)
-  assert.match(words.note, /Allowing also sets how openweather is sent: \?appid=…\.$/)
+  assert.equal(words.keptSlot, null)
+  assert.doesNotMatch(words.note, /appid|sent as/i)
   assert.deepEqual(approvalBody(card, ''), { ticket: 't1', sites: card.sites, inject: querySlot })
 })
 
@@ -337,7 +349,8 @@ test('a key something already sends keeps its slot, and its card says which', ()
   const card = { ...slotAsk, key_exists: true, sets_inject: false, inject_kept: true, key_inject: BEARER }
   const words = requestWording(card, appNames)
   assert.equal(words.slot, null)
-  assert.match(words.note, /so it stays sent as Authorization: Bearer …, not \?appid=… as asked\.$/)
+  assert.deepEqual(words.keptSlot, { kept: BEARER, asked: querySlot })
+  assert.doesNotMatch(words.note, /Bearer|appid/)
   assert.deepEqual(approvalBody(card, ''), { ticket: 't1', sites: card.sites })
 })
 
@@ -345,5 +358,6 @@ test('a new key is saved with its value and the slot its request named, or a bea
   assert.deepEqual(approvalBody({ ...slotAsk, key_exists: false }, 'v'),
     { ticket: 't1', sites: slotAsk.sites, value: 'v', inject: querySlot })
   assert.deepEqual(approvalBody({ ...slotAsk, key_exists: false, inject: null }, 'v').inject, BEARER)
-  assert.equal(requestWording({ ...slotAsk, key_exists: false }, appNames).note.includes('Allowing also sets'), false)
+  assert.equal(requestWording({ ...slotAsk, key_exists: false }, appNames).note,
+    'Weather wants a key sent to api.openweathermap.org. Allow only if you trust that website with it.')
 })

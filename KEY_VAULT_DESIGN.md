@@ -89,9 +89,9 @@ Status: draft for review.
    in the chat that asked (the vault keeps that chat; the agent's
    `request_key` control saves an ordinary owner card, and the card records
    the owner's answer only once the vault agrees with it, which resumes the
-   agent; the older `mobius-key-request` block is still rendered only so
-   chats that used it read as they did, and agents are no longer told to
-   write it), and an app's in a dialog over the app's window while the
+   agent; a `mobius-key-request` fence, a draft of this card that never
+   shipped, is shown as ordinary code), and an app's in a dialog over the
+   app's window while the
    owner has it open, straight away or when they next open it (the app list
    marks the app as needing them until then). Not now is the dialog's only
    way out. Settings › Keys answers only an agent's request that names no
