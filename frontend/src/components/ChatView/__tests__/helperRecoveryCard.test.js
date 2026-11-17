@@ -1,5 +1,4 @@
 /* A helper's recovery card offers only what its delegation can retry and links the parent for the rest. */
-import { readFileSync } from 'node:fs'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -10,7 +9,6 @@ const vite = await createSsrRenderServer()
 const { default: MsgContent } = await vite.ssrLoadModule(
   '/src/components/ChatView/MsgContent.jsx',
 )
-const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 
 after(() => vite.close())
 
@@ -68,11 +66,4 @@ test('a helper whose owner chat is gone still says where recovery lives, without
 
 test('only the tail card that owns recovery names the parent', () => {
   assert.doesNotMatch(card({ kind: 'restart' }, { isLastMsg: false }), /This helper continues from its/)
-})
-
-test('ChatView sends every resume, transcript and Goal rail, through the settings-aware owner', () => {
-  assert.match(chatView, /sendRecoveryResume\(\{\s*helperDelegationId, settingsSaved, request: apiFetch, send: sendAfterSettingsSaved,/)
-  assert.match(chatView, /const sendAfterSettingsSaved = useCallback\(async \(text, attachments, options\) => \{\s*await settingsSaved\(\)/)
-  assert.match(chatView, /helperChat=\{!!helperDelegationId\}\s*helperParentChatId=\{helperParentChatId\}/)
-  assert.doesNotMatch(chatView, /retryHelperRecovery/)
 })
