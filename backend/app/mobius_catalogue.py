@@ -7,8 +7,7 @@ def parse_catalogue(payload: Any) -> dict[str, Any]:
   """Translate the versioned gateway contract into the shared Responses shape.
 
   Reject the entire snapshot on malformed metadata: a partial update could pair
-  a new default with old capabilities. Replacement edges point directly to a
-  selectable model, never to another retired name or a different provider.
+  a new default with old capabilities. Retired IDs must not redirect silently.
   """
   if (not isinstance(payload, dict) or type(payload.get("contract_version")) is not int
       or payload.get("contract_version") != 1):
@@ -63,11 +62,8 @@ def parse_catalogue(payload: Any) -> dict[str, Any]:
   if not isinstance(default, str) or default not in ids:
     raise ValueError("Möbius default is not selectable")
   replacements = payload.get("replacements", {})
-  if not isinstance(replacements, dict) or any(
-    not isinstance(old, str) or not old or old in ids or not isinstance(new, str) or new not in ids
-    for old, new in replacements.items()
-  ):
-    raise ValueError("Invalid Möbius model replacements")
+  if replacements != {}:
+    raise ValueError("Möbius model replacements are not supported; select an available model")
   return {"name": "Möbius", "transport": "identity_broker",
           "base_url": "http://127.0.0.1:8765/v1", "default_model": default,
-          "models": models, "replacements": dict(replacements)}
+          "models": models, "replacements": {}}

@@ -1187,11 +1187,9 @@ class MobiusProvider(BaseProvider):
     }
 
   def resolve_model(self, model: str | None) -> str | None:
-    """Resolve only service-declared retirement edges; never guess a successor."""
+    """Accept only a currently selectable model; never redirect a saved ID."""
     if not model or not self.declaration["models"]:
       return model
-    if model in self.declaration.get("replacements", {}):
-      return self.declaration["replacements"][model]
     return model if model in {m["id"] for m in self.declaration["models"]} else None
 
   def model_effort_levels(self, model: str | None) -> list[str] | None:

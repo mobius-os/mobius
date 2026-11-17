@@ -1062,7 +1062,6 @@ def test_cold_mobius_catalogue_validates_before_owner_send_admission(
   monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
   providers.invalidate_model_cache()
   catalogue = contract()
-  catalogue["replacements"] = {}
   discovered = []
 
   async def discover(_data_dir):
@@ -1111,7 +1110,6 @@ def test_cold_removed_mobius_model_cannot_enter_owner_queue(
   monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
   providers.invalidate_model_cache()
   catalogue = contract()
-  catalogue["replacements"] = {}
 
   async def discover(_data_dir):
     provider.declaration = parse_catalogue(catalogue)
