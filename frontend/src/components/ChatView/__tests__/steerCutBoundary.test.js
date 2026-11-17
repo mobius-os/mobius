@@ -137,7 +137,7 @@ test('the cut hands the steered rows off the tray and into the transcript', () =
   )
   assert.match(
     handler,
-    /pendingQueue\.cancelByCid\(cid\)/,
+    /pendingQueue\.completeByCid\(steeredMessages\.map\(cidOf\)\)/,
     'the cut is when the rows genuinely leave chat.pending_messages',
   )
 })
@@ -276,7 +276,9 @@ function runSteerCut(messages) {
     setCommittedSteerKeyboardDismiss: () => assert.fail('no keyboard dismissal requested'),
     commitMessages: update => { state.rows = update(state.rows) },
     insertMessageBatchByTs: (prev, rows) => [...prev, ...rows],
-    pendingQueue: { cancelByCid: cid => state.retired.push(cid) },
+    pendingQueue: {
+      completeByCid: cids => state.retired.push(...cids),
+    },
     forgetSendIntent: () => {},
     onOwnerActivityRef: { current: () => { state.activity++ } },
   }
