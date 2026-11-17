@@ -4032,7 +4032,7 @@ async def test_stop_while_claude_turn_prepares_never_sends_the_prompt(monkeypatc
   gate = asyncio.Event()
   entered = asyncio.Event()
 
-  async def slow_effort_lookup(_data_dir, _model):
+  async def slow_effort_lookup(_data_dir, _model, *, provider_id):
     entered.set()
     await gate.wait()
     return True

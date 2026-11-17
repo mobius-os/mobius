@@ -3,9 +3,15 @@
 from app.runner_registry import RunnerKind, registry
 
 
+def _claude_engine(provider: str) -> bool:
+  # App providers on the Messages protocol run on the Claude engine too.
+  from app.providers import provider_runtime_kind
+  return provider_runtime_kind(provider) == "claude_sdk"
+
+
 def has_live_steerable_turn(chat_id: str, provider: str) -> bool:
   """Whether the current provider handle can accept an in-band message."""
-  if provider == "claude":
+  if _claude_engine(provider):
     handle = registry.get_handle(chat_id, RunnerKind.CLAUDE_SDK)
     if handle is None:
       return False
@@ -31,7 +37,7 @@ async def steer_into_active_turn(
   consume_pending_cids: list[str] | None = None,
 ) -> bool:
   """Admit a durably reserved message without awaiting provider settlement."""
-  if provider == "claude":
+  if _claude_engine(provider):
     from app import claude_sdk_runner
 
     return await claude_sdk_runner.steer_into_active_turn(

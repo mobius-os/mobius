@@ -1494,7 +1494,9 @@ export default function useStreamConnection(chatId, {
             // synchronous, so the old rAF delay was unnecessary and created a
             // visible terminal flash: React could paint the stream shutdown
             // before ChatView copied streamItems into the final assistant row.
-            onStreamEndRef.current?.({ continues, promotedTs, promotedMessage })
+            // `run_ended_ts`: when the turn's run ended, for the promoted
+            // reply's footer (chat detail reads carry the same time).
+            onStreamEndRef.current?.({ continues, promotedTs, promotedMessage, runEndedTs: event.run_ended_ts })
             setIsStreaming(false)
             if (continues) {
               scheduleReconnect(() => connectRef.current?.(true), 150)

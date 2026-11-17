@@ -146,6 +146,7 @@ from app.events import (
 )
 from app.providers import (
   DEFAULT_PROVIDER,
+  AppModelProvider,
   BaseProvider,
   authenticated_provider_ids,
   effective_agent_settings,
@@ -3031,6 +3032,24 @@ def _finalize_broadcast_if_running(chat_id: str) -> None:
   _publish_chat_run_finished(chat_id)
 
 
+def _publish_done(bc, chat_id: str, run_token: str | None, **fields) -> None:
+  """Publish a turn's final `done` event. Once its run has ended, it carries
+  `run_ended_ts`, so the client stamps the reply it promotes from the stream
+  with the same end time a later chat detail read carries
+  (app.run_end_times)."""
+  from app.database import SessionLocal
+  from app.run_end_times import run_ended_ts
+  ended = None
+  if run_token:
+    try:
+      with SessionLocal() as read_db:
+        ended = run_ended_ts(read_db, chat_id, {run_token}).get(run_token)
+    except Exception:
+      # The end time is presentation only; it must never hold up `done`.
+      _get_logger().warning("run end time unreadable chat_id=%s", chat_id, exc_info=True)
+  bc.publish({"type": "done", **fields, **({"run_ended_ts": ended} if ended is not None else {})})
+
+
 def _publish_chat_run_finished(chat_id: str) -> None:
   if chat_id:
     get_system_broadcast().publish({
@@ -3626,7 +3645,7 @@ def _schedule_continuation(
           "to schedule). It will be recovered automatically."
         ),
       })
-      bc.publish({"type": "done"})
+      _publish_done(bc, chat_id, run_token)
       bc.mark_completed()
     # Every caller announces chat_run_started before it reaches this helper.
     # Balance that shell-level signal when task creation fails, or the shell's
@@ -4655,7 +4674,7 @@ async def _complete_turn(
   chat_id: str,
   run_gen: int | None,
   provider_id: str | None,
-  cost_usd: float | int,
+  cost_usd: float | int | None,
   close_browser: bool,
   parked: bool = False,
   parked_until: datetime | None = None,
@@ -4773,7 +4792,7 @@ async def _complete_turn(
         "stale turn lifecycle flush failed chat_id=%s", chat_id, exc_info=True,
       )
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     # Deliberately NO shell chat_run_finished here: the successor turn (or the
     # Stop that took the generation) owns this chat's terminal signaling.
@@ -4851,7 +4870,7 @@ async def _complete_turn(
     # Identity-keyed: a Stop + fresh send racing in during the finalize await
     # may already hold the active pointer; clear only if it's still ours.
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -4864,7 +4883,7 @@ async def _complete_turn(
       sink=sink, chat_id=chat_id, run_gen=run_gen,
     )
     clear_active_broadcast_if(bc)
-    bc.publish({"type": "done", "cost_usd": cost_usd})
+    _publish_done(bc, chat_id, sink.run_token, cost_usd=cost_usd)
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
       _publish_chat_run_finished(chat_id)
@@ -4952,12 +4971,12 @@ async def _complete_turn(
         "Rate limited — the retry reminder could not be scheduled. "
         "Send a message or tap Resume to continue.",
       ))
-      bc.publish({"type": "done"})
+      _publish_done(bc, chat_id, sink.run_token)
       bc.mark_completed()
       _publish_chat_run_finished(chat_id)
       db.close()
       return chat_queue.TerminalDisposition.FAILED_LEAVE_MARKER
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -5008,7 +5027,7 @@ async def _complete_turn(
         "unavailable). Please resend it."
       ),
     })
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, sink.run_token)
     bc.mark_completed()
     _publish_chat_run_finished(chat_id)
     db.close()
@@ -5034,7 +5053,7 @@ async def _complete_turn(
     })
   # Any error event was already broadcast via sink.publish before
   # finalize; don't re-emit it here (it would double-deliver).
-  bc.publish({"type": "done", "cost_usd": cost_usd})
+  _publish_done(bc, chat_id, sink.run_token, cost_usd=cost_usd)
   bc.mark_completed()
   if not next_user:
     _publish_chat_run_finished(chat_id)
@@ -5239,7 +5258,7 @@ async def run_chat(
       bc = get_broadcast(chat_id) if chat_id else None
       if bc is not None and still_ours:
         bc.publish(dict(pause))
-        bc.publish({"type": "done"})
+        _publish_done(bc, chat_id, run_token)
         bc.mark_completed()
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
@@ -5290,7 +5309,7 @@ async def run_chat(
       bc = get_broadcast(chat_id) if chat_id else None
       if bc is not None and still_ours:
         bc.publish(_pause_note(message))
-        bc.publish({"type": "done"})
+        _publish_done(bc, chat_id, run_token)
         bc.mark_completed()
       if chat_id and still_ours:
         _publish_chat_run_finished(chat_id)
@@ -5764,13 +5783,18 @@ def _helper_host_key(db, run_policy, *, provider_id: str, connector_plan):
   # Claude fixes a helper's model on the host's helper definitions, so its
   # hosts are also per model; a Codex thread chooses its model per turn.
   # The turn refreshed the registry at its start; this lookup reads no storage.
-  claude = provider_runtime_kind(registered_provider(provider_id)) == "claude_sdk"
+  provider = registered_provider(provider_id)
+  claude = provider_runtime_kind(provider) == "claude_sdk"
   model = run_policy.model if claude else None
+  setup = [connectors, model]
+  if isinstance(provider, AppModelProvider):
+    # A host holds the app's relay token, which a new acceptance replaces.
+    setup.append(provider.consent_scope)
   return helper_hosts.HostKey(
     parent_chat_id=row[0],
     provider_id=provider_id,
     cwd=run_policy.cwd,
-    setup=helper_hosts.setup_digest(connectors, model),
+    setup=helper_hosts.setup_digest(*setup),
   )
 
 
@@ -6307,7 +6331,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=error_message,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -6420,8 +6444,11 @@ async def _run_chat_impl_with_db(
     )
   )
 
+  # Held to what the provider offers, whichever layer supplied the choice.
+  agent_settings["model"], agent_settings["effort"] = provider.resolve_selection(
+    agent_settings.get("model"), agent_settings.get("effort"),
+  )
   if provider_id == "mobius":
-    agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
     if not agent_settings["model"] or not provider.declaration["models"]:
       raise ValueError("This Möbius model is unavailable. Refresh models and choose a current model.")
 
@@ -6500,7 +6527,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=error_message,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -6658,7 +6685,7 @@ async def _run_chat_impl_with_db(
     disposition = await _terminal_setup_error_cleanup(
       chat_id, run_token or "", run_gen, error_message=auth_error,
     )
-    bc.publish({"type": "done"})
+    _publish_done(bc, chat_id, run_token)
     clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
     bc.mark_completed()
     if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
@@ -6767,12 +6794,14 @@ async def _run_chat_impl_with_db(
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (
@@ -6831,7 +6860,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,
@@ -6956,6 +6985,7 @@ async def _run_chat_impl_with_db(
             run_policy=run_policy,
             connector_plan=connector_turn_plan,
             coordination_enabled=coordination_tools_enabled,
+            provider_id=provider_id,
             goal_brief_refresh=goal_brief_refresh,
             fork_from=fork_from,
             run_generation=run_gen,
@@ -6996,18 +7026,22 @@ async def _run_chat_impl_with_db(
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       recorded_metrics = await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or claude_session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
         cost_scope=runner_result.get("cost_scope", "turn"),
         session_start=runner_result.get("session_start"),
       )
       if runner_result.get("cost_scope") == "session":
-        runner_result["cost_usd"] = (recorded_metrics or {}).get("cost_usd")
+        # The engine reports a session total; this turn's cost is the
+        # writer's delta, or unknown.
+        run_cost_usd = (recorded_metrics or {}).get("cost_usd")
       if (
         not err
         and new_session_id
@@ -7026,7 +7060,7 @@ async def _run_chat_impl_with_db(
         log.info(
           "chat done chat_id=%s cost_usd=%.4f sdk=claude "
           "input_tokens=%s output_tokens=%s total_tokens=%s",
-          chat_id, runner_result.get("cost_usd") or 0.0,
+          chat_id, run_cost_usd or 0.0,
           (usage_metrics or {}).get("input_tokens"),
           (usage_metrics or {}).get("output_tokens"),
           (usage_metrics or {}).get("total_tokens"),
@@ -7054,7 +7088,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,
@@ -7074,7 +7108,7 @@ async def _run_chat_impl_with_db(
     chat_id, run_token or "", run_gen, error_message=error_message,
   )
   clear_active_broadcast_if(bc)  # identity-keyed: never clobber a successor
-  bc.publish({"type": "done"})
+  _publish_done(bc, chat_id, run_token)
   bc.mark_completed()
   if disposition is not chat_queue.TerminalDisposition.STALE_NO_ACTION:
     _publish_chat_run_finished(chat_id)
