@@ -1732,7 +1732,9 @@ _TOOL_DEFINITIONS = {
         "inject": {
           "type": "object",
           "description": (
-            "How a NEW key is sent; default Authorization: Bearer. "
+            "How the key is sent, for a new key or one nothing sends yet "
+            "(Allow then sets it; a key already in use keeps its own); "
+            "default Authorization: Bearer. "
             "{type: header, name, prefix?} or {type: query, name}."
           ),
           "properties": {

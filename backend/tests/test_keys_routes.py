@@ -2076,3 +2076,74 @@ def test_only_top_level_agents_and_apps_ask_by_card(client, auth, db, vault, pus
   # An app's card says it came from the app.
   client.post("/api/keys/requests", headers=_app_auth(db, _app(db, "weather")), json=ask)
   assert [r["requester"] for r in client.get("/api/keys", headers=auth).json()["requests"]] == ["app"]
+
+
+# -- a key saved ahead of time takes the slot its first user needs -------------
+
+QUERY_SLOT = {"type": "query", "name": "api_key"}
+MULTILINE = "-----BEGIN KEY-----\nAbCdEf0123456789\n-----END KEY-----"
+
+
+@pytest.mark.parametrize("asker", ["app", "agent"])
+@pytest.mark.parametrize("value", [DUMMY, MULTILINE], ids=["one-line", "multiline"])
+def test_the_first_request_allowed_for_a_key_saved_ahead_sets_how_it_is_sent(client, auth, db, vault, asker, value):
+  """Settings saves a pasted key as a bearer token and sends it nowhere. The
+  first request for it may need another slot (a query parameter, or any
+  slot but a header for a key with line breaks): its card shows that slot,
+  and Allow sets it, so the key works for the asker it was saved for."""
+  saved = client.put("/api/keys/ahead", headers=auth, json={
+    "value": value, "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
+    "grants": {"apps": [], "agents": True, "sites": []}, "create_only": True,
+  })
+  assert saved.status_code in (200, 201), saved.text
+  headers = _app_auth(db, _app(db, "ahead")) if asker == "app" else _agent_auth(db)
+  asked = client.post("/api/keys/requests", headers=headers,
+                      json={**ASK, "key": "ahead", "sites": [SITE], "inject": QUERY_SLOT})
+  assert asked.status_code == 200, asked.text
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert card["sets_inject"] is True and card["inject_kept"] is False
+  assert card["inject"] == QUERY_SLOT
+  approved = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
+                         json={"ticket": card["ticket"], "sites": card["sites"], "inject": card["inject"]})
+  assert approved.status_code == 200, approved.text
+  [key] = vault.list_keys()
+  assert key["inject"] == QUERY_SLOT
+  sent = client.get("/api/keys/use/ahead/api.example.com/v1/forecast", headers=headers)
+  assert sent.status_code == 200, sent.text
+  echoed = sent.json()
+  assert "api_key=" in echoed["path"] and "Authorization" not in echoed["headers"]
+
+
+def test_a_key_something_already_sends_keeps_its_slot_and_its_card_says_so(client, auth, db, vault):
+  """Changing the slot under a key in use would break whoever sends it, so a
+  later request only adds sites; its card names the slot the key keeps."""
+  first, second = _app(db, "first"), _app(db, "second")
+  bearer = {"type": "header", "name": "Authorization", "prefix": "Bearer "}
+  vault.put_key("shared", {"value": DUMMY, "inject": bearer,
+                           "grants": {"apps": [{"id": first.id, "sites": [SITE]}], "agents": False, "sites": []}})
+  client.post("/api/keys/requests", headers=_app_auth(db, second),
+              json={**ASK, "key": "shared", "inject": QUERY_SLOT})
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert card["sets_inject"] is False and card["inject_kept"] is True
+  assert card["key_inject"] == bearer
+  refused = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
+                        json={"ticket": card["ticket"], "sites": card["sites"], "inject": QUERY_SLOT})
+  assert refused.status_code == 409
+  approved = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
+                         json={"ticket": card["ticket"], "sites": card["sites"]})
+  assert approved.status_code == 200, approved.text
+  assert vault.list_keys()[0]["inject"] == bearer
+
+
+def test_allow_sets_only_the_slot_the_request_proposed(client, auth, db, vault):
+  """The answer can confirm the request's slot, never substitute its own."""
+  vault.put_key("ahead", {"value": DUMMY, "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
+                          "grants": {"apps": [], "agents": True, "sites": []}})
+  client.post("/api/keys/requests", headers=_app_auth(db, _app(db, "ahead")),
+              json={**ASK, "key": "ahead", "inject": QUERY_SLOT})
+  [card] = client.get("/api/keys", headers=auth).json()["requests"]
+  other = {"type": "header", "name": "X-Api-Key", "prefix": ""}
+  refused = client.post(f"/api/keys/requests/{card['id']}/approve", headers=auth,
+                        json={"ticket": card["ticket"], "sites": card["sites"], "inject": other})
+  assert refused.status_code == 409
+  assert vault.list_keys()[0]["inject"]["type"] == "header" and vault.list_keys()[0]["grants"]["apps"] == []

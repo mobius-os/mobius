@@ -3,11 +3,9 @@ import { useState } from 'react'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
-import { requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
+import { approvalBody, requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
-
-export const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
 
 function Lead({ segments }) {
   return segments.map((segment, index) => (
@@ -36,7 +34,6 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
   // The requester only proposes: Allow grants exactly what this card shows.
   // An app's sites go to that app's own grant; an agent's to the sites for
   // the owner and agents.
-  const inject = request.inject || BEARER
   const sites = request.sites || []
   const guard = useKeyAnswerGuard({ enabled: !readOnly })
 
@@ -45,9 +42,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
     setError('')
     try {
       const response = kind === 'approve'
-        ? await api.keys.approve(request.id, {
-          ticket: request.ticket, sites, ...(words.needsValue ? { value, inject } : {}),
-        })
+        ? await api.keys.approve(request.id, approvalBody(request, value))
         : await api.keys.deny(request.id, request.ticket)
       await jsonOrThrow(response, kind === 'approve' ? 'Allow' : 'Not now')
       setValue('')
@@ -144,7 +139,7 @@ export default function KeyRequest({ request, names, onAnswered, readOnly = fals
         <summary>Details</summary>
         <ul className="settings-keys__details-list">
           {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
-          {words.needsValue && <li>Sent as <code>{sentAs(inject)}</code></li>}
+          {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
           <li>Saved as “{request.key}”</li>
         </ul>
       </details>

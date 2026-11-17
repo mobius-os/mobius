@@ -98,8 +98,10 @@ Status: draft for review.
    for every later ask for its key. If the vault can't be reached then,
    the next agent ask for that key withdraws the leftover request and gets
    its own card. Recovering the chat (or its project) first waits for a
-   withdrawal still on its way, so a late one never removes a request the
-   recovered chat makes. The card asks one thing at a time: whether to allow, then, for a
+   withdrawal still on its way, then tells the vault that deletion was undone:
+   each withdrawal names its deletion, and the vault ignores one for an undone
+   deletion that reaches it late, so it never removes a request the recovered
+   chat makes. The card asks one thing at a time: whether to allow, then, for a
    key the owner has no value for yet, the value. A chat only answers its own agent's request; an
    app's shown in a chat is read-only. Every card's answers wake only after
    the card has been still and untouched for about a second (since it
@@ -110,7 +112,11 @@ Status: draft for review.
    request only proposes: approval applies the sites and slot the owner's
    answer carries (a new key answered without a slot is sent as
    `Authorization: Bearer`). The sites go to that app's own grant. An existing
-   key keeps its value and slot, which only its own page changes. Granting
+   key keeps its value, and its slot unless nothing sends it yet (no app and
+   no site of its own): then the request's proposed slot is shown on the card
+   and Allow sets it, which is how a key saved ahead of time (always as a
+   bearer token) gets the slot its first user needs. A key already in use
+   keeps its slot under it, and the card says so. Granting
    the app those sites from the key editor settles its request too. When the
    key exists because another app saved it for itself, the card says so
    (the vault lists the key's `key_origin`): allowing would send this app's

@@ -11,10 +11,10 @@ import {
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
-  relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
+  BEARER, relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
   REQUESTS_SHOWN,
 } from '../../lib/keysSettingsText.js'
-import KeyRequest, { BEARER } from './KeyRequest.jsx'
+import KeyRequest from './KeyRequest.jsx'
 import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
 import './KeysSection.css'
 import { settingsKeyRequests } from '../../lib/keyRequestPlaces.js'

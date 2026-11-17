@@ -824,19 +824,21 @@ async def forget_app(app_id: int) -> None:
     await vault_call("DELETE", f"/apps/{int(app_id)}", caller="platform:app-purge")
 
 
-async def forget_chat(chat_id: str) -> None:
+async def forget_chat(chat_id: str, deletion: str | None = None) -> None:
   """Withdraw the waiting key requests a deleted chat's agent made.
 
   Only that chat's card could answer them, and a waiting request answers for
   every later ask for its key, so left behind no chat could ask for the key
   again. Deleting the chat never waits on the vault: if it can't be reached,
   the request stays until the next agent ask for its key withdraws it
-  (``request_key`` in routes/owner_approvals.py).
+  (``request_key`` in routes/owner_approvals.py). ``deletion`` stamps the
+  deletion it is for, so the vault ignores it once that deletion is undone.
   """
   if not _vault_ever_used():
     return
+  path = f"/chats/{chat_id}/requests" + (f"?deletion={urllib.parse.quote(deletion, safe='')}" if deletion else "")
   try:
-    await vault_call("DELETE", f"/chats/{chat_id}/requests", caller="platform:chat-delete")
+    await vault_call("DELETE", path, caller="platform:chat-delete")
   except (VaultUnavailable, VaultTimeout, VaultRefused):
     log.warning("Could not withdraw the key requests of deleted chat %s", chat_id, exc_info=True)
 
@@ -847,8 +849,14 @@ async def forget_chat(chat_id: str) -> None:
 _withdrawals: dict[str, asyncio.Task] = {}
 
 
-def start_withdrawing_chat_requests(chat_ids) -> asyncio.Future:
-  """Start ``forget_chat`` for each deleted chat, and return them together.
+def deletion_stamp(deleted_at) -> str | None:
+  """One deletion of a chat, as the vault knows it: its ``deleted_at``."""
+  return deleted_at.isoformat() if deleted_at is not None else None
+
+
+def start_withdrawing_chat_requests(chat_ids, deletion: str | None) -> asyncio.Future:
+  """Start ``forget_chat`` for each chat deleted by ``deletion`` (its
+  ``deletion_stamp``), and return them together.
 
   Call it while still holding the deletion's lifecycle gate, so a recovery
   waiting on that gate always finds the withdrawals it must settle first;
@@ -857,7 +865,7 @@ def start_withdrawing_chat_requests(chat_ids) -> asyncio.Future:
   """
   tasks = []
   for chat_id in chat_ids:
-    task = asyncio.ensure_future(forget_chat(chat_id))
+    task = asyncio.ensure_future(forget_chat(chat_id, deletion))
     _withdrawals[chat_id] = task
     task.add_done_callback(
       lambda done, chat_id=chat_id: _withdrawals.pop(chat_id, None) if _withdrawals.get(chat_id) is done else None
@@ -866,15 +874,25 @@ def start_withdrawing_chat_requests(chat_ids) -> asyncio.Future:
   return asyncio.gather(*tasks)
 
 
-async def settle_chat_withdrawals(chat_ids) -> None:
-  """Wait until no withdrawal for these chats is still on its way.
+async def settle_chat_withdrawals(chat_ids, deletion: str | None) -> None:
+  """Before recovering chats deleted by ``deletion``: wait until no
+  withdrawal for them is still on its way, then tell the vault that deletion
+  is undone, so one it has yet to process (ours gave up waiting) withdraws
+  nothing when it lands.
 
-  Recovering a chat calls this before restoring it. It waits at most one
-  vault timeout, and only while the vault is slow to answer a deletion.
+  It waits at most one vault timeout per step, and only while the vault is
+  slow. A vault that cannot be told leaves only that late case open.
   """
   pending = [task for chat_id in chat_ids if (task := _withdrawals.get(str(chat_id))) is not None]
   if pending:
     await asyncio.gather(*pending, return_exceptions=True)
+  if deletion is None or not chat_ids or not _vault_ever_used():
+    return
+  for chat_id in chat_ids:
+    try:
+      await vault_call("POST", f"/chats/{chat_id}/undeleted", {"deletion": deletion}, caller="platform:chat-recover")
+    except (VaultUnavailable, VaultTimeout, VaultRefused):
+      log.warning("Could not tell the vault chat %s was recovered", chat_id, exc_info=True)
 
 
 async def _import_when_ready() -> None:

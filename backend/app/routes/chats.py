@@ -2940,7 +2940,9 @@ async def delete_chat(
       # settles them first; awaited after it, so a vault that hangs never
       # holds the lock.
       from app import key_vault
-      withdrawal = key_vault.start_withdrawing_chat_requests([str(chat_id)])
+      withdrawal = key_vault.start_withdrawing_chat_requests(
+        [str(chat_id)], key_vault.deletion_stamp(chat.deleted_at if chat else None),
+      )
   # Destructive cleanup has settled before releasing transition ownership.
   # The tombstone and releases are already durable. Nudge exact-Goal delivery as a
   # best-effort layer; failure cannot roll back an owner-requested
@@ -2980,7 +2982,9 @@ async def recover_chat(
       # A deletion's key-request withdrawal still on its way would remove the
       # requests the recovered chat makes next.
       from app import key_vault
-      await key_vault.settle_chat_withdrawals([str(chat_id)])
+      deletion = db.query(models.Chat.deleted_at).filter(models.Chat.id == chat_id).scalar()
+      await key_vault.settle_chat_withdrawals([str(chat_id)], key_vault.deletion_stamp(deletion))
+      db.rollback()
       with drawer_pins.serialized_write():
         db.rollback()
         chat = db.query(models.Chat).filter(models.Chat.id == chat_id).first()

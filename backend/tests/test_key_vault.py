@@ -178,8 +178,9 @@ def test_a_key_is_never_sent_in_a_header_sites_log_as_metadata(header):
 def test_approving_sites_for_one_app_never_widens_another_app_or_agents(vault):
   request = vault.request_access(9, {**ASK, "key": "echo"})
   ticket = _ticket(vault, request["id"])
-  for change in ({"value": "other"}, {"inject": ASK["inject"]}):
-    with pytest.raises(kv.VaultError, match="already exists"):
+  # A key already in use keeps its value and its slot.
+  for change, refusal in (({"value": "other"}, "already exists"), ({"inject": ASK["inject"]}, "already sent another way")):
+    with pytest.raises(kv.VaultError, match=refusal):
       vault.approve_request(request["id"], {**change, "ticket": ticket})
   vault.approve_request(request["id"], {"sites": ASK["sites"], "ticket": ticket})
   [record] = [k for k in vault.list_keys() if k["name"] == "echo"]

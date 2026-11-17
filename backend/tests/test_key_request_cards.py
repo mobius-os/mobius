@@ -312,7 +312,7 @@ def test_a_project_withdraws_its_chats_requests_together_after_its_lifecycle_loc
   started, released = [], []
   everyone_asked = asyncio.Event()
 
-  async def slow_vault(chat_id):
+  async def slow_vault(chat_id, deletion=None):
     started.append(chat_id)
     if len(started) == len(chat_ids):
       everyone_asked.set()
@@ -338,17 +338,17 @@ def test_recovery_waits_for_a_deletion_withdrawal_still_on_its_way(monkeypatch):
     release = asyncio.Event()
     order = []
 
-    async def slow_forget(chat_id):
+    async def slow_forget(chat_id, deletion=None):
       await release.wait()
       order.append(f"withdrew {chat_id}")
     monkeypatch.setattr(key_vault, "forget_chat", slow_forget)
-    deletion = key_vault.start_withdrawing_chat_requests(["deleted"])
+    deletion = key_vault.start_withdrawing_chat_requests(["deleted"], None)
 
     async def recover():
-      await key_vault.settle_chat_withdrawals(["deleted"])
+      await key_vault.settle_chat_withdrawals(["deleted"], None)
       order.append("recovered")
     recovery = asyncio.create_task(recover())
-    await asyncio.wait_for(key_vault.settle_chat_withdrawals(["another"]), timeout=1)
+    await asyncio.wait_for(key_vault.settle_chat_withdrawals(["another"], None), timeout=1)
     await asyncio.sleep(0.05)
     assert order == [] and not recovery.done()
     release.set()
@@ -364,7 +364,8 @@ def _settled_while_deleted(monkeypatch):
   from app import key_vault
   settled = []
 
-  async def settle(chat_ids):
+  async def settle(chat_ids, deletion):
+    assert deletion is not None
     with SessionLocal() as db:
       settled.append({str(chat_id): db.get(models.Chat, chat_id).deleted_at is not None for chat_id in chat_ids})
   monkeypatch.setattr(key_vault, "settle_chat_withdrawals", settle)
@@ -387,3 +388,34 @@ def test_recovering_a_project_settles_its_chats_withdrawals_before_restoring_the
   assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
   assert client.post(f"/api/projects/{project['id']}/recover", headers=auth).status_code == 200
   assert settled == [{project_chat["id"]: True}]
+
+
+@pytest.mark.parametrize("deleted", ["chat", "project"])
+def test_a_withdrawal_reaching_the_vault_after_recovery_withdraws_nothing(client, auth, chat, monkeypatch, vault, deleted):
+  """Our wait for a withdrawal ends with the vault timeout, not when the vault
+  acts on it. Recovery tells the vault that deletion was undone, so a
+  withdrawal it processes later leaves the recovered chat's request alone."""
+  from app import key_vault
+  late = []
+
+  async def gave_up(chat_id, deletion=None):
+    late.append((chat_id, deletion))
+  monkeypatch.setattr(key_vault, "forget_chat", gave_up)
+  if deleted == "project":
+    project = client.post("/api/projects", headers=auth, json={"name": "Site", "template_id": "blank"}).json()
+    asker = client.post(f"/api/projects/{project['id']}/chats", headers=auth, json={
+      "title": "Site plan", "recovery_request_id": f"{project['id']}:Site plan",
+    }).json()["id"]
+    target = f"/api/projects/{project['id']}"
+  else:
+    asker, target = chat.id, f"/api/chats/{chat.id}"
+  vault.request_for_agents({"key": "nasa", "reason": "x", "sites": [APOD]}, actor=f"agent:{asker}")
+  assert client.delete(target, headers=auth).status_code == 204
+  assert client.post(f"{target}/recover", headers=auth).status_code == 200
+  [(chat_id, deletion)] = late
+  assert chat_id == asker and deletion
+  # The withdrawal lands now, after the chat is back.
+  assert vault.forget_chat(chat_id, deletion=deletion) == 0
+  assert [r["id"] for r in vault.list_requests()] == ["agent-nasa"]
+  # A later deletion of the same chat still withdraws its requests.
+  assert vault.forget_chat(chat_id, deletion="a later deletion") == 1

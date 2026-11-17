@@ -21,7 +21,7 @@ const vite = await createSsrRenderServer()
 const {
   requestFormKey, savedByApp, replaceWarning, requestSubject, siteLine, shownRequests, distinctAppNames,
   requestWording, requestAppName, serviceForValue, freeKeyName, newKeyName, hostList, keyHosts, sentToLine,
-  usedByLine, usedByRows, lastUseByCaller, usageWhat,
+  usedByLine, usedByRows, lastUseByCaller, usageWhat, approvalBody, BEARER,
 } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -316,4 +316,34 @@ test('a switched-off app asking for more websites is told it stays off', () => {
   assert.doesNotMatch(requestWording(request, { 8: 'Weather' }).note, /switched off/)
   assert.match(requestWording({ ...request, app_paused: true }, { 8: 'Weather' }).note,
     /Weather is switched off for this key and stays off until you switch it back on/)
+})
+
+// -- how a key is sent ---------------------------------------------------------
+// Settings saves a pasted key as a bearer token. The first request allowed for
+// a key nothing sends yet may set another slot; a key in use keeps its own.
+
+const querySlot = { type: 'query', name: 'appid' }
+const slotAsk = { ...weatherAsk, ticket: 't1', inject: querySlot, key_origin: null }
+
+test('a card that sets how a key is sent says so, and Allow sends exactly that slot', () => {
+  const card = { ...slotAsk, key_exists: true, sets_inject: true, inject_kept: false }
+  const words = requestWording(card, appNames)
+  assert.deepEqual(words.slot, querySlot)
+  assert.match(words.note, /Allowing also sets how openweather is sent: \?appid=…\.$/)
+  assert.deepEqual(approvalBody(card, ''), { ticket: 't1', sites: card.sites, inject: querySlot })
+})
+
+test('a key something already sends keeps its slot, and its card says which', () => {
+  const card = { ...slotAsk, key_exists: true, sets_inject: false, inject_kept: true, key_inject: BEARER }
+  const words = requestWording(card, appNames)
+  assert.equal(words.slot, null)
+  assert.match(words.note, /so it stays sent as Authorization: Bearer …, not \?appid=… as asked\.$/)
+  assert.deepEqual(approvalBody(card, ''), { ticket: 't1', sites: card.sites })
+})
+
+test('a new key is saved with its value and the slot its request named, or a bearer token', () => {
+  assert.deepEqual(approvalBody({ ...slotAsk, key_exists: false }, 'v'),
+    { ticket: 't1', sites: slotAsk.sites, value: 'v', inject: querySlot })
+  assert.deepEqual(approvalBody({ ...slotAsk, key_exists: false, inject: null }, 'v').inject, BEARER)
+  assert.equal(requestWording({ ...slotAsk, key_exists: false }, appNames).note.includes('Allowing also sets'), false)
 })

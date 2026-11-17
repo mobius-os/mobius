@@ -11,12 +11,11 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import { KEYS_QUERY, useAppNames, useKeys } from '../SettingsView/keysQueries.js'
 import useKeyAnswerGuard from '../SettingsView/useKeyAnswerGuard.js'
-import { requestAppPaused, requestWording } from '../../lib/keysSettingsText.js'
+import { approvalBody, requestAppPaused, requestWording } from '../../lib/keysSettingsText.js'
 import { KEY_ALLOW, KEY_DENY, keyAnswerAlreadyGiven, keyRequestCardState } from './keyRequestCardState.js'
 
 export { KEY_ALLOW, KEY_DENY }
 
-const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
 // Why an answer can't be given on a card in this state.
 const KEY_STATE_ERRORS = {
   denied: 'You already said Not now to this request.',
@@ -62,11 +61,7 @@ export default function useKeyRequestCard(keyRequest, { live }) {
       }
       if (!given) {
         const response = kind === KEY_ALLOW
-          ? await api.keys.approve(request.id, {
-            ticket: request.ticket,
-            sites: request.sites || [],
-            ...(needsValue ? { value, inject: request.inject || BEARER } : {}),
-          })
+          ? await api.keys.approve(request.id, approvalBody(request, value))
           : await api.keys.deny(request.id, request.ticket)
         await jsonOrThrow(response, kind === KEY_ALLOW ? 'Allow' : 'Not now')
         setValue('')

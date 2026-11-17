@@ -29,7 +29,7 @@ export default function KeyRequestDetails({ card }) {
         <summary>Details</summary>
         <ul>
           {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
-          {card.needsValue && <li>Sent as <code>{sentAs(request.inject || { type: 'header', name: 'Authorization', prefix: 'Bearer ' })}</code></li>}
+          {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
           <li>Saved as “{request.key}”</li>
         </ul>
       </details>

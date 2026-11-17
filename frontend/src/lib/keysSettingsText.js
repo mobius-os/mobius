@@ -51,6 +51,26 @@ export function siteLine(site) {
   return `${site.host}${paths} · ${site.methods.join(', ')}`
 }
 
+/** How a key is sent unless something sets otherwise. */
+export const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
+
+/**
+ * The slot Allow sends this key with, when the card sets one: a new key's,
+ * or the first slot of a key nothing sends yet (``sets_inject``). Null when
+ * the key keeps its own.
+ */
+export function slotShown(request) {
+  if (!request.key_exists) return request.inject || BEARER
+  return request.sets_inject ? request.inject : null
+}
+
+/** What Allow sends: exactly what the card shows, and a new key's value. */
+export function approvalBody(request, value) {
+  const body = { ticket: request.ticket, sites: request.sites || [] }
+  if (!request.key_exists) return { ...body, value, inject: slotShown(request) }
+  return request.sets_inject ? { ...body, inject: request.inject } : body
+}
+
 export function sentAs(inject) {
   if (!inject) return 'Authorization: Bearer …'
   return inject.type === 'query'
@@ -280,8 +300,16 @@ export function requestWording(request, names) {
   const appNote = hosts
     ? `It will only ever be sent to ${hosts}. ${who} never sees the key itself.`
     : `It names no websites, so ${who} can't send this key anywhere until you add one on the key's page.`
+  const slot = slotShown(request)
+  // Visible beside the question, not only under Details: Allow changes how
+  // an existing key is sent, or leaves it as it is although asked otherwise.
+  const slotNote = request.key_exists && slot
+    ? ` Allowing also sets how ${key} is sent: ${sentAs(slot)}.`
+    : request.inject_kept
+      ? ` Something already uses ${key}, so it stays sent as ${sentAs(request.key_inject)}, not ${sentAs(request.inject)} as asked.`
+      : ''
   const base = {
-    kind: subject.kind, who, needsValue, savedBy: subject.savedBy || null, allowHidden: false, warning: null,
+    kind: subject.kind, who, needsValue, slot, savedBy: subject.savedBy || null, allowHidden: false, warning: null,
     says: `${who} says:`,
     pasteTitle: hosts ? `Paste your ${hosts} key` : 'Paste the key',
     pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
@@ -304,12 +332,12 @@ export function requestWording(request, names) {
         lead: hosts
           ? ['Let ', strong(asked), ' send ', strong(key), ' to ', strong(hosts), '?']
           : ['Let ', strong(asked), ' use ', strong(key), '?'],
-        note: needsValue
+        note: (needsValue
           ? 'You have no key by that name yet. Your agents will be able to read it, and send it only to websites you allow.'
-          : hosts ? `Allowing lets your agents read it and send it to ${hosts}.` : 'Allowing lets your agents read and use it.',
+          : hosts ? `Allowing lets your agents read it and send it to ${hosts}.` : 'Allowing lets your agents read and use it.') + slotNote,
       }
     case 'new':
-      return { ...base, lead: ['Let ', strong(who), ' use a key', ...on, '?'], note: appNote }
+      return { ...base, lead: ['Let ', strong(who), ' use a key', ...on, '?'], note: appNote + slotNote }
     case 'more-sites':
       return {
         ...base,
@@ -317,17 +345,17 @@ export function requestWording(request, names) {
         lead: hosts
           ? ['Let ', strong(who), ' use ', strong(key), ' on more websites: ', strong(hosts), '?']
           : ['Let ', strong(who), ' use ', strong(key), ' on more websites?'],
-        note: `${who} never sees the key itself.${stillOff}`,
+        note: `${who} never sees the key itself.${stillOff}${slotNote}`,
       }
     case 'saved-by-other':
       return {
         ...base,
         ...otherApp,
         lead: ['Let ', strong(who), ' use ', strong(key), ', a key ', strong(subject.savedBy), ' saved?'],
-        note: appNote,
+        note: appNote + slotNote,
       }
     default:
-      return { ...base, lead: ['Let ', strong(who), ' use your ', strong(key), ' key', ...on, '?'], note: appNote }
+      return { ...base, lead: ['Let ', strong(who), ' use your ', strong(key), ' key', ...on, '?'], note: appNote + slotNote }
   }
 }
 
