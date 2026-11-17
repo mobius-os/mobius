@@ -3026,7 +3026,7 @@ def test_platform_conflict_resolver_message_points_at_the_parked_worktree():
   )
 
   assert parked["worktree"] in content
-  assert "continue_platform_overlay_update" in content
+  assert "/api/platform/overlay-finish" in content
   assert "final local source" in content
   assert "all marked files together" in content
   assert "merge --no-ff" not in content
@@ -3059,7 +3059,7 @@ def test_resolver_omits_two_sided_review_for_a_flag_without_snapshots(
   }
   content = pu._platform_conflict_resolver_message("e" * 40, [], parked)
 
-  assert "continue_platform_overlay_update" in content
+  assert "/api/platform/overlay-finish" in content
   assert "git diff --cached" not in content
   # Without the fixed snapshots the single-candidate guidance stays, but it
   # still keeps both sides' tests rather than those of a winning side.
@@ -9946,7 +9946,7 @@ async def test_resume_restarts_the_idle_bound_resolver(clone_env, db, monkeypatc
   assert started[0]["chat_id"] == "resolver-1"
   assert "backend/app/main.py" in started[0]["content"]
   assert str(worktree) in started[0]["content"]
-  assert "continue_platform_overlay_update" in started[0]["content"]
+  assert "/api/platform/overlay-finish" in started[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -10115,6 +10115,674 @@ async def test_the_resolver_is_the_chat_its_update_binds_not_one_with_its_title(
   assert [call["chat_id"] for call in started] == [first["chat_id"]]
   assert str(worktree) in started[0]["content"]
   assert pu._read_conflict_flag()["chat_id"] == first["chat_id"]
+
+
+# --- backend-owned overlay finish ---------------------------------------------
+# A resolver's staged answer is finished by the update owner, not a foreground
+# shell: admission answers at once, the checks outlive the caller, and every
+# ending (success, failure, process loss) leaves one truthful record.
+
+
+@pytest.fixture
+def finish_env(clone_env, monkeypatch):
+  monkeypatch.setattr(pu, "_UPDATE_PROGRESS", dict(pu._UPDATE_PROGRESS))
+  monkeypatch.setattr(pu, "_overlay_finish_task", None)
+  monkeypatch.setattr(pu, "_FINISH_LOCK_WAIT_SECONDS", 0.2)
+  return clone_env
+
+
+def _gate_local_tests(monkeypatch, during=None):
+  """Hold the finish inside its local-change tests until released."""
+  started, release, calls = threading.Event(), threading.Event(), []
+  original = pu._check_local_tests
+
+  def gated(*args, **kwargs):
+    from app import local_change_tests
+    calls.append(local_change_tests._PROCESS_MARKER.get())
+    if during:
+      during()
+    started.set()
+    assert release.wait(30), "the test never released the gated local tests"
+    return original(*args, **kwargs)
+
+  monkeypatch.setattr(pu, "_check_local_tests", gated)
+  return started, release, calls
+
+
+async def _owned_finish() -> dict:
+  return await asyncio.wait_for(pu._overlay_finish_task.task, 60)
+
+
+def _set_aside_files(platform: Path, path: str) -> list[str]:
+  """Every version of ``path`` kept under a set-aside recovery ref."""
+  refs = _git(
+    platform, "for-each-ref", "--format=%(refname)", pu._SET_ASIDE_PREFIX,
+  ).stdout.split()
+  found = []
+  for ref in refs:
+    shown = _git(platform, "show", f"{ref}:{path}", check=False)
+    if shown.returncode == 0:
+      found.append(shown.stdout)
+  return found
+
+
+@pytest.mark.asyncio
+async def test_overlay_finish_answers_on_admission_and_outlives_its_caller(
+  finish_env, monkeypatch,
+):
+  origin, platform = finish_env
+  served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  started, release, calls = _gate_local_tests(monkeypatch)
+  try:
+    # The caller leaves before admission is even answered.
+    caller = asyncio.create_task(
+      pu.finish_platform_overlay_update(target_sha=target, repo=platform),
+    )
+    await asyncio.sleep(0)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+      await caller
+
+    assert await asyncio.to_thread(started.wait, 30)
+    running = pu.platform_update_progress()
+    operation = running["plan_id"]
+    assert running["active"] is True and running["operation"] == "overlay_finish"
+    assert running["target_sha"] == target and len(operation) == 64
+    assert running["phase"] == "testing"
+    assert pu.overlay_finish_check(operation) == 1
+    # Its tests run under this finish's own marker.
+    assert calls == [pu._finish_test_marker(operation)]
+
+    # The resolver edits the candidate meanwhile, including an ignored file,
+    # and asks again: it joins the same operation, whose answer was frozen.
+    (worktree / "backend/app/main.py").write_text("SCRATCH = True\n")
+    ignored = worktree / "backend/app/__pycache__/scratch.pyc"
+    ignored.parent.mkdir(parents=True, exist_ok=True)
+    ignored.write_bytes(b"scratch")
+    joined = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+    assert joined["plan_id"] == operation and joined["active"] is True
+    with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+      await pu.finish_platform_overlay_update(target_sha="f" * 40, repo=platform)
+  finally:
+    release.set()
+  final = await _owned_finish()
+
+  assert len(calls) == 1
+  assert final["plan_id"] == operation and final["active"] is False
+  assert final["phase"] == "complete" and final["result"] == "prepared"
+  record = pu.read_prepared_update()
+  assert record["target"] == target and record["snapshot"] == served
+  prepared_main = _git(platform, "show", f"{record['prepared']}:backend/app/main.py").stdout
+  assert "LINE_A = 'RESOLVED'" in prepared_main and "SCRATCH" not in prepared_main
+  # The candidate is gone, but the edits made while it ran were kept.
+  assert not worktree.exists()
+  assert "SCRATCH = True\n" in _set_aside_files(platform, "backend/app/main.py")
+  assert _set_aside_files(platform, "backend/app/__pycache__/scratch.pyc") == ["scratch"]
+  assert not pu.CONFLICT_FLAG.exists()
+  assert _served_sha(platform) == served
+  assert pu.overlay_finish_check(operation) == 0
+
+  # A lost reply, repeated after the park cleared, reports the same ending.
+  again = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  await _owned_finish()
+  assert again["plan_id"] == operation and again["result"] == "prepared"
+  assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_untouched_candidate_is_removed_without_a_recovery_ref(
+  finish_env,
+):
+  origin, platform = finish_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+
+  await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  assert (await _owned_finish())["result"] == "prepared"
+
+  assert _git(
+    platform, "for-each-ref", pu._SET_ASIDE_PREFIX,
+  ).stdout.strip() == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("break_answer, refusal", [
+  (lambda wt: (wt / "backend/app/main.py").write_text("UNSTAGED = 1\n"),
+   "Stage every intended resolution"),
+  (lambda wt: _git(wt, "merge", "--abort"), "parked merge is no longer"),
+])
+async def test_overlay_finish_refuses_a_stale_answer_without_starting(
+  finish_env, break_answer, refusal,
+):
+  origin, platform = finish_env
+  served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  before = pu.platform_update_progress()
+  break_answer(worktree)
+
+  with pytest.raises(pu.PlatformUpdateError) as refused:
+    await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  with pytest.raises(pu.PlatformUpdateError):
+    await _owned_finish()
+
+  assert refusal in str(refused.value)
+  assert pu.platform_update_progress() == before
+  assert pu.read_prepared_update() is None and pu.CONFLICT_FLAG.exists()
+  assert _served_sha(platform) == served
+
+
+@pytest.mark.asyncio
+async def test_overlay_finish_refuses_another_release(finish_env):
+  origin, platform = finish_env
+  _park_resolved_line_a_conflict(platform, origin)
+
+  with pytest.raises(pu.PlatformUpdateError, match="belongs to another release"):
+    await pu.finish_platform_overlay_update(target_sha="e" * 40, repo=platform)
+  with pytest.raises(pu.PlatformUpdateError):
+    await _owned_finish()
+
+  assert pu.platform_update_progress()["operation"] == "apply"
+  assert pu.CONFLICT_FLAG.exists() and pu.read_prepared_update() is None
+
+
+@pytest.mark.asyncio
+async def test_overlay_finish_refuses_rather_than_queues_behind_an_apply(finish_env):
+  origin, platform = finish_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+
+  async with pu._APPLY_LOCK:
+    with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+      await asyncio.wait_for(
+        pu.finish_platform_overlay_update(target_sha=target, repo=platform), 5,
+      )
+
+  assert pu.CONFLICT_FLAG.exists()
+
+
+@pytest.mark.asyncio
+async def test_overlay_finish_waits_out_a_brief_lock_holder(finish_env, monkeypatch):
+  origin, platform = finish_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  monkeypatch.setattr(pu, "_FINISH_LOCK_WAIT_SECONDS", 10.0)
+  holding, release = threading.Event(), threading.Event()
+
+  def brief_holder():
+    with pu._reconcile_flock():
+      holding.set()
+      release.wait(10)
+
+  holder = threading.Thread(target=brief_holder)
+  holder.start()
+  try:
+    assert holding.wait(10)
+    threading.Timer(0.3, release.set).start()
+    admitted = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  finally:
+    release.set()
+    holder.join(10)
+
+  assert admitted["active"] is True
+  assert (await _owned_finish())["result"] == "prepared"
+
+
+@pytest.mark.asyncio
+async def test_failed_overlay_finish_is_recorded_and_rerun_only_when_named(
+  finish_env, monkeypatch,
+):
+  origin, platform = finish_env
+  served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  probes = []
+
+  def failing_probe(platform_root=None):
+    probes.append(platform_root)
+    raise restart_util.RestartSourceInvalid("startup check failed")
+
+  monkeypatch.setattr("app.restart_util.validate_restart_source", failing_probe)
+
+  admitted = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  with pytest.raises(pu.PlatformUpdateError, match="startup check failed"):
+    await _owned_finish()
+
+  operation = admitted["plan_id"]
+  failed = pu.platform_update_progress()
+  assert failed["plan_id"] == operation and failed["phase"] == "failed"
+  assert failed["active"] is False and failed["result"] is None
+  assert "startup check failed" in failed["error"]
+  # The probe ran on the committed answer, never the editable candidate.
+  assert probes and probes[0] != worktree
+  assert worktree.exists() and pu.CONFLICT_FLAG.exists()
+  assert pu.read_prepared_update() is None and _served_sha(platform) == served
+  assert pu.overlay_finish_check(operation) == 0
+
+  # Repeating the same request reports the failure; it does not run again.
+  repeated = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  await _owned_finish()
+  assert repeated["plan_id"] == operation and repeated["phase"] == "failed"
+  # A retry token for any other operation is refused, not taken as a fresh one.
+  with pytest.raises(pu.PlatformUpdateError, match="names another finish"):
+    await pu.finish_platform_overlay_update(
+      target_sha=target, retry_operation_id="0" * 64, repo=platform,
+    )
+  with pytest.raises(pu.PlatformUpdateError):
+    await _owned_finish()
+  assert len(probes) == 1
+
+  # The cause was outside the staged answer (the environment): fixing it and
+  # naming the failed operation runs that same answer again.
+  monkeypatch.setattr("app.restart_util.validate_restart_source", lambda platform_root=None: None)
+  retried = await pu.finish_platform_overlay_update(
+    target_sha=target, retry_operation_id=operation, repo=platform,
+  )
+  final = await _owned_finish()
+  assert retried["active"] is True and retried["plan_id"] == operation
+  assert final["phase"] == "complete" and final["result"] == "prepared"
+  assert pu.read_prepared_update()["target"] == target
+
+
+@pytest.mark.asyncio
+async def test_a_retry_token_without_its_recorded_failure_is_refused(finish_env):
+  origin, platform = finish_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  with pu._reconcile_flock():
+    flag, parked, answer = pu._parked_answer(platform)
+  operation = pu._overlay_finish_id(flag, parked, answer)
+
+  # The right id, but the record names no finish of it: no implicit run.
+  with pytest.raises(pu.PlatformUpdateError, match="No recorded finish"):
+    await pu.finish_platform_overlay_update(
+      target_sha=target, retry_operation_id=operation, repo=platform,
+    )
+  with pytest.raises(pu.PlatformUpdateError):
+    await _owned_finish()
+  assert pu.read_prepared_update() is None and pu.CONFLICT_FLAG.exists()
+
+  # A retry token naming a finish that did not fail returns its record.
+  await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  assert (await _owned_finish())["result"] == "prepared"
+
+
+@pytest.mark.asyncio
+async def test_a_finish_an_older_boot_retired_is_still_this_operation(
+  finish_env, monkeypatch,
+):
+  """The image's baked boot retires an active record with its own code,
+  which writes no ``operation``/``result`` and Apply's wording."""
+  origin, platform = finish_env
+  served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  with pu._reconcile_flock():
+    flag, parked, answer = pu._parked_answer(platform)
+  operation = pu._overlay_finish_id(flag, parked, answer)
+  pu._set_update_progress(
+    pu.PlatformUpdatePhase.TESTING, plan_id=operation, target_sha=target,
+    active=True, operation="overlay_finish",
+  )
+  # What /app/platform-baked's _finish_interrupted_update_progress writes.
+  pu.UPDATE_PROGRESS_PATH.write_text(json.dumps({
+    "active": False,
+    "error": (
+      "Möbius restarted before this update finished. Review the update again "
+      "before retrying."
+    ),
+    "image_digest": None, "phase": "failed", "plan_id": operation,
+    "target_sha": target, "updated_at": time.time(),
+  }, sort_keys=True))
+  assert pu.platform_update_progress()["operation"] == "apply"
+
+  assert pu.overlay_finish_check(operation) == 0
+  repeated = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  await _owned_finish()
+  assert repeated["plan_id"] == operation and repeated["phase"] == "failed"
+  assert pu.read_prepared_update() is None and worktree.exists()
+
+  retried = await pu.finish_platform_overlay_update(
+    target_sha=target, retry_operation_id=operation, repo=platform,
+  )
+  final = await _owned_finish()
+  assert retried["plan_id"] == operation
+  assert final["result"] == "prepared" and final["operation"] == "overlay_finish"
+  assert _served_sha(platform) == served
+
+
+@pytest.mark.asyncio
+async def test_a_restaged_answer_is_a_new_operation(finish_env, monkeypatch):
+  origin, platform = finish_env
+  _served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  monkeypatch.setattr(
+    "app.restart_util.validate_restart_source",
+    lambda platform_root=None: (_ for _ in ()).throw(
+      restart_util.RestartSourceInvalid("startup check failed"),
+    ),
+  )
+  first = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  with pytest.raises(pu.PlatformUpdateError):
+    await _owned_finish()
+
+  (worktree / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AGAIN'"),
+  )
+  _git(worktree, "add", "backend/app/main.py")
+  monkeypatch.setattr("app.restart_util.validate_restart_source", lambda platform_root=None: None)
+  second = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  final = await _owned_finish()
+
+  assert second["plan_id"] != first["plan_id"]
+  assert final["result"] == "prepared"
+  prepared = pu.read_prepared_update()["prepared"]
+  assert "RESOLVED AGAIN" in _git(platform, "show", f"{prepared}:backend/app/main.py").stdout
+
+
+def _late_edit_park(platform: Path, origin: Path, *, dirty: bool) -> tuple[str, Path]:
+  """Park late edits that overlap a swapped-in update, answer staged."""
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  _local_commit(platform, edits={
+    "backend/app/main.py": _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE'"),
+  }, msg="late conflicting commit")
+  if dirty:
+    (platform / "backend/app/main.py").write_text(
+      _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'LATE DIRTY'"),
+    )
+  assert pu.continue_platform_overlay_update(platform) == "prepared"
+  assert _finish_prepared(platform) == "conflict"
+  replay = Path(pu._read_conflict_flag()["overlay"]["worktree"])
+  (replay / "backend/app/main.py").write_text(
+    _MAIN_PY.replace("LINE_A = 1", "LINE_A = 'RESOLVED AND LATE'"),
+  )
+  _git(replay, "add", "backend/app/main.py")
+  return pu._read_conflict_flag()["overlay"]["target"], replay
+
+
+@pytest.mark.asyncio
+async def test_a_late_edit_finish_keeps_edits_made_while_its_tests_ran(
+  finish_env, monkeypatch,
+):
+  origin, platform = finish_env
+  target, replay = _late_edit_park(platform, origin, dirty=False)
+  digest = "sha256:" + "d" * 64
+  pu._set_update_progress(
+    pu.PlatformUpdatePhase.COMPLETE, plan_id="a" * 64, target_sha=target,
+    image_digest=digest, active=False,
+  )
+
+  def resolver_keeps_editing():
+    (replay / "backend/app/extra.py").write_text("EXTRA = 'mid-finish'\n")
+
+  started, release, calls = _gate_local_tests(monkeypatch, during=resolver_keeps_editing)
+  try:
+    admitted = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+    assert await asyncio.to_thread(started.wait, 30)
+  finally:
+    release.set()
+  final = await _owned_finish()
+
+  assert final["result"] == "updated" and final["phase"] == "complete"
+  # Late finalize runs its local tests under this finish's marker too.
+  assert calls == [pu._finish_test_marker(admitted["plan_id"])]
+  assert "LINE_A = 'RESOLVED AND LATE'" in (platform / "backend/app/main.py").read_text()
+  assert not (platform / "backend/app/extra.py").exists()
+  assert _set_aside_files(platform, "backend/app/extra.py") == ["EXTRA = 'mid-finish'\n"]
+  # The re-parked flag had no digest; the same release keeps its reviewed one.
+  assert final["image_digest"] == digest
+
+
+@pytest.mark.asyncio
+async def test_a_late_edit_finish_that_reparks_keeps_candidate_edits(
+  finish_env, monkeypatch,
+):
+  origin, platform = finish_env
+  target, replay = _late_edit_park(platform, origin, dirty=True)
+  original_merge = app_git.merge_refs
+  edited = []
+
+  def merge_while_resolver_edits(*args, **kwargs):
+    if not edited:
+      edited.append(True)
+      (replay / "backend/app/extra.py").write_text("EXTRA = 'before repark'\n")
+    return original_merge(*args, **kwargs)
+
+  monkeypatch.setattr(app_git, "merge_refs", merge_while_resolver_edits)
+
+  await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  final = await _owned_finish()
+
+  assert final["result"] == "conflict" and final["phase"] == "blocked"
+  assert final["error"] is None
+  flag = pu._read_conflict_flag()
+  assert flag["overlay"]["stage"] == "working" and flag["overlay"]["replay"] is True
+  assert _set_aside_files(platform, "backend/app/extra.py") == ["EXTRA = 'before repark'\n"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status, cause, phase", [
+  ("rolled_back", "ImportError: probe failed", "blocked"),
+  ("error", "rollback_incomplete: checkout changed; recovery marker retained", "failed"),
+])
+async def test_a_finish_keeps_the_cause_of_a_rollback_or_failed_transition(
+  finish_env, monkeypatch, status, cause, phase,
+):
+  origin, platform = finish_env
+  _served, target, _worktree = _park_resolved_line_a_conflict(platform, origin)
+  monkeypatch.setattr(pu, "_continue_parked_resolution", lambda *a, **k: (status, cause))
+
+  await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+  final = await _owned_finish()
+
+  assert final["phase"] == phase and final["error"] == cause
+  assert final["result"] == (status if status == "rolled_back" else None)
+
+
+_KILLED_FINISH_CHILD = textwrap.dedent("""
+  import json, sys, time
+  from pathlib import Path
+  from app import local_change_tests, platform_update as pu, restart_util
+
+  paths, repo, target, pidfile = (
+    json.loads(sys.argv[1]), Path(sys.argv[2]), sys.argv[3], sys.argv[4],
+  )
+  for name, value in paths.items():
+    setattr(pu, name, Path(value))
+  restart_util.validate_restart_source = lambda platform_root=None: None
+
+  def hang(*args, **kwargs):
+    # A runner in its own session, as wt-pytest.sh is, that outlives us.
+    local_change_tests._run_process(
+      repo, ["sh", "-c", f"echo $$ > {pidfile}.tmp && mv {pidfile}.tmp {pidfile}; exec sleep 3600"],
+      Path(pidfile).parent, time.monotonic() + 3600,
+    )
+
+  pu._check_local_tests = hang
+  pu._finish_overlay_operation_sync(
+    target_sha=target, retry_operation_id=None, repo=repo,
+    admitted=lambda progress: print(progress["plan_id"], flush=True),
+  )
+""")
+
+
+def _read_line(stream, timeout: float) -> str:
+  ready, _, _ = select.select([stream], [], [], timeout)
+  assert ready, "the worker process did not report in time"
+  return stream.readline().strip()
+
+
+def _wait_for(predicate, timeout: float, what: str):
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    value = predicate()
+    if value:
+      return value
+    time.sleep(0.05)
+  raise AssertionError(f"timed out waiting for {what}")
+
+
+@pytest.mark.asyncio
+async def test_overlay_finish_killed_with_its_process_is_retired_not_replayed(
+  finish_env, tmp_path,
+):
+  """A real worker process holds the lock, then dies by SIGKILL mid-tests."""
+  from app import process_groups
+
+  origin, platform = finish_env
+  served, target, worktree = _park_resolved_line_a_conflict(platform, origin)
+  paths = {
+    name: str(getattr(pu, name)) for name in (
+      "CONFLICT_FLAG", "RECONCILE_LOCK", "UPDATE_PROGRESS_PATH",
+      "PREPARED_UPDATE_PATH", "DEPENDENCY_RECEIPT_PATH", "UPGRADE_FLAG",
+      "RESTART_NEEDED_FLAG", "SERVING_SOURCE_FILE", "SERVING_SHA_FILE",
+      "ROLLED_BACK_FLAG", "RECONCILE_PRE_FLAG", "OFFLINE_FLAG",
+      "ACTIVATION_V2_CUTOVER_RECEIPT", "BOOT_TRANSACTION_MARKER",
+    )
+  }
+  pidfile = tmp_path / "runner.pid"
+  child = subprocess.Popen(
+    [sys.executable, "-c", _KILLED_FINISH_CHILD, json.dumps(paths),
+     str(platform), target, str(pidfile)],
+    cwd=Path(pu.__file__).resolve().parents[1], stdout=subprocess.PIPE, text=True,
+  )
+  try:
+    runner = None
+    operation = None
+    try:
+      operation = _read_line(child.stdout, 60)
+      runner = int(_wait_for(
+        lambda: pidfile.exists() and pidfile.read_text().strip(), 60, "the test runner",
+      ))
+      ticks = process_groups._start_ticks(runner)
+      assert pu.platform_update_progress()["phase"] == "testing"
+      assert pu.overlay_finish_check(operation) == 1
+      with pytest.raises(pu.PlatformUpdateError, match="platform_update_in_progress"):
+        await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+    finally:
+      child.kill()
+      child.wait(30)
+    # The worker is gone; its runner, in its own session, is not.
+    assert process_groups._is_same_process(runner, ticks)
+    # The record still says active; the read-only check sees its owner is
+    # gone without changing it.
+    assert pu.platform_update_progress()["active"] is True
+    assert pu.overlay_finish_check(operation) == 0
+    assert pu.platform_update_progress()["active"] is True
+
+    # A request that takes the lock itself retires it, ends exactly the dead
+    # finish's runner, and does not run again.
+    repeated = await pu.finish_platform_overlay_update(target_sha=target, repo=platform)
+    await _owned_finish()
+    _wait_for(lambda: not process_groups._is_same_process(runner, ticks), 10, "the runner to end")
+    assert repeated["plan_id"] == operation and repeated["phase"] == "failed"
+    assert repeated["active"] is False and repeated["operation"] == "overlay_finish"
+    assert "nothing retried it" in repeated["error"]
+    assert pu.read_prepared_update() is None
+    assert worktree.exists() and pu.CONFLICT_FLAG.exists()
+    assert _served_sha(platform) == served
+
+    retried = await pu.finish_platform_overlay_update(
+      target_sha=target, retry_operation_id=operation, repo=platform,
+    )
+    final = await _owned_finish()
+    assert retried["plan_id"] == operation
+    assert final["phase"] == "complete" and final["result"] == "prepared"
+  finally:
+    if operation:
+      process_groups.terminate_run_processes(
+        pu._finish_test_marker(operation), logger=logging.getLogger(__name__),
+        label="overlay finish crash-test cleanup",
+      )
+
+
+def test_a_progress_read_retires_a_dead_finish_and_ends_its_runners(finish_env, tmp_path):
+  from app import process_groups
+
+  _origin, platform = finish_env
+  operation = "d" * 64
+  runner = subprocess.Popen(
+    ["sleep", "3600"], start_new_session=True,
+    env={**os.environ, process_groups.RUN_MARKER_ENV: pu._finish_test_marker(operation)},
+  )
+  bystander = subprocess.Popen(
+    ["sleep", "3600"], start_new_session=True,
+    env={**os.environ, process_groups.RUN_MARKER_ENV: pu._finish_test_marker("e" * 64)},
+  )
+  try:
+    pu._set_update_progress(
+      pu.PlatformUpdatePhase.TESTING, plan_id=operation,
+      target_sha=_served_sha(platform), active=True, operation="overlay_finish",
+    )
+
+    recovered = pu.current_update_progress()
+
+    assert recovered["active"] is False and recovered["phase"] == "failed"
+    assert recovered["operation"] == "overlay_finish" and recovered["plan_id"] == operation
+    assert "retry_operation_id" in recovered["error"]
+    assert runner.wait(10) is not None
+    assert bystander.poll() is None
+  finally:
+    for proc in (runner, bystander):
+      if proc.poll() is None:
+        proc.kill()
+      proc.wait(10)
+
+
+def test_local_test_runners_carry_the_owning_marker(tmp_path):
+  from app import local_change_tests, process_groups
+
+  seen = tmp_path / "marker"
+  argv = ["sh", "-c", f'printf %s "${process_groups.RUN_MARKER_ENV}" > {seen}']
+  with local_change_tests.process_marker("owned-marker"):
+    assert local_change_tests._run_process(tmp_path, argv, tmp_path, time.monotonic() + 30) == 0
+  assert seen.read_text() == "owned-marker"
+  assert local_change_tests._PROCESS_MARKER.get() is None
+
+
+def test_overlay_finish_check_reports_a_replaced_record_as_broken(finish_env, capsys):
+  _origin, platform = finish_env
+  pu._set_update_progress(
+    pu.PlatformUpdatePhase.PREPARING, plan_id="a" * 64,
+    target_sha=_served_sha(platform), active=True,
+  )
+
+  assert pu.overlay_finish_check("d" * 64) == 2
+  assert "no longer names this finish operation" in capsys.readouterr().out
+
+
+def test_overlay_finish_check_rereads_a_finish_that_ended_during_its_probe(
+  finish_env, monkeypatch, capsys,
+):
+  _origin, platform = finish_env
+  operation, target = "e" * 64, _served_sha(platform)
+  pu._set_update_progress(
+    pu.PlatformUpdatePhase.TESTING, plan_id=operation, target_sha=target,
+    active=True, operation="overlay_finish",
+  )
+  probes = []
+
+  def finish_ends_then_releases() -> bool:
+    # The finish writes its terminal record, then releases the lock, between
+    # the check's first read and its lock probe.
+    if not probes:
+      pu._set_update_progress(
+        pu.PlatformUpdatePhase.COMPLETE, plan_id=operation, target_sha=target,
+        active=False, operation="overlay_finish", result="prepared",
+      )
+    probes.append(True)
+    return False
+
+  monkeypatch.setattr(pu, "_reconcile_lock_held", finish_ends_then_releases)
+  assert pu.overlay_finish_check(operation) == 0
+  out = capsys.readouterr().out
+  assert "stopped before" not in out
+  assert json.loads(out)["phase"] == "complete"
+  assert probes == [True]
+
+
+def test_resolver_instructions_finish_through_the_update_owner(parked_resolution):
+  target = "a" * 40
+  for overlay in (parked_resolution, {**parked_resolution, "replay": True}):
+    content = pu._platform_conflict_resolver_message(target, ["backend/app/main.py"], overlay)
+
+    assert "/api/platform/overlay-finish" in content
+    assert '{"target_sha":"' + target + '"}' in content
+    assert "overlay_finish_check" in content and "declare a wait" in content
+    assert "stopped or restarted, or because you fixed a cause outside" in content
+    assert "returns the recorded failure" in content
+    assert "`/data/platform` until it ends" in content
+    assert "declare the wait again" in content
+    assert "continue_platform_overlay_update" not in content
 
 
 def test_confirmed_resolver_archive_retries_after_activation_clears(
