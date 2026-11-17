@@ -277,6 +277,21 @@ def test_called_off_goal_settles_through_update_goal_not_chat_stop():
   assert "Only when the owner explicitly asks you to stop" in planning
 
 
+def test_goal_outcome_survives_milestones():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+  planning = " ".join((
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8").split())
+
+  assert "answered card, contribution or restart is not completion" in core
+  assert "keep milestones as tasks in the same open Goal" in core
+  assert "Record each blocking question on its task and ask them together" in core
+  assert "reconcile the owner's original request against the checklist" in planning
+  assert "low disk can sweep idle scratch sooner" in core
+  assert "still there after the answer" not in core
+
+
 def test_goal_responsibility_requires_truthful_outcome_or_real_handoff():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
