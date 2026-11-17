@@ -1,6 +1,6 @@
 /* A reply owns continuous prose and saved/live sources. The reply ending a
    complete answer stretch holds its time, Copy, Branch and References. */
-import { Fragment, memo, useContext, useMemo } from 'react'
+import { Fragment, memo, useCallback, useContext, useMemo } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
@@ -72,12 +72,15 @@ function AssistantReply({
     activeIndex: isStreaming ? activeRowIndex : -1, positions,
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
+  // Copy names this answer to ChatView's one handler, which builds the text
+  // only when pressed.
+  const answerKey = presentationRows[0].key
+  const readCopy = useCallback(button => copy(button, answerKey), [copy, answerKey])
   const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
   const branchThroughId = rows[rows.length - 1].message.id
-  const metaKey = presentationRows[0].key
   const settled = footer === 'settled' && !isStreaming
   const endedAt = presentationRows.at(-1).message.run_ended_ts
   // A stretch lists its References once, in its last reply's footer, after
@@ -96,7 +99,7 @@ function AssistantReply({
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.
-    onClick={settled && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
+    onClick={settled && onRevealMeta ? event => onRevealMeta(event, answerKey) : undefined}
     // Pointing at or focusing the footer's reply readies what it copies.
     onPointerEnter={settled ? onFooterIntent : undefined}
     onFocus={settled ? onFooterIntent : undefined}
@@ -157,7 +160,7 @@ function AssistantReply({
       // row's own time is when it began).
       timestamp={settled ? (endedAt ?? presentationRows[0].message.ts) : null}
       timeIsStart={endedAt == null}
-      copy={settled ? copy : undefined}
+      copy={settled && copy ? readCopy : undefined}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.
       branch={settled && onBranch && branchThroughId != null

@@ -1,43 +1,68 @@
-/* One shared quarter-minute clock for wait countdowns: one timer however many cards show a countdown. */
+/* Shared clocks: one timer however many components read the time. Wait
+   countdowns tick each quarter minute; reply footers each minute. */
 import { useSyncExternalStore } from 'react'
 
 // Countdowns read in whole minutes; a 15 s tick keeps them honest without
 // re-rendering anything else. Only subscribed components re-render on a tick.
 export const COUNTDOWN_TICK_MS = 15_000
-
-const listeners = new Set()
-let now = Date.now()
-let timer = null
-
-function tick() {
-  now = Date.now()
-  listeners.forEach(listener => listener())
-}
-
-function subscribe(listener) {
-  listeners.add(listener)
-  if (!timer) {
-    // The clock slept while nothing showed a countdown; catch up at once.
-    now = Date.now()
-    timer = setInterval(tick, COUNTDOWN_TICK_MS)
-  }
-  return () => {
-    listeners.delete(listener)
-    if (!listeners.size && timer) {
-      clearInterval(timer)
-      timer = null
-    }
-  }
-}
+export const MINUTE_TICK_MS = 60_000
 
 const noSubscription = () => () => {}
-const snapshot = () => now
+
+/** A clock that runs while anything subscribes and stops after the last
+ *  subscriber leaves. `refreshOnShow` also reads the time at once when a
+ *  suspended tab is shown again. */
+function sharedClock(tickMs, { refreshOnShow = false } = {}) {
+  const listeners = new Set()
+  let now = Date.now()
+  let timer = null
+  const tick = () => {
+    now = Date.now()
+    listeners.forEach(listener => listener())
+  }
+  const onVisible = () => { if (document.visibilityState === 'visible') tick() }
+  const subscribe = listener => {
+    listeners.add(listener)
+    if (!timer) {
+      // The clock slept while nothing read it; catch up at once.
+      now = Date.now()
+      timer = setInterval(tick, tickMs)
+      if (refreshOnShow) document.addEventListener('visibilitychange', onVisible)
+    }
+    return () => {
+      listeners.delete(listener)
+      if (!listeners.size && timer) {
+        clearInterval(timer)
+        timer = null
+        if (refreshOnShow) document.removeEventListener('visibilitychange', onVisible)
+      }
+    }
+  }
+  const snapshot = () => now
+  return {
+    use: active => useSyncExternalStore(active ? subscribe : noSubscription, snapshot, snapshot),
+    listenerCount: () => listeners.size,
+  }
+}
+
+const countdown = sharedClock(COUNTDOWN_TICK_MS)
+const minute = sharedClock(MINUTE_TICK_MS, { refreshOnShow: true })
 
 /** The shared countdown time; `active` false reads it without ticking. */
 export function useCountdownNow(active = true) {
-  return useSyncExternalStore(active ? subscribe : noSubscription, snapshot, snapshot)
+  return countdown.use(active)
+}
+
+/** The shared minute time for relative footer times; `active` false reads it
+ *  without ticking. */
+export function useMinuteNow(active = true) {
+  return minute.use(active)
 }
 
 export function _countdownListenerCount() {
-  return listeners.size
+  return countdown.listenerCount()
+}
+
+export function _minuteListenerCount() {
+  return minute.listenerCount()
 }

@@ -17,7 +17,7 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { agentStretches, footerCopyCache, footerCopyParts, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
+const { agentStretches, footerCopyParts, footerHasCopy, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
@@ -438,38 +438,24 @@ test('the answer before a visible steer stays working until its run settles', ()
   assert.equal(footerCopyParts(working, { messages }), null, 'nothing to copy until it settles')
 })
 
-test('Copy is rebuilt only for the answer whose inputs changed', () => {
-  const built = []
-  const copyOf = footerCopyCache(parts => {
-    built.push(parts.map(part => part.markdown))
-    return () => parts
-  })
-  const earlier = row('a')
-  let previousGroups = null
-  const frame = text => {
-    const messages = [ownerRow, earlier, ownerRow, row('b', { blocks: [{ type: 'text', content: text }] })]
-    // As ChatView does, each frame regroups from the last committed groups.
-    const replyGroups = assistantReplyGroups(messages, { previousGroups })
-    previousGroups = replyGroups
-    return { messages, footers: [...replyFooters({ messages, replyGroups, lastVisibleIndex: 3 }).byGroup.values()] }
+test('Copy shows for a settled answer with prose, and only once an earlier start is read', () => {
+  const footersOf = (messages, options = {}) => [...replyFooters({
+    messages, replyGroups: assistantReplyGroups(messages, options), lastVisibleIndex: messages.length - 1, ...options,
+  }).byGroup.values()]
+  const [prose] = footersOf([ownerRow, row('a')])
+  assert.equal(footerHasCopy(prose), true)
+  assert.equal(footerHasCopy({ ...prose, state: 'working' }), false, 'nothing until it settles')
+  const [tools] = footersOf([ownerRow, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })])
+  assert.equal(footerHasCopy(tools), false, 'tools only: nothing to copy')
+  // An answer reaching the page's first row may have begun before it.
+  const [partial] = footersOf([cardAnswer, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })], { offset: 10 })
+  assert.equal(partial.truncated, true)
+  assert.equal(footerHasCopy(partial), false, 'unknown until its start is read')
+  assert.equal(footerHasCopy(partial, { startRows: [row('earlier')] }), true, 'the read start has prose')
+  // Whether Copy shows agrees with the text it builds when pressed.
+  for (const footer of [prose, tools]) {
+    assert.equal(footerHasCopy(footer), (footerCopyParts(footer, { messages: [] }) || []).length > 0)
   }
-  const first = frame('b1')
-  const copies = first.footers.map(footer => copyOf(footer, { messages: first.messages }))
-  assert.deepEqual(built, [['a'], ['b1']])
-  // The next frame regroups everything; the earlier answer's rows keep their
-  // identity, so it keeps its Copy.
-  const next = frame('b2')
-  const again = next.footers.map(footer => copyOf(footer, { messages: next.messages }))
-  assert.equal(again[0], copies[0], 'the unchanged answer keeps its Copy handler')
-  assert.notEqual(again[1], copies[1])
-  assert.deepEqual(built, [['a'], ['b1'], ['b2']])
-  assert.notEqual(copyOf(next.footers[0], { messages: next.messages, chatId: 'another' }), copies[0],
-    'another chat in the same view does not reuse this chat’s Copy')
-  assert.equal(copyOf({ ...next.footers[0], state: 'working' }, { messages: next.messages }), undefined,
-    'no Copy while an answer is not settled')
-  const toolsOnly = [ownerRow, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })]
-  const [quiet] = replyFooters({ messages: toolsOnly, replyGroups: assistantReplyGroups(toolsOnly), lastVisibleIndex: 1 }).byGroup.values()
-  assert.equal(copyOf(quiet, { messages: toolsOnly }), undefined, 'nothing to copy, so no Copy')
 })
 
 test('Copy’s parts come from the stretch’s replies as they render, each naming its row', () => {

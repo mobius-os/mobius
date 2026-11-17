@@ -1,33 +1,15 @@
 /* MessageMetaRow keeps a message's time and actions in one row: its time,
-   Copy, and on the chat's reply footer (`side="start"`) Branch. Beside an
-   owner message's bubble it is revealed on tap; the reply footer reads how
-   long ago the reply settled (or, until that is known, began), aligned with the reply's prose, and appears
-   when the reply is tapped, keyboard-focused, or hovered with a fine pointer.
+   Copy, and on an answer's reply footer (`side="start"`) Branch and any
+   References (its children). Beside an owner message's bubble it is revealed
+   on tap; a reply footer reads how long ago the answer settled (or, until
+   that is known, began), aligned with the reply's prose, and appears when the
+   reply is tapped, keyboard-focused, or hovered with a fine pointer.
    `copy(button)` returns the clipboard payload (see MessageCopyButton);
    `branch()` opens a new chat continuing through this reply. */
-import { useEffect, useState } from 'react'
 import MessageBranchButton from './MessageBranchButton.jsx'
 import MessageCopyButton from './MessageCopyButton.jsx'
 import { formatDateTime, formatRecentDateTime } from '../../lib/dateTimeFormat.js'
-
-/** The current time, refreshed each minute while `ticking`, and at once
- *  when a suspended tab is shown again. */
-function useMinuteClock(ticking) {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    if (!ticking) return undefined
-    const refresh = () => setNow(Date.now())
-    refresh()
-    const timer = setInterval(refresh, 60_000)
-    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      clearInterval(timer)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [ticking])
-  return now
-}
+import { useMinuteNow } from './countdownClock.js'
 
 export default function MessageMetaRow({
   timestamp,
@@ -39,7 +21,8 @@ export default function MessageMetaRow({
   children,
 }) {
   const footer = side === 'start'
-  const now = useMinuteClock(footer && !!timestamp)
+  // One shared minute clock serves every footer showing a relative time.
+  const now = useMinuteNow(footer && !!timestamp)
   // A reply's start row is a line of its own, so it renders even with nothing
   // to show yet (a streaming reply); the overlay row beside a bubble does not.
   if (!footer && !timestamp && !copy) return null
