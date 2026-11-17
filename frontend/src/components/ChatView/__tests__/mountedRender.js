@@ -46,6 +46,7 @@ class FakeNode {
     for (let current = node; current; current = current.parentNode) if (current === this) return true
     return false
   }
+  get isConnected() { return this.getRootNode() === (this.ownerDocument || this) }
   getRootNode() {
     let current = this
     while (current.parentNode) current = current.parentNode
@@ -77,6 +78,8 @@ class FakeElement extends FakeNode {
   getAttribute(name) { return this.attributes.has(name) ? this.attributes.get(name) : null }
   hasAttribute(name) { return this.attributes.has(name) }
   removeAttribute(name) { this.attributes.delete(name) }
+  get parentElement() { return this.parentNode?.nodeType === 1 ? this.parentNode : null }
+  get children() { return this.childNodes.filter(child => child.nodeType === 1) }
   get id() { return this.getAttribute('id') || '' }
   set id(value) { this.setAttribute('id', value) }
   get className() { return this.getAttribute('class') || '' }

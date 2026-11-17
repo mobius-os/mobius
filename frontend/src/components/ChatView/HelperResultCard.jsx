@@ -10,6 +10,7 @@ import { helperPresentation, isWorkingHelper } from './workingHelper.js'
 import { elapsedLabel } from './toolTasks.js'
 import { toolCallLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { useHelperPreview } from './helperPreviewSlot.jsx'
 import { helperTitle } from './helperTitle.js'
 import { modelDisplayName } from './chatUsageFormat.js'
 import { modelQueries } from '../../hooks/queries.js'
@@ -54,13 +55,14 @@ function useElapsed(startedAt, running) {
 /* A helper's conversation (task, steps and result) over this chat, read-only
    and updating live while it works. Its owner decides how long it stays open:
    a row that can remount (the foot's regrouping list) must not own it. */
-export function HelperEventConversation({ event, chatId, host, onClose, onInternalNav }) {
+export function HelperEventConversation({ event, chatId, host, opener, onClose, onInternalNav }) {
   return <HelperConversation
     chatId={chatId}
     taskId={event.delegation_id}
     name={helperTitle(event)}
     status={event.status}
     host={host}
+    opener={opener}
     onClose={onClose}
     onInternalNav={onInternalNav}
   />
@@ -111,16 +113,18 @@ export function HelperRowLine({ event, chatId, onOpen, ref, children }) {
   </div>
 }
 
-// A transcript row stays where it was launched, so it owns its dialog.
+// A transcript row stays where it was launched, so it renders its dialog; the
+// pane decides which one row's preview is open.
 export function HelperRow({ event, chatId, onInternalNav }) {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useHelperPreview()
   const rowRef = useRef(null)
-  return <HelperRowLine ref={rowRef} event={event} chatId={chatId} onOpen={() => setOpen(true)}>
+  return <HelperRowLine ref={rowRef} event={event} chatId={chatId} onOpen={click => setOpen({ opener: click.currentTarget })}>
     {open && <HelperEventConversation
       event={event}
       chatId={chatId}
       host={rowRef.current?.closest('.chat')}
-      onClose={() => setOpen(false)}
+      opener={open.opener}
+      onClose={() => setOpen(null)}
       onInternalNav={onInternalNav}
     />}
   </HelperRowLine>
