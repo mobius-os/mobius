@@ -505,7 +505,7 @@ most 16384.
   hidden only while a passive session shows the app's own confirmation rows.
 - `"status_placement": "footer"` opts an inline block with an `action` and
   `"expand": false` in to a compact card: there is no header row, and the
-  title, its mark and badges sit in the footer beside the control, after the
+  title, its mark and badges sit in the footer beside the control, under the
   app's name, which the host always draws there. The footer keeps its height
   while the control is hidden (for example while your title reports work),
   your rows' `links` are drawn in that footer in place of the control, and

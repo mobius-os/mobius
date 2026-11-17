@@ -196,7 +196,7 @@ export function AppBlockLayout({ block, app, appsLoading, onInternalNav, actionF
           title, so Confirm is never labelled only by app-chosen text. */}
       {footerStatus ? <div className="md-app-block__footer-status">
         <span className="md-app-block__footer-app">{app ? app.name : block.app}</span>
-        <span className="md-app-block__footer-sep" aria-hidden="true">·</span>{status}</div> : null}
+        <span className="md-app-block__footer-line">{status}</span></div> : null}
       {footerStatus ? jump : null}
       {results.length ? <div className="md-app-block__results">{results.map((item, i) =>
         <ExternalLinks key={i} links={item.live.links} context={item.title} />)}</div> : null}
