@@ -30,6 +30,15 @@ export function settingsSectionPage(section) {
 
 const KNOWN = new Set(SETTINGS_SECTIONS)
 
+/**
+ * The request Settings navigates to: a section to focus, or a whole page such
+ * as one provider's (`{ page }`). Null opens Settings without a target. The
+ * nonce makes a repeat of the same request navigate again.
+ */
+export function settingsFocusRequest(section, { page = null } = {}, nonce = Date.now()) {
+  return section || page ? { section: section || null, page, nonce } : null
+}
+
 /** A known section id, or null for Settings without a focused section. */
 export function settingsSectionOrNull(value) {
   return typeof value === 'string' && KNOWN.has(value) ? value : null

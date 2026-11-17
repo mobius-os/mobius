@@ -50,6 +50,7 @@ function PaneChatView({
   loadTheme,
   openAppWithIntent,
   onInternalNav,
+  onOpenProviderSettings,
   onChatMissing,
   onFirstMessage,
   onDisplayReady,
@@ -176,6 +177,7 @@ function PaneChatView({
         artifactsAppId={artifactsAppId}
         onOpenArtifact={handleOpenArtifact}
         onInternalNav={onInternalNav}
+        onOpenProviderSettings={onOpenProviderSettings}
         onMessageStart={handleMessageStart}
         onOwnerActivity={handleOwnerActivity}
         composerRequest={composerRequest}
