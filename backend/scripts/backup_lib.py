@@ -321,31 +321,44 @@ def swap_entries_transactional(staging, data_dir, rollback_dir):
         added.append(name)
     return swapped + added
   except BaseException as forward_err:
-    # Undo entries we added where nothing existed before (removing an
-    # added entry never loses an original).
-    for name in added:
-      try:
-        _remove_path(os.path.join(data_dir, name))
-      except OSError:
-        pass
-    # Restore every stashed original. Scanning rollback_dir covers the
-    # in-flight entry whose original was moved but whose replacement did
-    # not land, not just the fully-swapped ones. Track any step that
-    # itself fails — its original STAYS stashed (never deleted).
-    unrecovered = []
-    restored = []
-    for name in sorted(os.listdir(rollback_dir)):
-      dst = os.path.join(data_dir, name)
-      try:
-        _remove_path(dst)                                  # clear the slot
-        os.replace(os.path.join(rollback_dir, name), dst)  # put it back
-        restored.append(name)
-      except OSError:
-        # Could not restore this original; it remains in rollback_dir.
-        unrecovered.append(name)
-    if unrecovered:
-      raise RollbackError(forward_err, rollback_dir, unrecovered, restored)
+    _put_originals_back(data_dir, rollback_dir, added, forward_err)
     raise
+
+
+def undo_swap(data_dir, rollback_dir, moved, cause):
+  """Puts data_dir back as it was before a successful
+  swap_entries_transactional that returned ``moved``, for a step that must
+  commit together with the swap and failed (``cause``). Raises RollbackError
+  as the swap's own rollback does when an original can't be put back."""
+  stashed = set(os.listdir(rollback_dir))
+  _put_originals_back(data_dir, rollback_dir, [n for n in moved if n not in stashed], cause)
+
+
+def _put_originals_back(data_dir, rollback_dir, added, cause):
+  # Undo entries we added where nothing existed before (removing an
+  # added entry never loses an original).
+  for name in added:
+    try:
+      _remove_path(os.path.join(data_dir, name))
+    except OSError:
+      pass
+  # Restore every stashed original. Scanning rollback_dir covers the
+  # in-flight entry whose original was moved but whose replacement did
+  # not land, not just the fully-swapped ones. Track any step that
+  # itself fails — its original STAYS stashed (never deleted).
+  unrecovered = []
+  restored = []
+  for name in sorted(os.listdir(rollback_dir)):
+    dst = os.path.join(data_dir, name)
+    try:
+      _remove_path(dst)                                  # clear the slot
+      os.replace(os.path.join(rollback_dir, name), dst)  # put it back
+      restored.append(name)
+    except OSError:
+      # Could not restore this original; it remains in rollback_dir.
+      unrecovered.append(name)
+  if unrecovered:
+    raise RollbackError(cause, rollback_dir, unrecovered, restored)
 
 
 def fsync_path(path):

@@ -655,6 +655,14 @@ def test_a_reused_id_with_the_same_slug_is_still_another_app_after_a_restore(tmp
   assert [grant["id"] for grant in key["grants"]["apps"]] == [1]
 
 
+def _load_restore():
+  import importlib.util
+  spec = importlib.util.spec_from_file_location("mobius_restore_under_test", RESTORE)
+  restore = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(restore)
+  return restore
+
+
 def test_the_image_ships_the_vault_program_where_the_restore_script_loads_it(tmp_path):
   """The shipped restore runs as /app/scripts/restore-data.py, so the image
   must carry the vault program where that copy resolves it. Lay out /app from
@@ -673,7 +681,23 @@ def test_the_image_ships_the_vault_program_where_the_restore_script_loads_it(tmp
   assert os.path.isfile(restore.VAULT_PROGRAM)
 
 
-def test_a_restore_without_secrets_never_edits_a_running_vault(tmp_path):
+def _apps(data):
+  db = sqlite3.connect(str(Path(data) / "db" / "ultimate.db"))
+  try:
+    return dict(db.execute("SELECT id, slug FROM apps").fetchall())
+  finally:
+    db.close()
+
+
+def _granted_ids(kv, data):
+  [key] = kv.Vault(Path(data) / ".vault").list_keys()
+  return [grant["id"] for grant in key["grants"]["apps"]]
+
+
+def test_a_restore_that_cannot_update_a_running_vault_changes_nothing(tmp_path):
+  """The kept vault's grants must be checked against the restored apps, so a
+  vault that can't be opened (here: still running) stops the restore before
+  it touches /data, rather than leaving grants that may name other apps."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
   _set_apps(data, {1: "notes"})
@@ -684,13 +708,91 @@ def test_a_restore_without_secrets_never_edits_a_running_vault(tmp_path):
   _vault_granting(data, kv, [1, 2])
   running = kv.hold_single_instance_lock(data / ".vault")
   try:
-    restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+    refused = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force", expect=4)
   finally:
     os.close(running)
-  assert "could not update the key vault" in restored.stdout
-  assert "Review every app grant in Settings › Keys" in restored.stdout
-  [key] = kv.Vault(data / ".vault").list_keys()
-  assert [grant["id"] for grant in key["grants"]["apps"]] == [1, 2]
+  assert "Stop Möbius and its key vault" in refused.stderr and "/data unchanged" in refused.stderr
+  assert _apps(data) == {1: "notes", 2: "maps"}
+  assert _granted_ids(kv, data) == [1, 2]
+  assert not list(data.glob(".restore-*"))
+
+
+@pytest.mark.parametrize("old_database", ["missing", "unreadable"])
+def test_a_grant_is_withdrawn_when_the_apps_before_the_restore_are_unknown(tmp_path, old_database):
+  """Without the old apps, no grant can be proven to name the same app after
+  the restore, so every app grant is withdrawn, even to an id the restored
+  database has."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _vault_granting(data, kv, [1, 2])
+  db = data / "db" / "ultimate.db"
+  db.unlink()
+  if old_database == "unreadable":
+    db.write_bytes(b"not a database")
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "withdrawing every one" in restored.stdout and "app ids [1, 2]" in restored.stdout
+  assert _granted_ids(kv, data) == []
+  vault = kv.Vault(data / ".vault")
+  assert vault.list_requests() == []
+  assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+
+
+def test_a_grant_to_an_id_the_old_apps_lack_is_withdrawn(tmp_path):
+  """The restored database gives id 2 to an app, but nothing shows the kept
+  vault's grant to id 2 was given to that app."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes"})
+  _vault_granting(data, kv, [1, 2])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "app ids [2]" in restored.stdout
+  assert _granted_ids(kv, data) == [1]
+
+
+def test_unproven_app_ids_keeps_only_the_same_installation():
+  restore = _load_restore()
+  before = {1: ("notes", "a"), 2: ("weather", "b"), 3: ("maps", "c")}
+  after = {1: ("notes", "a"), 2: ("weather", "other"), 4: ("chess", "d")}
+  assert restore.unproven_app_ids({1, 2, 3, 4, 5}, before, after) == [2, 3, 4, 5]
+  assert restore.unproven_app_ids({1}, None, after) == [1]
+  assert restore.unproven_app_ids({1}, before, None) == [1]
+
+
+def test_a_vault_update_that_fails_after_the_swap_undoes_the_restore(tmp_path, monkeypatch, capsys):
+  """The restore and the kept vault's grants commit together: when the vault
+  can't be updated, /data goes back to how it was and the vault is released."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: "maps"})
+  _vault_granting(data, kv, [1, 2])
+  restore = _load_restore()
+
+  def disk_full(self, before, after):
+    raise OSError(28, "No space left on device")
+  monkeypatch.setattr(restore.KeptVault, "withdraw_unproven_grants", disk_full)
+  monkeypatch.setattr(sys, "argv", [str(RESTORE), "--server-stopped", "--health-url", _dead_url(), bdir,
+                                    "--data-dir", str(data), "--i-understand-this-overwrites", "--force"])
+  with pytest.raises(SystemExit) as exited:
+    restore.main()
+  assert exited.value.code == 3
+  assert "the restore was undone" in capsys.readouterr().err
+  assert _apps(data) == {1: "notes", 2: "maps"}
+  assert not list(data.glob(".restore-*"))
+  os.close(kv.hold_single_instance_lock(data / ".vault"))
 
 
 def test_restore_refuses_running_server(tmp_path):

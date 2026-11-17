@@ -286,11 +286,14 @@ lets the app borrow, can never be replaced through them.
 **Restore.** Backups carry the vault only in the encrypted secrets archive.
 A restore that brings no vault (a backup without secrets, or with secrets from
 before the vault) keeps the current vault, whose grants name this install's
-app ids. `restore-data.py` warns, and, with the vault stopped,
-withdraws grants and requests for every id the restored database lacks or
-gives to another installation (slug and token nonce), using the vault's own
-purge step; if it cannot open the vault it changes nothing and asks the owner
-to review every grant. It runs as root from `/app/scripts`, so the image ships
+app ids. `restore-data.py` warns and keeps a grant only when the databases
+from before and after the restore both give its id to the same installation
+(slug and token nonce): every other app grant and request is withdrawn with
+the vault's own purge step, all of them when either database can't be read.
+It fails closed: it opens the vault, under its lock, before the swap, and
+refuses the restore with `/data` unchanged when it can't (a vault still
+running, say); if withdrawing fails after the swap, it undoes the restore.
+It runs as root from `/app/scripts`, so the image ships
 the vault program beside it (`/app/vault/keyvault.py`), never loading it from
 the editable checkout.
 
