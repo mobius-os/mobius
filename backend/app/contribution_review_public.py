@@ -60,6 +60,12 @@ def _clip_evidence(text: str, limit: int) -> str:
 
 VERDICT_HEADERS = {"COMMENT": None, "APPROVE": "Approved", "REQUEST_CHANGES": "Changes requested"}
 
+# Every posted copy carries a per-dispatch marker of this fixed shape. The
+# marker-free preview the owner confirms reserves exactly its room, so the
+# preview and the posted body clip the evidence at the same point and the owner
+# reads the words that are posted.
+MARKER_RESERVE_UNITS = _body_units(f"\n\n<!-- mobius-review:{'0' * 32} -->")
+
 
 def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMENT") -> str:
   """The public text of an owner-requested review: verdict, findings, checks.
@@ -80,10 +86,14 @@ def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMEN
     if tests_text:
       parts += ["", f"**Verification:** {tests_text}"]
     return "\n".join(parts + ["", footer])
+  # When this render omits the marker (the preview), still reserve its room so a
+  # later marker-bearing post clips at the same point; a render that already
+  # carries the marker counts it in full and reserves nothing more.
+  reserve = 0 if marker else MARKER_RESERVE_UNITS
   body = render(summary, tests)
-  if _body_units(body) <= GITHUB_REVIEW_BODY_MAX:
+  if _body_units(body) + reserve <= GITHUB_REVIEW_BODY_MAX:
     return body
-  available = GITHUB_REVIEW_BODY_MAX - _body_units(render("", ""))
+  available = GITHUB_REVIEW_BODY_MAX - reserve - _body_units(render("", ""))
   if tests:
     available -= _body_units("\n\n**Verification:** ")
   # Checks keep at least a quarter of the room, the summary takes the rest.

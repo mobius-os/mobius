@@ -1,5 +1,6 @@
 """A review ends finished or blocked, and the owner can post a finished private one."""
 import asyncio
+import re
 
 import pytest
 from fastapi import HTTPException
@@ -115,6 +116,32 @@ def test_the_owner_posts_exactly_the_previewed_words_once_as_a_comment(setup, mo
   with pytest.raises(HTTPException) as again:
     _post(setup, words["preview_sha256"])
   assert again.value.status_code == 409 and len(sent) == 1
+
+
+def _visible(body):
+  """The posted body with its hidden per-dispatch marker removed: what a reader sees."""
+  return re.sub(r"\n\n<!-- mobius-review:[0-9a-f]+ -->\Z", "", body)
+
+
+@pytest.mark.parametrize("summary,tests", [
+  ("The retry sends the message twice.", "Focused tests passed"),  # short: never clipped
+  ("x" * 70_000, "Focused tests passed"),                          # the summary must be clipped
+  ("The retry sends the message twice.", "y" * 70_000),            # the verification must be clipped
+  ("\U0001f600" * 40_000, "\U0001f642" * 40_000),                  # astral chars: two UTF-16 units each
+])
+def test_the_posted_words_match_the_preview_even_when_evidence_is_clipped(setup, monkeypatch, summary, tests):
+  # The preview the owner confirms is marker-free; the post adds a hidden marker
+  # that shrinks the body budget. Reserving that room keeps the visible words and
+  # the omission count identical, so "Posted exactly as" stays true past the limit.
+  _review(setup)
+  sent = _posts(monkeypatch)
+  report(setup, state="needs_you", summary=summary, tests=tests)
+  words = _preview(setup)
+  receipt = _post(setup, words["preview_sha256"])
+  assert receipt["state"] == "posted"
+  (_event, _head, body), = sent
+  assert "mobius-review:" in body and _visible(body) == words["body"]
+  assert public._body_units(body) <= public.GITHUB_REVIEW_BODY_MAX
 
 
 def test_the_review_agent_cannot_post_its_own_findings(setup, monkeypatch):
