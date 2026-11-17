@@ -456,6 +456,8 @@ export default function ChatSettingsPanel({
     setDraftEffort(nextEffort)
     setDraftEffortByProvider(nextEffortByProvider)
     await patchChat({
+      // Keep discovery's provider even when the server catalog is cold.
+      provider: providerValue,
       agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
     })
   }, [
