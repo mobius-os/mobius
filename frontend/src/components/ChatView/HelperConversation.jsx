@@ -133,6 +133,11 @@ export default function HelperConversation({
         <div
           ref={bodyRef}
           className="helper-convo__body"
+          // Focusable so a click on the transcript keeps keyboard scrolling
+          // (arrows, Page Down, Space) on the element that scrolls.
+          tabIndex={0}
+          role="region"
+          aria-label="Helper transcript"
           onScroll={event => {
             const el = event.currentTarget
             followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48

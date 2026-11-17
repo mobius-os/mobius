@@ -70,6 +70,8 @@
   padding-bottom: 18px;
   overscroll-behavior: contain;
 }
+.helper-convo__body:focus { outline: none; }
+.helper-convo__body:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .helper-convo__blocks {
   display: flex;
   flex-direction: column;

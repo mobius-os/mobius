@@ -200,6 +200,22 @@ for (const width of [1200, 900]) {
     act(() => { for (const listener of [...listeners]) listener(event) })
     assert.equal(dialogs().length, 0)
   })
+
+  test(`a click in a ${width >= 1000 ? 'docked' : 'narrow'} transcript keeps keyboard scrolling and Escape`, async t => {
+    const listeners = new Set()
+    t.mock.method(document, 'addEventListener', (type, listener) => { if (type === 'keydown') listeners.add(listener) })
+    t.mock.method(document, 'removeEventListener', (type, listener) => { listeners.delete(listener) })
+    const { pane } = mountPane(width, { transcript: [helper('one', 'Survey')] })
+    click(rowNamed(pane, 'Survey'))
+    await flush()
+    const body = dialogs()[0].querySelector('.helper-convo__body')
+    // Text inside the scroller focuses the scroller, so the browser scrolls it.
+    assert.equal(body.getAttribute('tabindex'), '0', 'the scrolling transcript takes focus from a click')
+    body.focus()
+    const event = { key: 'Escape', target: document.activeElement, shiftKey: false, preventDefault() {} }
+    act(() => { for (const listener of [...listeners]) listener(event) })
+    assert.equal(dialogs().length, 0)
+  })
 }
 
 // A local dialog in another workspace pane, standing in for any pane-scoped
