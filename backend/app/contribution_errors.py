@@ -92,3 +92,25 @@ def push_rejected(
     code=code,
     detail=detail,
   )
+
+
+def push_gate_refused(
+  raw: str,
+  *,
+  record_patch: dict | None = None,
+) -> ContributionSubmitError:
+  """Explain a pre-push gate that refused or did not finish, before any push.
+
+  A gate that printed its verdict is explained by that verdict. Otherwise (a
+  timeout, a crash, or a repository's own hook) nothing reached GitHub, so
+  the owner must not read that GitHub refused the branch.
+  """
+  detail = readable_output(raw)
+  if _GATE_VERDICT.search(detail):
+    return push_rejected(raw, record_patch=record_patch)
+  return ContributionSubmitError(
+    "The checks Möbius runs before publishing did not pass. Nothing was published.",
+    record_patch=record_patch,
+    code="push_gate_refused",
+    detail=detail,
+  )

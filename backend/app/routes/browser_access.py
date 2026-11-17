@@ -225,14 +225,12 @@ def _shared_instance(row) -> dict | None:
       or row.get("status") not in ("invited", "accepted")
       or type(row.get("unread")) is not bool):
     return None
-  instance = {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
-              "status": row["status"], "unread": row["unread"],
-              "open_url": origin + "/api/connect/browser-access/session/account/start?grant_id=" + quote(gid, safe="")}
-  # Leaving runs on the sharing instance. Only the directory can say that
-  # instance supports it (this side never contacts it), so no word, no link.
-  if row.get("leave") is True:
-    instance["leave_url"] = origin + "/shell/shared#account-leave=" + quote(gid, safe="")
-  return instance
+  # Leaving runs on the sharing instance; one that predates it shows a page
+  # that cannot complete the leave.
+  return {"grant_id": gid, "name": name, "origin": origin, "owner_handle": owner_handle,
+          "status": row["status"], "unread": row["unread"],
+          "open_url": origin + "/api/connect/browser-access/session/account/start?grant_id=" + quote(gid, safe=""),
+          "leave_url": origin + "/shell/shared#account-leave=" + quote(gid, safe="")}
 
 
 @router.get("/shared")
