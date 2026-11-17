@@ -108,48 +108,27 @@ export function footerCopyParts(footer, {
   return stretchProse([...new Set(groups.values())], positions, liveQuestionId)
 }
 
-/** Copy for each settled answer, rebuilt only when that answer's inputs
- *  change. ChatView renders on every streamed frame, while an earlier answer's
- *  reply rows, positioned notes and read start keep their identity, so it
- *  keeps its parts and its `toCopy(parts)` result (the Copy handler) instead
- *  of projecting every answer on the page again. A view reused for another
- *  chat (`context.chatId`) starts the cache afresh. */
-export function footerCopyCache(toCopy) {
-  const cache = new Map()
-  let chatId
-  return (footer, context) => {
-    if (context.chatId !== chatId) {
-      cache.clear()
-      chatId = context.chatId
-    }
-    if (footer?.state !== 'settled') return undefined
-    const inputs = copyInputs(footer, context)
-    const key = footer.group.rows[0].key
-    const prior = cache.get(key)
-    if (prior && prior.inputs.length === inputs.length
-      && prior.inputs.every((input, index) => input === inputs[index])) return prior.copy
-    const parts = footerCopyParts(footer, context)
-    const copy = parts?.length ? toCopy(parts) : undefined
-    cache.set(key, { inputs, copy })
-    return copy
+/** Whether a settled answer offers Copy: the same prose reading Copy uses
+ *  (replyProse) on the answer's stored rows, and, for an answer that began
+ *  before the loaded page, only once its start (`startRows`) is read.
+ *  Presentation only joins and regroups that prose, so it cannot decide
+ *  whether there is any; the text itself is built when Copy is pressed (see
+ *  footerCopyParts). replyProse reads only those messages and the open
+ *  question, so the answer is remembered on exactly those: its rows' identity
+ *  (unchanged while a later answer streams), the read start and the question. */
+const copyableByRows = new WeakMap()
+export function footerHasCopy(footer, { startRows = null, liveQuestionId = null } = {}) {
+  if (footer?.state !== 'settled') return false
+  if (footer.truncated && !startRows) return false
+  const rows = footer.groups.map(group => group.presentationRows)
+  const prefix = footer.truncated ? startRows : null
+  const prior = copyableByRows.get(footer.group.presentationRows)
+  if (prior && prior.prefix === prefix && prior.liveQuestionId === liveQuestionId
+    && prior.rows.length === rows.length && prior.rows.every((item, index) => item === rows[index])) {
+    return prior.copyable
   }
-}
-
-// Everything footerCopyParts reads for `footer`, as values compared by identity.
-function copyInputs(footer, { startRows, messages, offset = 0, slots = new Map(), positions = new Map(), displayKeys, liveQuestionId }) {
-  const inputs = [footer.truncated, liveQuestionId, displayKeys]
-  for (const group of footer.groups) {
-    inputs.push(group.presentationRows)
-    for (const row of group.presentationRows) inputs.push(...(positions.get(row.message.id) || []))
-  }
-  if (footer.truncated) {
-    // Regrouped with its read start: the loaded rows and note slots before
-    // its end decide how a reply split across the page's edge reads.
-    inputs.push(startRows, offset, ...messages.slice(0, footer.group.end + 1))
-    // Slot notes are copied per projection; their id and delivery are the note.
-    for (const [index, notes] of slots) {
-      if (index <= footer.group.end) inputs.push(index, ...notes.flatMap(note => [note.id ?? note, note.observedDelivery]))
-    }
-  }
-  return inputs
+  const messages = [...(prefix || []), ...rows.flatMap(items => items.map(row => row.message))]
+  const copyable = replyProse(messages, { liveQuestionId }).length > 0
+  copyableByRows.set(footer.group.presentationRows, { rows, prefix, liveQuestionId, copyable })
+  return copyable
 }

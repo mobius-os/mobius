@@ -201,7 +201,7 @@ import {
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
 import { stretchClipboard } from './messageCopy.js'
-import { footerCopyCache, replyFooters } from './replyFooter.js'
+import { footerCopyParts, footerHasCopy, replyFooters } from './replyFooter.js'
 import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
@@ -5979,17 +5979,26 @@ export default function ChatView({
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(
     chatId, truncatedFooter ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
   )
-  // Copy shows exactly when an answer's parts are known and say something;
-  // pressing it builds the clipboard from those same parts. Cached per answer
-  // so a streamed frame does not project every settled answer again.
-  const [footerCopy] = useState(() => footerCopyCache(
-    parts => button => stretchClipboard(parts, button.closest('.chat__list')),
-  ))
-  const copyContext = {
-    chatId, startRows: stretchStartRows, messages: peerTimeline.messages, offset,
-    slots: peerTimeline.slots, positions: peerTimeline.positions, displayKeys: assistantDisplayKeys,
-    liveQuestionId: answerableQuestionId,
-  }
+  // Copy shows when an answer settled with prose to copy (footerHasCopy) and
+  // builds its text only when pressed, from the transcript as it is then. The
+  // handler is stable, so streaming frames re-render no settled answer.
+  const copyReadRef = useRef(null)
+  useLayoutEffect(() => {
+    copyReadRef.current = {
+      footers,
+      context: {
+        startRows: stretchStartRows, messages: peerTimeline.messages, offset,
+        slots: peerTimeline.slots, positions: peerTimeline.positions,
+        displayKeys: assistantDisplayKeys, liveQuestionId: answerableQuestionId,
+      },
+    }
+  })
+  const copyAnswer = useCallback((button, answerKey) => {
+    const { footers: current, context } = copyReadRef.current
+    const footer = [...current.byGroup.values()].find(item => item.group.rows[0].key === answerKey)
+    const parts = footerCopyParts(footer, context)
+    return parts?.length ? stretchClipboard(parts, button.closest('.chat__list')) : null
+  }, [])
 
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
@@ -6011,8 +6020,8 @@ export default function ChatView({
       : -1
     const active = activeIndex >= 0
     const replyRoot = assistantReplyRoot(group.rows[0].message)
-    const continuingRun = !!(turnActive && replyRoot && replyRoot
-      === assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId }))
+    // The running run is still writing this reply (see runningRoot).
+    const continuingRun = !!runningRoot && replyRoot === runningRoot
     const tail = group.rows.at(-1)
     const groupFooter = footers.byGroup.get(group)
     const last = active || group.lastVisibleIndex === lastVisibleMessageIndex
@@ -6053,7 +6062,8 @@ export default function ChatView({
       // Each complete answer keeps its own footer; only one the running turn
       // is still writing, or briefly the one it is leaving, has no controls.
       footer={groupFooter?.state ?? null}
-      copy={footerCopy(groupFooter, copyContext)}
+      copy={footerHasCopy(groupFooter, { startRows: stretchStartRows, liveQuestionId: answerableQuestionId })
+        ? copyAnswer : undefined}
       metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
       onRevealMeta={groupFooter ? showMessageMeta : undefined}
       onFooterIntent={groupFooter?.truncated ? requestStretchStart : undefined}

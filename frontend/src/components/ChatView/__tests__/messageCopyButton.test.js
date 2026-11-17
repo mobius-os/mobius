@@ -117,6 +117,11 @@ test('each complete answer keeps its own footer reveal', () => {
   // behaviour-tested in replyFooter.test.js.
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
+  // One reading of which run is still writing serves both the footers and
+  // each reply's streaming state.
+  assert.match(chatView, /const runningRoot = turnActive\s*\?\s*assistantReplyRoot\(\{ role: 'assistant', id: activeAssistantMessageId \|\| streamAssistantMessageId \}\)/)
+  assert.match(chatView, /replyFooters\(\{[^}]*runningRoot/)
+  assert.match(chatView, /const continuingRun = !!runningRoot && replyRoot === runningRoot/)
 })
 
 test('every row reads time, then Copy, then Branch; the reply footer appears on hover', () => {
