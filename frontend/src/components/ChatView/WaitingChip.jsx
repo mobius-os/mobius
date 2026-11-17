@@ -102,7 +102,7 @@ function HelperListRows({ helpers, chatId, onOpenHelper, label = 'Helpers', unli
     <section className="chat__wait-card chat__helper-list" aria-label={label}>
       {helpers.map(helper => (
         <HelperRowLine key={helper.delegation_id} event={helper} chatId={chatId}
-          onOpen={event => onOpenHelper({ helper, chatId, host: event.currentTarget.closest('.chat') })} />
+          onOpen={event => onOpenHelper({ helper, chatId, host: event.currentTarget.closest('.chat'), opener: event.currentTarget })} />
       ))}
       <HandoffNotes unlistedHelpers={unlistedHelpers} automatic={automatic} />
     </section>
@@ -288,6 +288,7 @@ export default function WaitingChip({
       event={conversationHelper}
       chatId={chatId}
       host={openHelper.host}
+      opener={openHelper.opener}
       onClose={() => setOpenHelper(null)}
       onInternalNav={onInternalNav}
     />}

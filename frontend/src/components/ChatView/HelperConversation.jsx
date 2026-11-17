@@ -36,11 +36,15 @@ async function readConversation(chatId, taskId, signal) {
 // pane it belongs to: a pane wide enough for two columns keeps its chat usable
 // with the preview docked beside it; a narrower one is covered and blocked.
 export default function HelperConversation({
-  chatId, taskId, name, status, host, onClose, onInternalNav,
+  chatId, taskId, name, status, host, opener, onClose, onInternalNav,
 }) {
   const docked = useHelperPreviewDocked(host)
   const hostRef = useRef(host)
   hostRef.current = host
+  // Closing returns focus to the row that opened this preview. Recorded at the
+  // tap, not when the dialog mounts: a preview replacing another mounts just
+  // after the old one handed focus back to its own row.
+  const openerRef = useRef(opener)
   const [state, setState] = useState({ phase: 'loading' })
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
@@ -54,7 +58,7 @@ export default function HelperConversation({
 
   // Without a host the dialog is modal over the whole page. Docking only swaps
   // what it blocks, so crossing the width threshold keeps focus where it is.
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose,
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, restoreFocusRef: openerRef, onClose,
     modal: !host, inertBoundaryRef: docked ? undefined : hostRef })
 
   useEffect(() => {

@@ -38,8 +38,16 @@ export function useHelperPreview() {
       claim(id)
     }
   }, [claim, id])
+  // Give the pane up when this caller closes its preview, not on mount.
   const closed = local == null
-  useEffect(() => { if (closed) release?.(id) }, [closed, release, id])
+  const wasOpenRef = useRef(false)
+  useEffect(() => {
+    if (!closed) wasOpenRef.current = true
+    else if (wasOpenRef.current) {
+      wasOpenRef.current = false
+      release?.(id)
+    }
+  }, [closed, release, id])
   useEffect(() => release && (() => release(id)), [release, id])
   return [holds ? local : null, setValue]
 }

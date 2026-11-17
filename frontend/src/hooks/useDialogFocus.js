@@ -78,6 +78,13 @@ function unlockBodyScroll() {
   }
 }
 
+// A dialog nested inside the one holding the target still comes first.
+function keyOwner(target) {
+  const top = dialogStack.at(-1)
+  const holder = target && dialogStack.findLast(entry => entry.container.contains(target))
+  return holder && !holder.container.contains(top.container) ? holder : top
+}
+
 // A normal modal blocks every branch up to body; a local one only the branches
 // inside its boundary; a non-modal dialog without a boundary blocks nothing.
 function blockedElements(container, modal, boundaryRef) {
@@ -149,10 +156,13 @@ export default function useDialogFocus({
     queueMicrotask(focusInitial)
 
     function onKeyDown(event) {
-      // Only the topmost active dialog owns Escape and Tab. Without this gate,
-      // nested/sibling dialogs can both close or both redirect focus from one
-      // keypress even though inerting correctly hides the lower surface.
-      if (dialogStack.at(-1) !== stackEntry) return
+      // One dialog owns each Escape and Tab: the newest one holding the key's
+      // target, else the newest open one. Without this gate, nested/sibling
+      // dialogs can both close or both redirect focus from one keypress. Going
+      // by the target lets a dialog in one workspace pane keep its keys while
+      // a newer, non-blocking dialog (a docked helper preview) is open in
+      // another.
+      if (keyOwner(event.target) !== stackEntry) return
       const eventIsInsideDialog = container.contains(event.target)
       if (
         event.key === 'Escape'

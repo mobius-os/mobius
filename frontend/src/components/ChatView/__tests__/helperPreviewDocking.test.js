@@ -4,7 +4,7 @@
    width are stubbed; no backend or browser layout is involved. */
 import { after, afterEach, beforeEach, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { act } from 'react'
+import { act, useRef } from 'react'
 import { click, h, mount, unmountAll } from './mountedRender.js'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
@@ -22,6 +22,7 @@ after(() => vite.close())
 const { HelperRow } = await vite.ssrLoadModule('/src/components/ChatView/HelperResultCard.jsx')
 const { default: WaitingChip } = await vite.ssrLoadModule('/src/components/ChatView/WaitingChip.jsx')
 const { HelperPreviewProvider } = await vite.ssrLoadModule('/src/components/ChatView/helperPreviewSlot.jsx')
+const { default: useDialogFocus } = await vite.ssrLoadModule('/src/hooks/useDialogFocus.js')
 const client = new QueryClient()
 client.setQueryData(['models', 'registry'], TEST_MODEL_REGISTRY)
 after(() => client.clear())
@@ -89,6 +90,56 @@ test('opening another helper in the same pane replaces its preview, whichever ro
   assert.match(dialogs()[0].textContent, /Survey/, 'a row replaced earlier can open again')
   click(closeButton())
   assert.equal(dialogs().length, 0, 'closing the preview reveals no older one underneath')
+})
+
+test('closing a preview that replaced another returns focus to the row that opened it', async () => {
+  const { pane } = mountPane(1200, { transcript: [helper('one', 'Survey'), helper('two', 'Draft')] })
+  const survey = rowNamed(pane, 'Survey')
+  const draft = rowNamed(pane, 'Draft')
+  survey.focus()
+  click(survey)
+  await flush()
+  draft.focus()
+  click(draft)
+  await flush()
+  assert.match(dialogs()[0].textContent, /Draft/)
+  assert.ok(document.activeElement === closeButton(), 'the replacing preview takes focus')
+  click(closeButton())
+  assert.ok(document.activeElement === draft, 'focus returns to Draft, not to the row of the preview it replaced')
+})
+
+// A local dialog in another workspace pane, standing in for any pane-scoped
+// dialog (an update review, an image lightbox).
+function PaneDialog({ onClose }) {
+  const containerRef = useRef(null)
+  const boundaryRef = useRef(null)
+  useDialogFocus({ containerRef, onClose, modal: false, inertBoundaryRef: boundaryRef })
+  return h('div', { ref: boundaryRef, className: 'pane-b' },
+    h('div', { ref: containerRef, role: 'dialog', 'aria-label': 'Other pane' }, h('button', { type: 'button' }, 'Inside')))
+}
+
+test('an open docked preview leaves a dialog in another pane its own Escape', async t => {
+  const listeners = new Set()
+  t.mock.method(document, 'addEventListener', (type, listener) => { if (type === 'keydown') listeners.add(listener) })
+  t.mock.method(document, 'removeEventListener', (type, listener) => { listeners.delete(listener) })
+  const press = target => {
+    const event = { key: 'Escape', target, shiftKey: false, preventDefault() {} }
+    act(() => { for (const listener of [...listeners]) listener(event) })
+  }
+  let otherClosed = 0
+  const other = mount(h(PaneDialog, { onClose: () => { otherClosed += 1 } }))
+  const { pane } = mountPane(1200, { transcript: [helper('one', 'Survey')] })
+  click(rowNamed(pane, 'Survey'))
+  await flush()
+  assert.equal(dialogs().length, 2, 'the docked preview opened after the other pane\'s dialog')
+  const inside = other.container.querySelector('button')
+  inside.focus()
+  press(inside)
+  assert.equal(otherClosed, 1, 'Escape inside the other pane\'s dialog closes it although the preview is newer')
+  assert.equal(pane.querySelectorAll('[role="dialog"]').length, 1, 'and leaves the preview open')
+  press(pane.querySelector('.helper-convo__close'))
+  assert.equal(pane.querySelectorAll('[role="dialog"]').length, 0, 'Escape inside the preview still closes the preview')
+  assert.equal(otherClosed, 1)
 })
 
 test('a focused composer keeps its focus while a docked pane resizes, and crossing the width threshold never bounces focus to the opener', async () => {

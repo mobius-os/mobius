@@ -86,7 +86,8 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
     return () => clearInterval(id)
   }, [anyRunning])
 
-  // { taskId, host }: the open helper and the chat pane it belongs to.
+  // { taskId, host, opener }: the open helper, the chat pane it belongs to and
+  // the row that opened it.
   const [opened, setOpened] = useHelperPreview()
 
   if (helpers.length === 0) return null
@@ -109,7 +110,7 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
               type: 'button',
               'aria-label': `Open ${name} conversation`,
               'aria-haspopup': 'dialog',
-              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat') }),
+              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat'), opener: event.currentTarget }),
             })}
             className={
               'chat__subagent'
@@ -147,6 +148,7 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
           name={helperName(openHelper.description)}
           status={openHelper.status}
           host={opened.host}
+          opener={opened.opener}
           onClose={() => setOpened(null)}
           onInternalNav={onInternalNav}
         />
