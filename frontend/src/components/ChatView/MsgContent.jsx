@@ -821,7 +821,6 @@ function MsgContentInner({
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
-          key={0}
           className={`chat__text chat__text--${msg.role}`}
           data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? 0 : undefined}
         >

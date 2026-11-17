@@ -128,51 +128,64 @@ test('answering a parked question keeps its card and reading geometry through th
   const submit = card.getByRole('button', { name: 'Submit', exact: true })
   await expect(submit).toBeEnabled()
 
+  // The card's reply is the only one in this transcript; scoping every check to
+  // it keeps each locator to one element under strict mode.
+  const reply = surface.locator('.chat__reply').filter({ has: page.locator('.qcard') })
+  await expect(reply).toHaveCount(1)
   // A DOM reference (not a selector) detects delete/reinsert even when the
   // replacement carries the same data-key.
-  await card.evaluate(element => { window.__layoutCard = element; window.__layoutProse = element.closest(".chat__reply").querySelector(".md-paragraph") })
+  await card.evaluate(element => {
+    window.__layoutCard = element
+    window.__layoutProse = element.closest('.chat__reply').querySelector('.md-paragraph')
+  })
   const frame = () => page.evaluate(() => {
-    const card = document.querySelector('[data-chat-surface="painted"] .qcard')
+    const cards = document.querySelectorAll('[data-chat-surface="painted"] .qcard')
+    const card = cards[0]
     const reply = card?.closest('.chat__reply')
     return {
+      cardCount: cards.length,
       sameCard: card === window.__layoutCard,
-      sameProse: Boolean(window.__layoutProse) && reply?.querySelector(".md-paragraph") === window.__layoutProse,
-      top: card?.getBoundingClientRect().top,
+      sameProse: Boolean(window.__layoutProse) && reply?.querySelector('.md-paragraph') === window.__layoutProse,
+      // Measured inside its reply, so following the bottom or anchoring
+      // cannot move it; only content above the card changing can.
+      offset: card && reply ? card.getBoundingClientRect().top - reply.getBoundingClientRect().top : null,
       replyKey: card?.closest('[data-key]')?.dataset.key,
     }
   })
+  // Layout rounding can differ by under a pixel between frames; a remount or a
+  // line appearing above the card moves it by a full line.
+  const expectSameFrame = (next, first) => {
+    expect(next).toMatchObject({ cardCount: 1, sameCard: true, sameProse: true, replyKey: first.replyKey })
+    expect(Math.abs(next.offset - first.offset)).toBeLessThanOrEqual(1)
+  }
   const before = await frame()
-  expect(before.sameCard).toBe(true)
-  expect(before.sameProse).toBe(true)
+  expect(before).toMatchObject({ cardCount: 1, sameCard: true, sameProse: true })
   expect(before.replyKey).toBeTruthy()
+  expect(before.offset).not.toBeNull()
 
   await submit.click()
   await expect.poll(() => Boolean(answerPost && releaseAnswer)).toBe(true)
   const pending = await frame()
-  expect(pending).toMatchObject({ sameCard: true, sameProse: true, replyKey: before.replyKey })
-  expect(Math.abs(pending.top - before.top)).toBeLessThanOrEqual(2)
+  expectSameFrame(pending, before)
 
   releaseAnswer()
   await expect(card.getByRole('button', { name: 'Submitted', exact: true })).toBeVisible()
   const accepted = await frame()
-  expect(accepted).toMatchObject({ sameCard: true, sameProse: true, replyKey: before.replyKey })
-  expect(Math.abs(accepted.top - before.top)).toBeLessThanOrEqual(2)
+  expectSameFrame(accepted, before)
 
   await page.waitForFunction(() => window.__layoutReaderCount() > 0)
   await page.evaluate(text => window.__layoutStreamText(text), afterText)
-  await expect(surface.locator('.chat__msg--assistant')).toContainText(afterText)
-  await expect.poll(() => surface.locator('.chat__reply').getAttribute('data-current-response')).toBe('true')
+  await expect(reply).toContainText(afterText)
+  await expect.poll(() => reply.getAttribute('data-current-response')).toBe('true')
   const streaming = await frame()
-  expect(streaming).toMatchObject({ sameCard: true, sameProse: true, replyKey: before.replyKey })
-  expect(Math.abs(streaming.top - before.top)).toBeLessThanOrEqual(2)
+  expectSameFrame(streaming, before)
 
   assistant.blocks.push({ type: 'text', text_item_id: 'layout-continuation', content: afterText })
   assistant.content = `${beforeText}\n\n${afterText}`
   running = false
   await page.evaluate(() => window.__layoutFinish())
-  await expect.poll(() => surface.locator('.chat__reply').getAttribute('data-current-response')).toBeNull()
-  await expect(surface.locator('.chat__msg--assistant')).toContainText(afterText)
+  await expect.poll(() => reply.getAttribute('data-current-response')).toBeNull()
+  await expect(reply).toContainText(afterText)
   const terminal = await frame()
-  expect(terminal).toMatchObject({ sameCard: true, sameProse: true, replyKey: before.replyKey })
-  expect(Math.abs(terminal.top - before.top)).toBeLessThanOrEqual(2)
+  expectSameFrame(terminal, before)
 })
