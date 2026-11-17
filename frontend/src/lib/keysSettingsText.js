@@ -331,13 +331,10 @@ export function requestWording(request, names) {
   }
 }
 
-/** One line of Recent activity as a sentence, or null for entries the owner needn't read. */
-export function usageSentence(entry, names, now = Date.now()) {
-  const text = usageWhat(entry, names)
-  return text && `${text}${entry.ts ? ` ${relativeTime(entry.ts, now)}` : ''}`
-}
-
-/** What happened in one usage entry, without when ("Weather used it"), or null. */
+/**
+ * What happened in one Recent activity entry ("Weather used it"), or null for
+ * entries the owner needn't read. The row shows when beside it.
+ */
 export function usageWhat(entry, names) {
   const [kind, id] = String(entry.caller || '').split(':')
   const who = kind === 'app' ? appLabel(names, Number(id))

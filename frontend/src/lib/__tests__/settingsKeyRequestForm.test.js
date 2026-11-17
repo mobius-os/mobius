@@ -21,7 +21,7 @@ const vite = await createSsrRenderServer()
 const {
   requestFormKey, savedByApp, replaceWarning, requestSubject, siteLine, shownRequests, distinctAppNames,
   requestWording, requestAppName, serviceForValue, freeKeyName, newKeyName, hostList, keyHosts, sentToLine,
-  usedByLine, usedByRows, lastUseByCaller, usageSentence,
+  usedByLine, usedByRows, lastUseByCaller, usageWhat,
 } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -277,18 +277,17 @@ test('last use per user comes from the newest use, with all agents together', ()
 })
 
 test('recent activity reads as sentences, including refusals of a switched-off app', () => {
-  const now = Date.parse('2026-11-16T12:00:00Z')
   const at = '2026-11-16T11:58:00Z'
-  assert.equal(usageSentence({ caller: 'app:8', outcome: 'used', host: 'api.x', ts: at }, appNames, now), 'Weather used it 2 min ago')
-  assert.equal(usageSentence({ caller: 'agent:c1', outcome: 'revealed', host: '-', ts: at }, appNames, now), 'Your agent read it 2 min ago')
-  assert.equal(usageSentence({ caller: 'app:8', outcome: 'denied', host: 'api.x', reason: 'paused', ts: at }, appNames, now),
-    'Weather was refused (switched off) 2 min ago')
-  assert.equal(usageSentence({ caller: 'owner', outcome: 'granted app:8', host: '-', ts: at }, appNames, now), 'You let Weather use it 2 min ago')
-  assert.equal(usageSentence({ caller: 'owner', outcome: 'something new', host: '-', ts: at }, appNames, now), null)
+  assert.equal(usageWhat({ caller: 'app:8', outcome: 'used', host: 'api.x', ts: at }, appNames), 'Weather used it')
+  assert.equal(usageWhat({ caller: 'agent:c1', outcome: 'revealed', host: '-', ts: at }, appNames), 'Your agent read it')
+  assert.equal(usageWhat({ caller: 'app:8', outcome: 'denied', host: 'api.x', reason: 'paused', ts: at }, appNames),
+    'Weather was refused (switched off)')
+  assert.equal(usageWhat({ caller: 'owner', outcome: 'granted app:8', host: '-', ts: at }, appNames), 'You let Weather use it')
+  assert.equal(usageWhat({ caller: 'owner', outcome: 'something new', host: '-', ts: at }, appNames), null)
   // The vault writes an agent request's answers as "<verb> agents".
-  assert.equal(usageSentence({ caller: 'owner', outcome: 'granted agents', host: '-', ts: at }, appNames, now), 'You let your agents use it 2 min ago')
-  assert.equal(usageSentence({ caller: 'owner', outcome: 'denied agents', host: '-', ts: at }, appNames, now), 'You said no to your agent 2 min ago')
-  assert.equal(usageSentence({ caller: 'agent:c1', outcome: 'requested', host: '-', ts: at }, appNames, now), 'Your agent asked to use it 2 min ago')
+  assert.equal(usageWhat({ caller: 'owner', outcome: 'granted agents', host: '-', ts: at }, appNames), 'You let your agents use it')
+  assert.equal(usageWhat({ caller: 'owner', outcome: 'denied agents', host: '-', ts: at }, appNames), 'You said no to your agent')
+  assert.equal(usageWhat({ caller: 'agent:c1', outcome: 'requested', host: '-', ts: at }, appNames), 'Your agent asked to use it')
 })
 
 // Review follow-ups: the safe default covers agents, and the cards never
