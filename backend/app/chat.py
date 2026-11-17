@@ -146,6 +146,7 @@ from app.events import (
 )
 from app.providers import (
   DEFAULT_PROVIDER,
+  AppModelProvider,
   BaseProvider,
   authenticated_provider_ids,
   effective_agent_settings,
@@ -4673,7 +4674,7 @@ async def _complete_turn(
   chat_id: str,
   run_gen: int | None,
   provider_id: str | None,
-  cost_usd: float | int,
+  cost_usd: float | int | None,
   close_browser: bool,
   parked: bool = False,
   parked_until: datetime | None = None,
@@ -5778,13 +5779,18 @@ def _helper_host_key(db, run_policy, *, provider_id: str, connector_plan):
   # Claude fixes a helper's model on the host's helper definitions, so its
   # hosts are also per model; a Codex thread chooses its model per turn.
   # The turn refreshed the registry at its start; this lookup reads no storage.
-  claude = provider_runtime_kind(registered_provider(provider_id)) == "claude_sdk"
+  provider = registered_provider(provider_id)
+  claude = provider_runtime_kind(provider) == "claude_sdk"
   model = run_policy.model if claude else None
+  setup = [connectors, model]
+  if isinstance(provider, AppModelProvider):
+    # A host holds the app's relay token, which a new acceptance replaces.
+    setup.append(provider.consent_scope)
   return helper_hosts.HostKey(
     parent_chat_id=row[0],
     provider_id=provider_id,
     cwd=run_policy.cwd,
-    setup=helper_hosts.setup_digest(connectors, model),
+    setup=helper_hosts.setup_digest(*setup),
   )
 
 
@@ -6434,8 +6440,11 @@ async def _run_chat_impl_with_db(
     )
   )
 
+  # Held to what the provider offers, whichever layer supplied the choice.
+  agent_settings["model"], agent_settings["effort"] = provider.resolve_selection(
+    agent_settings.get("model"), agent_settings.get("effort"),
+  )
   if provider_id == "mobius":
-    agent_settings["model"] = provider.resolve_model(agent_settings.get("model"))
     if not agent_settings["model"] or not provider.declaration["models"]:
       raise ValueError("This Möbius model is unavailable. Refresh models and choose a current model.")
 
@@ -6780,12 +6789,14 @@ async def _run_chat_impl_with_db(
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
       )
       if (
@@ -6844,7 +6855,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,
@@ -6969,6 +6980,7 @@ async def _run_chat_impl_with_db(
             run_policy=run_policy,
             connector_plan=connector_turn_plan,
             coordination_enabled=coordination_tools_enabled,
+            provider_id=provider_id,
             goal_brief_refresh=goal_brief_refresh,
             fork_from=fork_from,
             run_generation=run_gen,
@@ -7008,18 +7020,22 @@ async def _run_chat_impl_with_db(
           dependency_results=dependency_results,
           side_question_cids=side_question_cids,
         )
-      usage_metrics = runner_result.get("usage_metrics")
+      run_cost_usd, usage_metrics = provider.measured_run_accounting(
+        runner_result.get("cost_usd"), runner_result.get("usage_metrics"),
+      )
       recorded_metrics = await _record_run_metrics(
         chat_id=chat_id,
         run_token=run_token or "",
         provider_session_id=new_session_id or claude_session_id,
-        cost_usd=runner_result.get("cost_usd"),
+        cost_usd=run_cost_usd,
         usage=usage_metrics,
         cost_scope=runner_result.get("cost_scope", "turn"),
         session_start=runner_result.get("session_start"),
       )
       if runner_result.get("cost_scope") == "session":
-        runner_result["cost_usd"] = (recorded_metrics or {}).get("cost_usd")
+        # The engine reports a session total; this turn's cost is the
+        # writer's delta, or unknown.
+        run_cost_usd = (recorded_metrics or {}).get("cost_usd")
       if (
         not err
         and new_session_id
@@ -7038,7 +7054,7 @@ async def _run_chat_impl_with_db(
         log.info(
           "chat done chat_id=%s cost_usd=%.4f sdk=claude "
           "input_tokens=%s output_tokens=%s total_tokens=%s",
-          chat_id, runner_result.get("cost_usd") or 0.0,
+          chat_id, run_cost_usd or 0.0,
           (usage_metrics or {}).get("input_tokens"),
           (usage_metrics or {}).get("output_tokens"),
           (usage_metrics or {}).get("total_tokens"),
@@ -7066,7 +7082,7 @@ async def _run_chat_impl_with_db(
     )
     return await _complete_turn(
       bc=bc, sink=sink, db=db, chat_id=chat_id, run_gen=run_gen,
-      provider_id=provider_id, cost_usd=runner_result.get("cost_usd") or 0,
+      provider_id=provider_id, cost_usd=run_cost_usd,
       close_browser=True,
       activity_results=(activity_results if not err else ()),
       **park_kwargs,

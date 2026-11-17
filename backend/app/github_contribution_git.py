@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import quote
 
 from app import app_git, github_auth
-from app.contribution_errors import ContributionSubmitError
+from app.config import get_settings
+from app.contribution_errors import ContributionSubmitError, push_gate_refused
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
@@ -83,24 +89,85 @@ def _validate_branch(value: object) -> str:
   return branch
 
 
-def _git_env(repo: Path) -> dict:
-  env = dict(os.environ)
-  for var in (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
-  ):
-    env.pop(var, None)
-  env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
-  env["GIT_TERMINAL_PROMPT"] = "0"
-  env["GH_PROMPT_DISABLED"] = "1"
-  token = github_auth.get_token()
-  if token:
-    env["GH_TOKEN"] = token
-  if github_auth.GH_AUTH_DIR.exists():
-    env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
+# The only inherited variables any contribution command (or the pre-push
+# gate, which runs checkout code) sees: where programs live, locale, time,
+# temp space, what https needs to reach GitHub, and the repository gate's own
+# MOBIUS_PREPUSH_* switches. Everything else, server
+# secrets and Git's own GIT_* settings and traces among it, is left out.
+_INHERITED_ENV = frozenset({
+  "PATH", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO",
+  "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+  "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY",
+  "https_proxy", "http_proxy", "no_proxy", "all_proxy",
+})
+# Command-scope config, exactly like ``-c``: it outranks the checkout's own
+# config and reaches nested repositories, so the programs local commands
+# would most often start (fsmonitor, hooks, ssh, credential helper) do not
+# run. The empty helper drops every helper configured so far.
+_INERT_CONFIG = (
+  ("core.fsmonitor", "false"), ("submodule.recurse", "false"),
+  ("core.hooksPath", "/dev/null"), ("core.sshCommand", "false"),
+  # A scratch borrows the checkout's objects; without this, its token-bearing
+  # fetch would start Git in the checkout to list the alternate's refs.
+  ("core.alternateRefsCommand", "true"),
+  ("credential.helper", ""),
+)
+# The one credential source, for commands that talk to GitHub.
+_GITHUB_CREDENTIAL_HELPER = ("credential.helper", "!gh auth git-credential")
+_NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
+# Contribution remotes are GitHub over https; other transports can run
+# programs, so they are refused.
+_ALLOWED_PROTOCOLS = "https"
+def _git_env(repo: Path, *, network: bool = False) -> dict:
+  """The one environment for every contribution Git and gh command.
+
+  Global and system config are ignored, nothing prompts, only https transport
+  is allowed, and the commonest programs a checkout's config can name
+  (fsmonitor, hooks, credential helper, askpass, ssh, pager, editor) are
+  inert. GitHub credentials are present only for ``network`` commands, and
+  those never run in an agent-writable checkout: ``_git`` runs them in a
+  server-owned scratch repository and ``_gh`` outside any checkout. A local
+  command never carries credentials, though it can still run a program the
+  checkout names, such as a filter. ``_run_cmd`` also gives every command an
+  empty home.
+  """
+  env = {
+    key: value for key, value in os.environ.items()
+    if key in _INHERITED_ENV or key.startswith(("LC_", "MOBIUS_PREPUSH_"))
+  }
+  config = _INERT_CONFIG + ((_GITHUB_CREDENTIAL_HELPER,) if network else ())
+  env.update(
+    GIT_CEILING_DIRECTORIES=str(repo.resolve().parent),
+    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+    GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never",
+    GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
+    GIT_PAGER="cat", GIT_EDITOR=":", GH_PROMPT_DISABLED="1",
+    GIT_ALLOW_PROTOCOL=_ALLOWED_PROTOCOLS, GIT_CONFIG_COUNT=str(len(config)),
+  )
+  for index, (name, value) in enumerate(config):
+    env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
+  if network:
+    token = github_auth.get_token()
+    if token:
+      env["GH_TOKEN"] = token
+    if github_auth.GH_AUTH_DIR.exists():
+      env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
   return env
+
+
+@contextmanager
+def _scratch_home(env: dict) -> Iterator[dict]:
+  """``env`` with a fresh, empty home, removed afterwards.
+
+  The service account's home links gh's token store, so a program a command
+  starts must not find it there.
+  """
+  home = tempfile.mkdtemp(prefix="home-", dir=scratch_root())
+  try:
+    yield {**env, "HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+  finally:
+    shutil.rmtree(home, ignore_errors=True)
 
 
 def _run_cmd(
@@ -111,16 +178,17 @@ def _run_cmd(
   env: dict | None = None,
   input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
-  proc = subprocess.run(
-    argv,
-    cwd=str(cwd),
-    capture_output=True,
-    text=True,
-    input=input_text,
-    timeout=timeout,
-    check=False,
-    env=env or _git_env(cwd),
-  )
+  with _scratch_home(env or _git_env(cwd)) as run_env:
+    proc = subprocess.run(
+      argv,
+      cwd=str(cwd),
+      capture_output=True,
+      text=True,
+      input=input_text,
+      timeout=timeout,
+      check=False,
+      env=run_env,
+    )
   if check and proc.returncode != 0:
     detail = (proc.stderr or proc.stdout or "command failed").strip()
     raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
@@ -133,17 +201,310 @@ def _git(
   check: bool = True,
 ) -> subprocess.CompletedProcess:
   timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
+  if args[:1] in _NETWORK_GIT:
+    if not isinstance(repo, ServerRepo):
+      return _network_git(repo, args, check=check, timeout=timeout)
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
     timeout=timeout,
+    env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
   )
 
 
-def _gh(repo: Path, *args: str, check: bool = True,
+def _scratch_parent() -> Path:
+  return Path(get_settings().data_dir) / "run" / "contribution-git"
+
+
+def sweep_scratch_root() -> None:
+  """Discard scratch directories a crashed process left behind.
+
+  Run at startup, before any contribution command can start.
+  """
+  shutil.rmtree(_scratch_parent(), ignore_errors=True)
+
+
+def scratch_root() -> Path:
+  """The one private parent of every scratch directory; cleared at startup."""
+  root = _scratch_parent()
+  root.mkdir(mode=0o700, parents=True, exist_ok=True)
+  root.chmod(0o700)
+  return root
+
+
+class ServerRepo(type(Path())):
+  """A repository the server created for one operation.
+
+  ``_git`` runs network commands in it directly; anything else is a
+  contribution checkout and gets a scratch repository. It lives under the
+  private ``scratch_root``, but code running as the same user could still
+  reach it.
+  """
+
+
+@contextmanager
+def _server_scratch(*, bare: bool = True) -> Iterator[ServerRepo]:
+  """A fresh repository the server creates, removed afterwards."""
+  root = ServerRepo(tempfile.mkdtemp(prefix="repo-", dir=scratch_root()))
+  try:
+    _run_cmd(["git", "init", "-q", *(("--bare",) if bare else ()), str(root)],
+             cwd=root, env=_git_env(root))
+    yield root
+  finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _refs(repo: Path) -> dict[str, str]:
+  listed = _git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
+  return dict(reversed(line.split(" ", 1)) for line in listed.stdout.splitlines() if line)
+
+
+# The options contribution fetches and pushes use, all in ``--name[=value]``
+# form. Anything else is refused rather than guessed at, so the positional
+# arguments (URL, then refspecs) are always read correctly.
+_NETWORK_OPTIONS = {
+  "fetch": {"--no-tags", "--force", "--quiet", "--depth", "--filter", "--no-recurse-submodules"},
+  "push": {"--force-with-lease", "--porcelain"},
+  "ls-remote": set(),
+}
+
+
+def _network_args(args: tuple[str, ...]) -> list[str]:
+  """The positional arguments of a fetch, push or ls-remote, checked."""
+  command, rest = args[0], args[1:]
+  positional = []
+  for arg in rest:
+    if arg.startswith("-"):
+      if arg.split("=", 1)[0] not in _NETWORK_OPTIONS[command]:
+        raise ContributionSubmitError(f"Contribution Git does not run {command} {arg}.")
+    else:
+      positional.append(arg)
+  # A remote name or a relative path would be resolved through the checkout:
+  # callers pass the URL they verified.
+  if not positional or not ("/" in positional[0] or ":" in positional[0]):
+    raise ContributionSubmitError(f"A contribution {command} must name its URL.")
+  if command == "fetch" and (
+      len(positional) < 2
+      or any(not refspec.partition(":")[2] for refspec in positional[1:])):
+    raise ContributionSubmitError("A contribution fetch must name each destination ref.")
+  return positional
+
+
+def _network_git(
+  checkout: Path, args: tuple[str, ...], *, check: bool, timeout: int,
+) -> subprocess.CompletedProcess:
+  """Run one token-bearing fetch, push or ls-remote for ``checkout``.
+
+  It runs in a scratch repository the server creates, reading the checkout's
+  objects through an alternates file the server writes. With the alternate's
+  ref listing switched off, no process that holds the token reads the
+  checkout's config, hooks or attributes. A fetch names each destination
+  ref: it starts from the checkout's refs, and a local, credential-free
+  fetch hands what it fetched back to the checkout.
+  """
+  _network_args(args)
+  objects = _git(
+    checkout, "rev-parse", "--path-format=absolute", "--git-path", "objects",
+  ).stdout.strip()
+
+  def failed(proc: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
+    if check:
+      detail = (proc.stderr or proc.stdout or "command failed").strip()
+      raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
+    return proc
+
+  with _server_scratch() as scratch:
+    (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (scratch / "objects" / "info" / "alternates").write_text(objects + "\n")
+    before = {}
+    if args[0] == "fetch":
+      before = _refs(checkout)
+      seeded = _run_cmd(
+        ["git", "-C", str(scratch), "update-ref", "--stdin"], cwd=scratch,
+        check=False, env=_git_env(scratch),
+        input_text="".join(f"create {ref} {sha}\n" for ref, sha in before.items()),
+      )
+      if seeded.returncode != 0:
+        return failed(seeded)
+    proc = _run_cmd(
+      ["git", "-C", str(scratch), *args], cwd=scratch, check=False,
+      timeout=timeout, env=_git_env(scratch, network=True),
+    )
+    if args[0] == "fetch" and proc.returncode == 0:
+      fetched = [ref for ref, sha in _refs(scratch).items() if before.get(ref) != sha]
+      if fetched:
+        # Local and credential-free: the checkout copies what it fetched.
+        copied = _run_cmd(
+          ["git", "-C", str(checkout), "fetch", "--quiet", "--no-tags", "--force",
+           "--no-write-fetch-head", str(scratch), *(f"+{ref}:{ref}" for ref in fetched)],
+          cwd=checkout, check=False, timeout=timeout,
+          env={**_git_env(checkout), "GIT_ALLOW_PROTOCOL": "file"},
+        )
+        if copied.returncode != 0:
+          return failed(copied)
+  return proc if proc.returncode == 0 else failed(proc)
+
+
+class PushGateRefused(ContributionSubmitError):
+  """The repository's pre-push gate refused, timed out or could not start.
+
+  It ran locally before the push, so nothing reached GitHub.
+  """
+
+  def __init__(self, transcript: str):
+    refused = push_gate_refused(transcript)
+    super().__init__(refused.message, code=refused.code, detail=refused.detail)
+
+
+def push(
+  repo: Path, remote: str, commit: str, ref: str, *, lease: str,
+) -> subprocess.CompletedProcess:
+  """Push one exact commit to ``ref`` behind the repository's pre-push gate.
+
+  The gate runs once, as its own local step, then the token-bearing push
+  sends the same commit id. ``lease`` is the expected remote tip ("" for
+  absent). Raises ``PushGateRefused`` when the gate refuses, times out or
+  cannot start, and otherwise returns the push's result unchecked.
+  """
+  _pre_push_gate(repo, remote, commit, ref, lease)
+  return _send_push(repo, remote, commit, ref, lease)
+
+
+def _exact_commit(commit: str) -> str:
+  if not _FULL_GIT_OID.match(commit):
+    raise ContributionSubmitError("Only an exact commit id can be pushed.")
+  return commit
+
+
+def _send_push(
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
+) -> subprocess.CompletedProcess:
+  """The network push alone, hooks inert; callers run the gate first."""
+  return _git(
+    repo, "push", f"--force-with-lease={ref}:{lease}", remote, f"{_exact_commit(commit)}:{ref}",
+    check=False,
+  )
+
+
+def _executable(path: Path) -> bool:
+  return path.is_file() and os.access(path, os.X_OK)
+
+
+def _pre_push_hook(repo: Path) -> Path | None:
+  """The pre-push hook Git would run in ``repo``, or None when there is none."""
+  common = Path(_git(
+    repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
+  ).stdout.strip())
+  default = common / "hooks" / "pre-push"
+  # Only the checkout's own scopes: command scope carries the inert override.
+  listed = _git(repo, "config", "--show-scope", "--get-all", "core.hooksPath", check=False)
+  if listed.returncode not in (0, 1):
+    raise PushGateRefused("Git could not read where this checkout keeps its hooks.")
+  configured = [
+    value for scope, _, value in
+    (line.partition("\t") for line in listed.stdout.splitlines())
+    if scope in ("local", "worktree")
+  ]
+  if not configured:
+    return default if _executable(default) else None
+  # Git runs hooks from the worktree root, so a relative path starts there.
+  top = _git(repo, "rev-parse", "--show-toplevel", check=False).stdout.strip()
+  hooks = Path(configured[-1])
+  hook = (hooks if hooks.is_absolute() else Path(top or common) / hooks) / "pre-push"
+  if _executable(hook):
+    return hook
+  if _executable(default):
+    raise PushGateRefused(
+      "This checkout points its hooks away from the repository's pre-push "
+      "checks, so they could not run."
+    )
+  return None
+
+
+def _pre_push_gate(
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
+) -> None:
+  """Run the pre-push hook Git would run, as a pre-push hook, without credentials.
+
+  The hook is found as Git finds it: under the checkout's own core.hooksPath
+  when set, otherwise in the common hooks directory, where the platform
+  installs its gate. A hooksPath without a pre-push hook while the common
+  one exists is refused rather than skipping the gate. Like Git, it passes
+  the pushed commit on stdin; checks the hook
+  makes of HEAD or the working tree see the checkout as it is, as they did
+  inside a push. It runs in its own process group, which is killed when it
+  ends; a child that starts its own session leaves that group and can
+  outlive it, though it never had credentials in its environment.
+  """
+  try:
+    hook = _pre_push_hook(repo)
+    if hook is None:
+      return
+    named = _git(repo, "remote", "get-url", remote, check=False)
+  except (subprocess.TimeoutExpired, OSError, ContributionSubmitError) as exc:
+    # Still local: nothing was sent, so this is a refusal, never ambiguous.
+    if isinstance(exc, PushGateRefused):
+      raise
+    raise PushGateRefused(f"Git could not prepare the pre-push checks: {exc}") from exc
+  url = named.stdout.strip() if named.returncode == 0 else remote
+  line = f"{_exact_commit(commit)} {commit} {ref} {lease or '0' * 40}\n"
+  with _scratch_home(_git_env(repo)) as env, \
+      tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as output:
+    stdin.write(line)
+    stdin.seek(0)
+    def start(argv: list[str]) -> subprocess.Popen:
+      return subprocess.Popen(
+        argv, cwd=str(repo), env=env, stdin=stdin,
+        stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+      )
+
+    try:
+      try:
+        proc = start([str(hook), remote, url])
+      except OSError as exc:
+        if exc.errno != errno.ENOEXEC:
+          raise
+        # Like Git, run a hook without an interpreter line through sh.
+        proc = start(["/bin/sh", str(hook), remote, url])
+    except OSError as exc:
+      raise PushGateRefused(f"The pre-push checks could not start: {exc}") from exc
+    try:
+      returncode = proc.wait(timeout=_PUSH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+      returncode = None
+    finally:
+      try:
+        os.killpg(proc.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      proc.wait()
+    output.seek(0)
+    transcript = output.read()
+  if returncode is None:
+    raise PushGateRefused(
+      f"{transcript}\nThe pre-push checks did not finish within {_PUSH_TIMEOUT} seconds."
+    )
+  if returncode != 0:
+    raise PushGateRefused(transcript)
+
+
+def _gh(cwd: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
-  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text)
+  """Run gh with the token, never in a contribution checkout.
+
+  Every call names its repository (-R or an API path), so gh runs in an
+  empty directory. Only a ``ServerRepo`` is used as gh's directory: the
+  in-repo fork command needs one whose origin is upstream. Any other
+  ``cwd`` is ignored; it keeps the ``gh(cwd, *args)`` shape the review
+  modules share.
+  """
+  if isinstance(cwd, ServerRepo):
+    return _run_cmd(["gh", *args], cwd=cwd, check=check, input_text=input_text,
+                    env=_git_env(cwd, network=True))
+  with tempfile.TemporaryDirectory(prefix="gh-", dir=scratch_root()) as empty:
+    return _run_cmd(["gh", *args], cwd=Path(empty), check=check, input_text=input_text,
+                    env=_git_env(Path(empty), network=True))
 
 
 def _assert_clean_worktree(repo: Path) -> None:

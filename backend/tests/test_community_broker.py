@@ -221,3 +221,16 @@ async def test_central_error_envelope_is_preserved_without_token_details():
   assert raised.value.status_code == 409
   assert raised.value.code == "request_in_progress"
   assert raised.value.retry_after == 2
+
+
+def test_public_store_reads_follow_the_launcher_the_instance_links_with():
+  from app.community_broker import community_base_url
+
+  staging = "https://staging.launcher.example"
+  assert community_base_url({}) == "https://www.mobius.you"
+  assert community_base_url({"MOBIUS_SSO_ISSUER": staging}) == "https://www.mobius.you"
+  assert community_base_url({"MOBIUS_IDENTITY_ISSUER": staging + "/"}) == staging
+  assert community_base_url({
+    "MOBIUS_IDENTITY_ISSUER": staging,
+    "MOBIUS_COMMUNITY_REGISTRY_URL": "https://registry.example",
+  }) == "https://registry.example"
