@@ -488,8 +488,8 @@ export default function QuestionCard({
         const selected = answers[q.question]
         const isMulti = q.multiSelect
         const options = q.options || []
-        // Allow on another app's key waits behind "Use <app>'s key anyway",
-        // unless it is already the owner's choice.
+        // Allow on a key another app saved for itself stays hidden until the
+        // owner opens "use that key anyway", unless Allow is already chosen.
         const visibleOptions = writtenRestartAction
           ? options.filter(opt => opt.id === platformAction.restart_option_id)
           : keyCard?.hidesAllow && chosenKeyOption !== KEY_ALLOW
