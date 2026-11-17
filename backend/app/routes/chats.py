@@ -1771,9 +1771,7 @@ async def patch_chat(
     if target_provider is None and new_model:
       current_provider = chat.provider or "claude"
       if providers._model_belongs_to_other_provider(new_model, current_provider):
-        target_provider = providers.provider_of_model(
-          new_model, preferred=current_provider,
-        )
+        target_provider = providers.provider_of_model(new_model)
     provider_changing = (
       target_provider is not None
       and target_provider != (chat.provider or "claude")

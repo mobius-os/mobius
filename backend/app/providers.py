@@ -37,7 +37,7 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -285,15 +285,26 @@ def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when another provider owns `model` and `provider` does not.
 
   Ownership is the (provider, model) pair: an id that two providers both list
-  (an app declaration and Codex discovery, say) stays valid for each of them. Use this to reject cross-provider mismatches without
-  blocking unknown / future model names — the SDK is the authority on what it
-  accepts; we only intercept sending a Codex model to Claude or vice versa."""
+  (an app declaration and Codex discovery, say) stays valid for each of them.
+  Use this to reject cross-provider mismatches without blocking unknown /
+  future model names — the SDK is the authority on what it accepts; we only
+  intercept sending a Codex model to Claude or vice versa."""
   if model in known_model_ids(provider):
     return False
   for p in PROVIDERS:
     if p != provider and model in known_model_ids(p):
       return True
   return False
+
+
+def _declared_model_ids(provider_ids: Iterable[str]) -> set[str]:
+  """Built-in and declared ids of these providers, never discovered ones.
+
+  The one collision rule for both the Möbius catalogue and app declarations:
+  an id discovery also lists is shared by (provider, model), not a collision.
+  """
+  return {mid for pid in provider_ids
+          for mid in known_model_ids(pid, include_discovered=False)}
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -1225,8 +1236,7 @@ class MobiusProvider(BaseProvider):
     # one of these ids shares it by (provider, model); it is not a collision
     # that should discard the whole catalogue. The current Möbius declaration
     # is what this replaces, so it grants no ownership here.
-    claimed = {mid for pid in PROVIDERS if pid != "mobius"
-               for mid in known_model_ids(pid, include_discovered=False)}
+    claimed = _declared_model_ids(pid for pid in PROVIDERS if pid != "mobius")
     if any(mid in claimed for mid in ids):
       raise ValueError("Möbius catalogue collides with another provider")
     return declaration
@@ -1844,10 +1854,7 @@ def _apply_app_model_declarations(
   # Möbius catalogue. Claude/Codex discovery does not: an id both list is
   # shared by (provider, model), so registration never depends on discovery
   # timing and an app update cannot evict a live provider and orphan its chats.
-  claimed_models = {
-    mid for pid in ("claude", "codex", "mobius")
-    for mid in known_model_ids(pid, include_discovered=False)
-  }
+  claimed_models = _declared_model_ids(("claude", "codex", "mobius"))
   for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
@@ -1859,12 +1866,12 @@ def _apply_app_model_declarations(
     if not isinstance(models, list) or not models:
       continue
     model_ids = [row.get("id") for row in models if isinstance(row, dict)]
-    current = PROVIDERS.get(provider_id)
     if len(model_ids) != len(models) or any(mid in claimed_models for mid in model_ids):
       _model_registry_log.warning("app model provider %s has colliding model ids", provider_id)
       continue
     next_ids.add(provider_id)
     claimed_models.update(model_ids)
+    current = PROVIDERS.get(provider_id)
     if (not isinstance(current, AppModelProvider) or current.declaration != declaration
         or current.consent_scope != consent_scope):
       PROVIDERS[provider_id] = AppModelProvider(app_id, declaration, consent_scope)
