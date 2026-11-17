@@ -28,7 +28,7 @@ import NotificationChannelsPage, { NotificationChannelsSummary } from './Notific
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
-import KeysSummary, { KeyPage, KeysPage } from './KeysSection.jsx'
+import KeysSummary, { KeyPage, KeyPageSubtitle, KeysPage } from './KeysSection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import WalletSection, { WalletConnect } from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
@@ -985,7 +985,7 @@ export default function SettingsView({
       />
     )
   } else if (keyPage !== null) {
-    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} backLabel="Back to Keys" onBack={() => openDetailPage(KEYS_PAGE)} />
+    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} subtitle={<KeyPageSubtitle name={keyPage} />} backLabel="Back to Keys" onBack={() => openDetailPage(KEYS_PAGE)} />
     detailBody = (
       <KeyPage
         name={keyPage}

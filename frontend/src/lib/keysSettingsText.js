@@ -333,13 +333,18 @@ export function requestWording(request, names) {
 
 /** One line of Recent activity as a sentence, or null for entries the owner needn't read. */
 export function usageSentence(entry, names, now = Date.now()) {
+  const text = usageWhat(entry, names)
+  return text && `${text}${entry.ts ? ` ${relativeTime(entry.ts, now)}` : ''}`
+}
+
+/** What happened in one usage entry, without when ("Weather used it"), or null. */
+export function usageWhat(entry, names) {
   const [kind, id] = String(entry.caller || '').split(':')
   const who = kind === 'app' ? appLabel(names, Number(id))
     : kind === 'agent' ? 'Your agent'
     : kind === 'platform' ? 'Möbius'
     : kind === 'owner' ? 'You' : entry.caller
   const outcome = String(entry.outcome || '')
-  const when = entry.ts ? ` ${relativeTime(entry.ts, now)}` : ''
   const subjectApp = () => appLabel(names, Number(outcome.split(':')[1]?.split(' ')[0]))
   let text = null
   if (outcome === 'used') text = `${who} used it`
@@ -358,5 +363,5 @@ export function usageSentence(entry, names, now = Date.now()) {
   else if (outcome.startsWith('granted agent')) text = `${who} let your agents use it`
   else if (outcome.startsWith('denied agent')) text = `${who} said no to your agent`
   else if (outcome.startsWith('forgot request agent')) text = `${who} let your agent ask again`
-  return text && `${text}${when}`
+  return text
 }

@@ -1,37 +1,8 @@
-/* Settings › Keys: overview list in the AI-providers style, app and agent requests, and a key's own page. */
-/* Layout comes from the shared Settings blocks (SettingsPage.css: settings-group,
-   settings-list, settings-item); this file styles only what is key-specific.
-   Settings' own stylesheet loads after this one, so overrides of shared
-   settings classes carry one extra class. */
-
-/* -- overview ------------------------------------------------------------- */
-.settings__btn.settings-keys__add {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex-shrink: 0;
-}
-
-.settings-keys > .alert,
-.settings-keys > [role="alert"] { margin-bottom: 10px; }
-
-.settings-keys__empty {
-  margin: 0;
-  padding: 16px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-.settings-keys__denied {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  flex-wrap: wrap;
-  padding: 10px 16px;
-  font-size: 13px;
-  color: var(--muted);
-}
+/* Settings › Keys: the request card shared with chats and apps, and what the Keys pages add to the shared Settings blocks. */
+/* Layout comes from SettingsPage.css (settings-group, settings-list,
+   settings-item, settings-field, settings-input, settings-seg); this file
+   styles only what is key-specific. Settings' own stylesheet loads after this
+   one, so overrides of shared settings classes carry one extra class. */
 
 /* -- an app asking for a key -------------------------------------------- */
 .settings-keys__request {
@@ -79,14 +50,8 @@
 .settings-keys__details-body { display: grid; gap: 8px; margin-top: 6px; }
 .settings-keys__actions.settings-keys__actions--start { justify-content: flex-start; }
 
-/* -- shared bits ---------------------------------------------------------- */
+/* Shared by the request card wherever it renders (Settings' sheets may not be loaded there). */
 .settings-keys__muted { margin: 0; font-size: 13px; line-height: 1.45; color: var(--muted); }
-.settings-keys__refused { color: var(--danger); }
-.settings-keys__error { display: block; padding: 0 16px 10px; color: var(--danger); font-size: 12.5px; }
-.settings-keys__error-inline { color: var(--danger); font-size: 12.5px; }
-.settings-keys__hint { font-size: 12.5px; color: var(--muted); }
-.settings-keys__hint strong { color: var(--text); font-weight: 600; }
-
 .settings-keys__actions {
   display: flex;
   align-items: center;
@@ -94,35 +59,92 @@
   gap: 8px;
   flex-wrap: wrap;
 }
-
-.settings-keys__input,
-.settings-keys__select {
+.settings-keys__input {
+  box-sizing: border-box;
   width: 100%;
   min-width: 0;
   min-height: 40px;
   padding: 8px 11px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
   font-size: 14px;
+  outline: 0;
 }
-.settings-keys__input:focus-visible,
-.settings-keys__select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.settings-keys__input[aria-invalid="true"] { border-color: var(--danger); }
+.settings-keys__input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 
-.settings-keys__link {
-  padding: 4px 2px;
+/* -- the Keys pages -------------------------------------------------------- */
+.settings-keys-page { display: grid; }
+.settings-keys-page > .alert { margin-bottom: 14px; }
+.settings-keys-page__lede { margin: 0 2px 22px; }
+.settings-keys-page__actions { margin-top: 12px; }
+.settings-keys-requests { display: grid; gap: 10px; }
+.settings-keys-requests .settings-keys__request { margin-bottom: 0; }
+.settings__btn.settings-keys__more { margin-top: 10px; }
+
+/* A row that only says something quiet (empty states). */
+.settings-item.settings-keys-quiet { min-height: 52px; }
+
+/* An "add" row: accent text, a plus in the icon slot. */
+.settings-item.settings-keys-add { color: var(--accent-text, var(--accent)); cursor: pointer; }
+.settings-keys-add .settings-item__title { font-weight: 500; }
+.settings-item__icon.settings-keys-add__icon { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent-text, var(--accent)); }
+@media (hover: hover) and (pointer: fine) {
+  .settings-item.settings-keys-add:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+}
+.settings-keys-add__select {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  outline: 0;
+}
+.settings-keys-add__select option { color: var(--text); background: var(--surface); }
+
+/* An app row: the left part opens its websites, the switch pauses it. */
+.settings-keys-expand {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin: -12px 0 -12px -16px;
+  padding: 12px 0 12px 16px;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: inherit;
   font: inherit;
-  font-size: 13.5px;
+  text-align: left;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
-.settings-keys__link:disabled { opacity: 0.5; cursor: default; }
-.settings-keys__more { justify-self: start; margin: -2px 0 10px; }
+.settings-keys-expand:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+.settings-keys-expand .settings-item__chevron { margin-right: 4px; }
+.settings-item__icon.settings-keys-initial { font-size: 14px; font-weight: 600; }
+.settings-item-panel.settings-keys-panel { display: grid; gap: 12px; padding-left: 62px; }
+
+/* The key's value: masked dots, or the revealed key in mono. */
+.settings-keys-value__mask { letter-spacing: 0.08em; }
+.settings-keys__value {
+  white-space: pre-wrap;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text);
+  word-break: break-all;
+  user-select: all;
+}
+.settings-actions.settings-keys-value__actions { flex: none; flex-wrap: nowrap; }
+.settings-keys-code { font-family: var(--mono); font-size: 12px; }
 
 .settings-keys__icon-btn {
   display: grid;
@@ -137,198 +159,33 @@
   cursor: pointer;
 }
 .settings-keys__icon-btn:hover { background: var(--surface-2); color: var(--text); }
+.settings-keys__icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* Recent activity: compact rows, when on the right. */
+.settings-item.settings-keys-activity { min-height: 48px; padding-top: 10px; padding-bottom: 10px; }
+.settings-keys-activity .settings-item__title { font-weight: 400; }
+.settings-keys-activity .settings-item__trail { font-size: 12.5px; white-space: nowrap; }
+.settings-keys__refused { color: var(--danger-text, var(--danger)); }
+.settings-keys__warn { color: var(--warning-text, var(--warning, #b7791f)); }
+
+/* Forms: a panel under a row, a form row inside a list, or the new-key card. */
+.settings-keys-form { display: grid; gap: 14px; }
+.settings-keys-form--row { padding: 14px 16px 16px; }
+.settings-keys-form--card { gap: 18px; padding: 18px; }
+.settings-keys-form__pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.settings-keys-form__switches { display: grid; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+.settings-keys-form__where { display: grid; gap: 12px; }
+.settings-link.settings-keys-form__link { justify-self: start; color: var(--accent-text, var(--accent)); }
+.settings-link.settings-keys-form__link:hover { text-decoration: underline; }
 
 .settings__btn.settings-keys__danger { background: var(--danger); border-color: var(--danger); color: #fff; }
-.settings__btn.settings-keys__danger-outline { color: var(--danger); }
 
-/* -- a key's page --------------------------------------------------------- */
-.settings-keys-page { display: grid; gap: 0; }
-.settings-keys-page > .alert { margin-bottom: 10px; }
-
-.settings-group__title.settings-keys-page__heading { margin: 24px 2px 10px; }
-.settings-keys-page__note { margin: 2px 2px 12px; }
-.settings-keys-page__summary { margin: 0 2px 4px; }
-/* The Keys page: a lede, then requests, then "Your keys" with its Add button. */
-.settings-keys-page__lede { margin: 0 2px 14px; }
-.settings-keys-page > .settings-keys__request { margin-bottom: 10px; }
-.settings-group.settings-keys-page__group { margin-top: 8px; }
-
-/* A "Used by" row's mark: the app's initial, or the agents' sparkle. */
-.settings-item__icon.settings-keys-usedby__icon { width: 30px; height: 30px; font-size: 13px; font-weight: 600; }
-
-/* Advanced: site lists, how it's sent, granting another app and Delete. */
-.settings-keys-disclosure {
-  margin-top: 24px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
+@container settings (max-width: 400px) {
+  .settings-item-panel.settings-keys-panel { padding-left: 14px; }
+  .settings-keys-form__pair { grid-template-columns: minmax(0, 1fr); }
+  .settings-keys-form--card { padding: 14px; }
+  /* Show and Replace drop their icons so the masked value keeps its room. */
+  .settings-keys-value__actions svg { display: none; }
+  .settings-keys-value .settings-item__icon { display: none; }
+  .settings-keys-value .settings-item__sub { white-space: normal; }
 }
-.settings-keys-disclosure > summary {
-  display: flex;
-  align-items: center;
-  min-height: 50px;
-  padding: 9px 16px;
-  font-size: 14px;
-  cursor: pointer;
-}
-.settings-keys-disclosure[open] > summary { border-bottom: 1px solid var(--border); }
-.settings-keys-disclosure__body { display: grid; gap: 8px; padding: 4px 16px 16px; }
-.settings-keys-disclosure__heading { margin: 14px 0 2px; font-size: 13px; font-weight: 600; color: var(--muted); }
-.settings-keys-disclosure .settings-keys-sent { margin-top: 0; }
-.settings-keys-card__row.settings-keys-card__row--plain { padding: 6px 0; min-height: 0; }
-
-.settings-keys-card__row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  min-height: 54px;
-  margin: 0;
-  padding: 9px 16px;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  font: inherit;
-  text-align: left;
-}
-
-.settings-keys-card__copy { display: grid; gap: 3px; min-width: 0; flex: 1; font-size: 14px; }
-.settings-keys-card__copy strong { font-weight: 500; overflow-wrap: anywhere; }
-.settings-keys-card__copy small { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; }
-.settings-keys-card__end { display: inline-flex; align-items: center; gap: 12px; flex: none; }
-
-.settings-keys-card__row--add {
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 14px;
-}
-.settings-keys-card__row--add:hover { background: var(--surface-2); }
-.settings-keys-card__row--add .settings-keys__select {
-  min-height: 34px;
-  padding: 4px 0;
-  border: 0;
-  background: transparent;
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.settings-keys-card__form { display: grid; gap: 8px; padding: 12px 16px 14px; }
-
-.settings-keys-card__field { display: grid; gap: 6px; padding: 12px 16px; font-size: 13px; color: var(--muted); }
-
-.settings-keys__value {
-  white-space: pre-wrap;
-  font-family: var(--mono);
-  font-size: 12.5px;
-  color: var(--text);
-  word-break: break-all;
-  user-select: all;
-}
-
-/* "How it's sent": the technical slot, out of the way until needed. */
-.settings-keys-sent {
-  margin-top: 10px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
-}
-.settings-keys-sent summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 50px;
-  padding: 9px 16px;
-  font-size: 14px;
-  cursor: pointer;
-  list-style: none;
-}
-.settings-keys-sent summary::-webkit-details-marker { display: none; }
-.settings-keys-sent summary code {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--muted);
-}
-.settings-keys-sent[open] summary { border-bottom: 1px solid var(--border); }
-
-.settings-keys__segmented {
-  display: inline-flex;
-  justify-self: start;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg);
-}
-.settings-keys__segment {
-  padding: 6px 12px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  font: inherit;
-  font-size: 13px;
-  cursor: pointer;
-}
-.settings-keys__segment--on { background: var(--surface-2); color: var(--text); }
-
-.settings-keys-delete { display: grid; gap: 8px; margin-top: 18px; justify-items: start; }
-
-/* The agents switch uses the shell accent, like the chat settings switch. */
-.settings-keys-switch {
-  --switch-track-width: 36px;
-  --switch-track-height: 20px;
-  --switch-thumb-size: 16px;
-  --switch-thumb-offset: 2px;
-  --switch-track-color: var(--border);
-  --switch-track-color-hover: var(--surface-2);
-  --switch-track-color-checked: var(--accent);
-  --switch-track-color-disabled: var(--surface);
-  --switch-track-color-checked-disabled: var(--accent-dim);
-  --color-ring: var(--accent);
-}
-
-.settings-keys-switch button[role="switch"] {
-  background: var(--switch-track-color);
-  border-radius: var(--radius-full, 9999px);
-}
-.settings-keys-switch button[role="switch"][data-state="checked"] {
-  background: var(--switch-track-color-checked);
-}
-.settings-keys-switch button[role="switch"][data-disabled] {
-  background: var(--switch-track-color-disabled);
-}
-.settings-keys-switch button[role="switch"][data-disabled][data-state="checked"] {
-  background: var(--switch-track-color-checked-disabled);
-}
-
-/* Keys with several lines: a plain box (it cannot be masked like one line). */
-.settings-keys__textarea { min-height: 120px; resize: vertical; line-height: 1.4; font-family: var(--mono); }
-
-.settings-keys__check {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 13px;
-  color: var(--muted);
-}
-.settings-keys__check em { font-style: normal; opacity: 0.8; }
-
-/* An app's own sites open beneath its row. */
-.settings-keys-grant__toggle {
-  border: 0;
-  padding: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.settings-keys-grant__sites { padding-left: 16px; }
-
-.settings-keys__warn { color: var(--warning, #b7791f); }
