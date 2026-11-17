@@ -216,6 +216,10 @@ def test_global_roster_unifies_top_level_and_arbitrarily_nested_peers(
   )
   assert by_id[chats["scout"].id]["provider"] == "claude"
   assert by_id[chats["outside_helper"].id]["provider"] == "codex"
+  # A helper is addressed by its name and read by its title (its chat's).
+  assert (by_id[chats["outside_helper"].id]["name"],
+          by_id[chats["outside_helper"].id]["title"]) == ("outside-builder", "Outside helper")
+  assert "title" not in by_id[chats["root"].id]
   assert "goal" not in by_id[chats["outsider"].id]
   assert "started_at" not in by_id[chats["scout"].id]
   assert snapshot["peer_total"] == 6
@@ -287,7 +291,8 @@ def test_nested_claude_helper_can_message_nested_codex_peer_across_scopes(
     },
   )
   assert sent.status_code == 200, sent.text
-  assert sent.json()["messages"][0]["recipient_name"] == "outside-builder"
+  # Note ends read as the helper's title, never its task key.
+  assert sent.json()["messages"][0]["recipient_name"] == "Outside helper"
   assert db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.send_id == "nested-cross-provider-1",
   ).one().room_kind == "workspace"
@@ -349,7 +354,7 @@ def test_mixed_scope_direct_send_is_atomic_grouped_and_idempotent(
     receipt = response.json()
     assert len(receipt["messages"]) == 1
     assert receipt["recipient_count"] == 2
-    assert set(receipt["recipient_names"]) == {"builder", "Outside"}
+    assert set(receipt["recipient_names"]) == {"Builder", "Outside"}
     assert response.text.count(payload["body"]) == 1
   stored = db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.send_id == "mixed-scope-handoff",

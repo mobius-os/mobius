@@ -115,7 +115,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     // The option buttons MUST be enabled (the regression was that
     // post-question tool_start events kept isStreaming=true →
     // disabled={isStreaming} stayed grayed out).
-    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard__opt')
+    const optionButtons = page.locator('[data-chat-surface="painted"] .qcard').getByRole('radio')
     await expect(optionButtons.first()).toBeEnabled({ timeout: 5000 })
   })
 
@@ -241,13 +241,16 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const network = await disconnectDelivery(page)
     await network.reconnect()
     await expect.poll(() => answerAttempts).toBe(2)
-    // The card settles into its durable answered state once the retried
-    // answer commits: the choice stays recorded and read-only, and the
-    // action row (Submit/Queued/Submitted) retires entirely rather than
-    // showing a terminal "Submitted" label.
+    // The retried answer is delivered and the question is no longer pending.
+    // This mock never records the answer in the transcript, so the card stays
+    // in its delivered state: the choice recorded and read-only, and the action
+    // row in place and inert, so the card keeps its shape. A real transcript
+    // turns the same slot into a disabled "Submitted".
+    await expect(card.getByText('Your answer reached Möbius. Confirming this card…')).toBeVisible()
     await expect(careful).toHaveAttribute('aria-checked', 'true')
     await expect(careful).toBeDisabled()
-    await expect(card.locator('.qcard__submit')).toHaveCount(0)
+    await expect(submit).toHaveText('Confirming answer…')
+    await expect(submit).toBeDisabled()
   })
 
 
@@ -341,7 +344,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
   })
 
 
-  test('multiline custom answers grow inline without moving the conversation', async ({ page }) => {
+  test('multiline custom answers at the chat bottom grow upward like the composer', async ({ page }) => {
     const streamBody = [
       `data: ${JSON.stringify({
         type: 'question',
@@ -378,6 +381,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
       const rect = node => node?.getBoundingClientRect()
       return {
         cardTop: rect(el)?.top,
+        cardBottom: rect(el)?.bottom,
         cardHeight: rect(el)?.height,
         inputHeight: rect(input)?.height,
         chatScrollTop: scroll?.scrollTop,
@@ -400,8 +404,12 @@ test.describe('Bug 1: AskUserQuestion', () => {
     await expect(customAnswer).toHaveValue('First line\nSecond line\nThird line')
     expect(after.cardHeight).toBeGreaterThan(before.cardHeight)
     expect(after.inputHeight).toBeGreaterThan(before.inputHeight)
-    expect(after.cardTop).toBeCloseTo(before.cardTop, 5)
-    expect(after.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+    // The card rests just above the composer, so the field grows upward: its
+    // Submit row keeps its place and the conversation above moves instead of
+    // the card sliding down under the composer.
+    expect(Math.abs(after.cardBottom - before.cardBottom)).toBeLessThanOrEqual(1)
+    expect(after.cardTop).toBeLessThan(before.cardTop)
+    expect(after.chatScrollTop).toBeGreaterThan(before.chatScrollTop)
 
     // Past the growth cap, the writing field—not the transcript—owns overflow.
     // Drive the real keyboard path so caret reveal, beforeinput, input, and the
@@ -417,8 +425,7 @@ test.describe('Bug 1: AskUserQuestion', () => {
     const inputScrollTop = await customAnswer.evaluate(el => el.scrollTop)
     expect(capped.inputHeight).toBeLessThanOrEqual(181)
     expect(inputScrollTop).toBeGreaterThan(0)
-    expect(capped.cardTop).toBeCloseTo(before.cardTop, 5)
-    expect(capped.chatScrollTop).toBeCloseTo(before.chatScrollTop, 5)
+    expect(Math.abs(capped.cardBottom - before.cardBottom)).toBeLessThanOrEqual(1)
   })
 
 

@@ -65,7 +65,7 @@ test('a working helper row shows its name, engine, current step, and clock', () 
   assert.match(html, /chat__subagent-elapsed">1m 1[45]s</)
   assert.match(html, /<button[^>]*aria-haspopup="dialog"/)
   assert.match(html, /chat__subagent--running/)
-  assert.doesNotMatch(html, /Helper finished/)
+  assert.doesNotMatch(html, /Finished/)
 })
 
 test('the clock reads the server start time as UTC, whatever the viewer\'s time zone', () => {
@@ -100,7 +100,7 @@ test('a finished helper keeps its row with its engine and how long it took', () 
              provider: 'claude', model: 'claude-opus-4-8', duration_ms: 12_000, body: 'Done.' },
   }))
   assert.match(html, /audit-login/)
-  assert.match(html, /Opus 4.8 · Helper finished/)
+  assert.match(html, /Opus 4.8 · Finished/)
   assert.match(html, /12s/)
 })
 
@@ -178,7 +178,7 @@ test('a finished helper stays its launch step: one settled row, counted as done'
   assert.match(html, /1 done/)
   assert.equal(html.match(/chat__helper-row/g)?.length, 1, 'one row per helper')
   assert.doesNotMatch(html, /Started helper audit-login/)
-  assert.match(html, /Helper finished/)
+  assert.match(html, /Finished/)
   _resetDisclosureStateForTests()
 })
 

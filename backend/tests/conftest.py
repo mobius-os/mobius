@@ -178,6 +178,18 @@ def idle_storage_guard(monkeypatch):
   monkeypatch.setattr(storage_guard.StorageGuard, "run", idle)
 
 
+@pytest.fixture
+def allow_local_test_remotes(monkeypatch):
+  """For tests that stand in for GitHub with local bare repositories.
+
+  Production contribution Git allows only https. Only the test modules that
+  need local remotes opt in, so the rest of the suite would catch production
+  code that relied on local transport.
+  """
+  from app import github_contribution_git
+  monkeypatch.setattr(github_contribution_git, "_ALLOWED_PROTOCOLS", "https:file")
+
+
 @pytest.fixture(autouse=True)
 def _isolate_git_env(monkeypatch, tmp_path, tmp_path_factory):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
@@ -635,3 +647,25 @@ def pytest_sessionfinish(session):
     return
   record = {path: round(seconds, 1) for path, seconds in sorted(_recorded_weights.items())}
   _SHARD_WEIGHTS.write_text(_json.dumps(record, indent=2) + "\n")
+
+
+@pytest.fixture(autouse=True)
+def service_catalogue_snapshot(monkeypatch):
+  """Tests start with known service metadata, never a real broker request.
+
+  Discovery tests instantiate a fresh provider to exercise cold/offline paths.
+  The fixture replaces the removed production static catalogue, not discovery.
+  """
+  import json
+  from app import providers
+  from app.mobius_catalogue import parse_catalogue
+  provider = providers.MobiusProvider()
+  declaration = parse_catalogue(json.loads(
+    (Path(__file__).parent / "fixtures" / "mobius_catalogue.json").read_text()
+  ))
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  monkeypatch.setitem(providers.DEFAULT_MODELS, "mobius", declaration["default_model"])
+  monkeypatch.setitem(providers.DEFAULT_BACKGROUND_MODELS, "mobius", declaration["default_model"])
+  provider._publish_catalogue(declaration)
+  yield
+  providers._model_registry_cache.pop("mobius", None)

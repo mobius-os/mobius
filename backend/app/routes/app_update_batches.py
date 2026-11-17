@@ -12,7 +12,7 @@ from app.database import get_db
 from app.streaming import ClosingStreamingResponse
 from app.deps import (
   get_owner_or_app_with_manage_apps, get_principal, Principal,
-  reject_cross_site, require_nondelegated_owner_or_app_control,
+  reject_cross_site, require_owner_or_full_access_control,
   revocable_browser_stream,
 )
 
@@ -35,7 +35,7 @@ async def batches(request: Request) -> AppUpdateBatches:
 
 @router.post("", dependencies=[
   Depends(reject_cross_site),
-  Depends(require_nondelegated_owner_or_app_control),
+  Depends(require_owner_or_full_access_control),
   Depends(get_owner_or_app_with_manage_apps),
 ])
 async def start_batch(

@@ -1,3 +1,4 @@
+import { selectEditorRange, markdownEditorView } from '../textEditor.js'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   composerDraftRevision,
@@ -234,8 +235,9 @@ export default function useComposerDraftState({ chatId, hidden, inputRef }) {
         catch { element.focus() }
       }
       const end = String(text).length
-      try { element.setSelectionRange(end, end) } catch {}
-      element.scrollTop = element.scrollHeight
+      try { selectEditorRange(element, end, end) } catch {}
+      const scroller = markdownEditorView(element)?.scrollDOM ?? element
+      scroller.scrollTop = scroller.scrollHeight
     })
   }, [handleComposerInputChange, inputRef, setComposerInput])
 

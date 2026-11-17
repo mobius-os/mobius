@@ -7,7 +7,8 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { ProgressiveMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {
@@ -17,7 +18,7 @@ import {
 } from './groupBlocks.js'
 import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
-import { isDurableRestartOffer } from './restartCard.js'
+import { questionCardOpen } from './questionOpen.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -61,16 +62,10 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
-  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
-    && block?.type === 'question'
-    && !block.answers
-    && (
-      durableRestart
-      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
-    )
+    && questionCardOpen(block, isLastMsg ? liveQuestionId : null)
   )
 }
 
@@ -102,7 +97,7 @@ function MarkdownCopySurface({ msg, markdownByIndex, children }) {
 
 /** Owner text renders through the same formatter as replies, with the
  * owner-text rules (typed line breaks and tag-like text stay as typed; see
- * BlockRenderer's `configuredMarked`). A `/goal` command keeps its Goal tag. */
+ * markdownParser.js). A `/goal` command keeps its Goal tag. */
 function UserMessageText({ text, onInternalNav, mediaDimensions }) {
   const goalObjective = goalMessageObjectiveFromText(text)
   if (!goalObjective) {

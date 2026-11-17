@@ -549,7 +549,20 @@ def test_revoke_reports_unconfirmed_work_without_claiming_stop(https, auth, monk
   monkeypatch.setattr(app.chat, "stop_browser_grant_runs", incomplete)
   response = https.delete(ROOT + "/" + grant, headers=auth)
   assert response.status_code == 202
-  assert response.json() == {"revoked": True, "pending_commands": pending, "pending_chat_ids": ["still-stopping"]}
+  assert response.json() == {"revoked": True, "pending_commands": pending, "pending_chat_ids": ["still-stopping"], "stop_incomplete": False}
+  assert https.get("/api/chats", headers={"Authorization": "Bearer " + token}).status_code == 401
+
+
+def test_revoke_with_a_failed_stop_step_reports_revoked_not_failure(https, auth, monkeypatch):
+  from app.routes import connect
+  grant, token, _ = invite(https)
+  def broken(_grant):
+    raise OSError("runner unreachable")
+  monkeypatch.setattr(connect, "cancel_browser_grant_commands", broken)
+  response = https.delete(ROOT + "/" + grant, headers=auth)
+  assert response.status_code == 202, response.text
+  assert response.json()["revoked"] is True
+  assert response.json()["stop_incomplete"] is True
   assert https.get("/api/chats", headers={"Authorization": "Bearer " + token}).status_code == 401
 
 
@@ -610,3 +623,185 @@ def test_guest_cannot_launch_clean_owner_conflict_resolver(https, auth, route, b
                         headers={"Authorization": "Bearer " + token})
   assert response.status_code == 403
   assert "installation owner" in response.json()["detail"]
+
+
+def account_guest(handle, **claims):
+  """An account grant for ``handle`` signed in once; return (grant_id, bearer).
+
+  Extra ``claims`` make a descendant bearer of that session, such as a helper."""
+  import secrets
+  from app import browser_access as access
+  with SessionLocal() as db:
+    owner = db.query(models.Owner).one()
+    if db.query(models.IdentityAccountLink).filter_by(owner_id=owner.id).first() is None:
+      db.add(models.IdentityAccountLink(owner_id=owner.id, access_token_encrypted="fixture", scopes_json=[]))
+      db.commit()
+    grant = access.BrowserAccessGrant(
+      id=secrets.token_urlsafe(24), owner_id=owner.id, label="Shared", kind="account",
+      issuer=access.issuer_origin(), subject="user_" + handle, recipient_handle=handle,
+      origin=access.runtime_origin(), remote_status="active",
+      grantor_binding=access.account_binding(db, owner.id),
+    )
+    db.add(grant)
+    db.commit()
+    _secret, session = access.open_session(db, grant, owner, None)
+    db.commit()
+    lineage = access.BrowserLineage(grant.id, session.id)
+    return grant.id, tokens.create_access_token(
+      {"sub": owner.username, **claims}, token_epoch=owner.token_epoch, browser=lineage)
+
+
+def full_access(https, auth, grant, enabled=True):
+  response = https.patch(ROOT + "/" + grant, json={"full_access": enabled}, headers=auth)
+  assert response.status_code == 200, response.text
+  assert response.json()["grant"]["full_access"] is enabled
+
+
+def test_full_access_lifts_only_its_own_gate_for_that_person_while_on(https, auth, monkeypatch):
+  from app import account_browser_access as account
+  async def unregistered(_db, _grant):
+    return "revoked"
+  monkeypatch.setattr(account, "unregister", unregistered)
+  other, other_token = account_guest("bob")
+  grant, token = account_guest("alice")
+  guest = {"Authorization": "Bearer " + token}
+  allowed = "/api/notifications/seen-all"
+  assert https.post(allowed, headers=guest).status_code == 403
+  full_access(https, auth, grant)
+  # Applies at once to the bearer the guest already holds, for that person only.
+  assert https.post(allowed, headers=guest).status_code == 200
+  assert https.post(allowed, headers={"Authorization": "Bearer " + other_token}).status_code == 403
+  # Everything else on the strict installation-owner gate stays the owner's:
+  # sharing and invites of any kind, push subscriptions, owner decisions,
+  # the owner's accounts, credit and provider, credential minting, work
+  # under the owner's lineage, and the owner's own screen.
+  refused = [
+    ("get", ROOT, None),
+    ("patch", ROOT + "/" + other, {"full_access": True}),
+    ("delete", ROOT + "/" + other, None),
+    ("post", ROOT + "/accounts", {"recipient_handle": "another-person"}),
+    ("get", ROOT + "/shared", None),
+    ("post", ROOT + "/shared/respond", {"origin": "https://other.example", "grant_id": "g" * 32, "action": "accept"}),
+    ("post", "/api/push/subscribe", {"endpoint": "https://push.example/x", "keys": {"p256dh": "k", "auth": "a"}}),
+    ("put", "/api/push/devices", {"token": "t", "platform": "ios"}),
+    ("get", "/api/push/devices", None),
+    ("post", "/api/projects/p1/invites", {}),
+    ("post", "/api/shared-apps/s1/invites", {}),
+    ("post", "/api/apps/1/runtime-capabilities/accept", {}),
+    ("post", "/api/skills/install", {}),
+    ("post", "/api/apps/1/run-job", None),
+    ("post", "/api/settings", {"provider": "claude"}),
+    ("post", "/api/platform/rebuild", {}),
+    ("post", "/api/platform/unfinished-update/keep", None),
+    ("post", "/api/admin/activity/emit", {}),
+    ("post", "/api/apps/1/consent", {"digest": "x"}),
+    ("delete", "/api/apps/1/consent", None),
+    ("post", "/api/apps/1/credits-charges/p1", {"pay": True}),
+    ("post", "/api/identity/credits/unpair", None),
+    ("post", "/api/auth/install-pass", {}),
+    ("post", "/api/auth/shell-install-pass", None),
+    ("post", "/api/auth/app-job-token", {"app_id": 1}),
+    ("post", "/api/admin/sign-out-everywhere", None),
+    ("get", "/api/screen-control/sessions/fake/events", None),
+  ]
+  for method, route, body in refused:
+    kwargs = {"headers": guest} if body is None else {"headers": guest, "json": body}
+    response = getattr(https, method)(route, **kwargs)
+    assert response.status_code == 403, (method, route, response.text)
+  assert {g["id"]: g["full_access"] for g in https.get(ROOT, headers=auth).json()["grants"]} == {
+    other: False, grant: True}
+  full_access(https, auth, grant, False)
+  assert https.post(allowed, headers=guest).status_code == 403
+  full_access(https, auth, grant)
+  assert https.delete(ROOT + "/" + grant, headers=auth).status_code in (202, 204)
+  assert https.post(allowed, headers=guest).status_code == 401
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth).status_code == 409
+
+
+def test_full_access_never_reaches_a_guests_helpers_and_does_reach_their_apps(https, auth, db):
+  grant, token = account_guest("alice")
+  full_access(https, auth, grant)
+  # A delegated helper of a Full-access guest stays behind the strict gate.
+  helper_grant, helper = account_guest("carol", delegation_id="d1", delegation_chat="c1")
+  full_access(https, auth, helper_grant)
+  refused = https.post("/api/notifications/seen-all", headers={"Authorization": "Bearer " + helper})
+  assert refused.status_code == 403
+  assert "Delegated" in refused.json()["detail"]
+  # An app working for the guest carries the grant's lineage, so it holds
+  # exactly the guest's Full access, and loses it with them.
+  app = models.App(name="Example", slug="example", source_dir=str(Path(get_settings().data_dir) / "example"))
+  db.add(app); db.commit()
+  minted = https.post("/api/auth/app-token", json={"app_id": app.id}, headers={"Authorization": "Bearer " + token})
+  assert minted.status_code == 200, minted.text
+  app_bearer = {"Authorization": "Bearer " + minted.json()["token"]}
+  badge = "/api/apps/%d/badge" % app.id
+  assert https.put(badge, json={"count": 1}, headers=app_bearer).status_code == 200
+  full_access(https, auth, grant, False)
+  assert https.put(badge, json={"count": 1}, headers=app_bearer).status_code == 403
+
+
+def test_one_time_link_grants_never_hold_full_access(https, auth, db):
+  grant, token, _ = invite(https)
+  assert https.get(ROOT, headers=auth).json()["grants"][0]["full_access"] is None
+  refused = https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=auth)
+  assert refused.status_code == 409
+  # Even a row set directly is ignored: a bare cookie proves no identity.
+  from app import browser_access as access
+  row = db.get(access.BrowserAccessGrant, grant)
+  row.full_access = True
+  db.commit()
+  assert https.post("/api/notifications/seen-all", headers={"Authorization": "Bearer " + token}).status_code == 403
+
+
+def test_full_access_gate_sits_on_exactly_these_routes():
+  """Opting a route into Full access is a deliberate change to this list."""
+  import inspect
+  from fastapi.routing import APIRoute
+  from app import deps
+  from app.main import app
+  gates = {deps.require_owner_or_full_access_control, deps.get_current_owner_for_full_access_control}
+
+  def uses(dependant):
+    return any(dep.call in gates or uses(dep) for dep in dependant.dependencies)
+
+  def api_routes():
+    for route in app.routes:
+      if isinstance(route, APIRoute):
+        yield route
+      # Included routers resolve to their effective routes.
+      elif hasattr(route, "effective_route_contexts"):
+        yield from route.effective_route_contexts()
+
+  found = set()
+  for route in api_routes():
+    if uses(route.dependant) or "require_owner_or_full_access_control(" in inspect.getsource(route.endpoint):
+      found |= {(method, route.path) for method in route.methods}
+  assert found == {
+    ("POST", "/api/admin/restart"),
+    ("POST", "/api/apps/update-batches"),
+    ("PUT", "/api/apps/{app_id}/badge"),
+    ("DELETE", "/api/apps/{app_id}/permanent"),
+    ("DELETE", "/api/chats/{chat_id}"),
+    ("POST", "/api/chats/{chat_id}/recover"),
+    ("GET", "/api/chats/{chat_id}/compact-progress"),
+    ("POST", "/api/chats/{chat_id}/compact-stop"),
+    ("POST", "/api/platform/apply"),
+    ("DELETE", "/api/platform/unfinished-update"),
+    ("POST", "/api/platform/restart"),
+    ("DELETE", "/api/projects/{project_id}"),
+    ("POST", "/api/projects/{project_id}/recover"),
+    ("POST", "/api/notifications/seen-all"),
+    ("POST", "/api/notifications/read-all"),
+    ("POST", "/api/notifications/{notification_id}/read"),
+    ("DELETE", "/api/notifications"),
+    ("DELETE", "/api/notifications/{notification_id}"),
+  }
+
+
+def test_full_access_toggle_is_owner_managed_and_strict(https, auth):
+  grant, token = account_guest("alice")
+  guest = {"Authorization": "Bearer " + token}
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True}, headers=guest).status_code == 403
+  assert https.patch(ROOT + "/missing-grant", json={"full_access": True}, headers=auth).status_code == 404
+  assert https.patch(ROOT + "/" + grant, json={"full_access": True, "extra": 1}, headers=auth).status_code == 422
+  assert https.get(ROOT, headers=auth).json()["grants"][0]["full_access"] is False

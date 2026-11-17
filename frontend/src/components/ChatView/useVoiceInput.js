@@ -1,3 +1,4 @@
+import { editorText } from './textEditor.js'
 import { useState, useRef, useEffect } from 'react'
 import useScreenWakeLock from '../../hooks/useScreenWakeLock.js'
 import { acquireAudioSession } from '../../lib/audioSession.js'
@@ -58,7 +59,7 @@ function speechRecognition() {
  * interim is shown live.
  *
  * Sessions restart on onend (mobile Chrome ends sessions after a few seconds
- * of silence). Manual textarea edits deliberately retire the current speech
+ * of silence). Manual composer edits deliberately retire the current speech
  * session and restart after a short idle window. That makes the owner's edit
  * the new authoritative base instead of letting a later interim result
  * overwrite it.
@@ -67,10 +68,11 @@ function speechRecognition() {
  * @param {(text: string) => void} options.onTranscript
  *   Called with the concatenated final+interim transcript on every
  *   onresult event. Caller commits this into the controlled composer; the
- *   composer layout effect owns its post-commit textarea sizing.
- * @param {React.RefObject<HTMLTextAreaElement>} options.inputRef
- *   The composer textarea — used to seed voiceFinalRef with the current value
- *   on start and to preserve the current value in permission-error copy.
+ *   composer layout effect owns its post-commit sizing.
+ * @param {React.RefObject<HTMLElement>} options.inputRef
+ *   The composer input (its Markdown editor's content element, or a
+ *   textarea) — its text seeds voiceFinalRef on start and is preserved in
+ *   permission-error copy.
  *
  * @returns {{
  *   listening: boolean,
@@ -106,7 +108,7 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
   useEffect(() => () => stopVoice(), [])
 
   function appendNote(note) {
-    const prev = inputRef.current?.value || ''
+    const prev = editorText(inputRef.current)
     onTranscript(prev + (prev ? ' ' : '') + note)
   }
 
@@ -221,7 +223,7 @@ export default function useVoiceInput({ onTranscript, inputRef }) {
 
     listeningRef.current = true
     setListening(true)
-    voiceFinalRef.current = inputRef.current?.value.trimEnd() || ''
+    voiceFinalRef.current = editorText(inputRef.current).trimEnd()
     startVoiceSession()
   }
 

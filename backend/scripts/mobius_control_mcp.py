@@ -1033,7 +1033,10 @@ def _helper_selection(arguments: dict[str, Any]) -> tuple[str, str | None, str |
     or (capability.get("defaults") or {}).get(provider)
   )
   if isinstance(wanted, str):
-    wanted = _RETIRED_MODELS.get(wanted, wanted)
+    replacements = (capability.get("replacements") or {}).get(provider) or {}
+    wanted = replacements.get(wanted, wanted)
+    if provider == "claude":
+      wanted = _RETIRED_MODELS.get(wanted, wanted)
   models = (capability.get("models") or {}).get(provider) or []
   aliases = (capability.get("aliases") or {}).get(provider) or {}
   if wanted:
@@ -1095,6 +1098,7 @@ def _helper_view(row: dict[str, Any], *, result: bool = False) -> dict[str, Any]
   view = {
     "helper": row.get("task_key"),
     "helper_id": row.get("id"),
+    "title": row.get("title"),
     "provider": row.get("provider"),
     "model": row.get("model"),
     "status": row.get("status"),
@@ -1112,7 +1116,7 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
       "spawn_agent no longer takes access; state any read-only constraint "
       "in the bounded task instead"
     )
-  allowed = {"name", "task", "provider", "model", "effort", "cwd", "plan_task"}
+  allowed = {"name", "title", "task", "provider", "model", "effort", "cwd", "plan_task"}
   if not set(arguments).issubset(allowed):
     raise ValueError("spawn_agent received unknown arguments")
   name, task = arguments.get("name"), arguments.get("task")
@@ -1141,6 +1145,8 @@ def _call_spawn_agent(arguments: dict[str, Any]) -> dict:
     body["cwd"] = arguments["cwd"].strip()
   if plan_task is not None:
     body["plan_task"] = plan_task.strip()
+  if isinstance(arguments.get("title"), str) and arguments["title"].strip():
+    body["title"] = arguments["title"].strip()
   row = _agent_api_call("POST", "/api/delegations", body)
   view = _helper_view(row)
   view["note"] = (
@@ -1509,7 +1515,9 @@ _TOOL_DEFINITIONS = {
       "calling turn, unless owner-configured preferences override) and has "
       "the same tools you do, but it does not see this "
       "conversation: write a self-contained task with the files, constraints, "
-      "and what done looks like. Its result arrives in this chat by itself, "
+      "and what done looks like. Give it a title: what the owner reads for "
+      "this helper, a short plain-language phrase in sentence case such as "
+      "\"Fixing the tray's closing conversation\". Its result arrives in this chat by itself, "
       "during a live Codex turn when safe or after the turn settles; Claude "
       "is not interrupted just for a helper result. Stop leaves it owed for "
       "the next owner turn; never poll. "
@@ -1533,6 +1541,10 @@ _TOOL_DEFINITIONS = {
         "cwd": {"type": "string", "description": "Working directory under /data; omit for /data."},
         "plan_task": {"type": "string", "minLength": 1, "maxLength": 128,
                       "description": "Optional Goal task id to file this helper under."},
+        "title": {
+          "type": "string", "maxLength": 256,
+          "description": "What the owner reads for this helper: a short plain-language phrase in sentence case, no jargon, e.g. \"Fixing the tray's closing conversation\". name stays its stable id.",
+        },
       },
       "required": ["name", "task"],
       "additionalProperties": False,

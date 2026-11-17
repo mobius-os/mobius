@@ -22,8 +22,9 @@ export function normalizeBackgroundHelpers(value) {
   const count = Number.isInteger(value.count) && value.count >= items.length
     ? value.count
     : items.length
-  if (count === 0 && items.length === 0) return EMPTY_BACKGROUND_HELPERS
-  return { count, items }
+  const withGoal = value.with_goal
+  if (count === 0 && items.length === 0 && !withGoal) return EMPTY_BACKGROUND_HELPERS
+  return { count, items, ...(withGoal ? { with_goal: withGoal } : {}) }
 }
 
 /** Distinguish an eligible automatic handoff from an owner barrier or recovery. */
