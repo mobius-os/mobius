@@ -37,7 +37,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { subscribeShellLaunchTargets } from '../../lib/shellLaunchTargets.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
-import { requestedSettingsSection, settingsSectionOrNull } from '../../lib/settingsSections.js'
+import { requestedSettingsSection, settingsFocusRequest, settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -2961,7 +2961,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // focus a known section, or open a whole page such as one provider's.
   // Navigation only; every action inside Settings stays the owner's.
   const openSettingsSection = useCallback((section, { page = null } = {}) => {
-    setSettingsFocusTarget(section || page ? { section: section || null, page, nonce: Date.now() } : null)
+    setSettingsFocusTarget(settingsFocusRequest(section, { page }))
     if (activeViewRef.current !== 'settings') navToRef.current('settings')
   }, [activeViewRef])
   // The chat picker only offers built-in providers here (providerSetupTarget).

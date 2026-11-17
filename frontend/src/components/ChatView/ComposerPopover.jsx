@@ -47,6 +47,7 @@ import ChatAgentNetwork from './ChatAgentNetwork.jsx'
 import BrainUsageIcon from './BrainUsageIcon.jsx'
 import AppIcon from '../AppIcon.jsx'
 import ChatSettingsPanel from './ChatSettingsPanel.jsx'
+import { providerSetupHandlers } from './ModelPickerRow.jsx'
 import ArtifactPickerSection from './ArtifactPickerSection.jsx'
 import {
   chatArtifactPickerItems,
@@ -325,11 +326,6 @@ export default function ComposerPopover({
     onOpenAppArtifact?.(app)
   }
 
-  function handleOpenProviderSettings(providerId) {
-    setOpen(false)
-    onOpenProviderSettings(providerId)
-  }
-
   function finishCurrentIconDrop() {
     setIconDropQueue(current => current.slice(1))
   }
@@ -496,9 +492,12 @@ export default function ComposerPopover({
                 autoResumeError={autoResumeError}
                 onAutoResumeChange={onAutoResumeChange}
                 onChange={onChangeChatInfo}
-                // An embedded chat cannot leave its host, so its logos stay plain.
-                onOpenProviderSettings={!embedded && onOpenProviderSettings ? handleOpenProviderSettings : undefined}
-                onOpenProviderApp={!embedded && onOpenAppArtifact ? handleOpenAppArtifact : undefined}
+                {...providerSetupHandlers({
+                  embedded,
+                  onOpenProviderSettings,
+                  onOpenApp: onOpenAppArtifact,
+                  close: () => setOpen(false),
+                })}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 providerUsage={providerUsage}

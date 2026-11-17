@@ -121,8 +121,9 @@
   font: inherit;
   cursor: pointer;
 }
+.csp-row__icon-slot { display: flex; align-items: center; }
 .csp-row__icon-button,
-.csp-row__icon-slot { display: flex; flex: none; padding: 8px 0 8px 10px; border-radius: 8px; }
+.csp-row__icon-slot { flex: none; padding: 8px 0 8px 10px; border-radius: 8px; }
 .csp-row__model-button { flex: 1; min-width: 0; gap: 12px; padding: 8px 10px 8px 12px; text-align: left; border-radius: 8px; }
 .csp-row__model-button:disabled { opacity: 0.4; cursor: not-allowed; }
 .csp-row__icon-button:focus-visible,

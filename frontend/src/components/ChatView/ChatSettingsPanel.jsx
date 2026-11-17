@@ -681,8 +681,8 @@ export default function ChatSettingsPanel({
                 }}
               />
               {isSelected && !isPendingRow && (
-                // Indent aligns the stepper under the row title (icon 30 +
-                // gap 12 + row pad 10 = 52).
+                // Indent aligns the stepper under the model title: logo
+                // padding 10 + icon 30 + model button padding 12 = 52.
                 <div className="csp-effort-indent">
                   <EffortStepper
                     efforts={rowEfforts}

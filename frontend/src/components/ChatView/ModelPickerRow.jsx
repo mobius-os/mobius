@@ -18,6 +18,20 @@ export function providerSetupLink(providerId, label, { onOpenProviderSettings, o
 }
 
 /**
+ * The picker's link handlers for a host. An embedded chat cannot leave its
+ * host, so it gets none and its logos stay plain. Otherwise each link closes
+ * the picker first, then navigates.
+ */
+export function providerSetupHandlers({ embedded = false, onOpenProviderSettings, onOpenApp, close }) {
+  if (embedded) return { onOpenProviderSettings: undefined, onOpenProviderApp: undefined }
+  const closingFirst = open => open && (target => { close(); open(target) })
+  return {
+    onOpenProviderSettings: closingFirst(onOpenProviderSettings),
+    onOpenProviderApp: closingFirst(onOpenApp),
+  }
+}
+
+/**
  * One model row: the provider logo opens that provider's setup (when a link
  * exists) and the rest of the row selects the model. Two separate buttons, so
  * opening setup never changes the selection and a disconnected provider's

@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import ModelPickerRow, { providerSetupLink } from '../ModelPickerRow.jsx'
+import ModelPickerRow, { providerSetupHandlers, providerSetupLink } from '../ModelPickerRow.jsx'
 import { providerSetupTarget } from '../providerRegistry.jsx'
 
 const Logo = () => createElement('svg', { 'aria-hidden': 'true' })
@@ -100,4 +100,25 @@ test('a selected row marks the model button pressed', () => {
   const { element, html } = row(() => ({ selected: true }))
   assert.equal(buttons(element)[0]['aria-pressed'], true)
   assert.match(html, /class="csp-row csp-row--selected"/)
+})
+
+test('the picker wiring: an embedded chat gets no links; otherwise a link closes the picker first', () => {
+  const calls = []
+  const host = {
+    onOpenProviderSettings: page => calls.push(['settings', page]),
+    onOpenApp: appId => calls.push(['app', appId]),
+    close: () => calls.push(['close']),
+  }
+  const embedded = providerSetupHandlers({ ...host, embedded: true })
+  assert.equal(embedded.onOpenProviderSettings, undefined)
+  assert.equal(embedded.onOpenProviderApp, undefined)
+  assert.equal(providerSetupLink('claude', 'Claude Code', embedded), null)
+
+  const handlers = providerSetupHandlers(host)
+  providerSetupLink('claude', 'Claude Code', handlers).open()
+  providerSetupLink('app-7', 'Sample Provider', handlers).open()
+  assert.deepEqual(calls, [['close'], ['settings', 'claude'], ['close'], ['app', 7]])
+
+  // A host without a navigator offers no link rather than a dead one.
+  assert.equal(providerSetupHandlers({ close: host.close }).onOpenProviderSettings, undefined)
 })
