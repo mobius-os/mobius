@@ -150,10 +150,13 @@ def frontend_tool_paths(frontend_dir: str | Path) -> tuple[Path, ...]:
 
 
 def provider_tool_paths(provider: str) -> tuple[Path, ...]:
-  if provider == "claude":
+  """The engine binaries a provider's runs use, by its runtime kind."""
+  from app.providers import provider_runtime_kind
+  kind = provider_runtime_kind(provider)
+  if kind == "claude_sdk":
     cli = shutil.which("claude")
     return (Path(cli).resolve(),) if cli else ()
-  if provider == "codex":
+  if kind == "codex_sdk":
     cli = shutil.which("codex")
     if not cli:
       return ()

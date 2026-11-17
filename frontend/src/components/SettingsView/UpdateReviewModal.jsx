@@ -46,7 +46,7 @@ export function RetiredLocalCopies({ copies }) {
 }
 
 export default function UpdateReviewModal({
-  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve,
+  intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve, onChooseAgent,
   applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
   restoreFocusRef, inertBoundaryRef,
 }) {
@@ -99,9 +99,11 @@ export default function UpdateReviewModal({
     // A ref closes the same-tick double-click gap before React paints disabled.
     if (parkingRef.current || busy || !preview?.plan_id) return
     parkingRef.current = true
-    setParking(true)
     setFixError('')
     try {
+      const agent = await onChooseAgent()
+      if (!agent || !mountedRef.current) return
+      setParking(true)
       const response = await api.platform.parkForAgent({ plan_id: preview.plan_id,
         current_sha: preview.current_sha, target_sha: preview.target_sha, image_digest: preview.image_digest })
       if (!response.ok) {
@@ -111,7 +113,7 @@ export default function UpdateReviewModal({
           || 'Couldn’t prepare this update for an agent. Check its status before trying again.')
       }
       if (mountedRef.current) {
-        const resolution = onResolve()
+        const resolution = onResolve(agent)
         setParking(false)
         await resolution
       }

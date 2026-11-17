@@ -2140,6 +2140,28 @@ through the owner's connection, as part of the shared workspace, and resolve
 handles in the public directory. This is an API boundary, not a sandbox
 around what a guest-started agent or a guest-edited app can later do.
 
+The owner may turn on **Full access** for one account grant (`full_access`,
+off by default; a one-time link is a bare cookie and never holds it). It lifts
+exactly one gate, `require_owner_or_full_access_control`, for that grant's
+lineage while `browser_access.has_full_access` holds; it is read on every
+check, so turning it off or revoking applies to the next request, including
+work the guest already started. It is a deliberate subset of what a connected
+Möbius with Full access can do (that one holds the owner's own agent bearer):
+deleting and recovering chats and projects, watching and stopping a chat's
+compaction, setting an app's badge, deleting an uninstalled app, applying
+reviewed app and platform updates, cancelling an update that was never
+swapped in, restarting, and notification housekeeping. A delegated helper's
+bearer never passes it. `require_installation_owner_control` itself never
+admits a guest, so a route stays owner-only unless it opts in, and a test pins
+the opted-in set. By rule, no opted-in route mints or uses a credential,
+spends or chooses the owner's credit or provider, makes the owner's own
+decision (app consent and permissions, runtime capabilities, payments,
+settings), manages sharing or invites of any kind, subscribes to the owner's
+notifications, forges the owner's records, or starts work under the owner's
+lineage or creates anything else that would outlive the grant (jobs,
+schedules, reminders, skills, resolver chats, hosted publications, paired
+machines). Shared folders and screen control refuse every guest.
+
 Revocation commits access denial first, then cancels attributed app-service
 invocations, chat runs, queued input and Connect commands. Rejected queued input
 keeps its content and identity. A remote stop is not claimed until confirmed:
@@ -2168,6 +2190,18 @@ transaction consumes the browser-bound proof,
 rechecks local permission, and retires the previous browser session. Failed proof
 validation leaves that prior session unchanged. Verified proof admission expires
 within 60 seconds; old pending rows are pruned on subsequent starts.
+
+A recipient can leave without waiting for the owner. Shared with me carries a
+`leave_url` for every share and invitation, to a confirmation page in the
+sharing instance's shared shell. A sharing instance that predates leaving
+shows a page that cannot complete it.
+Its Leave button is a same-origin POST to `/session/account/leave/start`, so
+a cross-site link alone ends nothing; that runs the same proof flow under a
+separate pending cookie. The cookie that matches the callback state decides
+its purpose, so a sign-in proof can never leave and a leave proof can never
+sign in. A leave proof is spent in the callback itself, which runs the
+owner's revoke and `end_grant`, including directory removal, so no
+confirmation window can lapse. Declining an invitation is the same action.
 
 Local validation pins the issuer, runtime origin and grantor credential generation
 (or managed instance ID and owner subject). Changing those bindings invalidates
