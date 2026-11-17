@@ -292,9 +292,14 @@ def _refuse_agent_enabled_auto_send(options, principal) -> None:
   """Sending a verdict unseen is the owner's own choice in the review window.
 
   A chat approval is the agent's attestation, so it never grants this: the owner
-  would learn what was posted in their name only after it was public.
+  would learn what was posted in their name only after it was public. An app
+  token an agent minted carries the same provenance (``via_agent_chat``) even
+  though it drops the agent's chat/run identity, so it is refused too; the
+  owner's own browser mints an app token with no such provenance and keeps its
+  legitimate access.
   """
-  if options is not None and options.agent_submits_verdict is True and _is_agent(principal):
+  agent_backed = _is_agent(principal) or principal.via_agent_chat is not None
+  if options is not None and options.agent_submits_verdict is True and agent_backed:
     raise HTTPException(403, AGENT_ENABLED_AUTO_SEND)
 
 

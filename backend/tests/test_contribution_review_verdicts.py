@@ -626,6 +626,29 @@ def test_an_agent_cannot_turn_on_automatic_verdict_sending_for_itself(setup):
   assert core_refused.value.status_code == 403
 
 
+def _app_minted_by_agent(setup, *, via_agent_chat):
+  """An app token an agent minted (deps._generic_principal): app principal, chat/run
+  cleared, the agent's chat kept only as via_agent_chat provenance."""
+  return Principal(owner=setup[2].owner, app_id=1, scope="app",
+                   app_instance_id="nonce", via_agent_chat=via_agent_chat)
+
+
+def test_an_agent_cannot_turn_on_automatic_sending_through_an_app_token_it_minted(setup):
+  # _snapshot is the one seam every app/core preview and fresh start passes through.
+  db = setup[0]
+  minted = _app_minted_by_agent(setup, via_agent_chat=setup[2].chat_id)
+  with pytest.raises(HTTPException) as refused:
+    routes._snapshot(db, routes.ReviewPreview(mode="review", options=AUTO_SEND), minted)
+  assert refused.value.status_code == 403 and refused.value.detail == routes.AGENT_ENABLED_AUTO_SEND
+
+
+def test_the_owners_own_browser_app_access_can_still_choose_automatic_sending(setup):
+  db = setup[0]
+  owner_browser_app = _app_minted_by_agent(setup, via_agent_chat=None)
+  frozen = routes._snapshot(db, routes.ReviewPreview(mode="review", options=AUTO_SEND), owner_browser_app)
+  assert frozen["agent_submits_verdict"] is True
+
+
 def test_the_owners_own_review_window_can_still_choose_automatic_sending(setup):
   db = setup[0]
   frozen = routes.review_preview(1, routes.ReviewPreview(mode="review", options=AUTO_SEND), db, _owner(setup))
