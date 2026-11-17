@@ -50,8 +50,8 @@ function MessageSources({
   return (
     <section
       className={`chat__sources${open ? ' chat__sources--open' : ''}${held ? ' chat__sources--held' : ''}`}
+      // inert removes it from focus, input and the accessibility tree.
       inert={held || undefined}
-      aria-hidden={held || undefined}
     >
       <button
         ref={toggleRef}

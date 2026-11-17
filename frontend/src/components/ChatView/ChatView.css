@@ -516,7 +516,6 @@
    they are unseen like the other controls; an open list stays visible, so it
    neither leaves a list-sized gap nor collapses. */
 .chat__sources--held:not(.chat__sources--open) { visibility: hidden; }
-.chat__sources--held { pointer-events: none; }
 .chat__msg-meta--start:has(> .chat__sources--open) {
   opacity: 1;
   visibility: inherit;

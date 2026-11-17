@@ -71,7 +71,7 @@ test('a reply spanning several messages still shows one References disclosure', 
 test('a streaming reply holds its References in place until it settles', () => {
   const html = renderReply([searchedMessage('one', 'https://example.com/a')], true)
   assert.equal(referencesCount(html), 1, 'the line keeps its References, so settling cannot resize it')
-  assert.match(html, /<section class="chat__sources chat__sources--held" inert="" aria-hidden="true">/,
+  assert.match(html, /<section class="chat__sources chat__sources--held" inert="">/,
     'unseen and unusable until the answer settles')
   assert.doesNotMatch(renderReply([searchedMessage('one', 'https://example.com/a')]), /chat__sources--held/)
 })
@@ -83,7 +83,7 @@ test('an open References list stays shown, but unusable, while its answer contin
   persistDisclosureOpen('chat-references', 'one:references', true)
   try {
     const html = renderReply([searchedMessage('one', 'https://example.com/a')], true)
-    assert.match(html, /<section class="chat__sources chat__sources--open chat__sources--held" inert="" aria-hidden="true">/)
+    assert.match(html, /<section class="chat__sources chat__sources--open chat__sources--held" inert="">/)
     assert.match(html, /href="https:\/\/example\.com\/a"/, 'its links are still rendered')
   } finally { _resetDisclosureStateForTests() }
 })
