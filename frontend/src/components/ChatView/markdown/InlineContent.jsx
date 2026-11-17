@@ -253,6 +253,7 @@ export function ExpandableImage({
   const [open, setOpen] = useState(false)
   const buttonRef = useRef(null)
   const [resolvedSrc, setResolvedSrc] = useState(null)
+  const [previewResult, setPreviewResult] = useState(null)
   const historyDismiss = useHistoryDismiss(() => setOpen(false))
 
   const rawSrc = safeImageHref(href)
@@ -260,6 +261,10 @@ export function ExpandableImage({
   const previewSrc = resolvedSrc
     ? previewSrcForChatMedia(resolvedSrc)
     : null
+  // Key decode state to the URL: an older image finishing after a source
+  // change cannot hide the new preview's loading or failure treatment.
+  const previewState = previewResult?.src === previewSrc
+    ? previewResult.state : 'pending'
 
   // Local chat images get their intrinsic size from the owning media path,
   // projected into the message response. The URL remains a resource identity,
@@ -285,7 +290,8 @@ export function ExpandableImage({
     && imageUnreadableForHref(rawSrc, mediaDimensions)
 
   useEffect(() => {
-    if (!rawSrc || dimensionError) { setResolvedSrc(null); return }
+    setResolvedSrc(null)
+    if (!rawSrc || dimensionError) return
     let cancelled = false
     if (mediaChatId) {
       // Media path: fetch a short-lived media token, never the owner JWT in URL.
@@ -329,6 +335,8 @@ export function ExpandableImage({
         type="button"
         className="md-image-frame"
         style={imageVars || undefined}
+        data-preview-state={previewState}
+        aria-busy={previewState === 'pending' || undefined}
         aria-label={`Open ${alt || 'image'} preview`}
         disabled={!resolvedSrc}
         onClick={() => {
@@ -340,6 +348,11 @@ export function ExpandableImage({
           }
         }}
       >
+        {previewState !== 'loaded' && (
+          <span className="md-image-placeholder" role={previewState === 'pending' ? 'status' : undefined}>
+            {previewState === 'failed' ? 'Preview unavailable' : 'Loading image…'}
+          </span>
+        )}
         {previewSrc && (
           <img
             src={previewSrc}
@@ -347,6 +360,8 @@ export function ExpandableImage({
             className="md-image"
             loading={loading || 'lazy'}
             decoding="async"
+            onLoad={() => setPreviewResult({ src: previewSrc, state: 'loaded' })}
+            onError={() => setPreviewResult({ src: previewSrc, state: 'failed' })}
           />
         )}
       </button>

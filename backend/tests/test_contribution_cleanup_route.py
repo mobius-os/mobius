@@ -1,6 +1,7 @@
 """Focused route tests for terminal contribution staging disposal."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -290,3 +291,219 @@ def test_cancelled_cleanup_holds_the_source_lock_through_its_settlement(
 
   assert isinstance(outcome, asyncio.CancelledError), repr(outcome)
   assert checkout.exists()  # No cleanup step starts after the cancel.
+
+
+def _standalone_checkout(name: str) -> Path:
+  checkout = Path(get_settings().data_dir) / "contrib" / name / "repo"
+  checkout.mkdir(parents=True)
+  subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+  return checkout
+
+
+def _cleanup(client, auth, app_id: int, record_id: str) -> dict:
+  response = client.post(
+    f"/api/github/contributions/{app_id}/{record_id}/cleanup-staging",
+    headers=auth,
+  )
+  assert response.status_code == 200, response.text
+  return response.json()
+
+
+def test_a_checkout_shared_with_an_open_contribution_outlives_the_finished_one(
+  client, auth,
+):
+  app = create_local_app(client, auth, name="Cleanup shared checkout")
+  checkout = _standalone_checkout("cleanup-shared-checkout")
+  _write_terminal_record(app["id"], "shared-first", {
+    "id": "shared-first", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  # A follow-up PR prepared in the same clone is still open.
+  _write_terminal_record(app["id"], "shared-follow-up", {
+    "id": "shared-follow-up", "type": "pr", "status": "draft",
+    "plan": {"repo_path": str(checkout)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "shared-first") == {
+    "cleaned": False, "kept_for": "shared-follow-up"}
+  assert checkout.is_dir()
+
+  # Whichever finishes last removes the checkout.
+  _write_terminal_record(app["id"], "shared-follow-up", {
+    "id": "shared-follow-up", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  assert _cleanup(client, auth, app["id"], "shared-follow-up") == {"cleaned": True}
+  assert not checkout.exists()
+  assert _cleanup(client, auth, app["id"], "shared-first") == {"cleaned": True}
+
+
+def test_an_open_contribution_using_an_enclosing_folder_keeps_the_checkout(client, auth):
+  app = create_local_app(client, auth, name="Cleanup enclosing checkout")
+  checkout = _standalone_checkout("cleanup-enclosing-checkout")
+  _write_terminal_record(app["id"], "nested-finished", {
+    "id": "nested-finished", "type": "pr", "status": "closed",
+    "plan": {"repo_path": str(checkout)},
+  })
+  _write_terminal_record(app["id"], "enclosing-open", {
+    "id": "enclosing-open", "type": "pr", "status": "prepared",
+    "plan": {"repo_path": str(checkout.parent)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "nested-finished") == {
+    "cleaned": False, "kept_for": "enclosing-open"}
+  assert checkout.is_dir()
+
+
+def test_an_open_worktree_of_a_finished_clone_keeps_the_clone(client, auth):
+  app = create_local_app(client, auth, name="Cleanup worktree of clone")
+  clone = _standalone_checkout("cleanup-worktree-clone")
+  subprocess.run(
+    ["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "base"],
+    check=True,
+    env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+  )
+  worktree = Path(get_settings().data_dir) / "contrib" / "cleanup-worktree-open" / "repo"
+  worktree.parent.mkdir(parents=True)
+  subprocess.run(
+    ["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(worktree)],
+    check=True,
+  )
+  _write_terminal_record(app["id"], "clone-finished", {
+    "id": "clone-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(clone)},
+  })
+  _write_terminal_record(app["id"], "worktree-open", {
+    "id": "worktree-open", "type": "pr", "status": "open",
+    "plan": {"repo_path": str(worktree)},
+  })
+
+  # The open worktree keeps its Git data inside the finished clone.
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {
+    "cleaned": False, "kept_for": "worktree-open"}
+  assert clone.is_dir()
+  status = subprocess.run(["git", "-C", str(worktree), "status", "--short"], check=False)
+  assert status.returncode == 0
+
+  # Once the worktree's contribution finishes too, Contribute asks again
+  # about the kept clone, and nothing needs it any more.
+  _write_terminal_record(app["id"], "worktree-open", {
+    "id": "worktree-open", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(worktree)},
+  })
+  assert _cleanup(client, auth, app["id"], "worktree-open") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "clone-finished") == {"cleaned": True}
+  assert not clone.exists()
+
+
+def test_an_open_worktree_of_a_separate_git_dir_clone_keeps_its_git_data(client, auth):
+  """A clone whose Git data sits in a sibling git folder, as the Möbius adapter
+  stages apps without a Git origin: removal deletes that folder too."""
+  app = create_local_app(client, auth, name="Cleanup separate git dir")
+  base = Path(get_settings().data_dir) / "contrib" / "cleanup-separate-git"
+  clone, git_dir = base / "worktree", base / "git"
+  clone.mkdir(parents=True)
+  env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+  subprocess.run(["git", "init", "-q", f"--separate-git-dir={git_dir}", str(clone)], check=True)
+  subprocess.run(["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "base"],
+                 check=True, env=env)
+  follow_up = Path(get_settings().data_dir) / "contrib" / "cleanup-separate-follow-up" / "repo"
+  follow_up.parent.mkdir(parents=True)
+  subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(follow_up)],
+                 check=True)
+  _write_terminal_record(app["id"], "separate-finished", {
+    "id": "separate-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(clone)},
+  })
+  _write_terminal_record(app["id"], "separate-follow-up", {
+    "id": "separate-follow-up", "type": "pr", "status": "draft",
+    "plan": {"repo_path": str(follow_up)},
+  })
+
+  assert _cleanup(client, auth, app["id"], "separate-finished") == {
+    "cleaned": False, "kept_for": "separate-follow-up"}
+  assert git_dir.is_dir()
+  assert subprocess.run(["git", "-C", str(follow_up), "status", "--short"],
+                        check=False).returncode == 0
+
+  _write_terminal_record(app["id"], "separate-follow-up", {
+    "id": "separate-follow-up", "type": "pr", "status": "closed",
+    "plan": {"repo_path": str(follow_up)},
+  })
+  assert _cleanup(client, auth, app["id"], "separate-follow-up") == {"cleaned": True}
+  assert _cleanup(client, auth, app["id"], "separate-finished") == {"cleaned": True}
+  assert not clone.exists() and not git_dir.exists()
+
+
+def test_kept_for_is_reported_only_when_it_is_why_a_checkout_stays(client, auth):
+  app = create_local_app(client, auth, name="Cleanup kept_for reason")
+  checkout = _standalone_checkout("cleanup-kept-for-reason")
+  for record_id in ("reason-a", "reason-b"):
+    _write_terminal_record(app["id"], record_id, {
+      "id": record_id, "type": "pr", "status": "open",
+      "plan": {"repo_path": str(checkout)},
+    })
+  # An unfinished contribution is never cleaned, whoever else uses its checkout.
+  assert _cleanup(client, auth, app["id"], "reason-a") == {"cleaned": False}
+  assert checkout.is_dir()
+
+
+def test_an_unreadable_git_pointer_elsewhere_does_not_break_cleanup(client, auth):
+  app = create_local_app(client, auth, name="Cleanup unreadable pointer")
+  checkout = _standalone_checkout("cleanup-unreadable-finished")
+  other = Path(get_settings().data_dir) / "contrib" / "cleanup-unreadable-open" / "repo"
+  other.mkdir(parents=True)
+  (other / ".git").write_bytes(b"gitdir: \xff\xfe not utf-8\n")
+  _write_terminal_record(app["id"], "unreadable-finished", {
+    "id": "unreadable-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  _write_terminal_record(app["id"], "unreadable-open", {
+    "id": "unreadable-open", "type": "pr", "status": "open",
+    "plan": {"repo_path": str(other)},
+  })
+  assert _cleanup(client, auth, app["id"], "unreadable-finished") == {"cleaned": True}
+  assert not checkout.exists()
+
+
+def test_a_stray_open_record_path_does_not_keep_every_checkout(client, auth):
+  app = create_local_app(client, auth, name="Cleanup stray path")
+  checkout = _standalone_checkout("cleanup-stray-path")
+  _write_terminal_record(app["id"], "stray-finished", {
+    "id": "stray-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(checkout)},
+  })
+  for record_id, path in (("stray-data", get_settings().data_dir),
+                          ("stray-root", Path(get_settings().data_dir) / "contrib")):
+    _write_terminal_record(app["id"], record_id, {
+      "id": record_id, "type": "pr", "status": "open", "plan": {"repo_path": str(path)},
+    })
+  assert _cleanup(client, auth, app["id"], "stray-finished") == {"cleaned": True}
+  assert not checkout.exists()
+
+
+def test_an_open_worktree_outside_the_staging_folders_keeps_its_clone(client, auth):
+  app = create_local_app(client, auth, name="Cleanup outside worktree")
+  clone = _standalone_checkout("cleanup-outside-clone")
+  env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+  subprocess.run(["git", "-C", str(clone), "commit", "-q", "--allow-empty", "-m", "base"],
+                 check=True, env=env)
+  worktree = Path(get_settings().data_dir) / "worktrees" / "cleanup-outside-open"
+  worktree.parent.mkdir(parents=True, exist_ok=True)
+  subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "--detach", str(worktree)],
+                 check=True)
+  _write_terminal_record(app["id"], "outside-finished", {
+    "id": "outside-finished", "type": "pr", "status": "merged",
+    "plan": {"repo_path": str(clone)},
+  })
+  _write_terminal_record(app["id"], "outside-open", {
+    "id": "outside-open", "type": "pr", "status": "open",
+    "plan": {"repo_path": str(worktree)},
+  })
+  assert _cleanup(client, auth, app["id"], "outside-finished") == {
+    "cleaned": False, "kept_for": "outside-open"}
+  assert subprocess.run(["git", "-C", str(worktree), "status", "--short"],
+                        check=False).returncode == 0

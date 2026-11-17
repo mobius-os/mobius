@@ -33,7 +33,9 @@ router = APIRouter(prefix="/api/chats", tags=["goal-plans"])
 class GoalPromotionRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  objective: str = Field(min_length=1, max_length=1000)
+  # Like an owner's /goal objective, an agent's is not capped and is shown
+  # whole; the tool asks for a short heading with the detail in tasks.
+  objective: str = Field(min_length=1)
 
   @field_validator("objective")
   @classmethod
@@ -164,6 +166,7 @@ async def promote_current_run_to_goal(
       "run_not_current": "A newer agent turn now owns this chat.",
       "different_goal_active": "This turn already owns a different Goal.",
       "logical_root_missing": "The running turn has no durable logical root.",
+      "claim_adoption_conflict": "An exact work claim changed or would create a Goal dependency cycle. Inspect it before promoting again.",
     }
     raise HTTPException(
       status_code=409,
@@ -223,9 +226,9 @@ async def clear_presented_goal(
 
 class CannotCompleteOutcome(BaseModel):
   model_config = ConfigDict(extra="forbid")
-  reason: str = Field(min_length=1, max_length=1500)
-  efforts: str = Field(min_length=1, max_length=2000)
-  unmet_outcome: str = Field(min_length=1, max_length=1000)
+  reason: str = Field(min_length=1)
+  efforts: str = Field(min_length=1)
+  unmet_outcome: str = Field(min_length=1)
 
 
 class GoalUpdateRequest(BaseModel):
@@ -234,19 +237,19 @@ class GoalUpdateRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
   goal_id: str | None = Field(default=None, min_length=1, max_length=64)
   tasks: list[dict[str, Any]] | None = Field(default=None, min_length=1)
-  next_action: str | None = Field(default=None, min_length=1, max_length=2000)
+  next_action: str | None = Field(default=None, min_length=1)
   complete: bool | str | None = None
   cannot_complete: CannotCompleteOutcome | None = None
-  cancel: str | None = Field(default=None, min_length=1, max_length=4000)
-  defer: str | None = Field(default=None, min_length=1, max_length=2000)
-  finished_claims: list[str] = Field(default_factory=list, max_length=50)
+  cancel: str | None = Field(default=None, min_length=1)
+  defer: str | None = Field(default=None, min_length=1)
+  finished_claims: list[str] = Field(default_factory=list)
 
   @field_validator("complete", mode="before")
   @classmethod
   def completion_signal(cls, value):
     if value is None or value is True:
       return value
-    if isinstance(value, str) and value.strip() and len(value) <= 4000:
+    if isinstance(value, str) and value.strip():
       return value
     raise ValueError("complete must be true")
 
@@ -270,7 +273,7 @@ class GoalUpdateRequest(BaseModel):
 
 
 def _goal_summary(db: Session, goal) -> dict[str, Any]:
-  from app.agent_work_claims import open_claim_keys
+  from app.agent_work_claims import completable_claim_keys, open_claim_keys
   from app.goals import goal_hold
   return {
     "hold": goal_hold(goal) if goal.status == "stopped" else None,
@@ -278,6 +281,9 @@ def _goal_summary(db: Session, goal) -> dict[str, Any]:
     "objective": goal.objective, "next_action": goal.next_action,
     "result": goal.result,
     "held_work_keys": sorted(open_claim_keys(db, chat_id=goal.chat_id, goal_id=goal.id)),
+    "completable_work_keys": sorted(completable_claim_keys(
+      db, chat_id=goal.chat_id, goal_id=goal.id,
+    )),
   }
 
 
@@ -335,10 +341,16 @@ async def _attach_run_to_goal(db: Session, chat_id: str, principal: Principal,
 def read_goal_brief(
   chat_id: str,
   task: str | None = Query(default=None, min_length=1, max_length=64),
+  field: str | None = Query(default=None),
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
   """read_goal: expand one task of the calling agent's own Goal, on demand.
+
+  With ``field`` it returns that one text whole instead: a task's title,
+  note, result or completion_condition, or with no task the Goal's
+  objective, next_action or checkpoint (as far as this agent may see them).
+  The control tool pages any result too long for one provider tool result.
 
   The same projection a turn receives, refocused on ``task``. Without a
   task a helper re-reads its assignment brief; a coordinator is pointed to
@@ -350,14 +362,21 @@ def read_goal_brief(
   if principal.chat_id != chat_id:
     raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
   get_active_chat_for_principal(db, chat_id, principal)
-  from app.goals import read_goal_view
+  from app.goals import GoalTextNotFound, read_goal_text, read_goal_view
   try:
+    if field is not None:
+      return read_goal_text(
+        db, chat_id, principal.run_id, delegation_id=principal.delegation_id,
+        task_id=task, field=field,
+      )
     return read_goal_view(
       db, chat_id, principal.run_id, delegation_id=principal.delegation_id,
       task_id=task,
     )
   except PermissionError as exc:
     raise HTTPException(status_code=403, detail=str(exc)) from exc
+  except GoalTextNotFound as exc:
+    raise HTTPException(status_code=404, detail=str(exc)) from exc
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -1,0 +1,136 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { MutationObserver, QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { api } from '../../api/client.js'
+import { appQueries } from '../../hooks/queries.js'
+import AppsDirectory from '../../components/Drawer/AppsDirectory.jsx'
+import {
+  latestActionState,
+  runUninstalledAction,
+  selectActionState,
+  uninstalledActionKey,
+} from '../../components/Drawer/uninstalledAppActions.js'
+import { expiryCountdown, failureMessage, removedLabel } from '../../components/Drawer/uninstalledApps.js'
+
+const NOW = Date.parse('2026-10-27T12:00:00Z')
+
+const SEC = 1000
+const MIN = 60 * SEC
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+const label = offset => expiryCountdown(NOW + offset, NOW)?.label
+
+test('the countdown shows whole days, then rough steps on the last day, and is gone at zero', () => {
+  assert.equal(label(7 * DAY), '7 days left')
+  assert.equal(label(DAY + 5 * HOUR), '1 day left')
+  assert.equal(label(DAY), '1 day left')
+  assert.equal(label(DAY - 1), '~12 hrs left')
+  assert.equal(label(6 * HOUR + 1), '~12 hrs left')
+  assert.equal(label(6 * HOUR), '~6 hrs left')
+  assert.equal(label(HOUR + 1), '~6 hrs left')
+  assert.equal(label(HOUR), '~1 hr left')
+  assert.equal(label(SEC), '~1 hr left')
+  assert.equal(label(1), '~1 hr left')
+  assert.equal(label(0), undefined)
+  assert.equal(label(-HOUR), undefined)
+  assert.equal(expiryCountdown(NaN, NOW), null)
+})
+
+test('the pill turns amber under three days and red on the last day', () => {
+  assert.equal(expiryCountdown(NOW + 5 * DAY, NOW).tone, '')
+  assert.equal(expiryCountdown(NOW + 2 * DAY, NOW).tone, 'soon')
+  assert.equal(expiryCountdown(NOW + 8 * HOUR, NOW).tone, 'urgent')
+})
+
+test('the next wake lands exactly when the label changes', () => {
+  for (const offset of [6 * DAY + 3 * HOUR, DAY, DAY - 1, 20 * HOUR, 12 * HOUR, 8 * HOUR, 6 * HOUR, 5 * HOUR + 7 * MIN, HOUR, 42 * MIN, 400]) {
+    const { label: before, changesAt } = expiryCountdown(NOW + offset, NOW)
+    const nextChangeIn = changesAt - NOW
+    assert.ok(nextChangeIn > 0)
+    assert.notEqual(label(offset - nextChangeIn), before)
+    assert.ok(nextChangeIn <= offset)
+    assert.equal(label(offset - nextChangeIn + 1), before)
+  }
+})
+
+test('the removal date is a full phrase with the month written out and the year only when it is not this year', () => {
+  const now = new Date('2026-10-28T12:00:00Z')
+  const thisYear = removedLabel('2026-10-27T12:00:00Z', now)
+  assert.match(thisYear, /^Uninstalled on .*October.*$/)
+  assert.doesNotMatch(thisYear, /2026|\bOct\b/)
+  assert.match(removedLabel('2025-12-30T12:00:00Z', now), /^Uninstalled on .*December.*2025/)
+  assert.equal(removedLabel('nonsense', now), '')
+})
+
+test('a failed recover or delete shows the server reason, or the given fallback', async () => {
+  const reason = await failureMessage(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }), 'Could not recover this app. Try again.')
+  assert.equal(reason, 'Recovery window has expired.')
+  const generic = await failureMessage(new Response('boom', { status: 500 }), 'Could not delete this app. Try again.')
+  assert.equal(generic, 'Could not delete this app. Try again.')
+})
+
+function render(rows, query = '') {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+  client.setQueryData(appQueries.uninstalled.key, rows)
+  return renderToStaticMarkup(
+    React.createElement(QueryClientProvider, { client }, React.createElement(AppsDirectory, {
+      empty: false, status: 'success', resultCount: 0, query, onQueryChange() {}, onRetry() {},
+    })),
+  )
+}
+
+const news = { id: 7, name: 'News', slug: 'news', version: '1.2.0', icon_data_url: null, background_color: '#336699', theme_color: null, deleted_at: '2026-10-26T12:00:00Z', expires_at: '2026-11-02T12:00:00Z', seconds_left: 6 * DAY / SEC + 60 }
+const kanban = { id: 9, name: 'Kanban', slug: 'kanban', version: null, deleted_at: '2026-10-27T08:00:00Z', expires_at: '2026-11-03T08:00:00Z', seconds_left: 7 * DAY / SEC + 60 }
+
+test('each uninstalled app is a tile in the apps grid with its days left', () => {
+  const html = render([news, kanban])
+  assert.match(html, /apps-directory__card--uninstalled/)
+  assert.match(html, /aria-label="News, uninstalled, 6 days left\. Show actions"/)
+  assert.match(html, /aria-label="Kanban, uninstalled, 7 days left\. Show actions"/)
+})
+
+test('search narrows the uninstalled tiles like the installed ones', () => {
+  const html = render([news, kanban], 'kan')
+  assert.match(html, /Kanban/)
+  assert.doesNotMatch(html, /News/)
+})
+
+test('an app the server says has no time left is not shown', () => {
+  const gone = { id: 3, name: 'Gone', slug: 'gone', deleted_at: '2026-10-20T12:00:00Z', expires_at: '2026-10-27T12:00:00Z', seconds_left: 0 }
+  assert.doesNotMatch(render([gone]), /Gone/)
+  const html = render([gone, { id: 4, name: 'Kept', slug: 'kept', deleted_at: '2026-10-25T12:00:00Z', expires_at: '2026-11-01T12:00:00Z', seconds_left: 2 * DAY / SEC + 60 }])
+  assert.doesNotMatch(html, /Gone/)
+  assert.match(html, /Kept, uninstalled, 2 days left/)
+})
+
+test('a device clock that runs ahead does not hide an app the server would still recover', () => {
+  // By this device's clock the window closed an hour ago; the server says three hours remain.
+  const html = render([
+    { id: 5, name: 'Skewed', slug: 'skewed', deleted_at: new Date(Date.now() - 7 * DAY - HOUR).toISOString(), expires_at: new Date(Date.now() - HOUR).toISOString(), seconds_left: 3 * HOUR / SEC },
+  ])
+  assert.match(html, /Skewed, uninstalled, ~6 hrs left/)
+})
+
+test('a request outlives its tile: a tile mounted later sees it running, and keeps its failure', async () => {
+  const client = new QueryClient()
+  const key = uninstalledActionKey(7)
+  const original = api.apps.recover
+  let finish
+  api.apps.recover = () => new Promise(resolve => { finish = resolve })
+  try {
+    // The tile that started it is gone (a search filtered it out); only the query client remembers.
+    const done = new MutationObserver(client, { mutationKey: key, mutationFn: kind => runUninstalledAction(client, 7, kind) })
+      .mutate('recover').catch(() => {})
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const shown = () => latestActionState(client.getMutationCache().findAll({ mutationKey: key }).map(selectActionState))
+    assert.deepEqual(shown(), { working: 'recover', error: '' })
+
+    finish(new Response(JSON.stringify({ detail: 'Recovery window has expired.' }), { status: 410 }))
+    await done
+    assert.deepEqual(shown(), { working: null, error: 'Recovery window has expired.' })
+  } finally {
+    api.apps.recover = original
+  }
+})

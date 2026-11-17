@@ -39,7 +39,7 @@ def test_update_progress_requires_owner(client):
 
 def test_update_progress_returns_observable_phase(client, auth, monkeypatch):
   monkeypatch.setattr(
-    "app.routes.platform.platform_update.platform_update_progress",
+    "app.routes.platform.platform_update.current_update_progress",
     lambda: {
       "plan_id": "a" * 64,
       "target_sha": "2" * 40,
@@ -292,6 +292,9 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
       "needs_restart": False,
       "activation": classify_activation([]),
       "current_build_sha": None,
+      "served_sha": "3" * 40,
+      "image_build_applied": None,
+      "update_contains_image_release": False,
       "checked_target_sha": target,
       "installed_release_sha": "1" * 40,
       "recorded_upstream_sha": "1" * 40,
@@ -332,6 +335,7 @@ def test_railway_status_and_check_use_latest_verified_ghcr_target(
   check_response = client.post("/api/platform/check", headers=auth)
 
   assert status_response.status_code == 200
+  assert status_response.json()["served_sha"] == "3" * 40
   assert check_response.status_code == 200
   assert check_response.json()["available"] is True
   assert check_response.json()["checked_target_sha"] == target
@@ -386,6 +390,54 @@ def test_update_check_reports_fetch_failure(client, auth, monkeypatch):
     "code": "platform_fetch_failed",
     "message": "This update could not be verified. Refresh it and try again.",
   }
+
+
+def test_status_offers_cancel_only_when_no_bound_replacement_may_run(
+  client, auth, monkeypatch,
+):
+  """Cancel refuses while a bound replacement may still run, so status must
+  not offer it then; once the replacement provably ended, cancel releases the
+  binding and succeeds, so status offers it again."""
+  pending = {"target_sha": "2" * 40, "stage": "finish", "action": "replace",
+             "cancellable": True}
+
+  def status(**_kwargs):
+    return {
+      "state": "activation_needed", "available": False, "needs_restart": False,
+      "activation": classify_activation([]),
+      "current_build_sha": None, "served_sha": None, "image_build_applied": None,
+      "update_contains_image_release": False, "checked_target_sha": None,
+      "installed_release_sha": None, "recorded_upstream_sha": None,
+      "contained_upstream_sha": None, "contained_upstream_committed_at": None,
+      "current_build_committed_at": None, "upstream_checked_at": None,
+      "seed_required": False, "conflict_paths": [], "conflict_chat_id": None,
+      "newer_updates_available": False,
+      "rollback_target_sha": None, "rollback_error": None,
+      "unfinished_update": dict(pending),
+    }
+
+  may_run = [True]
+
+  async def bound_replacement_may_run():
+    return may_run[0]
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_activation.deployment_kind", lambda: "self_hosted",
+  )
+  monkeypatch.setattr("app.routes.platform.platform_update.platform_status", status)
+  monkeypatch.setattr("app.routes.platform.platform_update.check_for_updates", status)
+  monkeypatch.setattr(
+    "app.routes.platform.deployment_control.bound_replacement_may_run",
+    bound_replacement_may_run,
+  )
+  for request in (
+    lambda: client.get("/api/platform/status", headers=auth),
+    lambda: client.post("/api/platform/check", headers=auth),
+  ):
+    may_run[0] = True
+    assert request().json()["unfinished_update"]["cancellable"] is False
+    may_run[0] = False
+    assert request().json()["unfinished_update"]["cancellable"] is True
 
 
 def test_status_failure_does_not_claim_up_to_date(
@@ -510,3 +562,75 @@ def test_conflict_resolver_chat_resume_restarts_the_stalled_resolver(client, aut
   assert resumed.status_code == 200 and resumed.json()["started"] is True
   assert opened.status_code == 200
   assert calls == ["resume", "create"]
+
+
+def test_overlay_finish_requires_owner(client):
+  response = client.post(
+    "/api/platform/overlay-finish", json={"target_sha": "a" * 40},
+  )
+  assert response.status_code == 401
+
+
+def test_overlay_finish_answers_admission_with_its_operation(client, auth, monkeypatch):
+  captured = {}
+
+  async def fake_finish(**request):
+    captured.update(request)
+    return {
+      "plan_id": "b" * 64, "target_sha": request["target_sha"],
+      "image_digest": None, "phase": "preparing", "active": True,
+      "error": None, "updated_at": 1.0, "operation": "overlay_finish",
+      "result": None,
+    }
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.finish_platform_overlay_update", fake_finish,
+  )
+  response = client.post(
+    "/api/platform/overlay-finish", headers=auth,
+    json={"target_sha": "a" * 40, "retry_operation_id": "b" * 64},
+  )
+
+  assert response.status_code == 202
+  assert response.json()["plan_id"] == "b" * 64
+  assert response.json()["operation"] == "overlay_finish"
+  assert captured == {"target_sha": "a" * 40, "retry_operation_id": "b" * 64}
+
+
+def test_overlay_finish_refusal_names_its_reason(client, auth, monkeypatch):
+  from app.platform_update import PlatformUpdateError
+
+  reasons = iter([
+    "Stage every intended resolution before continuing the update.",
+    "platform_update_in_progress",
+  ])
+
+  async def refuse(**_request):
+    raise PlatformUpdateError(next(reasons))
+
+  monkeypatch.setattr(
+    "app.routes.platform.platform_update.finish_platform_overlay_update", refuse,
+  )
+  unstaged = client.post(
+    "/api/platform/overlay-finish", headers=auth, json={"target_sha": "a" * 40},
+  )
+  busy = client.post(
+    "/api/platform/overlay-finish", headers=auth, json={"target_sha": "a" * 40},
+  )
+
+  assert unstaged.status_code == 409
+  assert unstaged.json()["detail"] == {
+    "code": "overlay_finish_refused",
+    "message": "Stage every intended resolution before continuing the update.",
+  }
+  assert busy.status_code == 409
+  assert busy.json()["detail"]["code"] == "platform_update_in_progress"
+  assert "repeat this same request shortly" in busy.json()["detail"]["message"]
+
+
+def test_overlay_finish_rejects_a_malformed_operation(client, auth):
+  response = client.post(
+    "/api/platform/overlay-finish", headers=auth,
+    json={"target_sha": "a" * 40, "retry_operation_id": "not-an-operation"},
+  )
+  assert response.status_code == 422

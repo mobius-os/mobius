@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import NAMESPACE_URL, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +27,13 @@ from app.agent_work_claims import claim_work
 
 router = APIRouter(prefix="/api/chats", tags=["owner-approvals"])
 
+# The turn's closing message travels with the card that ends the turn, so it
+# reaches the owner as reliably as the card itself. It is not card identity:
+# an identical retry with reworded prose addresses the same saved card, and the
+# first saved message is kept, so a retry can never revise what the owner read.
+CLOSING_MESSAGE_MAX_CHARS = 20_000
+ClosingMessage = Annotated[str | None, Field(max_length=CLOSING_MESSAGE_MAX_CHARS)]
+
 
 class ApprovalOption(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -40,6 +47,7 @@ class ApprovalRequest(BaseModel):
   question: str = Field(min_length=1, max_length=2000)
   options: list[ApprovalOption] = Field(min_length=2, max_length=3)
   work_key: str = Field(min_length=3, max_length=256)
+  message: ClosingMessage = None
 
   @model_validator(mode="after")
   def unique_options(self):
@@ -65,8 +73,9 @@ class QuestionSpec(BaseModel):
 
 
 class QuestionRequest(BaseModel):
-  model_config = ConfigDict(extra="forbid")
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
   questions: list[QuestionSpec] = Field(min_length=1, max_length=10)
+  message: ClosingMessage = None
 
   @model_validator(mode="after")
   def distinct_questions(self):
@@ -94,7 +103,8 @@ class QuestionRequest(BaseModel):
 class RestartRequest(BaseModel):
   """The server, not the caller, derives the exact restart action."""
 
-  model_config = ConfigDict(extra="forbid")
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+  message: ClosingMessage = None
 
 
 class TurnEndRequest(BaseModel):
@@ -142,7 +152,9 @@ async def request_question(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  return await save_owner_question(chat_id, body.canonical_payload(), principal, db)
+  return await save_owner_question(
+    chat_id, body.canonical_payload(), principal, db, closing_message=body.message,
+  )
 
 
 @router.post("/{chat_id}/approval", dependencies=[Depends(reject_cross_site)])
@@ -152,19 +164,19 @@ async def request_approval(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  public_body = body.model_dump(exclude={"work_key"}, exclude_none=True)
+  public_body = body.model_dump(exclude={"work_key", "message"}, exclude_none=True)
   return await save_owner_question(chat_id, {
     "questions": [{"id": "approval", "header": "Approval", **public_body}],
     "action_key": body.work_key,
-  }, principal, db, identity_payload=body.model_dump(exclude_none=True),
+  }, principal, db, identity_payload=body.model_dump(exclude={"message"}, exclude_none=True),
      approval_work_key=body.work_key,
-     approval_summary=body.question[:500])
+     approval_summary=body.question[:500], closing_message=body.message)
 
 
 @router.post("/{chat_id}/restart-request", dependencies=[Depends(reject_cross_site)])
 async def request_restart(
   chat_id: str,
-  _body: RestartRequest,
+  body: RestartRequest,
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
@@ -174,6 +186,7 @@ async def request_restart(
     CONDITION_VERSION,
     pending_restart_paths,
     restart_condition_id,
+    uncommitted_restart_paths,
   )
 
   source_boot_id = restart_ledger.current_boot_id()
@@ -193,21 +206,28 @@ async def request_restart(
     "paths": pending_restart_paths(),
   }
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
-  paths = requirement["paths"]
-  if paths:
-    path_summary = ", ".join(paths[:3])
+
+  def summarize(paths: list[str]) -> str:
+    summary = ", ".join(paths[:3])
     if len(paths) > 3:
-      path_summary += f", and {len(paths) - 3} more"
-    question = (
-      f"Restart to load the tested platform changes in {path_summary}? "
-      "This interrupts active turns and Möbius may be unavailable for "
-      "tens of seconds."
+      summary += f", and {len(paths) - 3} more"
+    return summary
+
+  paths = requirement["paths"]
+  question = (
+    f"Restart to load the tested platform changes in {summarize(paths)}?"
+    if paths else "Restart Möbius now?"
+  )
+  uncommitted = uncommitted_restart_paths()
+  if uncommitted:
+    question += (
+      f" It will also load uncommitted edits in {summarize(uncommitted)}, "
+      "which may be another chat's unfinished work."
     )
-  else:
-    question = (
-      "Restart Möbius now? This interrupts active turns and Möbius may be "
-      "unavailable for tens of seconds."
-    )
+  question += (
+    " This interrupts active turns and Möbius may be unavailable for "
+    "tens of seconds."
+  )
   payload = {
     "questions": [{
       "id": "restart",
@@ -238,6 +258,7 @@ async def request_restart(
     db,
     identity_payload={"type": "request_restart", "source_boot_id": source_boot_id},
     activation_requirement=requirement,
+    closing_message=body.message,
   )
 
 
@@ -247,6 +268,7 @@ async def save_owner_question(
   approval_work_key: str | None = None,
   approval_summary: str | None = None,
   activation_requirement: dict | None = None,
+  closing_message: str | None = None,
 ):
   """One save-before-receipt owner for every terminal question card."""
   if principal.chat_id != chat_id:
@@ -335,6 +357,7 @@ async def save_owner_question(
           "question_id": question_id,
           "response_mode": "continuation",
           **payload,
+          **({"message": closing_message} if closing_message else {}),
         }, **(
           {"secure_request": secure_request}
           if secure_request is not None

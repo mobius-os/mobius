@@ -84,7 +84,8 @@ for pair in \
   "scripts/pre-commit.sh:$HOOKS_DIR/pre-commit" \
   "scripts/githooks/pre-push:$HOOKS_DIR/pre-push" \
   "scripts/frontend-deps.sh:$HOOKS_DIR/frontend-deps.sh" \
-  "scripts/check-frontend-deps.mjs:$HOOKS_DIR/check-frontend-deps.mjs"; do
+  "scripts/check-frontend-deps.mjs:$HOOKS_DIR/check-frontend-deps.mjs" \
+  "scripts/wt-npm.sh:$HOOKS_DIR/wt-npm.sh"; do
   source_path="${pair%%:*}"
   installed_path="${pair#*:}"
   if git cat-file -e "origin/main:$source_path" 2>/dev/null; then

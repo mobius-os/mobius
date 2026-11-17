@@ -112,7 +112,7 @@ _HELPER_PROTOCOL_MESSAGE = (
 # meets both the served source's and the target release's requirement, so a
 # helper fix that was merged but never installed on this host blocks
 # replacement instead of running the old cutover path.
-_HELPER_REQUIREMENT_PATH = "deployment/self-hosted-helper.required"
+_HELPER_REQUIREMENT_PATH = platform_activation.HOST_HELPER_REQUIREMENT_PATH
 _REQUIRED_HELPER_PROTOCOL = Path(__file__).resolve().parents[2] / _HELPER_REQUIREMENT_PATH
 
 
@@ -472,6 +472,9 @@ def _read_host_status() -> dict[str, Any]:
         # handoff version. Preserve their retired capability through this
         # synthesized state so a pending request cannot make them look current.
         "runtime_overlay": value.get("runtime_overlay"),
+        # The certified protocol belongs to the installed helper, not to the
+        # request, so a queued request must not hide it.
+        "helper_protocol": value.get("helper_protocol"),
       }
       unclaimed_for = (datetime.now(timezone.utc) - queued_at).total_seconds()
       if unclaimed_for >= _UNCLAIMED_REQUEST_BOUND_S:
@@ -496,7 +499,9 @@ def _read_host_status() -> dict[str, Any]:
   return value
 
 
-def _required_helper_protocol(target_sha: str | None = None) -> int | None:
+def _required_helper_protocol(
+  target_sha: str | None = None, repo: Path | None = None,
+) -> int | None:
   """The larger of the served and target requirements; None if unreadable."""
   try:
     required = int(_REQUIRED_HELPER_PROTOCOL.read_text(encoding="ascii").strip())
@@ -504,7 +509,7 @@ def _required_helper_protocol(target_sha: str | None = None) -> int | None:
     return None
   if target_sha is None:
     return required
-  repo = platform_update.PLATFORM_REPO
+  repo = repo or platform_update.PLATFORM_REPO
   try:
     if platform_update._rev(repo, target_sha) != target_sha:
       return None
@@ -530,6 +535,27 @@ def _current_host_controller(raw: dict[str, Any]) -> bool:
   )
 
 
+def _helper_protocol_meets(installed: Any, required: int | None) -> bool:
+  return (
+    required is not None
+    and isinstance(installed, int) and not isinstance(installed, bool)
+    and installed >= required
+  )
+
+
+def host_helper_meets_release(
+  target_sha: str | None = None, repo: Path | None = None,
+) -> bool:
+  """Whether the host's last completed helper install certified a protocol
+  that the served source and ``target_sha`` accept. The root-owned status is
+  the only evidence; unreadable status or requirement is never proof."""
+  try:
+    installed = _read_host_status().get("helper_protocol")
+  except (DeploymentControlError, OSError):
+    return False  # a read-only status call must never fail on host state
+  return _helper_protocol_meets(installed, _required_helper_protocol(target_sha, repo))
+
+
 def _ensure_host_helper_meets_release(target_sha: str) -> None:
   """Dispatch-only: status of an older helper stays readable for recovery."""
   required = _required_helper_protocol(target_sha)
@@ -540,9 +566,7 @@ def _ensure_host_helper_meets_release(target_sha: str) -> None:
       "the update review and try again.",
       status_code=409,
     )
-  installed = _read_host_status().get("helper_protocol")
-  if not (isinstance(installed, int) and not isinstance(installed, bool)
-          and installed >= required):
+  if not _helper_protocol_meets(_read_host_status().get("helper_protocol"), required):
     raise DeploymentControlError(
       "controller_upgrade_required", _HELPER_PROTOCOL_MESSAGE, status_code=409,
     )
@@ -786,6 +810,14 @@ async def _binding_ended(operation: dict) -> bool:
   if not status.get("supported") or status.get("state") in (_ACTIVE_STATES | _UNRESOLVED_STATES):
     return False
   return True
+
+
+async def bound_replacement_may_run() -> bool:
+  """Whether the prepared update's bound replacement may still start or
+  succeed. Cancelling refuses exactly then: ``release_ended_binding`` frees
+  only a binding whose replacement provably ended."""
+  operation = await asyncio.to_thread(_bound_operation)
+  return operation is not None and not await _binding_ended(operation)
 
 
 async def release_ended_binding() -> None:

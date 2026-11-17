@@ -34,12 +34,8 @@ import { cidOf } from '../messageIdentity.js'
  *   - attachments?: array
  *
  * Critical contract: pendingMessagesRef.current MUST update
- * SYNCHRONOUSLY on every mutation. handleStop's
- * fetchGenRef.current++ / pendingMessagesRef.current = [] sequence
- * runs BEFORE the await on /chat/stop; if any mutation here only
- * scheduled a render, the natural onStreamEnd handler could read
- * stale ref contents and re-fire fetchMessages({force:true}),
- * overwriting the just-promoted partial.
+ * SYNCHRONOUSLY on every mutation: doSend and the natural onStreamEnd
+ * handler read it in the same task as a mutation.
  *
  * Reconcile contract: hydrate() is a MERGE, not a wholesale replace.
  * It must never drop an optimistic-only entry whose own persistence
@@ -72,14 +68,26 @@ import { cidOf } from '../messageIdentity.js'
  *   promoteAll: (cid?: string) => PendingMsg | null,
  *   promoteManyByCid: (cidList: string[]) => PendingMsg | null,
  *   cancelByCid: (cid: string) => void,
+ *   completeByCid: (cidList: string[]) => void,
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
  *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
  *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
+ *   releaseHolds: () => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
- *   clear: () => void,
  * }}
  */
+
+// Mirrors the server: starting a message with positive owner proof releases
+// the rows a Stop held, so they follow it (continuations.releases_holds). The
+// server stamps that proof (`_owner_input_at`) on the owner's send; a row this
+// device just typed is the owner's own send too. An app's, a guest's or an
+// agent's row, or a hidden carrier, leaves them held.
+function _releasesHolds(row, typedHere) {
+  return !!row && !row.hidden && !row.held
+    && row._initiated_by_app_id == null && row._browser_grant_id == null
+    && (row._owner_input_at != null || typedHere)
+}
 
 function _fromServerList(serverList) {
   return (serverList || []).map(m => ({
@@ -160,7 +168,9 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // a successful fetch alone. One disposition map also fences local removal;
   // cancellation must never masquerade as proof of server acceptance.
   const acknowledgeServerIntent = useCallback(cid => {
-    intentDispositionsRef.current.set(cid, 'accepted')
+    if (intentDispositionsRef.current.get(cid) !== 'completed') {
+      intentDispositionsRef.current.set(cid, 'accepted')
+    }
     if (pendingMessagesRef.current.some(row => cidOf(row) === cid && row.recoveryAvailable)) {
       void retireIntent(cid, { ...scopeRef.current, outcome: 'delivered' })
     }
@@ -231,6 +241,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // the row (the server cleared the queue) cannot resurrect a phantom.
   const add = useCallback((msg, { inFlight = false } = {}) => {
     const cid = cidOf(msg)
+    if (intentDispositionsRef.current.get(cid) === 'completed') return
     if (inFlight && cid != null) inFlightCidsRef.current.add(cid)
     apply(prev => {
       const existing = prev.find(m => cidOf(m) === cid)
@@ -325,7 +336,11 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const current = pendingMessagesRef.current
     const promotedGroup = current.filter(m => wanted.has(cidOf(m)))
     if (promotedGroup.length === 0) return null
-    const kept = current.filter(m => !wanted.has(cidOf(m)))
+    const remaining = current.filter(m => !wanted.has(cidOf(m)))
+    const typedHere = m => inFlightCidsRef.current.has(m.cid) || localMessageCidsRef.current.has(m.cid)
+    const kept = promotedGroup.some(m => _releasesHolds(m, typedHere(m)))
+      ? remaining.map(m => (m.held ? { ...m, held: false } : m))
+      : remaining
     for (const m of promotedGroup) {
       if (m.cid != null) {
         inFlightCidsRef.current.delete(m.cid)
@@ -341,16 +356,41 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     return promoted
   }, [acknowledgeServerIntent, releaseSteerReservation])
 
+  // The owner's empty Send released every hold on the server.
+  const releaseHolds = useCallback(() => {
+    apply(prev => (prev.some(m => m.held)
+      ? prev.map(m => (m.held ? { ...m, held: false } : m))
+      : prev))
+  }, [apply])
+
   const cancelByCid = useCallback((cid) => {
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
     // cannot resurrect on the next hydrate.
     inFlightCidsRef.current.delete(cid)
     localMessageCidsRef.current.delete(cid)
     if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    intentDispositionsRef.current.set(cid, 'cancelled')
+    if (intentDispositionsRef.current.get(cid) !== 'completed') {
+      intentDispositionsRef.current.set(cid, 'cancelled')
+    }
     apply(prev => prev.filter(m => cidOf(m) !== cid))
     releaseSteerReservation([cid])
   }, [apply, releaseSteerReservation])
+
+  // Only an authoritative transcript cut may complete these queue identities.
+  // Unlike hydration this says nothing about siblings still being sent or
+  // retained locally after failure; their ownership and flags stay untouched.
+  const completeByCid = useCallback((cidList) => {
+    const cids = new Set((cidList || []).filter(cid => cid != null))
+    for (const cid of cids) {
+      inFlightCidsRef.current.delete(cid)
+      localMessageCidsRef.current.delete(cid)
+      acknowledgeServerIntent(cid)
+      intentDispositionsRef.current.set(cid, 'completed')
+      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+    }
+    apply(prev => prev.filter(row => !cids.has(cidOf(row))))
+    releaseSteerReservation([...cids])
+  }, [acknowledgeServerIntent, apply, releaseSteerReservation])
 
   // Restore one optimistically-cancelled row after both the DELETE and its
   // authoritative fallback read fail. Reinsert into the CURRENT queue rather
@@ -359,7 +399,8 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   const restoreByCid = useCallback((msg, index) => {
     if (!msg) return
     const cid = cidOf(msg)
-    if (cid == null || pendingMessagesRef.current.some(row => cidOf(row) === cid)) return
+    if (cid == null || intentDispositionsRef.current.get(cid) === 'completed'
+        || pendingMessagesRef.current.some(row => cidOf(row) === cid)) return
     if (msg.serverTs !== true) inFlightCidsRef.current.add(cid)
     apply(current => {
       const next = [...current]
@@ -388,14 +429,16 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     // completed its queue-to-history handoff. Empty runtime snapshots may have
     // been read before delivery; they do not prove that the intent disappeared.
     const completedCids = new Set(opts.completedCids || [])
-    for (const cid of completedCids) {
-      localMessageCidsRef.current.delete(cid)
-      inFlightCidsRef.current.delete(cid)
-      acknowledgeServerIntent(cid)
-      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    }
-    const local = (pendingMessagesRef.current || []).filter(m => !completedCids.has(cidOf(m)))
-    const serverRows = (serverList || []).filter(m => !completedCids.has(cidOf(m)))
+    // A committed transcript identity is terminal for this mounted chat's
+    // queue. A snapshot still containing it predates that handoff; applying
+    // any of that snapshot would also drop sends queued after it was read.
+    if (completedCids.size) completeByCid([...completedCids])
+    const staleQueue = (serverList || []).some(row => (
+      intentDispositionsRef.current.get(cidOf(row)) === 'completed'
+    ))
+    if (staleQueue) return
+    const local = pendingMessagesRef.current || []
+    const serverRows = serverList || []
     const serverCidSet = new Set(serverRows.map(m => cidOf(m)))
 
     const reconciled = serverRows.map(m => {
@@ -433,12 +476,14 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     const next = [...reconciled, ...preservedInFlight, ...preservedMissing]
     pendingMessagesRef.current = next
     setPendingMessages(next)
-    const nextCidSet = new Set(next.map(m => cidOf(m)))
+    // A held row is in flight to no turn (a Stop ended the steer it was
+    // reserved for), so it shows in the tray again.
+    const nextCidSet = new Set(next.filter(m => !m.held).map(m => cidOf(m)))
     applySteerReservations(prev => {
       const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
       return kept.size === prev.size ? prev : kept
     })
-  }, [acknowledgeServerIntent, applySteerReservations])
+  }, [acknowledgeServerIntent, applySteerReservations, completeByCid])
 
   // A runtime-only empty queue cannot end a local intent's lifetime. A
   // version-matched authoritative transcript can: its exact user identities
@@ -453,6 +498,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     })
   }, [hydrate])
 
+  // A chat or principal switch starts from an empty queue.
   const clear = useCallback(() => {
     if (initialReadPendingRef.current) {
       for (const row of pendingMessagesRef.current) observedCidsRef.current.add(cidOf(row))
@@ -516,7 +562,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       } else if (!record.body.hidden) {
         // A late failed POST cannot undo a newer authoritative queue/cut.
         if (intentDispositionsRef.current.has(cid)) {
-          if (intentDispositionsRef.current.get(cid) === 'accepted' && record.recovery === 'rejected') {
+          if (['accepted', 'completed'].includes(intentDispositionsRef.current.get(cid)) && record.recovery === 'rejected') {
             void retireIntent(cid, { chatId, principalKey, outcome: 'delivered' })
           }
           return
@@ -597,10 +643,11 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     promoteAll,
     promoteManyByCid,
     cancelByCid,
+    completeByCid,
     restoreByCid,
     hydrate,
     hydrateFromTranscript,
-    clear,
+    releaseHolds,
     markInFlight,
     clearInFlight,
   }

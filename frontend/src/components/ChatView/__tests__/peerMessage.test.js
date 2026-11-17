@@ -119,7 +119,7 @@ test('the card model bounds bodies and normalizes an unknown kind', () => {
   assert.equal(model.status, 'sent')
   assert.equal(model.kind, 'note') // unknown kind falls back
   assert.deepEqual(model.peers, ['A', 'B']) // deduped
-  assert.equal(model.body.length, 4000) // full note preserved to the platform cap
+  assert.equal(model.body.length, 4000) // the backend display limit
   assert.equal(model.hasDetail, true)
 })
 

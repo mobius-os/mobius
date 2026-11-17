@@ -32,6 +32,11 @@ const workspaceViewSrc = readFileSync(new URL('../workspaceView.js', import.meta
 const modeViewTransitionSrc = readFileSync(new URL('../useModeViewTransition.js', import.meta.url), 'utf8')
 const modeControllerSrc = readFileSync(new URL('../useModeController.js', import.meta.url), 'utf8')
 const drawer = readFileSync(new URL('../../Drawer/Drawer.jsx', import.meta.url), 'utf8')
+const pinnedItemMutations = readFileSync(new URL('../../Drawer/usePinnedItemMutations.js', import.meta.url), 'utf8')
+const itemMenuGestures = readFileSync(
+  new URL('../../Drawer/useItemMenuGestures.js', import.meta.url),
+  'utf8',
+)
 const drawerItemActionMenu = readFileSync(
   new URL('../../Drawer/DrawerItemActionMenu.jsx', import.meta.url),
   'utf8',
@@ -120,7 +125,7 @@ test('the canonical workspace snapshot survives a closed PWA relaunch', () => {
   assert.match(shell, /const tabStorage = isSharedBrowserAccess \? sharedWorkspaceStorage : sessionStore\(\)/)
   assert.match(
     shell,
-    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*\}\)/,
+    /useWorkspaceSession\(\{\s*storage: workspaceStorage,\s*legacyStorage: sharedBrowserAccess \? null : tabStorage,\s*recoveringFromCrash,\s*\}\)/,
     'owner durability and one-time migration remain canonical; guest storage is separate',
   )
   assert.doesNotMatch(
@@ -268,12 +273,20 @@ test('drawer lists distinguish loading, error, and confirmed empty data', () => 
   assert.match(drawer, /Nothing recent yet/)
 })
 
+test('a pointer press switches drawer lists without leaving a latent keyboard ring', () => {
+  const tab = drawer.match(/<button\s+type="button"\s+role="tab"[\s\S]*?>\n/)?.[0] ?? ''
+  assert.match(tab, /data-list-tab=\{tab\}/)
+  assert.match(tab, /onMouseDown=\{event => event\.preventDefault\(\)\}/)
+  assert.match(tab, /onClick=\{\(\) => selectListTab\(tab\)\}/)
+})
+
 test('a crashed app pane is isolated by a per-pane ErrorBoundary', () => {
-  // The AppCanvas wrapper is wrapped in its own inline ErrorBoundary so one
-  // canvas throw degrades locally instead of replacing the whole shell.
+  // The AppCanvas wrapper is wrapped in its own LazySurface (an inline
+  // ErrorBoundary by default) so one canvas throw or failed chunk download
+  // degrades locally instead of replacing the whole shell.
   assert.match(
     shell,
-    /<ErrorBoundary[^>]*key=\{`ab-\$\{id\}`\}[^>]*variant="inline"[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
+    /<LazySurface[^>]*key=\{`ab-\$\{id\}`\}[^>]*label="app"[^>]*recoveryKey=\{`app:\$\{id\}`\}/,
   )
 })
 
@@ -781,10 +794,12 @@ test('one held drawer-row gesture resolves menu, reorder, or workspace drag', ()
     'reordering has one Pointer Events lifecycle')
   assert.doesNotMatch(drawer, /beginTouchMenuHold|touchMenuCleanupRef|drawerGestureEndPoint/,
     'drawer menu access must not own a parallel custom touch lifecycle')
-  assert.match(drawer, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
-  assert.match(drawer, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
-  assert.equal((drawer.match(/onContextMenuCapture=\{suppressTouchContextMenu\}/g) || []).length, 1,
-    'the card still suppresses native contextmenu during its own hold')
+  assert.match(itemMenuGestures, /const TOUCH_CONTEXT_MENU_PROVENANCE_MS = 1500/)
+  assert.match(itemMenuGestures, /function suppressTouchContextMenu\(event\)[\s\S]*?event\.nativeEvent\?\.pointerType[\s\S]*?contextPointerType === 'touch'[\s\S]*?freshTouchPointer[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?stopImmediatePropagation/)
+  assert.match(itemMenuGestures, /const triggerProps = \{\s*onContextMenuCapture: suppressTouchContextMenu,/,
+    'a standalone trigger still suppresses native contextmenu during its own hold')
+  assert.equal((drawer.match(/\{\.\.\.cardMenuTriggerProps\}/g) || []).length, 1,
+    'only the card, not the drawer row, owns its own hold')
   assert.doesNotMatch(drawerCss, /\.drawer__row \.drawer__item\s*\{[\s\S]*?-webkit-touch-callout:/,
     'the shared controller owns callout suppression for its full hold window')
   assert.doesNotMatch(drawer, /data-hold-ready/)
@@ -874,7 +889,7 @@ test('the Apps tab never disables the mobile drawer layered above it', () => {
     'workspace content is inert while the drawer is open; the drawer must stay interactive')
   assert.doesNotMatch(drawer, /interactionLocked \|\| appsActive/,
     'Apps is a tab underneath navigation, not a modal owner of Escape')
-  assert.match(drawer, /activeView === 'apps' \? ' drawer__item--active'/,
+  assert.match(drawer, /appsViewActive=\{activeView === 'apps'\}/,
     'the Apps entry highlights from the focused-pane route, matching how chats do')
   assert.match(shell, /appsActive=\{appsVisibleAsTab\}/)
 })
@@ -975,8 +990,12 @@ test('live preview reveal keeps the workspace controller distinct from device mo
 
 test('large drawer lists memoize ordering and row actions without changing row ownership', () => {
   assert.match(
+    pinnedItemMutations,
+    /const projectedItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)/,
+  )
+  assert.match(
     drawer,
-    /const projectedDrawerItems = useMemo\(\(\) => projectPendingDrawerPins\([\s\S]*?\), \[chats, apps, projects, pendingPins\]\)[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
+    /const projectedDrawerItems = pins\.projectedItems[\s\S]*?useMemo\(\(\) => buildDrawerSections\([\s\S]*?\), \[projectedDrawerItems\]\)/,
   )
   assert.match(drawer, /const filteredApps = useMemo\(/)
   assert.match(drawer, /const rowActions = useMemo\(/)
@@ -988,15 +1007,29 @@ test('large drawer lists memoize ordering and row actions without changing row o
     'the drawer must render one item-menu controller')
 })
 
-test('successful project artifacts render as direct Recents destinations', () => {
-  assert.match(drawer, /kind === 'artifact' \? \(/)
-  assert.match(drawer, /<DrawerArtifactRow/)
-  assert.match(drawer, /<ProjectArtifactIcon artifact=\{item\}/)
-  assert.doesNotMatch(drawer, /<ArtifactIdentityIcon artifact=\{item\}/,
-    'Recents uses one semantic glyph rather than nesting a tile inside a row icon')
-  assert.match(drawer, /actions\.select\('artifact', item\.id\)/)
-  assert.match(shell, /activeArtifactRef=\{activeArtifactRef\}/)
-  assert.match(shell, /parseArtifactTabId\(artifactRef\)[\s\S]*?openArtifact\(project, parsed\.artifactId\)/)
+test('built artifacts open from their project, never as Recents rows', () => {
+  assert.doesNotMatch(drawer, /DrawerArtifactRow/, 'artifacts are not Recents rows')
+  // The sidebar has no artifact or project rows, so it takes no inputs to
+  // open, rename, recolour, or delete them.
+  assert.doesNotMatch(drawer, /kind === 'artifact'|kind === 'project'|onArtifact|activeArtifactRef|onProjectRename|onProjectDelete/)
+})
+
+// Projects are not sidebar rows, so pinning a project happens on the Projects
+// list, where pinned projects lead and can be unpinned in place.
+test('projects are pinned and unpinned from the Projects list', () => {
+  const directory = readFileSync(new URL('../../Projects/ProjectsDirectory.jsx', import.meta.url), 'utf8')
+  const actions = readFileSync(new URL('../../Projects/ProjectActions.jsx', import.meta.url), 'utf8')
+  // One pin owner: the list shows pending pins and writes through pins.pin,
+  // never a second writer that a stale list read could undo.
+  assert.match(shell, /<ProjectsDirectory\s+projects=\{pins\.projectedItems\.projects\}/)
+  assert.match(shell, /onPin=\{pinProject\}/)
+  assert.match(shell, /function pinProject\(project, pinned\) \{\s+return pins\.pin\('project', project\.id, pinned\)/)
+  assert.doesNotMatch(shell, /api\.projects\.setPinned/)
+  assert.match(directory, /\.sort\(\(a, b\) => Boolean\(b\.pinned_at\) - Boolean\(a\.pinned_at\)\)/)
+  assert.match(directory, /aria-label=\{`Unpin \$\{project\.name\}`\}/)
+  // The pin owner projects the change and reports failures itself, so the
+  // menu closes at once instead of waiting on the server.
+  assert.match(actions, /onClick=\{\(\) => \{ close\(\); onPin\(project, !project\.pinned_at\) \}\}/)
 })
 
 test('artifact previews keep recovery actions visible without a build-log drawer', () => {
@@ -1025,16 +1058,12 @@ test('a selected project-owned chat Recent includes its project chip in one row 
     drawerCss,
     /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
   )
-  assert.doesNotMatch(
-    drawerCss.match(/\.drawer__item--apps\s*\{[\s\S]*?\}/)?.[0] || '',
-    /margin-(?:top|bottom)/,
-    'Apps must not insert drift before the Projects glyph shared with the closed rail',
-  )
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
-  assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b|<PinFilled\b/)
+  // Section headings may carry an icon; chat rows never do.
+  assert.doesNotMatch(drawer, /drawer__chat-icon|<Chat\b|<Clock\b(?![^>]*drawer__section-icon)|<PinFilled\b/)
 })
 
 test('New chat and Apps share one compact navigation rhythm', () => {
@@ -1087,13 +1116,14 @@ test('drawer rows keep action and reorder chrome out of the list', () => {
   )
   assert.doesNotMatch(drawerCss, /drawer__menu-anchor|drawer__more|drawer__row-actions|drawer__reorder-handle/)
   assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(drawer, /openMenuFromKey\(event\)/)
   assert.match(
-    drawer,
+    itemMenuGestures,
     /event\.key === 'ContextMenu' \|\| \(event\.shiftKey && event\.key === 'F10'\)/,
   )
   assert.match(drawer, /if \(openMenu\) return[\s\S]*?onClose\?\.\(\)/,
     'Escape must close a row menu before dismissing the mobile drawer beneath it')
-  assert.match(drawer, /focusFirstAction: event\.type === 'keydown'/,
+  assert.match(itemMenuGestures, /focusFirstAction: event\.type === 'keydown'/,
     'only keyboard invocation should focus the first drawer action')
   assert.match(drawer, /focusFirstAction=\{menu\?\.focusFirstAction === true\}/)
   assert.match(
@@ -1125,9 +1155,11 @@ test('drawer row actions have one opening path without a custom touch hold', () 
   assert.match(drawer, /function showItemMenu\(\{ restoreFocusTarget, \.\.\.menu \}\) \{[\s\S]*?openItemMenuHistory\(\)[\s\S]*?setOpenMenu\(menu\)/,
     'Back ownership must be registered before the portaled menu paints')
   assert.match(drawer, /function openItemMenuAt\(\s*point,[\s\S]*?actions\.openMenu\(\{[\s\S]*?restoreFocusTarget: trigger,/)
-  assert.equal((drawer.match(/onContextMenu=\{openItemMenu\}/g) || []).length, 2,
+  assert.match(drawer, /onContextMenu=\{openItemMenu\}/)
+  assert.match(itemMenuGestures, /onContextMenu: openItemMenu,/,
     'app cards and drawer rows must share one semantic opening function')
-  assert.match(drawer, /if \(suppressTouchContextMenu\(event\)\) return/,
+  assert.match(drawer, /\} = useItemMenuGestures\(openItemMenuAt\)/)
+  assert.match(itemMenuGestures, /if \(suppressTouchContextMenu\(event\)\) return/,
     'native touch contextmenu must never pre-empt the shared held gesture')
   assert.doesNotMatch(
     dragBinding,
@@ -1159,24 +1191,24 @@ test('both context menus dismiss without stealing the destination press, includi
 })
 
 test('a secondary-button release cannot immediately select a flipped drawer menu item', () => {
-  assert.match(drawer, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
-  assert.match(drawer, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
-  assert.match(drawer, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
-  assert.match(drawer, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
-  assert.match(drawer, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
-  assert.match(drawer, /cleanup\(\)[\s\S]*?openItemMenuAt\(openingPoint, sourceBtn\)/,
+  assert.match(itemMenuGestures, /event\.type === 'contextmenu' && secondaryReleaseCleanupRef\.current/)
+  assert.match(itemMenuGestures, /event\.pointerType !== 'mouse' \|\| event\.button !== 2/)
+  assert.match(itemMenuGestures, /window\.addEventListener\('pointerup', onSecondaryPointerUp, true\)/)
+  assert.match(itemMenuGestures, /upEvent\.pointerId !== pointerId \|\| upEvent\.button !== 2/)
+  assert.match(itemMenuGestures, /const openingPoint = \{ x: event\.clientX, y: event\.clientY \}/)
+  assert.match(itemMenuGestures, /cleanup\(\)[\s\S]*?openMenuAtRef\.current\(openingPoint, sourceBtn\)/,
     'the release path must not normalize the pointer point twice')
-  assert.match(drawer, /timer = setTimeout\(cleanup, 1500\)/)
+  assert.match(itemMenuGestures, /timer = setTimeout\(cleanup, 1500\)/)
 })
 
 test('launcher cards and drawer rows share the stationary menu threshold', () => {
-  const dragImports = drawer.match(
+  const dragImports = itemMenuGestures.match(
     /import \{([\s\S]*?)\} from '\.\.\/Shell\/dragController\.js'/,
   )?.[1] || ''
   assert.match(dragImports, /PRESS_MENU_HOLD_MS/)
   assert.match(dragImports, /PRE_HOLD_MOVE_PX/)
-  assert.match(drawer, /\}, PRESS_MENU_HOLD_MS\)/)
-  assert.match(drawer, /> PRE_HOLD_MOVE_PX/)
+  assert.match(itemMenuGestures, /\}, PRESS_MENU_HOLD_MS\)/)
+  assert.match(itemMenuGestures, /> PRE_HOLD_MOVE_PX/)
   assert.match(dragBinding, /\}, PRESS_DRAG_HOLD_MS\)/,
     'the drag stage timing is shared across drawer rows and tabs')
   assert.doesNotMatch(
@@ -1286,9 +1318,6 @@ test('DRAG IS BUILDING: arming in single mode unfolds a builder preview; any dro
   assert.match(dragBinding, /const flipToPanes = before\.viewMode === 'single'/)
   assert.match(dragBinding, /flipViewMode: flipToPanes \? 'panes' : null/)
   assert.doesNotMatch(dragBinding, /dispatchWorkspace\(\{ type: 'SET_VIEW_MODE'/)
-  // v2 deleted the Settings mode-conversion: a builder Settings tab survives the
-  // flip, so a drop-into-builder no longer routes any overlay<->tab conversion.
-  assert.doesNotMatch(dragBinding, /convertSettingsForModeTransition/)
   // §8: "committed" is the ACTUAL workspace change, not a stale lit-zone flag.
   assert.match(dragBinding, /return workspaceStateRef\.current\.ws !== before/)
   assert.match(dragBinding, /if \(moveRAF\) \{[\s\S]*?cancelAnimationFrame\(moveRAF\)[\s\S]*?doMoveWork\(\)/)
@@ -1404,6 +1433,27 @@ test('deletion-evidence contract: probeDeletion classifies 404 vs exists vs unkn
   // Both cold-restore probes read the SAME contract (rhyme, not two copies).
   assert.match(appFrameCache, /probeDeletion\(`\/apps\//)
   assert.match(shell, /probeDeletion\(`\/chats\//)
+  assert.match(shell, /probeDeletion\(`\/projects\//)
+})
+
+// A tab for a project deleted elsewhere renders nothing, so restoring it used to
+// leave a blank shell that never finished loading. It must be closed, and only on
+// a direct 404, with the Projects list shown if it was on screen.
+test('a deleted project tab is closed on proof of deletion, never left blank', () => {
+  const start = shell.indexOf('const projectsLiveFetched')
+  const effect = shell.slice(start, shell.indexOf('// App delete lives here', start))
+  assert.ok(start > 0)
+  assert.match(effect, /projectsQuery\.isSuccess && projectsQuery\.isFetchedAfterMount/)
+  assert.match(effect, /projectById\.has\(id\) \|\| parseAppSourceProjectId\(id\)/)
+  assert.match(effect, /verdict === 'deleted' && !reappeared\) closeRemovedProject\(projectId\)/)
+  const helper = shell.slice(shell.indexOf('function closeRemovedProject'), start)
+  assert.match(helper, /if \(showProjects \|\| showing\) navTo\('projects'\)/)
+  // One reducer action clears builder panes AND the Standard single-screen slot;
+  // a per-tab close would miss a result saved only in that slot.
+  assert.match(helper, /dispatchWorkspace\(\{ type: 'CLOSE_PROJECT_TABS', projectId: id \}\)/)
+  assert.doesNotMatch(helper, /type: 'CLOSE_TAB'/)
+  // Deleting a project here takes the same path.
+  assert.match(shell, /closeRemovedProject\(projectId, \{ showProjects: true \}\)/)
 })
 
 test('round4-3: the null-slot landing is passive and interactive New Chat uses ChatView', () => {
@@ -1449,21 +1499,12 @@ test('round4-3: the null-slot landing is passive and interactive New Chat uses C
 // ── Retired live-layout mode plumbing is gone ───────────────────────────────
 test('mode transitions have one browser scene owner and no legacy CSS controller', () => {
   const controller = modeControllerSrc
-  // The ignored focusedPaneId drag-arm payload is gone (the reducer never read it).
-  assert.doesNotMatch(controller, /dragArm = useCallback\(\(focusedPaneId\)/)
-  assert.doesNotMatch(controller, /drag-arm', focusedPaneId/)
   assert.match(shell, /mode\.dragArm\(\)/)
   assert.doesNotMatch(controller, /getAnimations|animationName|setTimeout|presentation/)
   assert.doesNotMatch(css, /shell-mode-(?:slide|promote|strip)|data-mode-motion/)
   assert.doesNotMatch(workspaceViewSrc, /deriveExitPlan|deriveEnterPlan|transitionSignature/)
   assert.match(modeViewTransitionSrc, /transition\.finished\.then\([\s\S]*?settle\(id\)/)
-  // The unused excludeChatId param is gone; the helper is now the New Chat request
-  // (round 4 item 3 — the old freshest-chat write is fully retired).
-  assert.doesNotMatch(shell, /excludeChatId/)
-  assert.doesNotMatch(shell, /resolveEmptySingleHome/)
   assert.match(shell, /const requestEmptySingleNewChat = useCallback\(\(\) =>/)
-  // The stale "Settings conversion" comment near the toggle handler is corrected.
-  assert.doesNotMatch(shell, /Settings overlay<->tab conversion/)
 })
 
 test('authenticated launch cover waits for the shell first frame', () => {
@@ -1516,9 +1557,9 @@ test('complete and scoped reads both preserve pending archive intent', () => {
 })
 
 function deferred() {
-  let resolve
-  const promise = new Promise(r => { resolve = r })
-  return { promise, resolve }
+  let resolve, reject
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+  return { promise, resolve, reject }
 }
 
 function harness() {
@@ -1605,6 +1646,46 @@ test('failed last intent refreshes server truth and successful archive retains U
   await second
   assert.equal(h.row.archived_at, 'server-archive', 'failed restore uses authoritative scoped row')
   assert.match(h.notices[1].message, /Couldn’t restore/)
+})
+
+test('archiving a chat the list has not read yet files it and brings its row in', async () => {
+  const h = harness()
+  h.fullRead({ id: 'other', archived_at: null, pinned_at: null })
+  const pending = h.act('a', true)
+  await tick()
+  assert.deepEqual(h.calls, ['archive'], 'an unseen id still reaches the server')
+  h.requests[0].resolve({ ok: true })
+  assert.equal(await pending, true)
+  assert.deepEqual(h.refreshes, ['a'])
+  assert.equal(h.row.archived_at, 'server-archive')
+  assert.equal(h.notices[0].options.action.label, 'Undo')
+})
+
+test('unreachable archive says so and offers Try again', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].reject(new TypeError('Load failed'))
+  assert.equal(await first, false)
+  assert.equal(h.row.archived_at, null, 'failure settles from the server row')
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius couldn’t be reached\./)
+  assert.equal(h.notices[0].options.variant, 'error')
+  assert.equal(h.notices[0].options.action.label, 'Try again')
+  const retry = h.notices[0].options.action.onAction()
+  await tick()
+  assert.deepEqual(h.calls, ['archive', 'archive'])
+  h.requests[1].resolve({ ok: true })
+  assert.equal(await retry, true)
+  assert.equal(h.row.archived_at, 'server-archive')
+})
+
+test('a server error reads differently from an unreachable server', async () => {
+  const h = harness()
+  const first = h.act('a', true)
+  await tick()
+  h.requests[0].resolve({ ok: false })
+  await first
+  assert.match(h.notices[0].message, /Couldn’t archive that chat: Möbius hit an error\./)
 })
 
 test('Undo reverses a committed archive without creating another Undo', async () => {

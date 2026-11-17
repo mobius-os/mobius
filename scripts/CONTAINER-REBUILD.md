@@ -289,7 +289,8 @@ latest official release's Python packages, since Settings installs that
 release next. Until then,
 older source runs on the newer packages; the probe proves that it imports,
 nothing more. A release that also advances `deployment/self-hosted-helper.required`
-then asks you to reinstall the helper from a current trusted checkout.
+then asks you to reinstall the helper from a current trusted checkout; Settings
+stops asking once the helper status below certifies that protocol.
 
 ## Self-updating worker
 

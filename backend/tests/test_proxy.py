@@ -1797,3 +1797,315 @@ def test_exchange_deadline_bounds_a_request_queued_for_a_host_connection(
     asyncio.run(asyncio.wait_for(exercise(), timeout=10))
   finally:
     upstream.close()
+
+
+# ---------------------------------------------------------------------------
+# Downscaled images (`w`) and commit-pinned caching
+# ---------------------------------------------------------------------------
+
+_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+_PINNED_ICON = f"https://raw.githubusercontent.com/o/app/{_COMMIT}/icon.png"
+
+
+def _encoded(image, image_format, **params):
+  import io
+  out = io.BytesIO()
+  image.save(out, format=image_format, **params)
+  return out.getvalue()
+
+
+def _noisy(mode, size):
+  """A test image that compresses poorly, so a smaller WebP is a real win."""
+  import os
+  from PIL import Image
+  return Image.frombytes(mode, size, os.urandom(size[0] * size[1] * len(mode)))
+
+
+def _proxy_image(client, owner_token, monkeypatch, body, *, url=_PINNED_ICON,
+                 w=None, content_type="image/png", hops=None, status=200,
+                 cache_control="max-age=300"):
+  _pin_every_hop(monkeypatch)
+  fake_client, _ = _hop_client([*(hops or []), _HopUpstream(status, body, {
+    "content-type": content_type, "cache-control": cache_control,
+  })])
+  monkeypatch.setattr("app.routes.proxy.httpx.AsyncClient", lambda **_: fake_client())
+  params = {"url": url} if w is None else {"url": url, "w": str(w)}
+  return client.get(
+    "/api/proxy", params=params,
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+
+
+@pytest.mark.parametrize("image_format, mode, content_type", [
+  ("PNG", "RGBA", "image/png"),
+  ("JPEG", "RGB", "image/jpeg"),
+  ("WEBP", "RGBA", "image/webp"),
+  ("GIF", "P", "image/gif"),
+])
+def test_proxy_downscales_a_wide_raster_image_to_webp(
+  client, owner_token, monkeypatch, image_format, mode, content_type,
+):
+  import io
+  from PIL import Image
+  image = _noisy("RGBA" if mode == "RGBA" else "RGB", (400, 200))
+  if mode == "RGBA":
+    image.paste((0, 0, 0, 0), (0, 0, 40, 40))
+  params = {}
+  if mode == "P":
+    image = image.convert("P")
+    image.paste(0, (0, 0, 40, 40))
+    params["transparency"] = 0
+  body = _encoded(image, image_format, **params)
+
+  r = _proxy_image(
+    client, owner_token, monkeypatch, body, w=100, content_type=content_type,
+  )
+
+  assert r.status_code == 200
+  assert r.headers["content-type"] == "image/webp"
+  with Image.open(io.BytesIO(r.content)) as thumb:
+    assert thumb.format == "WEBP"
+    assert thumb.size == (100, 50)
+    if mode in ("RGBA", "P"):
+      assert thumb.convert("RGBA").getpixel((2, 2))[3] == 0
+
+
+@pytest.mark.parametrize("orientation", [1, 6])
+def test_downscale_keeps_the_colour_key_transparency_of_an_rgb_png(orientation):
+  import io
+  from PIL import Image
+  from app.image_previews import downscaled_webp
+  key = (255, 0, 255)
+  image = _noisy("RGB", (400, 200))
+  for left, top in ((0, 0), (360, 0), (0, 160), (360, 160)):
+    image.paste(key, (left, top, left + 40, top + 40))
+  exif = Image.Exif()
+  exif[0x0112] = orientation
+  body = _encoded(image, "PNG", transparency=key, exif=exif)
+
+  with Image.open(io.BytesIO(downscaled_webp(body, 100))) as thumb:
+    rgba = thumb.convert("RGBA")
+    assert rgba.getpixel((2, 2))[3] == 0
+    assert rgba.getpixel((rgba.width // 2, rgba.height // 2))[3] == 255
+
+
+def test_proxy_never_upscales_or_rewrites_a_narrow_image(
+  client, owner_token, monkeypatch,
+):
+  body = _encoded(_noisy("RGB", (64, 64)), "PNG")
+  r = _proxy_image(client, owner_token, monkeypatch, body, w=128)
+  assert r.content == body
+  assert r.headers["content-type"] == "image/png"
+
+
+@pytest.mark.parametrize("body, content_type", [
+  (b'{"id": "app"}', "application/json"),
+  (b'<svg xmlns="http://www.w3.org/2000/svg" width="900"/>', "image/svg+xml"),
+  (b"\x89PNG\r\n\x1a\n" + b"\0" * 64, "image/png"),
+])
+def test_proxy_returns_non_raster_and_undecodable_bodies_unchanged(
+  client, owner_token, monkeypatch, body, content_type,
+):
+  r = _proxy_image(
+    client, owner_token, monkeypatch, body, w=128, content_type=content_type,
+  )
+  assert r.status_code == 200
+  assert r.content == body
+  assert r.headers["content-type"] == content_type
+
+
+def test_proxy_downscale_refuses_a_decompression_bomb(
+  client, owner_token, monkeypatch,
+):
+  from PIL import Image
+  from app.image_previews import DOWNSCALE_MAX_PIXELS, downscaled_webp
+  side = 5000
+  assert side * side > DOWNSCALE_MAX_PIXELS
+  body = _encoded(Image.new("1", (side, side)), "PNG")
+  assert len(body) < 64 * 1024
+
+  def no_decode(*_args, **_kwargs):
+    raise AssertionError("an over-budget image must not be decoded")
+
+  monkeypatch.setattr(Image.Image, "load", no_decode)
+  assert downscaled_webp(body, 128) is None
+  r = _proxy_image(client, owner_token, monkeypatch, body, w=128)
+  assert r.content == body
+  assert r.headers["content-type"] == "image/png"
+
+
+def test_proxy_never_decodes_a_body_cut_at_the_size_cap(
+  client, owner_token, monkeypatch,
+):
+  from app.routes.proxy import _MAX_BYTES
+  body = b"\x89PNG\r\n\x1a\n" + b"\0" * _MAX_BYTES
+
+  def no_decode(*_args):
+    raise AssertionError("a truncated body must not be decoded")
+
+  monkeypatch.setattr("app.routes.proxy.downscaled_webp", no_decode)
+  r = _proxy_image(client, owner_token, monkeypatch, body, w=128)
+  assert r.content == body[:_MAX_BYTES]
+  assert r.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("requested, expected", [(1, 16), (100000, 1600)])
+def test_proxy_clamps_the_requested_width(
+  client, owner_token, monkeypatch, requested, expected,
+):
+  import io
+  from PIL import Image
+  body = _encoded(_noisy("RGB", (2000, 40)), "PNG")
+  r = _proxy_image(client, owner_token, monkeypatch, body, w=requested)
+  with Image.open(io.BytesIO(r.content)) as thumb:
+    assert thumb.width == expected
+
+
+def test_downscale_measures_the_displayed_width_of_a_rotated_photo():
+  import io
+  from PIL import Image
+  from app.image_previews import downscaled_webp
+  exif = Image.Exif()
+  exif[274] = 6  # stored landscape, displayed portrait
+  body = _encoded(_noisy("RGB", (400, 200)), "JPEG", exif=exif, quality=95)
+
+  assert downscaled_webp(body, 200) is None
+  with Image.open(io.BytesIO(downscaled_webp(body, 50))) as thumb:
+    assert thumb.size == (50, 100)
+
+
+@pytest.mark.parametrize("orientation", [None, 1])
+def test_downscale_of_an_upright_image_skips_the_transposed_copy(orientation):
+  from PIL import Image
+  from app.image_previews import downscaled_webp
+  params = {}
+  if orientation is not None:
+    exif = Image.Exif()
+    exif[274] = orientation
+    params["exif"] = exif
+  body = _encoded(_noisy("RGB", (400, 200)), "JPEG", quality=95, **params)
+  # A transposed copy would hold a second full-size image in memory.
+  with patch("app.image_previews.ImageOps.exif_transpose") as transpose:
+    assert downscaled_webp(body, 100) is not None
+  transpose.assert_not_called()
+
+
+def test_downscale_keeps_the_original_of_a_16_bit_greyscale_png():
+  import io
+  import os
+  from PIL import Image
+  from app.image_previews import downscaled_webp
+  # Mid-grey 16-bit samples would clip to white in an 8-bit conversion.
+  image = Image.frombytes("I;16", (400, 200), os.urandom(400 * 200 * 2))
+  body = _encoded(image, "PNG")
+  with Image.open(io.BytesIO(body)) as decoded:
+    assert decoded.mode.startswith("I")
+  assert downscaled_webp(body, 100) is None
+
+
+def test_downscale_keeps_the_original_when_webp_would_be_larger():
+  from PIL import Image
+  from app.image_previews import downscaled_webp
+  # A flat 1-bit PNG is already tiny; a WebP of it is not smaller.
+  body = _encoded(Image.new("1", (2000, 1)), "PNG", optimize=True)
+  assert downscaled_webp(body, 1600) is None
+
+
+def test_commit_pinned_github_image_is_cached_as_immutable(
+  client, owner_token, monkeypatch,
+):
+  r = _proxy_image(client, owner_token, monkeypatch, b"png-bytes")
+  assert r.status_code == 200
+  assert r.headers["cache-control"] == "private, max-age=31536000, immutable"
+  assert r.headers["vary"] == "Authorization"
+  assert "etag" not in r.headers
+
+
+@pytest.mark.parametrize("url", [
+  "https://raw.githubusercontent.com/o/app/main/icon.png",
+  f"https://raw.githubusercontent.com/o/app/{_COMMIT[:-1]}/icon.png",
+  f"https://raw.githubusercontent.com/o/app/{_COMMIT.upper()}/icon.png",
+  f"http://raw.githubusercontent.com/o/app/{_COMMIT}/icon.png",
+  f"https://raw.githubusercontent.com:8443/o/app/{_COMMIT}/icon.png",
+  f"https://raw.githubusercontent.com.example/o/app/{_COMMIT}/icon.png",
+  f"https://example.com/o/app/{_COMMIT}/icon.png",
+  f"https://raw.githubusercontent.com/o/{_COMMIT}/icon.png",
+  f"https://raw.githubusercontent.com/o/app/{_COMMIT}/../main/icon.png",
+  f"https://raw.githubusercontent.com/o/app/{_COMMIT}/%2e%2E/main/icon.png",
+  f"https://raw.githubusercontent.com/o/app/{_COMMIT}/./icon.png",
+])
+def test_unpinned_proxy_reads_keep_bounded_freshness(
+  client, owner_token, monkeypatch, url,
+):
+  r = _proxy_image(client, owner_token, monkeypatch, b"png-bytes", url=url)
+  assert r.headers["cache-control"].startswith("private, max-age=")
+  assert "immutable" not in r.headers["cache-control"]
+  assert int(r.headers["cache-control"].split("=")[1]) <= 300
+
+
+def test_service_worker_predicts_commit_pins_with_the_server_pattern():
+  import re
+  from pathlib import Path
+  from app.routes.proxy import _COMMIT_PINNED_RAW_PATH
+  policy = (
+    Path(__file__).parents[2] / "frontend" / "src" / "sw-cache-policy.js"
+  ).read_text()
+  # The worker anchors at the start, as re.match does here.
+  worker = re.search(r"^const COMMIT_PINNED_RAW_PATH = /\^(.+)/$", policy, re.M)
+  assert worker, "COMMIT_PINNED_RAW_PATH must be an unflagged ^-anchored regex"
+  server = _COMMIT_PINNED_RAW_PATH.pattern.replace("(", "").replace(")", "")
+  assert worker[1].replace("\\/", "/") == server
+
+
+@pytest.mark.parametrize("case", ["redirect_off_commit", "no_store", "error", "truncated"])
+def test_commit_pinned_read_is_not_immutable_unless_complete_and_on_commit(
+  client, owner_token, monkeypatch, case,
+):
+  from app.routes.proxy import _MAX_BYTES
+  options = {
+    "redirect_off_commit": {"hops": [_HopUpstream(302, headers={
+      "location": "https://raw.githubusercontent.com/o/app/main/icon.png",
+    })]},
+    "no_store": {"cache_control": "no-store"},
+    "error": {"status": 404},
+    "truncated": {},
+  }[case]
+  body = b"x" * (_MAX_BYTES if case == "truncated" else 8)
+  r = _proxy_image(client, owner_token, monkeypatch, body, **options)
+  assert "immutable" not in r.headers.get("cache-control", "")
+
+
+def test_commit_pinned_redirect_within_the_same_commit_stays_immutable(
+  client, owner_token, monkeypatch,
+):
+  r = _proxy_image(client, owner_token, monkeypatch, b"png-bytes", hops=[
+    _HopUpstream(301, headers={
+      "location": f"https://raw.githubusercontent.com/renamed/app/{_COMMIT}/icon.png",
+      "cache-control": "max-age=300",
+    }),
+  ])
+  assert r.headers["cache-control"] == "private, max-age=31536000, immutable"
+
+
+def test_proxy_rejects_a_non_integer_width(client, owner_token):
+  r = client.get(
+    "/api/proxy", params={"url": _PINNED_ICON, "w": "wide"},
+    headers={"Authorization": f"Bearer {owner_token}"},
+  )
+  assert r.status_code == 422
+
+
+def test_downscale_keeps_only_a_profile_that_describes_rgb_pixels():
+  import io
+  from PIL import Image, ImageCms
+  from app.image_previews import downscaled_webp
+  srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+
+  rgb = _encoded(_noisy("RGB", (400, 200)), "PNG", icc_profile=srgb)
+  with Image.open(io.BytesIO(downscaled_webp(rgb, 100))) as thumb:
+    assert thumb.info.get("icc_profile") == srgb
+
+  cmyk = _encoded(_noisy("CMYK", (400, 200)), "JPEG", icc_profile=b"cmyk-profile")
+  with Image.open(io.BytesIO(downscaled_webp(cmyk, 100))) as thumb:
+    assert thumb.mode == "RGB"
+    assert not thumb.info.get("icc_profile")

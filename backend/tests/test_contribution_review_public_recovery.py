@@ -18,7 +18,7 @@ def test_real_gh_streams_public_body_over_stdin(tmp_path, monkeypatch):
   payload = tmp_path / 'payload.json'
   executable.write_text('#!/bin/sh\ncat > "$PAYLOAD_FILE"\nprintf \'{"id":5,"html_url":"review-url"}\'\n')
   executable.chmod(0o755)
-  monkeypatch.setattr(git, '_git_env', lambda cwd: {'PATH': f'{tmp_path}:/usr/bin:/bin', 'PAYLOAD_FILE': str(payload)})
+  monkeypatch.setattr(git, '_git_env', lambda cwd, **_k: {'PATH': f'{tmp_path}:/usr/bin:/bin', 'PAYLOAD_FILE': str(payload)})
   result = public.post_review(git._gh, tmp_path, ITEM, '😀' * 30_000)
   assert result.state == 'confirmed' and result.receipt['id'] == 5
   sent = json.loads(payload.read_text())
@@ -113,6 +113,28 @@ def test_recovery_scans_later_page_and_keeps_legacy_uncertainty():
   assert public.reconcile_review(gh, None, ITEM, receipt, '42')['id'] == 3
   legacy = public.reconcile_review(lambda *a: pytest.fail('unattributable legacy receipt'), None, ITEM, {'state': 'posting'}, '42')
   assert legacy['state'] == 'unknown'
+
+
+def test_find_review_still_matches_a_review_dismissed_after_it_was_sent():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  sent = {'id': 5, 'user': {'id': 42}, 'commit_id': ITEM['head_sha'], 'state': 'DISMISSED', 'body': receipt['marker']}
+  gh = lambda *a: SimpleNamespace(stdout=json.dumps([sent]))
+  for event in ('APPROVE', 'REQUEST_CHANGES'):
+    review, complete = public.find_review(gh, None, ITEM, receipt, '42', event)
+    assert (review['id'], review['state'], complete) == (5, 'DISMISSED', True)
+  other = {**sent, 'user': {'id': 99}}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout=json.dumps([other])), None, ITEM, receipt, '42', 'APPROVE') == (None, True)
+
+
+def test_find_review_proves_absence_only_when_the_whole_list_was_read():
+  receipt = {'state': 'unknown', 'marker': '<!-- mobius-review:unique -->'}
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='[]'), None, ITEM, receipt, '42') == (None, True)
+  full = lambda *a: SimpleNamespace(stdout=json.dumps([{}] * 100))
+  assert public.find_review(full, None, ITEM, receipt, '42') == (None, False), 'ten full pages cap the scan: absence is unproven'
+  broken = lambda *a: (_ for _ in ()).throw(OSError('network'))
+  assert public.find_review(broken, None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: SimpleNamespace(stdout='{}'), None, ITEM, receipt, '42') == (None, False)
+  assert public.find_review(lambda *a: pytest.fail('no marker, nothing to look for'), None, ITEM, {'state': 'unknown'}, '42') == (None, False)
 
 
 def test_marker_is_within_unicode_body_limit():

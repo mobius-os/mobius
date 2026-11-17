@@ -16,7 +16,7 @@ from py_vapid import Vapid
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import models, presence
+from app import models, notification_channels, presence
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -150,6 +150,9 @@ class _PreparedPush:
   subscriptions: tuple[dict, ...]
   # Native push devices (Möbius mobile app): {"id", "token", "registered_at"}.
   devices: tuple[dict, ...] = ()
+  # Ids of outside channels (Slack, Discord, …) and the message they receive.
+  channels: tuple[str, ...] = ()
+  channel_message: notification_channels.Message | None = None
 
 
 # APNs caps a collapse id at 64 bytes; FCM accepts the same key.
@@ -170,7 +173,7 @@ def _collapse_key(tag: str | None, notification_id: str) -> str:
 _TAP_URL_MAX_BYTES = 2048
 
 
-def _tap_url(target: str | None) -> str:
+def tap_url(target: str | None) -> str:
   """The phone opens this on tap: always a page of this installation."""
   origin = get_settings().frontend_origin.rstrip("/")
   if (
@@ -353,6 +356,11 @@ def _prepare_owner_notification(
       .all()
     )
   ]
+  channels = notification_channels.channels_for(db, owner_id, source_type, source_id)
+  channel_message = notification_channels.Message(
+    title=title, body=body, url=tap_url(target), notification_id=notification_id,
+    source_type=source_type, source_id=source_id,
+  ) if channels else None
   # Web Push is remote I/O and may wait on several endpoints. Copy the four
   # scalar fields we need, then release the checkout before delivery. If stale
   # subscriptions are found, delivery opens a fresh short cleanup transaction.
@@ -362,6 +370,8 @@ def _prepare_owner_notification(
     payload=payload,
     subscriptions=tuple(subscriptions),
     devices=tuple(devices),
+    channels=channels,
+    channel_message=channel_message,
   )
 
 
@@ -396,6 +406,9 @@ def _deliver_prepared_push(prepared: _PreparedPush) -> None:
 
   if prepared.devices:
     _send_native_later(prepared)
+
+  if prepared.channels:
+    notification_channels.send_later(prepared.channels, prepared.channel_message)
 
   if stale_ids:
     from app.database import SessionLocal
@@ -446,7 +459,7 @@ def _deliver_native(prepared: _PreparedPush) -> list[dict]:
         [device["token"] for device in batch],
         title=payload["title"],
         body=payload["body"] or "",
-        data={"url": _tap_url(payload["target"]), "notificationId": prepared.notification_id},
+        data={"url": tap_url(payload["target"]), "notificationId": prepared.notification_id},
         collapse_key=_collapse_key(payload["tag"], prepared.notification_id),
       )
     except push_relay.RelayError as exc:

@@ -28,7 +28,8 @@ console.info(`Mobius shell build: ${SHELL_BUILD}`)
 async function mount() {
   // iOS copies cookies but not localStorage into a new Home Screen shell.
   // Settle that bounded one-use exchange before App chooses setup or login.
-  await redeemInstalledShellSession()
+  // index.html's boot check counts it as network time, not as a stalled mount.
+  await window.__mobiusBootSessionExchange(redeemInstalledShellSession())
   startShellInstallSessionLifecycle()
   ReactDOM.createRoot(document.getElementById('root')).render(
     <React.StrictMode>

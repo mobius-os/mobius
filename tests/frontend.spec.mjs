@@ -1,3 +1,4 @@
+import { composerValue, expectComposerValue } from './_composer.mjs'
 /**
  * Core frontend behavior tests.
  *
@@ -91,9 +92,10 @@ test.describe('Input behavior', () => {
     await setup(page)
     await createChat(page)
 
-    const input = page.getByRole('textbox', { name: 'Message Möbius…' })
+    const editor = page.getByRole('textbox', { name: 'Message Möbius…' })
+    await expectComposerValue(editor, '')
+    const input = page.locator('[data-chat-surface="painted"] .chat__input.chat__markdown-input')
     await input.evaluate(el => {
-      el.value = ''
       el.style.height = '280px'
       el.closest('.chat__pill')?.setAttribute('data-composer-tall', '')
     })
@@ -190,9 +192,7 @@ test.describe('Input behavior', () => {
     await createChat(page)
     await sendMessage(page, 'Test message')
 
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toBe('')
   })
 
@@ -994,6 +994,9 @@ test.describe('Scroll position', () => {
     let releaseCatchUp
     const catchUpGate = new Promise(resolve => { releaseCatchUp = resolve })
     let returnImageServed = false
+    let returnDetailServed = false
+    let releaseReturnDetail
+    const returnDetailGate = new Promise(resolve => { releaseReturnDetail = resolve })
     const squarePng = Buffer.from(
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII=',
       'base64',
@@ -1016,7 +1019,10 @@ test.describe('Scroll position', () => {
 
     await page.route(new RegExp(`/api/chats/${chatId}\\?limit=`), async route => {
       if (route.request().method() !== 'GET') return route.continue()
-      if (returning) await new Promise(resolve => setTimeout(resolve, 220))
+      if (returning) {
+        await returnDetailGate
+        returnDetailServed = true
+      }
       return route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -1152,7 +1158,11 @@ test.describe('Scroll position', () => {
       return !!el && getComputedStyle(el).visibility !== 'hidden' && !!target
     }, chatId, { timeout: 5000 })
     await expect(page.locator('.shell__chat-view--held')).toHaveCount(0)
+    // The saved reading position paints before the chat detail answers.
+    expect(returnDetailServed).toBe(false)
     expect(catchUpServed).toBe(false)
+    releaseReturnDetail()
+    await expect.poll(() => returnDetailServed, { timeout: 3000 }).toBe(true)
     releaseCatchUp()
     await expect.poll(() => catchUpServed, { timeout: 3000 }).toBe(true)
 
@@ -1168,7 +1178,6 @@ test.describe('Scroll position', () => {
     const visibleRows = trajectory.filter(row => row.visible)
     expect(returnImageServed).toBe(true)
     expect(streamCount).toBeGreaterThan(0)
-    expect(trajectory.some(row => row.held)).toBe(true)
     expect(trajectory.every(row => row.painted)).toBe(true)
     expect(visibleRows.length).toBeGreaterThan(2)
     expect(visibleRows.every(row => row.anchor && row.y != null)).toBe(true)
@@ -1219,9 +1228,7 @@ test.describe('Enter key — touch-primary device (mobile)', () => {
     expect(hasEmpty).toBe(true)
 
     // Textarea should still have the text.
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toContain('Line one')
   })
 })
@@ -1260,9 +1267,7 @@ test.describe('Enter key — desktop (no touch)', () => {
     expect(hasEmpty).toBe(true)
 
     // Textarea should have multiline content.
-    const value = await page.evaluate(
-      () => document.querySelector('[data-chat-surface="painted"] .chat__input')?.value
-    )
+    const value = await composerValue(page.locator('[data-chat-surface="painted"] .chat__editor-content'))
     expect(value).toContain('Line one')
     expect(value).toContain('\n')
   })

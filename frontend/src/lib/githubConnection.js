@@ -38,20 +38,73 @@ function attemptFrom(body) {
     : null
 }
 
+/** The instance's GitHub status, with a sign-in already waiting on GitHub (another tab, a reload) as `attempt`. Rejects when it cannot be read. */
 export async function fetchGithubStatus({ signal } = {}) {
-  try {
-    const s = await call(options => api.github.status({ ...options, signal }), 'Could not check GitHub.')
-    return {
-      state: s.connected ? 'connected' : 'disconnected',
-      login: s.login || '',
-      scopes: Array.isArray(s.scopes) ? s.scopes : [],
-      signInAvailable: !!s.device_flow_available,
-      // A sign-in already waiting on GitHub (another tab, a reload) resumes.
-      attempt: attemptFrom(s.active_attempt),
-    }
-  } catch (error) {
-    return { state: 'unknown', message: error?.message || 'Could not reach the GitHub connection service.' }
+  const s = await call(options => api.github.status({ ...options, signal }), 'Could not check GitHub.')
+  return {
+    state: s.connected ? 'connected' : 'disconnected',
+    login: s.login || '',
+    scopes: Array.isArray(s.scopes) ? s.scopes : [],
+    signInAvailable: !!s.device_flow_available,
+    attempt: attemptFrom(s.active_attempt),
   }
+}
+
+/** The status Settings shows when GitHub could not be read. */
+export const unknownGithubStatus = error => ({
+  state: 'unknown',
+  message: error?.message || 'Could not reach the GitHub connection service.',
+})
+
+const STATUS_KEY = ['github', 'status']
+
+// The newest status read for each query client, or null once an account
+// change has started since. Only the newest read publishes: Settings can
+// unmount mid-read (a provider page opens) and start another read on return,
+// and the slower one would otherwise land last and replace the newer answer,
+// connected or not. An overtaken read answers with the newer read instead, so
+// whichever caller acts on a waiting sign-in sees the same status.
+const newestReads = new WeakMap()
+
+/**
+ * GitHub status in the shared query cache, persisted (queryClient.js) so
+ * Settings paints the last confirmed account at once after a reload. The
+ * cache holds only that settled account state (connection, login, scopes); a
+ * sign-in waiting on GitHub goes to the caller of `refresh` and is never
+ * stored. Reads happen when Settings asks, so `options` only subscribes.
+ */
+export const githubStatus = {
+  key: STATUS_KEY,
+  options: { queryKey: STATUS_KEY, enabled: false, staleTime: Infinity },
+  /**
+   * Read the status now and cache its account part. Resolves the full status
+   * of the newest read, or null when an account change started meanwhile
+   * (its caller reads next and decides, so this caller must not act); rejects
+   * when the newest read cannot be read.
+   */
+  refresh(queryClient) {
+    const overtaken = () => newestReads.get(queryClient) !== read
+    const read = fetchGithubStatus().then(status => {
+      if (overtaken()) return newestReads.get(queryClient)
+      const { attempt, ...account } = status
+      queryClient.setQueryData(STATUS_KEY, account)
+      return { ...account, attempt }
+    }, error => {
+      if (overtaken()) return newestReads.get(queryClient)
+      throw error
+    })
+    newestReads.set(queryClient, read)
+    return read
+  },
+  /**
+   * Run a request that changes the account (disconnect, cancelling a sign-in):
+   * every read already under way is obsolete, so none publishes over it.
+   * Follow it with `refresh` for the status it left.
+   */
+  change(queryClient, request) {
+    newestReads.set(queryClient, null)
+    return request()
+  },
 }
 
 export async function startGithubSignIn({ privateRepos = false, signal } = {}) {

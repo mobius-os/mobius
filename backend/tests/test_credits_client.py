@@ -1,0 +1,1759 @@
+"""A Möbius paired with a credits service: pairing, reads, and app charges."""
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+from fastapi import HTTPException
+
+from app import app_consent, credits_client, credits_confirmations, deps, models
+from app.auth import create_access_token, create_agent_token, create_app_token
+from app.browser_access import BrowserLineage, redeem_invitation
+from app.config import get_settings
+from tests.browser_access_fixtures import link_grant
+
+
+class FakeService:
+  """Records calls and answers like the mobius.you credits service."""
+
+  def __init__(self):
+    self.calls = []
+    self.answers = {}
+    self.refused_keys = {}  # key -> the 401 body it is refused with, as once revoked
+
+  def __call__(self, method, url, json=None, headers=None, **_kwargs):
+    self.calls.append({"method": method, "url": url, "json": json, "headers": headers})
+    path = url.split("/api/billing/", 1)[1]
+    key = (headers or {}).get("Authorization", "").removeprefix("Bearer ")
+    if key in self.refused_keys:
+      return httpx.Response(401, json=self.refused_keys[key], request=httpx.Request(method, url))
+    status, body = self.answers.get(path, (200, {"balance": "0.00"}))
+    return httpx.Response(status, json=body, request=httpx.Request(method, url))
+
+
+@pytest.fixture(autouse=True)
+def owner_pays(request, monkeypatch):
+  """Most tests here are about one charge's rules, not the owner's Pay.
+
+  They see the owner press Pay at once; tests that take the ``real_payments``
+  fixture go through the question as the shell does.
+  """
+  credits_confirmations.clear()
+  if "real_payments" in request.fixturenames:
+    return
+  confirmed = credits_confirmations.Payment(
+    id="test", app_id=0, app_name="", key="", seller="", priced_app="", action="",
+    max_price_micro=0, description="", state=credits_confirmations.CONFIRMED)
+  monkeypatch.setattr(credits_confirmations, "require", lambda **_kw: confirmed)
+
+
+@pytest.fixture
+def real_payments(service):
+  """Charges wait for a real Pay or Cancel (see ``owner_pays``).
+
+  The seller has priced the action, so the owner is asked; a test can
+  replace that answer to see an unpriced action refused.
+  """
+  service.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [
+    {"action": "run", "description": "Run: Meeting notes", "price_micro": 400_000}]})
+  return credits_confirmations
+
+
+@pytest.fixture
+def service(monkeypatch, tmp_path):
+  monkeypatch.setattr(get_settings(), "data_dir", str(tmp_path))
+  fake = FakeService()
+  monkeypatch.setattr(credits_client.httpx, "request", fake)
+  return fake
+
+
+@pytest.fixture
+def paired(service):
+  credits_client.pair("https://www.mobius.you/credits/", "mbc_example_key")
+  return service
+
+
+def _app(db, slug, *, spend_credits=("ana/prompts",), package_id=None, store=True,
+         **grants):
+  row = models.App(
+    slug=slug, source_dir=f"/tmp/mobius-tests/{slug}", name=slug,
+    description="", jsx_source="export default function App(){}",
+    compiled_path="/tmp/app.js", package_id=package_id,
+    manifest_url=f"https://store.example/{slug}/mobius.json" if store else None,
+    capability_contract={"data": {"spend_credits": list(spend_credits), **grants}},
+  )
+  if store:
+    assert app_consent.accept(row, app_consent.request_digest(app_consent.current_rows(row)))
+  db.add(row)
+  db.commit()
+  db.refresh(row)
+  return row
+
+
+def _as(db, app, service):
+  owner = db.query(models.Owner).first()
+  token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
+                           consent=app_consent.session_id(app), service=service)
+  return {"Authorization": f"Bearer {token}"}
+
+
+TOPUP_ID = "12345678-1234-4567-89ab-123456789abc"
+
+
+CHARGE = {"seller": "ana", "app": "prompts", "action": "run",
+          "idempotency_key": "run-00000001", "max_price_micro": 500_000}
+
+
+def test_an_unpaired_installation_is_told_so(client, auth, service):
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["mode"] == "unpaired" and body["balance"] is None
+  assert not service.calls
+
+
+class FakeLauncher:
+  """The identity broker's route to the launcher, as the credits client calls it."""
+
+  def __init__(self, status=200, body=None):
+    self.status = status
+    self.body = body if body is not None else {
+      "service_url": "https://www.mobius.you/credits", "key": "mbc_from_launcher"}
+    self.error = None  # raised instead of answering, as an unreachable broker does
+    self.posts = []
+
+  def __call__(self, *, timeout):
+    launcher = self
+
+    class Client:
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *_exc):
+        return False
+
+      def post(self, path):
+        launcher.posts.append(path)
+        if launcher.error is not None:
+          raise launcher.error
+        return httpx.Response(launcher.status, json=launcher.body,
+                              request=httpx.Request("POST", "http://broker" + path))
+
+    return Client()
+
+
+@pytest.fixture
+def launcher(monkeypatch):
+  """This Möbius was launched from mobius.you and can reach its launcher."""
+  monkeypatch.setattr(get_settings(), "mobius_sso_issuer", "https://www.mobius.you")
+  monkeypatch.setattr(get_settings(), "mobius_sso_instance_id", "mob_example")
+  fake = FakeLauncher()
+  monkeypatch.setattr(credits_client, "broker_client", fake)
+  return fake
+
+
+def test_a_launched_installation_pairs_with_its_owners_wallet_without_a_key(
+  client, auth, service, launcher
+):
+  before = client.get("/api/identity/credits", headers=auth).json()
+  assert before["mode"] == "unpaired" and before["can_pair_with_account"] is True
+
+  paired = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert paired.status_code == 200 and paired.json() == {"paired": True}
+  assert launcher.posts == ["/managed/api/instance/v1/credits/key"]
+  # The key is checked at the service before it is kept, exactly like a pasted one.
+  assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/balance"
+  assert service.calls[-1]["headers"]["Authorization"] == "Bearer mbc_from_launcher"
+  assert credits_client.load_credentials()["key"] == "mbc_from_launcher"
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
+
+
+def test_a_self_hosted_installation_is_not_offered_account_pairing(
+  client, auth, service, monkeypatch
+):
+  monkeypatch.setattr(credits_client, "broker_client", FakeLauncher())
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["can_pair_with_account"] is False
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "not_managed"
+  assert credits_client.broker_client.posts == []
+  assert credits_client.load_credentials() is None
+
+
+@pytest.mark.parametrize("status, body", [
+  (503, {"error": {"code": "credits_unavailable", "message": "unavailable"}}),
+  (200, ["not", "an", "object"]),
+  (200, {"service_url": "https://www.mobius.you/credits"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": ""}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": "mbc_"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": "sk_live_other"}),
+  (200, {"service_url": "https://www.mobius.you/credits", "key": 12345}),
+  (200, {"key": "mbc_from_launcher"}),
+  (200, {"service_url": "", "key": "mbc_from_launcher"}),
+  (200, {"service_url": ["https://www.mobius.you/credits"], "key": "mbc_from_launcher"}),
+  (200, {"service_url": "http://credits.example", "key": "mbc_from_launcher"}),
+  (200, {"service_url": "https://user:pw@credits.example", "key": "mbc_from_launcher"}),
+], ids=["launcher-unavailable", "not-an-object", "no-key", "empty-key", "bare-prefix",
+        "not-a-credits-key", "key-not-text", "no-address", "empty-address",
+        "address-not-text", "plain-http-address", "address-with-userinfo"])
+def test_a_launcher_answer_without_a_usable_key_reads_as_mobius_you_unavailable(
+  client, auth, service, launcher, status, body
+):
+  # The owner copied and entered nothing, so paste-a-key guidance would mislead.
+  launcher.status, launcher.body = status, body
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 503, refused.text
+  assert refused.json()["detail"]["code"] == "credits_unavailable"
+  assert "mobius.you" in refused.json()["detail"]["message"]
+  assert not service.calls  # nothing unusable is sent to any service
+  assert credits_client.load_credentials() is None
+
+
+def test_an_unreachable_launcher_reads_as_mobius_you_unavailable(
+  client, auth, service, launcher
+):
+  launcher.error = httpx.ConnectError("broker socket missing")
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 503
+  assert refused.json()["detail"]["code"] == "credits_unavailable"
+  assert credits_client.load_credentials() is None
+
+
+def test_a_launcher_key_the_service_refuses_is_not_kept(client, auth, service, launcher):
+  service.answers["balance"] = (401, {"detail": {"code": "invalid_api_key", "message": "no"}})
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "invalid_api_key"
+  assert credits_client.load_credentials() is None
+
+
+@pytest.mark.parametrize("first", ["pasted", "account"])
+@pytest.mark.parametrize("service_state", ["accepts-the-key", "unavailable"])
+def test_a_paired_installation_is_not_asked_for_another_key(
+  client, auth, service, launcher, first, service_state
+):
+  # Asking the launcher retires this installation's current key before the new
+  # one is checked, and its answer could name another service: either would
+  # break a pairing that may still work, so only a refused key is replaced.
+  if first == "pasted":
+    credits_client.pair("https://credits.example", "mbc_pasted_key")
+  else:
+    assert client.post("/api/identity/credits/pair/account", headers=auth).status_code == 200
+  kept = credits_client.load_credentials()
+  asked = list(launcher.posts)
+  launcher.body = {"service_url": "https://other-operator.example", "key": "mbc_other"}
+  if service_state == "unavailable":
+    service.answers["balance"] = (503, {"detail": {"code": "", "message": "down"}})
+
+  refused = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "already_paired"
+  assert launcher.posts == asked
+  assert credits_client.load_credentials() == kept
+
+
+@pytest.mark.parametrize("first", ["pasted", "account"])
+@pytest.mark.parametrize("refusal, code", [
+  ({"detail": {"code": "invalid_api_key", "message": "Invalid API key."}}, "invalid_api_key"),
+  ({}, "key_refused"),
+], ids=["invalid_api_key", "key_refused"])
+def test_a_refused_key_is_replaced_through_the_launcher(
+  client, auth, service, launcher, first, refusal, code
+):
+  # Revoked, retired by a direct broker call, or restored from an older /data:
+  # a key the service refuses has nothing left to retire, so the owner can
+  # reconnect in one tap instead of being stuck until someone unpairs by hand.
+  if first == "pasted":
+    credits_client.pair("https://credits.example", "mbc_pasted_key")
+  else:
+    assert client.post("/api/identity/credits/pair/account", headers=auth).status_code == 200
+  service.refused_keys[credits_client.load_credentials()["key"]] = refusal
+  launcher.body = {"service_url": "https://www.mobius.you/credits", "key": "mbc_reissued"}
+
+  stuck = client.get("/api/identity/credits", headers=auth).json()
+  assert stuck["mode"] == "customer" and stuck["error"]["code"] == code
+  assert stuck["can_pair_with_account"] is True
+
+  reconnected = client.post("/api/identity/credits/pair/account", headers=auth)
+
+  assert reconnected.status_code == 200, reconnected.text
+  assert launcher.posts[-1] == "/managed/api/instance/v1/credits/key"
+  assert credits_client.load_credentials()["key"] == "mbc_reissued"
+  after = client.get("/api/identity/credits", headers=auth).json()
+  assert after["mode"] == "customer" and after["error"] is None
+
+
+def test_a_self_hosted_paired_installation_is_not_offered_account_pairing(
+  client, auth, paired
+):
+  paired.refused_keys["mbc_example_key"] = {}
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["mode"] == "customer" and body["error"]["code"] == "key_refused"
+  assert body["can_pair_with_account"] is False
+
+
+def test_concurrent_account_pairings_ask_the_launcher_once(service, launcher, monkeypatch):
+  # The second request waits for the first and then finds it paired, rather
+  # than retiring the key the first one is about to save.
+  from concurrent.futures import ThreadPoolExecutor
+  import threading
+
+  first_asked, second_asked, release = threading.Event(), threading.Event(), threading.Event()
+
+  def held_launcher(*, timeout):
+    client = launcher(timeout=timeout)
+    post = client.post
+
+    def held_post(path):
+      if first_asked.is_set():
+        second_asked.set()
+      first_asked.set()
+      assert release.wait(5)
+      return post(path)
+
+    client.post = held_post
+    return client
+
+  monkeypatch.setattr(credits_client, "broker_client", held_launcher)
+  with ThreadPoolExecutor(max_workers=2) as pool:
+    first = pool.submit(credits_client.pair_with_account)
+    assert first_asked.wait(5)
+    second = pool.submit(credits_client.pair_with_account)
+    assert not second_asked.wait(0.5)  # held back while the first is pairing
+    release.set()
+    assert first.result(timeout=5) == {"paired": True}
+    with pytest.raises(credits_client.CreditsUnavailable) as refused:
+      second.result(timeout=5)
+
+  assert refused.value.code == "already_paired"
+  assert launcher.posts == ["/managed/api/instance/v1/credits/key"]
+
+
+def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
+  client, auth, service, tmp_path
+):
+  paired = client.post(
+    "/api/identity/credits/pair",
+    json={"operator_url": "https://www.mobius.you/credits/", "key": "mbc_example_key"},
+    headers=auth)
+  assert paired.status_code == 200, paired.text
+  assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/balance"
+  assert service.calls[-1]["headers"]["Authorization"] == "Bearer mbc_example_key"
+  stored = tmp_path / "credits-client" / "credentials.json"
+  assert stored.stat().st_mode & 0o777 == 0o600
+  assert "mbc_example_key" not in stored.read_text()
+  assert "mobius.you" not in stored.read_text()
+  assert [p.name for p in stored.parent.iterdir()] == ["credentials.json"]
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
+
+  assert client.post("/api/identity/credits/unpair", headers=auth).json() == {"paired": False}
+  assert not stored.exists()
+
+
+def test_a_key_the_service_refuses_is_not_stored(client, auth, service, tmp_path):
+  service.answers["balance"] = (401, {"detail": {
+    "code": "invalid_api_key", "message": "Invalid API key."}})
+  refused = client.post(
+    "/api/identity/credits/pair",
+    json={"operator_url": "https://www.mobius.you/credits", "key": "mbc_revoked"},
+    headers=auth)
+  # Not 401: that would read as the caller's own Möbius sign-in expiring.
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "invalid_api_key"
+  assert not (tmp_path / "credits-client" / "credentials.json").exists()
+
+
+def test_an_address_without_a_credits_service_is_a_bad_gateway(client, auth, service):
+  service.answers["balance"] = (404, {"detail": "Not Found"})
+  refused = client.post(
+    "/api/identity/credits/pair",
+    json={"operator_url": "https://example.com", "key": "mbc_example_key"}, headers=auth)
+  assert refused.status_code == 502 and refused.json()["detail"]["code"] == "not_found"
+
+
+def _attacker_rewrites(stored, **fields):
+  """What an app able to write the file could do: keep what it cannot forge
+  (the sealed part) and change the rest."""
+  stored.write_text(json.dumps({**json.loads(stored.read_text()), **fields}))
+
+
+ATTACKER = "https://collector.attacker.example"
+
+
+def _the_key_went_only_to_the_paired_service(service):
+  assert service.calls
+  for call in service.calls:
+    assert call["url"].startswith("https://www.mobius.you/credits/"), call["url"]
+
+
+def test_a_credentials_file_pointed_at_another_address_never_sends_the_key_there(
+  client, auth, paired, tmp_path
+):
+  stored = tmp_path / "credits-client" / "credentials.json"
+  _attacker_rewrites(stored, operator_url=ATTACKER, service_url=ATTACKER)
+  paired.calls.clear()
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["service_host"] == "www.mobius.you"
+  _the_key_went_only_to_the_paired_service(paired)
+
+
+def _key_sealed_beside_a_clear_address(_current):
+  sealed_key = credits_client._fernet().encrypt(b"mbc_example_key").decode()
+  return {"operator_url": ATTACKER, "sealed_key": sealed_key}
+
+
+def _key_in_the_clear(_current):
+  return {"operator_url": ATTACKER, "key": "mbc_example_key"}
+
+
+def _sealed_pairing_altered(current):
+  sealed = current["sealed"]
+  middle = len(sealed) // 2
+  changed = "A" if sealed[middle] != "A" else "B"
+  return {"sealed": sealed[:middle] + changed + sealed[middle + 1:]}
+
+
+@pytest.mark.parametrize("tamper", [
+  _key_sealed_beside_a_clear_address, _key_in_the_clear, _sealed_pairing_altered,
+])
+def test_a_credentials_file_this_installation_did_not_seal_reads_as_unpaired(
+  client, auth, paired, tmp_path, tamper
+):
+  stored = tmp_path / "credits-client" / "credentials.json"
+  stored.write_text(json.dumps(tamper(json.loads(stored.read_text()))))
+  paired.calls.clear()
+  assert credits_client.load_credentials() is None
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "unpaired"
+  assert client.post("/api/identity/credits/withdraw", headers=auth).status_code == 409
+  assert not paired.calls
+
+
+def test_a_key_sealed_under_another_installation_secret_reads_as_unpaired(
+  paired, monkeypatch
+):
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+  monkeypatch.setattr(get_settings(), "secret_key", "a-different-installation-secret-0")
+  assert credits_client.load_credentials() is None
+  assert credits_client.summary()["mode"] == "unpaired"
+
+
+def test_overlapping_pairings_never_share_a_temporary_file(service, tmp_path, monkeypatch):
+  real_replace, temporaries = credits_client.os.replace, []
+
+  def record(source, target):
+    temporaries.append(source)
+    real_replace(source, target)
+
+  monkeypatch.setattr(credits_client.os, "replace", record)
+  credits_client.pair("https://www.mobius.you/credits", "mbc_first_key")
+  credits_client.pair("https://www.mobius.you/credits", "mbc_second_key")
+  assert len(set(temporaries)) == 2
+  assert credits_client.load_credentials()["key"] == "mbc_second_key"
+
+  def fail(_source, _target):
+    raise OSError("disk full")
+
+  monkeypatch.setattr(credits_client.os, "replace", fail)
+  with pytest.raises(OSError):
+    credits_client.pair("https://www.mobius.you/credits", "mbc_third_key")
+  folder = tmp_path / "credits-client"
+  assert [p.name for p in folder.iterdir()] == ["credentials.json"]
+  assert credits_client.load_credentials()["key"] == "mbc_second_key"
+
+
+@pytest.mark.parametrize(("url", "key"), [
+  ("https://www.mobius.you/credits", "sk_live_wrong_shape"),
+  ("http://credits.example", "mbc_example_key"),
+  ("https://credits.example:abc", "mbc_example_key"),
+  ("https://credits.example:99999", "mbc_example_key"),
+  ("https://[credits.example", "mbc_example_key"),
+  ("https://name:secret@credits.example", "mbc_example_key"),
+  ("https://name@credits.example", "mbc_example_key"),
+])
+def test_pairing_refuses_a_wrong_key_or_plain_http(client, auth, service, url, key):
+  refused = client.post("/api/identity/credits/pair",
+                        json={"operator_url": url, "key": key}, headers=auth)
+  assert refused.status_code == 422 and not service.calls
+
+
+def test_an_address_the_http_client_cannot_use_is_refused_not_a_crash(
+  client, auth, service, monkeypatch
+):
+  def invalid(*_args, **_kwargs):
+    raise httpx.InvalidURL("Invalid port")
+
+  monkeypatch.setattr(credits_client.httpx, "request", invalid)
+  refused = client.post("/api/identity/credits/pair", headers=auth, json={
+    "operator_url": "https://credits.example", "key": "mbc_example_key"})
+  assert refused.status_code == 422, refused.text
+
+
+def test_summary_passes_the_service_payout_fields_through(client, auth, paired):
+  payouts = {"earned_micro": 2_000_000, "withdrawable_micro": 1_000_000,
+             "keepable_micro": 1_500_000, "withdrawal_status": "pending",
+             "destination": "…ab12", "cooldown_ends_at": "2026-11-05T00:00:00+00:00"}
+  paired.answers["payouts"] = (200, payouts)
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["service_host"] == "www.mobius.you" and body["error"] is None
+  assert body["earnings"] == payouts
+
+
+def test_a_charge_only_key_reads_its_balance_without_an_error(client, auth, paired):
+  paired.answers["payouts"] = (403, {"detail": {
+    "code": "key_scope", "message": "this key may only read and pay for calls"}})
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["balance"] == {"balance": "0.00"}
+  assert body["earnings"] is None and body["error"] is None
+
+
+def test_an_unreachable_service_is_an_error_not_a_zero(client, auth, paired, monkeypatch):
+  def unreachable(*_args, **_kwargs):
+    raise httpx.ConnectError("down")
+
+  monkeypatch.setattr(credits_client.httpx, "request", unreachable)
+  body = client.get("/api/identity/credits", headers=auth).json()
+  assert body["balance"] is None
+  assert body["error"]["message"] == "Could not reach www.mobius.you."
+
+
+def test_owner_actions_reach_the_service_routes(client, auth, paired):
+  checkout = "https://checkout.stripe.com/c/pay/cs_test_a1#fid=x"
+  paired.answers["topups"] = (200, {"topup_id": TOPUP_ID, "checkout_url": checkout})
+  paired.answers["payouts/connect"] = (
+    200, {"connect_url": "https://connect.stripe.com/setup/e/acct_1/abc"})
+  started = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 1000, "waiver_accepted": True})
+  assert started.json() == {"checkout_url": checkout, "topup_id": TOPUP_ID}
+  assert paired.calls[-1]["json"] == {
+    "amount_cents": 1000, "waiver_accepted": True}
+
+  requests = [
+    ("get", f"/api/identity/credits/topups/{TOPUP_ID}", None, "GET", f"topups/{TOPUP_ID}"),
+    ("get", "/api/identity/credits/transactions?limit=500", None,
+     "GET", "transactions?limit=200"),
+    ("post", "/api/identity/credits/model-funding",
+     {"amount_micro": 5_000_000, "idempotency_key": "fund-0001"}, "POST", "model-funding"),
+    ("get", "/api/identity/credits/prices/ana?app_slug=prompts", None,
+     "GET", "prices/ana?app_slug=prompts"),
+    ("put", "/api/identity/credits/prices/prompts/run", {"price_micro": 250_000},
+     "PUT", "priced-actions/prompts/run"),
+    ("post", "/api/identity/credits/connect", None,
+     "POST", "payouts/connect"),
+    ("post", "/api/identity/credits/convert", None, "POST", "payouts/convert"),
+    ("post", "/api/identity/credits/withdraw", None, "POST", "payouts/withdraw"),
+    ("post", "/api/identity/credits/disconnect", None, "POST", "payouts/disconnect"),
+  ]
+  for verb, route, body, method, path in requests:
+    answer = getattr(client, verb)(route, headers=auth, **({"json": body} if body else {}))
+    assert answer.status_code == 200, (route, answer.text)
+    call = paired.calls[-1]
+    assert (call["method"], call["url"].split("/api/billing/", 1)[1]) == (method, path)
+  assert paired.calls[-5]["json"] == {
+    "price_micro": 250_000, "description": None, "enabled": True}
+  assert paired.calls[-4]["json"] == {}
+
+
+@pytest.mark.parametrize("page", [
+  "javascript:alert(document.cookie)",
+  "data:text/html,<script>alert(1)</script>",
+  "http://checkout.stripe.com/c/pay/cs_test_a1",
+  "https://checkout.stripe.com.example.net/c/pay",
+  "https://checkout.stripe.com@example.net/c/pay",
+  "https://checkout.stripe.com:8443/c/pay",
+  "https://checkout.stripe.com:bad/c/pay",
+  "https://[checkout.stripe.com/c/pay",
+  "https://connect.stripe.com/setup/e/acct_1/abc",
+  "",
+  None,
+])
+def test_a_checkout_page_that_is_not_stripes_is_never_passed_on(client, auth, paired, page):
+  paired.answers["topups"] = (200, {"topup_id": TOPUP_ID, "checkout_url": page})
+  refused = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 1000, "waiver_accepted": True})
+  assert refused.status_code == 502
+  assert refused.json()["detail"]["code"] == "unexpected_page"
+
+
+@pytest.mark.parametrize("page", [
+  "javascript:alert(1)",
+  "https://checkout.stripe.com/c/pay/cs_test_a1",
+  "https://connect.stripe.com.example.net/setup",
+])
+def test_a_payout_setup_page_that_is_not_stripes_is_never_passed_on(
+  client, auth, paired, page,
+):
+  paired.answers["payouts/connect"] = (200, {"connect_url": page})
+  refused = client.post("/api/identity/credits/connect", headers=auth, json={})
+  assert refused.status_code == 502
+  assert refused.json()["detail"]["code"] == "unexpected_page"
+
+
+def test_owner_actions_before_pairing_say_so(client, auth, service):
+  refused = client.post("/api/identity/credits/withdraw", headers=auth)
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "not_paired"
+  assert not service.calls
+
+
+def test_only_an_app_service_with_spend_credits_can_charge(client, auth, db, paired):
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
+  for headers in (_as(db, granted, None), _as(db, granted, "public"),
+                  _as(db, ungranted, "private"), auth):
+    assert client.post("/api/identity/credits/charges", json=CHARGE,
+                       headers=headers).status_code == 403
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.50"})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, granted, "private"))
+  assert paid.status_code == 200 and paid.json()["charge_id"] == "c1"
+  # The service learns which local app paid, for the owner's history.
+  assert paired.calls[-1]["json"] == {
+    **CHARGE, "buyer_app": "granted",
+    "idempotency_key": credits_client.app_scoped_key(
+      f"app:{granted.id}", CHARGE["idempotency_key"]),
+  }
+
+
+def test_an_app_pays_only_the_sellers_its_grant_lists(client, auth, db, paired):
+  app = _app(db, "granted")
+  calls = len(paired.calls)
+  for other in ({"seller": "bob"}, {"app": "other-app"}):
+    refused = client.post("/api/identity/credits/charges", json={**CHARGE, **other},
+                          headers=_as(db, app, "private"))
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["code"] == "seller_not_allowed"
+  assert len(paired.calls) == calls
+
+
+def test_a_marketplace_pays_any_creator_of_its_app_and_nothing_else(client, auth, db, paired):
+  app = _app(db, "marketplace", spend_credits=("*/prompts",))
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.50"})
+  for seller in ("ana", "bob"):
+    paid = client.post("/api/identity/credits/charges", json={**CHARGE, "seller": seller},
+                       headers=headers)
+    assert paid.status_code == 200, paid.text
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "app": "notes"},
+                        headers=headers)
+  assert refused.status_code == 403
+  assert refused.json()["detail"]["code"] == "seller_not_allowed"
+  assert len(paired.calls) == calls
+
+
+def test_a_local_app_spends_without_a_standing_grant(client, auth, db, paired):
+  """Spending needs no one-time answer: every charge waits for the owner's Pay."""
+  app = _app(db, "local-payer", spend_credits=("*/prompts",), store=False)
+  assert not app_consent.gated(app)
+  paired.answers["charges"] = (200, {"charge_id": "c2", "amount": "0.50"})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private"))
+  assert paid.status_code == 200 and paid.json()["charge_id"] == "c2"
+
+
+def test_a_local_app_that_declares_credits_manage_is_only_a_payer(
+  client, auth, db, paired, real_payments,
+):
+  """``credits_manage`` is Store-only. A local app that declares it still
+  pays, each charge waiting for Pay, but never learns the owner's balance."""
+  app = _app(db, "local-manage-pay", spend_credits=("*/prompts",), store=False, credits_manage=True)
+  assert not deps.app_manages_credits(app)
+  headers = _as(db, app, "private")
+  held = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert held.status_code == 409 and held.json()["detail"]["code"] == "confirmation_required"
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40", "balance": "9.60",
+                                     "balance_micro": 9_600_000})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert paid.status_code == 200 and paid.json() == {"charge_id": "c1", "amount": "0.40"}
+
+
+@pytest.mark.parametrize("through_frame", [False, True], ids=["agent", "app-frame"])
+def test_a_service_cannot_launder_helper_lineage_into_spending_credits(
+  client, auth, db, paired, through_frame,
+):
+  from tests.test_app_services import SERVICE_TOKEN, _service_agent_token, _service_app
+
+  app = _service_app(db, service_bytes=SERVICE_TOKEN)
+  app.manifest_url = "https://store.example/service-test/mobius.json"
+  app.capability_contract = {
+    **app.capability_contract, "data": {"spend_credits": ["ana/prompts"]},
+  }
+  assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
+  db.commit()
+  helper = _service_agent_token(db, delegated=True)
+  paired.answers["charges"] = (200, {"charge_id": "c1"})
+  for headers, delegated in (({"Authorization": f"Bearer {helper}"}, True), (auth, False)):
+    if through_frame:
+      frame = client.post("/api/auth/app-token", headers=headers, json={"app_id": app.id})
+      assert frame.status_code == 200, frame.text
+      headers = {"Authorization": f"Bearer {frame.json()['token']}"}
+    invocation = client.get(f"/api/apps/{app.id}/service/token", headers=headers)
+    assert invocation.status_code == 200, invocation.text
+    token = invocation.json()["token"]
+    principal = deps.get_principal(token, db)
+    assert principal.app_is_service
+    assert principal.delegation_id == ("service-helper" if delegated else None)
+    calls = len(paired.calls)
+    charged = client.post("/api/identity/credits/charges", json=CHARGE,
+                          headers={"Authorization": f"Bearer {token}"})
+    assert charged.status_code == (403 if delegated else 200), charged.text
+    assert len(paired.calls) == calls + (0 if delegated else 1)
+    if delegated:
+      assert "Delegated" in charged.json()["detail"]
+    else:
+      assert charged.json()["charge_id"] == "c1"
+
+
+def test_an_app_that_spends_credits_can_read_the_price_it_pays(client, auth, db, paired):
+  granted, ungranted = _app(db, "granted"), _app(db, "ungranted", spend_credits=())
+  path = "/api/identity/credits/prices/ana?app_slug=prompts"
+  paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [{"price_micro": 250_000}]})
+  for headers in (_as(db, granted, "private"), _as(db, granted, None)):
+    answer = client.get(path, headers=headers)
+    assert answer.status_code == 200
+    assert answer.json() == {"prices": [{"price_micro": 250_000}]}
+  calls = len(paired.calls)
+  refused = client.get(path, headers=_as(db, ungranted, "private"))
+  assert refused.status_code == 403 and "spend_credits" in refused.json()["detail"]
+  assert len(paired.calls) == calls
+
+
+def test_a_shared_browser_guest_cannot_spend_the_owners_credits(client, auth, db):
+  owner = db.query(models.Owner).first()
+  guest = deps.Principal(owner=owner, app_id=1, app_is_service=True,
+                         browser=BrowserLineage("grant-1"))
+  with pytest.raises(HTTPException) as refused:
+    deps.get_credits_spender(principal=guest, db=db)
+  assert refused.value.status_code == 403
+
+
+@pytest.mark.parametrize(("status", "detail"), [
+  (402, {"code": "insufficient_credits", "message": "not enough credits",
+         "required_micro": 500_000, "available_micro": 0}),
+  (409, {"code": "price_changed", "message": "the price is higher than the caller agreed to",
+         "price_micro": 750_000, "max_price_micro": 500_000}),
+])
+def test_a_refused_charge_reaches_a_credits_manager_with_its_full_details(
+  client, auth, db, paired, status, detail
+):
+  app = _app(db, "granted", credits_manage=True)
+  paired.answers["charges"] = (status, {"detail": detail})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == status
+  assert refused.json()["detail"] == detail
+
+
+def test_a_spend_only_app_never_learns_the_balance_from_its_charge(client, auth, db, paired):
+  """A payer sees only its own charge, never the owner's running balance."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (200, {
+    "charge_id": "c1", "amount_micro": 500_000, "amount": "0.50",
+    "seller_micro": 450_000, "platform_micro": 50_000,
+    "balance_micro": 9_500_000, "balance": "9.50", "replayed": False})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private"))
+  assert paid.status_code == 200
+  assert paid.json() == {
+    "charge_id": "c1", "amount_micro": 500_000, "amount": "0.50", "replayed": False}
+
+
+def test_a_refused_charge_hides_the_balance_from_a_spend_only_app(client, auth, db, paired):
+  """A refusal reaches a payer without the figure that reveals the balance."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "insufficient_credits", "message": "not enough credits",
+    "required_micro": 500_000, "available_micro": 250_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 402
+  detail = refused.json()["detail"]
+  assert detail["code"] == "insufficient_credits" and detail["required_micro"] == 500_000
+  assert "available_micro" not in detail
+
+
+def test_a_refused_charge_hides_every_owner_figure_from_a_spend_only_app(
+  client, auth, db, paired
+):
+  """Only the fields about the app's own call pass; a spend cap, what the key
+  has spent, or any field the service adds later never reaches a payer."""
+  app = _app(db, "granted")
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "key_spend_cap", "message": "this key reached its spend cap",
+    "cap_micro": 10_000_000, "spent_micro": 9_800_000, "remaining_micro": 200_000,
+    "balance_micro": 42_000_000, "window": "day", "required_micro": 500_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 402
+  assert refused.json()["detail"] == {
+    "code": "key_spend_cap", "message": "this key reached its spend cap",
+    "required_micro": 500_000}
+
+
+def test_a_spend_only_app_still_learns_a_changed_price(client, auth, db, paired):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (409, {"detail": {
+    "code": "price_changed", "message": "the price is higher than the caller agreed to",
+    "price_micro": 750_000, "max_price_micro": 500_000, "available_micro": 1}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 409
+  assert refused.json()["detail"] == {
+    "code": "price_changed", "message": "the price is higher than the caller agreed to",
+    "price_micro": 750_000, "max_price_micro": 500_000}
+
+
+def test_a_credits_manager_still_sees_the_balance_on_its_charge(client, auth, db, paired):
+  """An app that manages credits keeps the balance a charge answer carries."""
+  app = _app(db, "manager", credits_manage=True)
+  paired.answers["charges"] = (200, {
+    "charge_id": "c1", "amount": "0.50", "balance_micro": 9_500_000,
+    "balance": "9.50", "replayed": False})
+  paid = client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private"))
+  assert paid.status_code == 200
+  assert paid.json()["balance_micro"] == 9_500_000 and paid.json()["balance"] == "9.50"
+
+
+def test_charging_before_pairing_says_so(client, auth, db, service):
+  app = _app(db, "granted")
+  answer = client.post("/api/identity/credits/charges", json=CHARGE,
+                       headers=_as(db, app, "private"))
+  assert answer.status_code == 409 and answer.json()["detail"]["code"] == "not_paired"
+  assert not service.calls
+
+
+CHARGE_ID = "0b5c2a3e-6f1d-4c8e-9a7b-1d2e3f405162"
+RECEIPT = {"charge_id": CHARGE_ID, "seller": "ana", "buyer": "bo", "app": "prompts",
+           "action": "run", "amount_micro": 500_000}
+
+
+def _receipt(service, *, handle="ana", **fields):
+  service.answers[f"charges/{CHARGE_ID}"] = (200, {**RECEIPT, **fields})
+  service.answers["balance"] = (200, {"balance_micro": 0, "handle": handle})
+
+
+def _checker(db, slug, *, apps=("prompts",), **options):
+  return _app(db, slug, spend_credits=(), check_credits_charges=list(apps), **options)
+
+
+def test_checking_a_charge_needs_its_own_read_only_grant_not_a_spend_grant(
+  client, auth, db, paired,
+):
+  checker, spender = _checker(db, "market"), _app(db, "spender")
+  url = f"/api/identity/credits/charges/{CHARGE_ID}"
+  _receipt(paired)
+  calls = len(paired.calls)
+  for headers in (_as(db, checker, None), _as(db, spender, "private"),
+                  _as(db, spender, "public"), auth):
+    refused = client.get(url, headers=headers)
+    assert refused.status_code == 403, refused.text
+  assert "check_credits_charges" in client.get(
+    url, headers=_as(db, spender, "private")).json()["detail"]
+  assert len(paired.calls) == calls
+  # Both lanes: the public one is where a marketplace checks a visitor's claim.
+  for lane in ("private", "public"):
+    checked = client.get(url, headers=_as(db, checker, lane))
+    assert checked.status_code == 200, checked.text
+    assert checked.json() == RECEIPT
+  assert paired.calls[-2]["url"].endswith(f"/api/billing/charges/{CHARGE_ID}")
+
+
+@pytest.mark.parametrize(("fields", "reads_handle"), [
+  ({"app": "notes"}, False),            # this owner's sale of an app it does not name
+  ({"seller": "cy"}, True),             # another creator's sale of the same app
+  ({"seller": "cy", "buyer": "ana"}, True),  # the owner's own purchase
+  ({"seller": None}, False),
+])
+def test_a_receipt_is_shown_only_for_this_owners_sale_of_a_named_app(
+  client, auth, db, paired, fields, reads_handle,
+):
+  checker = _checker(db, "market")
+  _receipt(paired, **fields)
+  paired.calls.clear()
+  refused = client.get(f"/api/identity/credits/charges/{CHARGE_ID}",
+                       headers=_as(db, checker, "public"))
+  assert refused.status_code == 404
+  assert refused.json()["detail"]["code"] == "charge_not_found"
+  assert any(call["url"].endswith("/balance") for call in paired.calls) is reads_handle
+
+
+def test_a_renamed_account_never_matches_its_old_handle(paired):
+  _receipt(paired, handle="ana-renamed")
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(CHARGE_ID, ["prompts"])
+  assert refused.value.code == "charge_not_found"
+
+
+def test_a_local_app_may_check_its_own_sales(client, auth, db, paired):
+  local = _checker(db, "local-market", store=False)
+  _receipt(paired)
+  checked = client.get(f"/api/identity/credits/charges/{CHARGE_ID}",
+                       headers=_as(db, local, "public"))
+  assert checked.status_code == 200 and checked.json()["seller"] == "ana"
+
+
+def test_a_store_app_cannot_check_charges_before_the_owner_accepts_the_grant(
+  client, auth, db, paired,
+):
+  app = _app(db, "market-update", spend_credits=())
+  headers = _as(db, app, "public")
+  # An update that newly declares the grant waits for consent; its tokens stop.
+  app.capability_contract = {"data": {"check_credits_charges": ["prompts"]}}
+  db.commit()
+  _receipt(paired)
+  paired.calls.clear()
+  refused = client.get(f"/api/identity/credits/charges/{CHARGE_ID}", headers=headers)
+  assert refused.status_code == 401, refused.text
+  assert refused.json()["detail"] == "App has not been approved."
+  assert not paired.calls
+
+
+@pytest.mark.parametrize("charge_id", [
+  "..", ".", "c-1/../balance", "c 1", "", "c-1", CHARGE_ID.upper(), CHARGE_ID + "0",
+])
+def test_an_invalid_charge_id_never_sends_the_installation_key(paired, charge_id):
+  paired.calls.clear()
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(charge_id, ["prompts"])
+  assert refused.value.code == "invalid_name"
+  assert not paired.calls
+
+
+def test_a_failed_charge_receipt_read_keeps_the_services_refusal(paired):
+  # Reading a receipt moves no money, so a 5xx is not an unknown charge outcome.
+  paired.answers[f"charges/{CHARGE_ID}"] = (
+    503, {"detail": {"code": "busy", "message": "busy"}})
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    credits_client.own_sale_receipt(CHARGE_ID, ["prompts"])
+  assert refused.value.code == "busy" and refused.value.status == 503
+
+
+def test_only_the_public_resolver_marks_the_public_lane(auth, db):
+  app = _checker(db, "lane")
+  for lane, public in (("public", True), ("private", False), (None, False)):
+    token = _as(db, app, lane)["Authorization"].split(" ", 1)[1]
+    principal = deps.get_principal_or_public_service(token=token, db=db)
+    assert principal.app_is_public_service is public
+  with pytest.raises(HTTPException):
+    deps.get_principal(token=_as(db, app, "public")["Authorization"].split(" ", 1)[1], db=db)
+
+
+def test_settings_reads_the_amounts_the_service_sells(client, auth, service):
+  credits_client.pair("https://www.mobius.you/credits", "mbc_example_key")
+  terms = {"currency": "usd", "amounts_cents": [500, 1000], "waiver_required": True}
+  service.answers["purchase-terms"] = (200, terms)
+  read = client.get("/api/identity/credits/purchase-terms", headers=auth)
+  assert read.status_code == 200, read.text
+  assert service.calls[-1]["url"] == "https://www.mobius.you/credits/api/billing/purchase-terms"
+  pairing = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert read.json() == {**terms, "pairing": pairing}
+
+
+# --- Credits management is its own grant ---------------------------------------
+
+# Every route that reads or moves the owner's money, with a body it accepts.
+OWNER_CREDIT_ROUTES = [
+  ("GET", "/api/identity/credits", None),
+  ("GET", "/api/identity/credits/transactions", None),
+  ("GET", "/api/identity/credits/purchase-terms", None),
+  ("GET", f"/api/identity/credits/topups/{TOPUP_ID}", None),
+  ("GET", "/api/identity/credits/prices/ana", None),
+  ("POST", "/api/identity/credits/pair",
+   {"operator_url": "https://www.mobius.you/credits", "key": "mbc_other_key"}),
+  ("POST", "/api/identity/credits/topup", {"amount_cents": 500}),
+  ("POST", "/api/identity/credits/model-funding",
+   {"amount_micro": 1_000_000, "idempotency_key": "fund-0001"}),
+  ("PUT", "/api/identity/credits/prices/prompts/run", {"price_micro": 250_000}),
+  ("POST", "/api/identity/credits/connect", {}),
+  ("POST", "/api/identity/credits/convert", None),
+  ("POST", "/api/identity/credits/withdraw", None),
+  ("POST", "/api/identity/credits/disconnect", None),
+  ("POST", "/api/identity/credits/pair/account", None),
+  ("POST", "/api/identity/credits/unpair", None),
+]
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+@pytest.mark.parametrize("has_package_id", [False, True], ids=["local", "local-package"])
+@pytest.mark.parametrize("consented", [False, True], ids=["unanswered", "after-consent"])
+def test_local_manifest_credits_manage_never_grants_credits_access(
+  client, auth, db, paired, service_scope, has_package_id, consented,
+):
+  """``credits_manage`` stays Store-only: an editable local manifest never
+  reaches the owner's credits account, even with an accepted consent record."""
+  from app.app_capabilities import contract_from_manifest
+
+  app = _app(db, "local-credits", store=False,
+             package_id="local-package" if has_package_id else None)
+  app.capability_contract = contract_from_manifest({
+    "permissions": {"credits_manage": True, "spend_credits": ["ana/prompts"]},
+  })
+  if consented:
+    # Whatever answer a local app's record holds, it grants no management.
+    assert app_consent.accept(app, app_consent.request_digest(app_consent.current_rows(app)))
+    assert app.accepted_consent is not None
+  db.commit()
+  assert not app_consent.gated(app) and not deps.app_manages_credits(app)
+  headers = _as(db, app, service_scope)
+  calls = len(paired.calls)
+  for method, path, body in OWNER_CREDIT_ROUTES:
+    answer = client.request(method, path, json=body, headers=headers)
+    if path.endswith("/prices/ana"):
+      # Prices are public, and a paying app shows one before it charges.
+      assert answer.status_code == 200, answer.text
+      continue
+    assert answer.status_code == 403, (path, answer.text)
+    assert "installed Store app with accepted consent" in answer.json()["detail"]
+  assert [c["url"].rsplit("/", 2)[-2:] for c in paired.calls[calls:]] == [["prices", "ana"]]
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("gate", [deps.get_credits_reader, deps.get_credits_controller,
+                                  deps.get_credits_spender, deps.get_credits_price_reader])
+def test_credits_gates_require_the_store_contract_to_be_accepted(auth, db, gate):
+  app = _app(db, "credits-manager", credits_manage=True)
+  owner = db.query(models.Owner).first()
+  principal = deps.Principal(owner=owner, app_id=app.id, app_is_service=True)
+  assert gate(principal=principal, db=db) is not None
+  app.accepted_consent = None
+  db.commit()
+  with pytest.raises(HTTPException) as refused:
+    gate(principal=principal, db=db)
+  assert refused.value.status_code == 403
+  assert "installed Store app with accepted consent" in refused.value.detail
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_an_app_approved_only_to_manage_identity_cannot_reach_the_owners_credits(
+  client, auth, db, paired, service_scope
+):
+  """Consent to the sign-in link is not consent to see or move money."""
+  app = _app(db, "identity-only", spend_credits=(), identity_manage=True)
+  headers = _as(db, app, service_scope)
+  calls = len(paired.calls)
+  for method, path, body in OWNER_CREDIT_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_an_app_approved_to_manage_credits_reaches_them(
+  client, auth, db, paired, service_scope
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _as(db, app, service_scope)
+  paired.answers["balance"] = (200, {"balance": "2.25"})
+  read = client.get("/api/identity/credits", headers=headers)
+  assert read.status_code == 200 and read.json()["balance"] == {"balance": "2.25"}
+  for method, path, body in OWNER_CREDIT_ROUTES:
+    if path.endswith(("/pair", "/pair/account", "/unpair", "/topup", "/connect")):
+      continue  # Their answers depend on the service's page; covered above.
+    answer = client.request(method, path, json=body, headers=headers)
+    assert answer.status_code == 200, (path, answer.text)
+
+
+# Moving money is an installation-owner control; seeing it is the owner's own.
+OWNER_ACTION_ROUTES = [route for route in OWNER_CREDIT_ROUTES if route[0] != "GET"]
+OWNER_PRIVATE_ROUTES = [
+  route for route in OWNER_CREDIT_ROUTES if not route[1].endswith("/prices/ana")]
+
+
+def _guest_lineage(db):
+  owner = db.query(models.Owner).first()
+  grant, invitation = link_grant(db, owner, "Guest")
+  _secret, session, _grant, _owner = redeem_invitation(db, invitation)
+  return BrowserLineage(grant.id, session.id)
+
+
+def _guest(db, app=None):
+  """A shared-browser guest's bearer, or the bearer of an app it opened."""
+  owner = db.query(models.Owner).first()
+  lineage = _guest_lineage(db)
+  if app is None:
+    token = create_access_token(
+      {"sub": owner.username}, token_epoch=owner.token_epoch, browser=lineage)
+  else:
+    token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
+                             consent=app_consent.session_id(app), browser=lineage)
+  return {"Authorization": f"Bearer {token}"}
+
+
+def _delegated_helper(db, app=None):
+  """A delegated helper's bearer, or the bearer of an app it opened."""
+  owner = db.query(models.Owner).first()
+  helper = {"delegation_id": "credits-helper", "delegation_chat": "credits-helper-chat"}
+  if app is None:
+    token = create_agent_token("credits-helper-chat", owner.username, owner.token_epoch,
+                               **helper)
+  else:
+    token = create_app_token(app.id, owner.username, owner.token_epoch, app.token_nonce,
+                             consent=app_consent.session_id(app), **helper)
+  return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.mark.parametrize("through_app", [False, True], ids=["owner-bearer", "credits-app"])
+def test_a_delegated_helper_cannot_move_the_owners_credits(
+  client, auth, db, paired, through_app
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _delegated_helper(db, app if through_app else None)
+  # It acts with its parent's tools, so it can still read the balance.
+  assert client.get("/api/identity/credits", headers=headers).status_code == 200
+  calls = len(paired.calls)
+  for method, path, body in OWNER_ACTION_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+
+
+@pytest.mark.parametrize("through_app", [False, True], ids=["owner-bearer", "credits-app"])
+def test_a_shared_browser_guest_cannot_see_or_move_the_owners_credits(
+  client, auth, db, paired, through_app
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _guest(db, app if through_app else None)
+  calls = len(paired.calls)
+  for method, path, body in OWNER_PRIVATE_ROUTES:
+    refused = client.request(method, path, json=body, headers=headers)
+    assert refused.status_code == 403, (path, refused.text)
+  assert len(paired.calls) == calls
+  assert credits_client.load_credentials()["key"] == "mbc_example_key"
+  # The same bearer is otherwise live: the refusal is the credits rule.
+  assert client.get("/api/identity/credits/prices/ana", headers=headers).status_code == 200
+
+
+def test_every_credits_route_has_exactly_one_gate():
+  """A route added without its gate would be open to every app; one with two
+  gates would mean one of them is not saying the whole rule."""
+  from app.routes import credits
+  gates = {deps.get_credits_reader, deps.get_credits_controller,
+           deps.get_credits_spender, deps.get_credits_price_reader,
+           deps.get_credits_receipt_reader}
+  routes = [route for route in credits.router.routes if hasattr(route, "dependant")]
+  assert len(routes) == len(OWNER_CREDIT_ROUTES) + 2  # and the app charge and its receipt
+  for route in routes:
+    used = {dep.call for dep in route.dependant.dependencies} & gates
+    assert len(used) == 1, (route.path, used)
+
+
+# --- One app's idempotency key never replays another's ---------------------------
+
+
+def test_two_apps_using_the_same_key_are_two_charges_upstream(client, auth, db, paired):
+  store_app = _app(db, "store-payer", package_id="pkg-store-payer")
+  unpackaged_app = _app(db, "unpackaged-payer")
+  paired.answers["charges"] = (200, {"charge_id": "c1"})
+  sent = []
+  for app in (store_app, unpackaged_app, store_app):
+    answer = client.post("/api/identity/credits/charges", json=CHARGE,
+                         headers=_as(db, app, "private"))
+    assert answer.status_code == 200, answer.text
+    sent.append(paired.calls[-1]["json"]["idempotency_key"])
+  # Different apps: different upstream keys. The same app retrying: the same.
+  assert sent[0] != sent[1]
+  assert sent[0] == sent[2]
+  assert CHARGE["idempotency_key"] not in sent
+
+
+def test_a_scoped_key_stays_within_the_services_key_limits():
+  for key in ("k" * 8, "x" * 200, "ünïcode-key/with:separators"):
+    scoped = credits_client.app_scoped_key("package:" + "p" * 128, key)
+    assert 8 <= len(scoped) <= 200 and scoped.isascii()
+  assert credits_client.app_scoped_key("app:1", "run-0001") != \
+    credits_client.app_scoped_key("app:2", "run-0001")
+
+
+# --- Purchase terms belong to one pairing --------------------------------------
+
+
+def test_pairing_again_with_another_key_changes_the_pairing(client, auth, paired):
+  first = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert first and client.get("/api/identity/credits", headers=auth).json()["pairing"] == first
+  credits_client.pair("https://www.mobius.you/credits/", "mbc_another_key")
+  second = client.get("/api/identity/credits", headers=auth).json()["pairing"]
+  assert second and second != first
+  credits_client.pair("https://credits.example.test", "mbc_another_key")
+  assert client.get("/api/identity/credits", headers=auth).json()["pairing"] not in (
+    first, second)
+  assert "mbc_" not in second
+
+
+def test_a_purchase_on_terms_from_an_earlier_pairing_buys_nothing(client, auth, paired):
+  paired.answers["purchase-terms"] = (200, {"currency": "gbp", "amounts_cents": [500]})
+  shown = client.get("/api/identity/credits/purchase-terms", headers=auth).json()
+  credits_client.pair("https://credits.example.test", "mbc_new_service_key")
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 500, "pairing": shown["pairing"]})
+  assert refused.status_code == 409
+  assert refused.json()["detail"]["code"] == "pairing_changed"
+  assert len(paired.calls) == calls
+
+  paired.answers["topups"] = (200, {
+    "checkout_url": "https://checkout.stripe.com/c/pay/cs_1", "topup_id": TOPUP_ID})
+  current = client.get("/api/identity/credits/purchase-terms", headers=auth).json()
+  started = client.post("/api/identity/credits/topup", headers=auth, json={
+    "amount_cents": 500, "pairing": current["pairing"]})
+  assert started.status_code == 200, started.text
+  assert paired.calls[-1]["url"] == "https://credits.example.test/api/billing/topups"
+
+
+# --- Path pieces cannot turn a public price read into a private account read ----
+
+
+@pytest.mark.parametrize("segment", ["%2e", "%2e%2e", "Ana", "ana.name"])
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_a_spending_app_cannot_escape_the_sellers_price_path(
+  client, auth, db, paired, segment, service_scope,
+):
+  app = _app(db, "price-reader")
+  calls = len(paired.calls)
+  refused = client.get(f"/api/identity/credits/prices/{segment}",
+                       headers=_as(db, app, service_scope))
+  assert refused.status_code == 422, refused.text
+  assert refused.json()["detail"]["code"] == "invalid_name"
+  assert len(paired.calls) == calls
+
+
+@pytest.mark.parametrize("piece", [".", "..", "../balance", "%2e%2e", "name?x=y",
+                                  "name#balance", "name\\balance", "name\n", ""])
+@pytest.mark.parametrize("field", ["seller", "topup_id", "app", "action", "app_slug"])
+def test_invalid_credits_names_never_send_the_installation_key(paired, piece, field):
+  calls = len(paired.calls)
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    if field == "seller":
+      credits_client.prices(piece)
+    elif field == "topup_id":
+      credits_client.read_topup(piece)
+    elif field == "app_slug":
+      credits_client.prices("ana", piece)
+    else:
+      credits_client.publish_price(piece if field == "app" else "prompts",
+                                   piece if field == "action" else "run", 1, None, True)
+  assert refused.value.status == 422 and refused.value.code == "invalid_name"
+  assert len(paired.calls) == calls
+
+
+@pytest.mark.parametrize("field,piece", [
+  ("seller", "a" * 41), ("seller", "Ana"),
+  ("app", "a" * 81), ("app", "Prompts"), ("action", "Run"),
+  ("topup_id", "not-a-uuid"),
+])
+def test_credits_names_use_the_services_handle_slug_and_id_formats(paired, field, piece):
+  calls = len(paired.calls)
+  with pytest.raises(credits_client.CreditsUnavailable) as refused:
+    if field == "seller":
+      credits_client.prices(piece)
+    elif field == "topup_id":
+      credits_client.read_topup(piece)
+    else:
+      credits_client.publish_price(piece if field == "app" else "prompts",
+                                   piece if field == "action" else "run", 1, None, True)
+  assert refused.value.status == 422
+  assert len(paired.calls) == calls
+
+
+def test_valid_credits_names_keep_the_service_path(paired):
+  credits_client.read_topup(TOPUP_ID)
+  assert paired.calls[-1]["url"].endswith(f"/topups/{TOPUP_ID}")
+  credits_client.prices("a" * 40, "a" + "._-9" * 19 + "xyz")
+  assert paired.calls[-1]["url"].endswith(
+    f"/prices/{'a' * 40}?app_slug={'a' + '._-9' * 19 + 'xyz'}")
+  credits_client.publish_price("app.v2_3-4", "run.v2_3-4", 1, None, True)
+  assert paired.calls[-1]["url"].endswith("/priced-actions/app.v2_3-4/run.v2_3-4")
+
+
+@pytest.mark.parametrize("service_scope", [None, "private"], ids=["frame", "service"])
+def test_a_consented_credits_manager_can_pair_and_unpair(
+  client, auth, db, paired, service_scope,
+):
+  app = _app(db, "credits-manager", spend_credits=(), credits_manage=True)
+  headers = _as(db, app, service_scope)
+  answer = client.post("/api/identity/credits/pair", headers=headers, json={
+    "operator_url": "https://credits.example", "key": "mbc_replacement"})
+  assert answer.status_code == 200, answer.text
+  assert credits_client.load_credentials()["operator_url"] == "https://credits.example"
+  assert credits_client.load_credentials()["key"] == "mbc_replacement"
+  assert client.post("/api/identity/credits/unpair", headers=headers).status_code == 200
+  assert credits_client.load_credentials() is None
+
+
+# --- An upstream server error is not proof that a charge failed -----------------
+
+
+UNKNOWN_CHARGE = {
+  "code": "charge_outcome_unknown",
+  "message": "The charge outcome is unknown. Retry with the same idempotency key.",
+}
+
+
+@pytest.mark.parametrize("status", [500, 502, 503, 504, 599])
+@pytest.mark.parametrize("body", ["Bad Gateway", {"detail": {
+  "code": "upstream_failed", "message": "Server failed.", "extra": "not a refusal"}}])
+def test_upstream_charge_failures_require_retrying_the_same_key(
+  client, auth, db, paired, status, body,
+):
+  app = _app(db, "granted")
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (status, body)
+  calls = len(paired.calls)
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert unknown.status_code == 503, unknown.text
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+  assert len(paired.calls) == calls + 1  # The client never retries a charge itself.
+  first = paired.calls[-1]["json"]
+
+  paired.answers["charges"] = (200, {"charge_id": "c1", "replayed": True})
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["replayed"] is True
+  assert paired.calls[-1]["json"] == first
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ReadTimeout,
+                                  httpx.RemoteProtocolError])
+def test_charge_transport_failures_report_an_unknown_outcome(
+  client, auth, db, paired, monkeypatch, error,
+):
+  app = _app(db, "granted")
+
+  def fail(*_args, **_kwargs):
+    raise error("Lost the response")
+
+  monkeypatch.setattr(credits_client.httpx, "request", fail)
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert unknown.status_code == 503
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+
+
+def test_an_unreadable_charge_receipt_also_has_an_unknown_outcome(client, auth, db, paired):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (200, "not a receipt")
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert unknown.status_code == 503
+  assert unknown.json()["detail"] == UNKNOWN_CHARGE
+
+
+def test_a_definite_missing_charge_endpoint_is_not_an_unknown_charge(
+  client, auth, db, paired,
+):
+  app = _app(db, "granted")
+  paired.answers["charges"] = (404, {"detail": "Not Found"})
+  answer = client.post("/api/identity/credits/charges", json=CHARGE,
+                       headers=_as(db, app, "private"))
+  assert answer.status_code == 502
+  assert answer.json()["detail"]["code"] == "not_found"
+
+
+@pytest.mark.parametrize("status", [500, 502, 504])
+def test_noncharge_server_errors_keep_the_service_refusal(client, auth, paired, status):
+  detail = {"code": "upstream_failed", "message": "Server failed."}
+  paired.answers["purchase-terms"] = (status, {"detail": detail})
+  answer = client.get("/api/identity/credits/purchase-terms", headers=auth)
+  assert answer.status_code == status
+  assert answer.json()["detail"] == detail
+
+
+@pytest.mark.parametrize("path,heading", [
+  ("CAPABILITIES.md", "### Paying for priced calls with credits"),
+  ("backend/scripts/seed-skills/building-apps.md", "## Priced calls paid with credits"),
+])
+def test_credits_docs_use_the_supported_pairing_flow(path, heading):
+  document = (Path(__file__).resolve().parents[2] / path).read_text()
+  section = document.split(heading, 1)[1].split("\n##", 1)[0]
+  assert "POST /api/identity/credits/pair" in section
+  assert "owner-only" not in section
+  assert "credits_manage" in section and "including frames" in section
+  assert "charge_outcome_unknown" in section and "5xx" in section
+  assert "Settings connect" in section and "planned" in section
+  assert "not_paired" in section and "has not connected credits yet" in section
+  assert "key_refused" in section and "invalid_api_key" in section
+  assert "Möbius · You" not in section
+
+
+# --- Every charge waits for the owner's Pay ---------------------------------------
+
+
+def _charges_upstream(service):
+  return [c for c in service.calls if c["url"].endswith("/api/billing/charges")]
+
+
+def test_every_charge_waits_for_the_owners_pay(client, auth, db, paired, chat, real_payments):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.50"})
+
+  held = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert held.status_code == 409
+  assert held.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired) == []
+
+  waiting = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
+  assert [(p["seller"], p["app"], p["description"], p["max_price"]) for p in waiting] == [
+    ("ana", "prompts", "Run: Meeting notes", "0.50")]
+  # Asking again before the owner answers raises no second question.
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  assert len(client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]) == 1
+
+  agent = create_agent_token(chat.id, "test", 0)
+  refused = client.post(f"/api/apps/{app.id}/credits-charges/{waiting[0]['id']}", json={"pay": True},
+                        headers={"Authorization": f"Bearer {agent}"})
+  assert refused.status_code == 403
+  assert _charges_upstream(paired) == []
+
+  paid = client.post(f"/api/apps/{app.id}/credits-charges/{waiting[0]['id']}", json={"pay": True},
+                     headers=auth)
+  assert paid.status_code == 200 and paid.json()["state"] == "confirmed"
+  charged = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert charged.status_code == 200 and charged.json()["charge_id"] == "c1"
+  assert len(_charges_upstream(paired)) == 1
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  # The app's next step failed and it retries the same charge: the owner is
+  # not asked to pay again, and the credits service replays the one charge.
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["charge_id"] == "c1"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_an_unpriced_action_is_refused_without_asking(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [
+    {"action": "other", "description": "Something else"},
+    {"action": "run", "description": "Switched off", "enabled": False}]})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 404 and refused.json()["detail"]["code"] == "price_not_found"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+
+@pytest.mark.parametrize("prices_answer", [
+  (503, "Server down"),
+  (401, {"detail": {"code": "invalid_api_key", "message": "Invalid API key."}}),
+], ids=["service-down", "key-refused"])
+def test_a_failed_price_lookup_refuses_without_asking(
+  client, auth, db, paired, real_payments, prices_answer,
+):
+  """A price that could not be read is never put to the owner as a Pay."""
+  app = _app(db, "payer")
+  paired.answers["prices/ana?app_slug=prompts"] = prices_answer
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code >= 400 and refused.json()["detail"]["code"] != "confirmation_required"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+
+@pytest.mark.parametrize("price_micro", [None, "400000", -1, True, 0.4],
+                         ids=["missing", "text", "negative", "bool", "fraction"])
+def test_an_unreadable_price_refuses_without_asking(
+  client, auth, db, paired, real_payments, price_micro,
+):
+  """A listed price with no readable amount is never put to the owner as a Pay."""
+  app = _app(db, "payer")
+  listed = {"action": "run", "description": "Run: Meeting notes"}
+  if price_micro is not None:
+    listed["price_micro"] = price_micro
+  paired.answers["prices/ana?app_slug=prompts"] = (200, {"prices": [listed]})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 502 and refused.json()["detail"]["code"] == "price_unreadable"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+  assert _charges_upstream(paired) == []
+
+
+def test_a_charge_before_pairing_refuses_without_asking(client, auth, db, service, real_payments):
+  app = _app(db, "payer")
+  refused = client.post("/api/identity/credits/charges", json=CHARGE,
+                        headers=_as(db, app, "private"))
+  assert refused.json()["detail"]["code"] == "not_paired"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_a_marketplace_cannot_name_the_wildcard_as_its_seller(client, auth, db, paired, real_payments):
+  """``*`` in a grant means any creator; no creator is literally called ``*``."""
+  app = _app(db, "marketplace", spend_credits=("*/prompts",))
+  assert not deps.spend_credits_allows(app, "*", "prompts")
+  assert deps.spend_credits_allows(app, "ana", "prompts")
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "seller": "*"},
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 403 and refused.json()["detail"]["code"] == "seller_not_allowed"
+  assert len(paired.calls) == calls  # not even a price lookup
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_the_question_shows_the_creators_price_and_the_apps_ceiling(
+  client, auth, db, paired, real_payments,
+):
+  app = _app(db, "payer")
+  assert client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private")).status_code == 409
+  [shown] = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
+  assert (shown["price"], shown["price_micro"], shown["max_price"]) == ("0.40", 400_000, "0.50")
+
+
+def test_a_price_above_the_apps_ceiling_refuses_without_asking(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "max_price_micro": 300_000},
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 409 and refused.json()["detail"]["code"] == "price_changed"
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_a_cancelled_payment_stays_refused_until_the_app_uses_a_new_key(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  """Cancel sticks: an app retrying the same key (even at another price) never
+  puts the payment to the owner again; only a new purchase, with a new key,
+  asks again."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  waiting = client.get(path, headers=auth).json()["payments"]
+  assert client.post(f"{path}/{waiting[0]['id']}", json={"pay": False}, headers=auth).status_code == 200
+  for retry in (CHARGE, CHARGE, {**CHARGE, "max_price_micro": 450_000}, CHARGE):
+    clock[0] += 60
+    declined = client.post("/api/identity/credits/charges", json=retry, headers=headers)
+    assert declined.status_code == 403
+    assert declined.json()["detail"]["code"] == "payment_declined"
+    assert client.get(path, headers=auth).json()["payments"] == []
+  fresh = client.post("/api/identity/credits/charges",
+                      json={**CHARGE, "idempotency_key": "run-00000002"}, headers=headers)
+  assert fresh.status_code == 409 and fresh.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired) == []
+
+
+def test_a_payment_unanswered_past_its_window_cannot_be_paid(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  clock[0] += credits_confirmations.CONFIRM_SECONDS + 1
+  late = client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  assert late.status_code == 409 and late.json()["detail"]["code"] == "payment_gone"
+  again = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert again.status_code == 409 and again.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired) == []
+
+
+@pytest.mark.parametrize("first, state, said", [
+  (True, "confirmed", "already paid"), (False, "declined", "already cancelled"),
+], ids=["paid", "cancelled"])
+def test_a_second_answer_is_told_the_first_rather_than_that_it_failed(
+  client, auth, db, paired, real_payments, first, state, said,
+):
+  """A double tap, or a second device, answering a payment already answered
+  hears how it was answered: a paid payment is never reported as failed, which
+  would send the owner to buy it again under a new key and pay twice."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40"})
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(path, headers=auth).json()["payments"][0]["id"]
+  assert client.post(f"{path}/{pid}", json={"pay": first}, headers=auth).status_code == 200
+  for again in (True, False):
+    late = client.post(f"{path}/{pid}", json={"pay": again}, headers=auth)
+    assert late.status_code == 409
+    detail = late.json()["detail"]
+    assert (detail["code"], detail["state"]) == ("payment_already_answered", state)
+    assert said in detail["message"]
+  # The first answer stands: a later Cancel never undoes a Pay, nor Pay a Cancel.
+  replay = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert replay.status_code == (200 if first else 403)
+  assert len(_charges_upstream(paired)) == (1 if first else 0)
+
+
+def test_an_answered_payment_is_gone_once_its_answer_lapses(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  path = f"/api/apps/{app.id}/credits-charges"
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(path, headers=auth).json()["payments"][0]["id"]
+  assert client.post(f"{path}/{pid}", json={"pay": True}, headers=auth).status_code == 200
+  clock[0] += credits_confirmations.CONFIRM_SECONDS - 1
+  held = client.post(f"{path}/{pid}", json={"pay": True}, headers=auth)
+  assert held.json()["detail"]["code"] == "payment_already_answered"
+  clock[0] += 2
+  gone = client.post(f"{path}/{pid}", json={"pay": True}, headers=auth)
+  assert gone.status_code == 409 and gone.json()["detail"]["code"] == "payment_gone"
+
+
+def test_a_card_payment_is_refused_rather_than_charged_from_credits(
+  client, auth, db, paired, real_payments,
+):
+  app = _app(db, "payer")
+  calls = len(paired.calls)
+  refused = client.post("/api/identity/credits/charges", json={**CHARGE, "method": "card"},
+                        headers=_as(db, app, "private"))
+  assert refused.status_code == 422
+  assert refused.json()["detail"]["code"] == "payment_method_unsupported"
+  assert len(paired.calls) == calls
+  assert client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"] == []
+
+
+def test_a_confirmation_covers_only_the_payment_the_owner_saw(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  waiting = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{waiting[0]['id']}", json={"pay": True}, headers=auth)
+  # Same key, a higher ceiling: not what the owner confirmed.
+  dearer = client.post("/api/identity/credits/charges",
+                       json={**CHARGE, "max_price_micro": 900_000}, headers=headers)
+  assert dearer.status_code == 409 and dearer.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired) == []
+
+
+def test_another_apps_payment_cannot_be_answered_through_this_app(client, auth, db, paired, real_payments):
+  payer, other = _app(db, "payer"), _app(db, "other")
+  assert client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, payer, "private")).status_code == 409
+  pid = client.get(f"/api/apps/{payer.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  wrong = client.post(f"/api/apps/{other.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  assert wrong.status_code == 409 and wrong.json()["detail"]["code"] == "payment_gone"
+
+
+def test_two_charges_at_once_both_wait_and_the_oldest_is_shown_first(
+  client, auth, db, paired, real_payments,
+):
+  """An app's concurrent charges queue rather than evict each other, so
+  paying one never strands the other as "no longer waiting"."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  first, second = CHARGE, {**CHARGE, "idempotency_key": "run-00000002"}
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.40"})
+  # Each retries while the other waits: neither question replaces the other.
+  for _ in range(2):
+    for charge in (first, second):
+      held = client.post("/api/identity/credits/charges", json=charge, headers=headers)
+      assert held.json()["detail"]["code"] == "confirmation_required"
+  path = f"/api/apps/{app.id}/credits-charges"
+  waiting = client.get(path, headers=auth).json()["payments"]
+  assert len(waiting) == 2
+  oldest = waiting[0]["id"]
+  assert client.post(f"{path}/{oldest}", json={"pay": True}, headers=auth).status_code == 200
+  assert client.post("/api/identity/credits/charges", json=first, headers=headers).status_code == 200
+  still = client.get(path, headers=auth).json()["payments"]
+  assert [p["id"] for p in still] == [waiting[1]["id"]]
+  assert client.post(f"{path}/{still[0]['id']}", json={"pay": True}, headers=auth).status_code == 200
+  assert client.post("/api/identity/credits/charges", json=second, headers=headers).status_code == 200
+
+
+def test_an_apps_waiting_payments_are_bounded(client, auth, db, paired, real_payments):
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  for n in range(credits_confirmations.MAX_WAITING_PER_APP):
+    held = client.post("/api/identity/credits/charges",
+                       json={**CHARGE, "idempotency_key": f"run-0000010{n}"}, headers=headers)
+    assert held.json()["detail"]["code"] == "confirmation_required"
+  over = client.post("/api/identity/credits/charges",
+                     json={**CHARGE, "idempotency_key": "run-00000199"}, headers=headers)
+  assert over.status_code == 429 and over.json()["detail"]["code"] == "too_many_payments_waiting"
+  waiting = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"]
+  assert len(waiting) == credits_confirmations.MAX_WAITING_PER_APP
+
+
+def test_a_replay_does_not_extend_a_confirmations_life(
+  client, auth, db, paired, real_payments, monkeypatch,
+):
+  """After Pay, the confirmation expires ten minutes later however often the
+  app replays the charge, so a stale app is asked to pay again."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  clock = [credits_confirmations.time.monotonic()]
+  monkeypatch.setattr(credits_confirmations.time, "monotonic", lambda: clock[0])
+  paired.answers["charges"] = (200, {"charge_id": "c1", "amount": "0.50"})
+
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 200
+
+  # A replay just before ten minutes still reads the confirmed answer.
+  clock[0] += credits_confirmations.CONFIRM_SECONDS - 1
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 200
+  # Past ten minutes from Pay, the confirmation is gone: the owner is asked anew.
+  clock[0] += 2
+  again = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert again.status_code == 409 and again.json()["detail"]["code"] == "confirmation_required"
+
+
+def test_a_definite_refusal_forgets_the_confirmation(client, auth, db, paired, real_payments):
+  """After Pay, a charge the service definitely refuses is forgotten, so the
+  owner is asked again instead of the refusal replaying silently."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+
+  paired.answers["charges"] = (402, {"detail": {
+    "code": "insufficient_credits", "message": "not enough credits", "required_micro": 500_000}})
+  refused = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert refused.status_code == 402 and refused.json()["detail"]["code"] == "insufficient_credits"
+  again = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert again.status_code == 409 and again.json()["detail"]["code"] == "confirmation_required"
+  assert _charges_upstream(paired)  # the refused charge did reach the service
+
+
+def test_an_unknown_charge_outcome_keeps_the_confirmation_for_a_replay(
+  client, auth, db, paired, real_payments,
+):
+  """An unknown outcome may have charged, so the same confirmed payment stays
+  for the retry to replay rather than ask the owner to pay twice."""
+  app = _app(db, "payer")
+  headers = _as(db, app, "private")
+  assert client.post("/api/identity/credits/charges", json=CHARGE, headers=headers).status_code == 409
+  pid = client.get(f"/api/apps/{app.id}/credits-charges", headers=auth).json()["payments"][0]["id"]
+  client.post(f"/api/apps/{app.id}/credits-charges/{pid}", json={"pay": True}, headers=auth)
+
+  paired.answers["charges"] = (503, "Server down")
+  unknown = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert unknown.status_code == 503 and unknown.json()["detail"]["code"] == "charge_outcome_unknown"
+  paired.answers["charges"] = (200, {"charge_id": "c1", "replayed": True})
+  retried = client.post("/api/identity/credits/charges", json=CHARGE, headers=headers)
+  assert retried.status_code == 200 and retried.json()["replayed"] is True
+
+
+def test_waiting_payments_are_the_owners_own_to_read(client, auth, db, paired, real_payments):
+  """The owner and their own top-level agent see the pending payments; a
+  shared-browser guest or a delegated helper authenticates but reads an empty
+  list, never the owner's payments and never an error."""
+  app = _app(db, "payer")
+  assert client.post("/api/identity/credits/charges", json=CHARGE,
+                     headers=_as(db, app, "private")).status_code == 409
+  path = f"/api/apps/{app.id}/credits-charges"
+  owner_view = client.get(path, headers=auth)
+  assert owner_view.status_code == 200 and len(owner_view.json()["payments"]) == 1
+  for headers in (_guest(db), _delegated_helper(db)):
+    hidden = client.get(path, headers=headers)
+    assert hidden.status_code == 200 and hidden.json()["payments"] == []

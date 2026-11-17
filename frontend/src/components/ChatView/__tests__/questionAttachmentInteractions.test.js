@@ -21,7 +21,8 @@ const vite = await createSsrRenderServer({
       if (id === 'question-card-hooks') return '\0question-card-hooks'
     },
     load(id) {
-      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => null;`
+      // The card's only context is the local answer outbox; a test sets it here.
+      if (id === '\0question-card-hooks') return `export * from '${hooksPath}'; export const useContext = () => globalThis.__questionCardLocalAnswers ?? null; export const useId = () => 'qcard';`
     },
   }],
 })
@@ -39,8 +40,12 @@ function find(tree, predicate) {
   assert.ok(element, 'expected rendered control')
   return element
 }
-const submit = tree => find(tree, node => node.props?.className === 'qcard__submit')
-const editor = (tree, question) => find(tree, node => node.props?.question === question)
+const submit = tree => find(tree, node => node.props?.className?.split(' ').includes('qcard__submit'))
+const editor = (tree, question) => {
+  const block = find(tree, node => node.props?.['data-question-index'] != null
+    && elements(node.props.children).some(child => child.props?.text === question))
+  return find(block.props.children, node => node.type === CustomAnswerArea)
+}
 const chipSets = tree => elements(tree).filter(node => Array.isArray(node.props?.files))
 const chips = (tree, index = 0) => chipSets(tree)[index]
 const sentSets = tree => elements(tree).filter(node => Array.isArray(node.props?.attachments))
@@ -49,6 +54,61 @@ const questions = [
   { question: 'First?', options: [{ label: 'A' }] },
   { question: 'Second?', multiSelect: true, options: [{ label: 'B' }] },
 ]
+
+test('Stop keeps a live card\'s hint, paperclip, and Submit in place, inert', () => {
+  const props = { chatId: 'stop-chat', questionId: 'stop-card', questions, onAnswer: () => true }
+  const controls = tree => elements(tree)
+    .map(node => node.props?.className?.split?.(' ')[0])
+    .filter(name => ['qcard__hint', 'qcard__attach', 'qcard__submit'].includes(name))
+  const card = renderHook(QuestionCard, props)
+  try {
+    const live = controls(card.result.current)
+    assert.deepEqual(live, ['qcard__hint', 'qcard__attach', 'qcard__hint', 'qcard__attach', 'qcard__submit'])
+    // Stop retires answerability in place: the same rows stay laid out so the
+    // card, and a bottom-anchored transcript, does not move.
+    card.rerender({ ...props, onAnswer: undefined, disabled: true })
+    assert.deepEqual(controls(card.result.current), live)
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props.children, 'Submit')
+    assert.match(submit(card.result.current).props.className, /qcard__submit--incomplete/,
+      'an unanswered stopped card keeps its quiet outline instead of a dimmed primary')
+    for (const clip of elements(card.result.current).filter(node => node.props?.className === 'qcard__attach')) {
+      assert.equal(clip.props.disabled, true)
+    }
+  } finally { card.unmount() }
+
+  // A card that was never answerable in this mount is history: it stays compact.
+  const history = renderHook(QuestionCard, { ...props, questionId: 'history-card', onAnswer: undefined, disabled: true })
+  try {
+    assert.deepEqual(controls(history.result.current), [])
+  } finally { history.unmount() }
+})
+
+test('a delivered answer awaiting its transcript keeps its status and inert slot when the question closes', () => {
+  // The outbox retried an answer and the server took it, so the chat no longer
+  // has a pending question, but the transcript has not recorded the answer yet.
+  globalThis.__questionCardLocalAnswers = [{
+    chatId: 'delivered-chat', deliveryOutcome: 'delivered',
+    body: { question_id: 'delivered-card', answers: { 'First?': 'A', 'Second?': 'B' } },
+  }]
+  const props = { chatId: 'delivered-chat', questionId: 'delivered-card', questions, onAnswer: () => true }
+  const rows = tree => elements(tree)
+    .map(node => node.props?.className?.split?.(' ')[0])
+    .filter(name => ['qcard__hint', 'qcard__attach', 'qcard__queue-status', 'qcard__submit'].includes(name))
+  const card = renderHook(QuestionCard, props)
+  try {
+    const live = rows(card.result.current)
+    assert.ok(live.includes('qcard__queue-status'))
+    card.rerender({ ...props, onAnswer: undefined, disabled: true })
+    assert.deepEqual(rows(card.result.current), live,
+      'closing the question must not collapse the card while its answer is confirmed')
+    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props.children, 'Confirming answer…')
+  } finally {
+    card.unmount()
+    delete globalThis.__questionCardLocalAnswers
+  }
+})
 
 test('pasting into question two keeps the file with that answer, upload gates submit, and submission locks all attachment edits', async () => {
   const originalFetch = globalThis.fetch
@@ -66,7 +126,15 @@ test('pasting into question two keeps the file with that answer, upload gates su
     onAnswer: (...args) => { posted = args; return new Promise(resolve => { finishAnswer = resolve }) },
   })
   try {
-    assert.equal(submit(card.result.current).props.disabled, true)
+    // Incomplete: tappable to find the missing answer, never submittable.
+    assert.equal(submit(card.result.current).props.disabled, false)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
+    const hint = tree => elements(tree).find(node => node.props?.className === 'qcard__submit-hint')
+    assert.equal(hint(card.result.current), undefined, 'no hint before a Submit attempt')
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted, undefined, 'an incomplete click guides; it never submits')
+    assert.equal(hint(card.result.current)?.props.children, 'Answer each question before submitting')
+    assert.equal(submit(card.result.current).props['aria-describedby'], hint(card.result.current).props.id)
     const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
     const uploading = editor(card.result.current, 'Second?').props.onPasteFiles([file])
     await tick()
@@ -81,7 +149,9 @@ test('pasting into question two keeps the file with that answer, upload gates su
     finishUpload({ ok: true, json: async () => [{ name: 'notes.txt', size: 5, mime_type: 'text/plain' }] })
     await uploading
     // The file answers question two only; question one still needs its own.
-    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted, undefined)
     editor(card.result.current, 'First?').props.onChange('first answer')
     assert.equal(submit(card.result.current).props.disabled, false)
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
@@ -306,7 +376,7 @@ test('a restored draft file for a replaced sole question never answers the new q
     const trays = () => elements(card.result.current).filter(node => node.props?.role === 'group')
       .map(tray => [tray.props['aria-label'], chips({ props: { children: tray.props.children } }).props.files.map(f => f.name)])
     assert.deepEqual(trays(), [['Files for this answer', []], ['Files for all answers', ['gone.txt']]])
-    assert.equal(submit(card.result.current).props.disabled, true)
+    assert.equal(submit(card.result.current).props['aria-disabled'], true)
     editor(card.result.current, 'New question?').props.onChange('typed answer')
     assert.equal(submit(card.result.current).props.disabled, false)
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
@@ -329,7 +399,7 @@ test('answer paste matches the composer: Markdown by default, plain on the short
   const paste = props => {
     const changes = []
     const box = renderHook(CustomAnswerArea, {
-      question: 'Q?', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
+      questionTextId: 'q-text', value: 'ab', canSubmit: false, onSubmitShortcut: () => {},
       onChange: value => changes.push(value), ...props,
     })
     let prevented = false
@@ -371,4 +441,70 @@ test('an answer takes at most 20 files and says so when more are attached', asyn
     const error = find(card.result.current, node => node.props?.className === 'qcard__submit-error')
     assert.equal(error.props.children, 'Attach at most 20 files to one card.')
   } finally { card.unmount(); globalThis.fetch = originalFetch }
+})
+
+test('explanation controls keep their clicks, explanation text picks, and keys pick the raw label', async () => {
+  const question = 'Install **both**?'
+  const label = '**Update**'
+  let posted
+  const card = renderHook(QuestionCard, { chatId: 'markdown-events', questionId: 'markdown-events-q',
+    questions: [{ question, options: [{ label, description: '[Notes](https://example.com)' }] }],
+    onAnswer: (...args) => { posted = args },
+  })
+  const option = () => find(card.result.current, node => node.props?.role === 'radio')
+  const container = () => find(card.result.current, node => node.props?.className?.split(' ').includes('qcard__opt'))
+  const inside = { contains: () => true }
+  try {
+    // A portaled image lightbox bubbles its backdrop click through React.
+    container().props.onClick({ detail: 1, currentTarget: { contains: () => false }, target: { closest: () => null } })
+    // A link, preview or copy button in the explanation, or the choice itself
+    // (which handles its own click), resolves to a control.
+    container().props.onClick({ detail: 0, currentTarget: inside, target: { closest: () => ({ tagName: 'A' }) } })
+    assert.equal(option().props['aria-checked'], false)
+    option().props.onKeyDown({ key: 'Enter', repeat: true, preventDefault: () => assert.fail('held keys repeat nothing') })
+    assert.equal(option().props['aria-checked'], false)
+    option().props.onKeyDown({ key: ' ', preventDefault: () => {} })
+    assert.equal(option().props['aria-checked'], true)
+    await submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
+    assert.equal(posted[0], `- ${question}: ${label}`)
+    assert.deepEqual(posted[1], { [question]: label })
+  } finally { card.unmount() }
+})
+
+test('the label control and explanation text both toggle multi-select without altering Markdown labels', () => {
+  const card = renderHook(QuestionCard, { chatId: 'markdown-multi', questionId: 'markdown-multi-q',
+    questions: [{ question: '**Choose**', multiSelect: true, options: [{ label: '**A**' }, { label: '`B`', description: 'Plain text' }] }],
+  })
+  const options = () => elements(card.result.current).filter(node => node.props?.role === 'checkbox')
+  const containers = () => elements(card.result.current).filter(node => node.props?.className?.split(' ').includes('qcard__opt'))
+  try {
+    options()[0].props.onClick({ detail: 0 })
+    containers()[1].props.onClick({ detail: 0, currentTarget: { contains: () => true }, target: { closest: () => null } })
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [true, true])
+    options()[0].props.onClick({ detail: 0 })
+    assert.deepEqual(options().map(node => node.props['aria-checked']), [false, true])
+    const described = options()[1]
+    assert.equal(find(containers()[1], node => node.props?.id === described.props['aria-describedby']).props.className, 'qcard__opt-desc')
+    assert.equal(options()[0].props['aria-describedby'], undefined)
+  } finally { card.unmount() }
+})
+
+test('an incomplete Submit focuses the first Markdown answer choice', () => {
+  const priorWindow = globalThis.window
+  globalThis.window = { ...priorWindow, matchMedia: () => ({ matches: true }) }
+  let focused = false
+  const card = renderHook(QuestionCard, { chatId: 'markdown-focus', questionId: 'markdown-focus-q',
+    questions: [{ question: '**Choose**', options: [{ label: '**A**' }] }],
+  })
+  const questionNode = {
+    scrollIntoView: () => {},
+    querySelector: selector => {
+      assert.equal(selector, '.qcard__opt-choice[tabindex="0"], textarea')
+      return { focus: () => { focused = true } }
+    },
+  }
+  try {
+    submit(card.result.current).props.onClick({ currentTarget: { closest: () => ({ querySelector: () => questionNode }) } })
+    assert.equal(focused, true)
+  } finally { card.unmount(); globalThis.window = priorWindow }
 })

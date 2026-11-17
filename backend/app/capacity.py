@@ -299,6 +299,8 @@ def capacity_snapshot(
     "alert_tier": tier,
     "alert_ladder": data_alert_ladder(data_total),
   }
+  from app.storage_guard import reserve_report
+  snapshot["recovery_reserve"] = reserve_report(data_dir)
   if include_domains:
     domain_fn = domains_reader or data_domains
     snapshot["domains"] = domain_fn(data_dir)

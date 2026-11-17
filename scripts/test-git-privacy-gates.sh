@@ -29,6 +29,7 @@ cp "$ROOT/scripts/install-hooks.sh" "$repo/scripts/install-hooks.sh"
 cp "$ROOT/scripts/githooks/pre-push" "$repo/scripts/githooks/pre-push"
 cp "$ROOT/scripts/frontend-deps.sh" "$repo/scripts/frontend-deps.sh"
 cp "$ROOT/scripts/check-frontend-deps.mjs" "$repo/scripts/check-frontend-deps.mjs"
+cp "$ROOT/scripts/wt-npm.sh" "$repo/scripts/wt-npm.sh"
 cp "$ROOT/scripts/submit-pr.sh" "$repo/scripts/submit-pr.sh"
 cp "$ROOT/scripts/check-private-paths.sh" "$repo/scripts/check-private-paths.sh"
 chmod +x "$repo/scripts/"*.sh "$repo/scripts/githooks/pre-push"
@@ -59,6 +60,8 @@ cmp -s "$repo/scripts/frontend-deps.sh" "$repo/.git/hooks/frontend-deps.sh" \
   || fail "installer did not install frontend dependency helper"
 cmp -s "$repo/scripts/check-frontend-deps.mjs" "$repo/.git/hooks/check-frontend-deps.mjs" \
   || fail "installer did not install frontend dependency checker"
+cmp -s "$repo/scripts/wt-npm.sh" "$repo/.git/hooks/wt-npm.sh" \
+  || fail "installer did not install the frontend command runner"
 [ "$(git -C "$repo" rev-parse --path-format=absolute --git-path hooks)" = \
   "$repo/.git/hooks" ] || fail "installer did not activate the repository hook directory"
 

@@ -5,6 +5,7 @@ export function resolveComposerEnterAction(event, {
   canSteer = false,
   canRequestSteer = canSteer,
   canSubmitSteer = canRequestSteer,
+  canSendQueue = false,
   isTouchPrimary = false,
 } = {}) {
   if (!event || event.key !== 'Enter' || event.shiftKey) return null
@@ -17,6 +18,7 @@ export function resolveComposerEnterAction(event, {
     return 'submit'
   }
   if (canRequestSteer) return 'steer'
+  if (canSendQueue) return 'send-queue'
   return 'noop'
 }
 

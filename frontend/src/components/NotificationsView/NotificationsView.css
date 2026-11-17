@@ -242,8 +242,8 @@
 }
 
 .notifications__update-action--primary {
-  border-color: var(--accent);
-  background: var(--accent);
+  border-color: var(--accent-fill, var(--accent));
+  background: var(--accent-fill, var(--accent));
   color: var(--accent-fg, #fff);
 }
 
@@ -253,8 +253,8 @@
   }
 
   .notifications__update-action--primary:hover {
-    border-color: color-mix(in srgb, var(--accent) 82%, var(--text));
-    background: color-mix(in srgb, var(--accent) 88%, var(--text));
+    border-color: var(--accent-fill-hover, var(--accent-hover));
+    background: var(--accent-fill-hover, var(--accent-hover));
   }
 }
 
@@ -425,7 +425,7 @@
   border: 1px solid var(--accent);
   border-radius: 999px;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-size: 13px;
   font-weight: 650;

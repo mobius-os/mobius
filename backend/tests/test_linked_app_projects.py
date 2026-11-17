@@ -76,6 +76,7 @@ def test_theme_is_effective_read_only_and_confined_to_active_project_members(cli
   session, guest = _redeem(client, secret)
   url = f"/api/projects/{project['id']}/theme"
   expected = client.get('/api/theme', headers=auth).json()
+  del expected['toggle']  # the owner's light/dark switch preview
   assert client.get(url, headers=guest).json() == expected
   assert client.get(url).status_code == 401
   assert client.put(url, headers=guest, json={'css': 'bad'}).status_code == 404
@@ -113,18 +114,23 @@ def test_linked_project_build_status_compares_the_app_accepted_source(client, au
 
 
 def test_theme_source_preserves_raw_text_and_distinguishes_empty_missing_and_default(client, auth, linked):
-  from app.theme import DEFAULT_THEME
+  from app.theme import DEFAULT_THEME, shipped_palettes_css
   _, project, _ = linked
   url = f"/api/projects/{project['id']}/theme/source"
   theme_path = Path(os.environ['DATA_DIR']) / 'shared' / 'theme.css'
   theme_path.parent.mkdir(parents=True, exist_ok=True)
   theme_path.unlink(missing_ok=True)
-  defaults = {'name': 'default-theme.css', 'content': DEFAULT_THEME}
-  assert client.get(url, headers=auth).json() == {'files': [defaults]}
+  palettes = {'name': 'palettes.css', 'content': shipped_palettes_css()}
+  defaults = [palettes, {'name': 'default-theme.css', 'content': DEFAULT_THEME}]
+  assert client.get(url, headers=auth).json() == {'files': defaults}
+  # The reference lists both complete palettes.
+  assert ':root[data-theme="dark"] {\n  --bg: #0d0d0d;' in palettes['content']
+  assert ':root[data-theme="light"] {\n  --bg: #f0eeeb;' in palettes['content']
+  assert palettes['content'].count('--accent-fill-hover:') == 2
   raw = '\r\n/* untouched source */\r\n:root { --bg: #123456; }\r\n'
   theme_path.write_bytes(raw.encode('utf-8'))
   assert client.get(url, headers=auth).json() == {
-    'files': [{'name': 'theme.css', 'content': raw}, defaults],
+    'files': [{'name': 'theme.css', 'content': raw}, *defaults],
   }
   effective = client.get(f"/api/projects/{project['id']}/theme", headers=auth).json()['css']
   assert effective != raw
@@ -132,7 +138,7 @@ def test_theme_source_preserves_raw_text_and_distinguishes_empty_missing_and_def
   assert theme_path.read_bytes() == raw.encode('utf-8')
   theme_path.write_text('')
   assert client.get(url, headers=auth).json() == {
-    'files': [{'name': 'theme.css', 'content': ''}, defaults],
+    'files': [{'name': 'theme.css', 'content': ''}, *defaults],
   }
 
 

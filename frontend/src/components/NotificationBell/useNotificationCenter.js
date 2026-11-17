@@ -3,6 +3,15 @@ import { api } from '../../api/client.js'
 import { notificationQueries } from '../../hooks/queries.js'
 import useSessionNotices from './useSessionNotices.js'
 
+// Drop rows the server has confirmed gone from the loaded pages at once; the
+// refresh that follows stays authoritative and can only be slower or fail.
+function removeHistoryRows(queryClient, isRemoved) {
+  queryClient.setQueryData(notificationQueries.list.key, history => history && {
+    ...history,
+    pages: history.pages.map(page => page.filter(row => !isRemoved(row))),
+  })
+}
+
 // Owns the small amount of state behind the shell notification preview. Keeping
 // this out of Shell is deliberate: notifications can grow into an app later
 // without making navigation, workspace, or pane state aware of that product UI.
@@ -58,8 +67,10 @@ export default function useNotificationCenter(queryClient) {
     const noticeIds = session.rows.map(row => row.id)
     await api.notifications.clearAll()
     session.clearAll(noticeIds)
+    // Rows with actions may be Undo receipts the server keeps; the refresh decides.
+    removeHistoryRows(queryClient, row => !row.actions?.length)
     await Promise.all([
-      queryClient.resetQueries({ queryKey: notificationQueries.list.key }),
+      notificationQueries.list.invalidate(queryClient),
       notificationQueries.unreadCount.invalidate(queryClient),
       notificationQueries.newCount.invalidate(queryClient),
     ])
@@ -71,7 +82,9 @@ export default function useNotificationCenter(queryClient) {
       return
     }
     await api.notifications.dismiss(notificationId)
-    await queryClient.resetQueries({ queryKey: notificationQueries.list.key })
+    removeHistoryRows(queryClient, row => row.id === notificationId)
+    // Refresh in place: resetting discards every page and flashes the loader.
+    await notificationQueries.list.invalidate(queryClient)
     notificationQueries.unreadCount.invalidate(queryClient)
     notificationQueries.newCount.invalidate(queryClient)
   }, [session.dismiss, queryClient, session.rows])

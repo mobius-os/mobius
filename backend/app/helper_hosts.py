@@ -25,6 +25,11 @@ it, so nothing run- or helper-specific may live there. Each helper turn gets:
   the file's path is ever handed to the provider, which may persist settings in
   its session history.
 
+Claude's shared control server discovers installed-app tools before any child
+call supplies an identity. Its host-lifetime catalogue file contains reviewed
+metadata only, never a bearer; calls still authenticate as the exact child
+against the live backend catalogue (see ``claude_helper_host._host_options``).
+
 Hosts are keyed by (parent chat, provider, working directory,
 connected-services plan), so one chat's crash, secrets, or permissions never
 reach another chat's helpers. A host shuts down after it has been idle for
@@ -35,6 +40,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
+import tempfile
 import hashlib
 import json
 import logging
@@ -74,6 +81,8 @@ PER_TURN_ENV = frozenset({
   "TMPDIR", "TMP", "TEMP",
   "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_SESSION", "AGENT_BROWSER_NAMESPACE",
   "AGENT_BROWSER_SOCKET_DIR",
+  # Derived from the turn's viewport width (chat.desktop_pointer_browser_env).
+  "AGENT_BROWSER_EXECUTABLE_PATH", "MOBIUS_SCREENSHOT_REAL_BROWSER",
 })
 # Per-turn entries safe to hand to a provider verbatim (it may persist them).
 PUBLIC_TURN_ENV = frozenset({
@@ -400,7 +409,28 @@ class CodexHelperHost(Host):
   def __init__(self, key: HostKey, *, sdk: dict, config: Any):
     super().__init__(key)
     self._sdk = sdk
-    self._config = config
+    self._config = copy.copy(config)
+    self._catalogue_directory = None
+    # A custom-provider catalogue can belong to a single turn. This process
+    # serves many turns, so retain its own copy until the host is closed.
+    for override in getattr(config, "config_overrides", ()):
+      if override.startswith("model_catalog_json="):
+        source = Path(json.loads(override.split("=", 1)[1]))
+        content = source.read_bytes()
+        self._catalogue_directory = tempfile.TemporaryDirectory(prefix="mobius-host-models-")
+        destination = Path(self._catalogue_directory.name) / "catalog.json"
+        destination.write_bytes(content)
+        replacement = f"model_catalog_json={json.dumps(str(destination))}"
+        self._config.config_overrides = tuple(
+          replacement if value == override else value
+          for value in config.config_overrides
+        )
+        if config.launch_args_override is not None:
+          self._config.launch_args_override = tuple(
+            replacement if value == override else value
+            for value in config.launch_args_override
+          )
+        break
     self._context: Any = None
     self.client: Any = None
     self.process_group_id: int | None = None
@@ -492,6 +522,9 @@ class CodexHelperHost(Host):
       with contextlib.suppress(Exception):
         self._executor.close()
       self._executor = None
+    if self._catalogue_directory is not None:
+      self._catalogue_directory.cleanup()
+      self._catalogue_directory = None
 
 
 def codex_turn_thread_config(

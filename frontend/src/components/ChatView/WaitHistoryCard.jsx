@@ -2,6 +2,7 @@
 
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import DependencyLink from './DependencyLink.jsx'
+import DependencyFullText from './DependencyFullText.jsx'
 import LifecycleIcon, { LifecycleOutcome } from './LifecycleIcon.jsx'
 import { waitHistoryViewModel } from './waitHistory.js'
 
@@ -19,6 +20,8 @@ export default function WaitHistoryCard({ summary, onInternalNav }) {
       </span>
     </>
     const hasContext = !summary.source_deleted && !!summary.source_chat_title
+    // A claim text shown in part reads whole here, as in the Goal plan.
+    const fullText = summary.truncated && summary.id && <DependencyFullText dependencyId={summary.id} />
     return <aside className="chat__goal-history chat__wait-history" aria-label={view.ariaLabel}>
       {hasContext ? <details className="chat__goal-history-details">
         <summary className="chat__goal-history-summary">
@@ -27,8 +30,9 @@ export default function WaitHistoryCard({ summary, onInternalNav }) {
         </summary>
         <div className="chat__dependency-history-detail">
           <DependencyLink dependency={summary} onInternalNav={onInternalNav} />
+          {fullText}
         </div>
-      </details> : header}
+      </details> : <>{header}{fullText}</>}
     </aside>
   }
 

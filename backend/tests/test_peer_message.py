@@ -27,7 +27,7 @@ from app.memory_recall import EMPTY_RECALL_BINDING
 from app.peer_message import (
   CLAUDE_SEND_TOOL,
   CODEX_SEND_TOOL,
-  MAX_BODY_CHARS,
+  PEER_NOTE_CHARS,
   MAX_PEER_NOTES,
   MAX_RESULT_ENVELOPE_CHARS,
   MAX_RESULT_MESSAGES,
@@ -335,7 +335,7 @@ def test_persisted_marker_is_rebounded_before_projection():
   assert len(marker["notes"]) == MAX_PEER_NOTES
   assert len(marker["notes"][0]["sender"]) == 120
   assert marker["notes"][0]["kind"] == "note"
-  assert len(marker["notes"][0]["body"]) == MAX_BODY_CHARS
+  assert len(marker["notes"][0]["body"]) == PEER_NOTE_CHARS
 
 
 def test_persisted_send_marker_keeps_only_a_known_delivery_mode():
@@ -371,12 +371,12 @@ def test_send_counts_distinct_recipient_chats_not_deduped_names():
 
 
 def test_oversized_note_is_flagged_as_an_excerpt():
-  long_body = "x" * (MAX_BODY_CHARS + 500)
+  long_body = "x" * (PEER_NOTE_CHARS + 500)
   settled = settle_peer_message(
     {"direction": "send", "status": "sending"},
     json.dumps({"messages": [_message(body=long_body)]}),
   )
-  assert len(settled["body"]) == MAX_BODY_CHARS
+  assert len(settled["body"]) == PEER_NOTE_CHARS
   assert settled["body_truncated"] is True
 
 

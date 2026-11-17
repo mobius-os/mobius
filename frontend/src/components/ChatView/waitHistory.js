@@ -26,7 +26,8 @@ const OUTCOMES = {
 export function waitWokeItsAnswer(summary) {
   if (summary?.target_kind) return summary.result_disposition === 'delivered' && !!summary.received_run_id
   if (summary?.result_disposition === 'retired_by_goal_outcome'
-    || summary?.result_disposition === 'withdrawn') return false
+    || summary?.result_disposition === 'withdrawn'
+    || summary?.result_disposition === 'withdrawn_after_attempt') return false
   if (summary?.result_disposition === 'delivered'
     || summary?.result_disposition === 'scheduled') return true
   // legacy_consumed and absent dispositions cannot identify a receiving run.

@@ -3,6 +3,7 @@ import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import './SubagentChips.css'
 import { toolActivityLabel } from './toolActivityLabel.js'
 import HelperConversation from './HelperConversation.jsx'
+import { useHelperPreview } from './helperPreviewSlot.jsx'
 import { agentHelperEntries, elapsedLabel } from './toolTasks.js'
 
 // Helper ROWS for a delegating turn's background subagents, rendered inside an
@@ -85,8 +86,9 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
     return () => clearInterval(id)
   }, [anyRunning])
 
-  // { taskId, host }: the open helper and the chat pane its dialog covers.
-  const [opened, setOpened] = useState(null)
+  // { taskId, host, opener }: the open helper, the chat pane it belongs to and
+  // the row that opened it.
+  const [opened, setOpened] = useHelperPreview()
 
   if (helpers.length === 0) return null
   const openHelper = opened && helpers.find(([taskId]) => taskId === opened.taskId)?.[1]
@@ -108,7 +110,7 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
               type: 'button',
               'aria-label': `Open ${name} conversation`,
               'aria-haspopup': 'dialog',
-              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat') }),
+              onClick: event => setOpened({ taskId, host: event.currentTarget.closest('.chat'), opener: event.currentTarget }),
             })}
             className={
               'chat__subagent'
@@ -140,12 +142,16 @@ export default function SubagentChips({ subagent, chatId, onInternalNav }) {
         )
       })}
       {openHelper && (
+        // Keyed per helper: switching helpers starts a fresh preview, never the
+        // previous helper's transcript, read state or return target.
         <HelperConversation
+          key={opened.taskId}
           chatId={chatId}
           taskId={opened.taskId}
           name={helperName(openHelper.description)}
           status={openHelper.status}
           host={opened.host}
+          opener={opened.opener}
           onClose={() => setOpened(null)}
           onInternalNav={onInternalNav}
         />

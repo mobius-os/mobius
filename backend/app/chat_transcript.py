@@ -405,9 +405,26 @@ def project_legacy_memory_recalls(
   return projected if projected is not None else messages
 
 
+def _quiet_routine_call(block: dict) -> bool:
+  """A routine call that did not fail (the shell's isRoutineTool)."""
+  activity = block.get("app_activity")
+  activity = activity if isinstance(activity, dict) else {}
+  return (
+    block.get("routine") is True
+    and block.get("status") != "failed"
+    and block.get("output_exit_code") in (None, 0)
+    and activity.get("status") != "failed"
+    and not activity.get("warning")
+    and not activity.get("receipt_missing")
+  )
+
+
 def _distinctive_activity(block: dict, binding: RecallBinding) -> bool:
-  """Keep notable one-line activity beats out of a folded metadata run."""
-  if block.get("type") != "tool":
+  """Keep notable one-line activity beats out of a folded metadata run.
+
+  A routine call folds into the run even when it carries an app activity.
+  """
+  if block.get("type") != "tool" or _quiet_routine_call(block):
     return False
   skills = block.get("skills")
   if (
@@ -475,7 +492,7 @@ def _compact_activity_item(block: dict, binding: RecallBinding) -> dict:
       else block.get("status") or "done"
     ),
   }
-  for key in ("tool_use_id", "output_exit_code"):
+  for key in ("tool_use_id", "output_exit_code", "routine"):
     if key in block:
       tool[key] = block[key]
   if isinstance(block.get("subagent"), dict):
@@ -666,11 +683,7 @@ def compact_messages_for_detail(
         if activity and block.get("type") == "tool"
         else None
       )
-      distinctive = activity and (
-        bool(recovered_recall)
-        or isinstance(block.get("app_activity"), dict)
-        or _distinctive_activity(block, binding)
-      )
+      distinctive = activity and _distinctive_activity(block, binding)
       if activity and not distinctive:
         run.append((raw_index, block))
         continue

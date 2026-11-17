@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.agent_coordination import (
+  with_note_heads,
   chat_message_history_query,
   serialize_messages,
 )
@@ -21,6 +22,7 @@ from app.delegations import (
   TERMINAL_DELEGATION_STATUSES,
   derived_status,
   helper_current_activity,
+  helper_titles,
   running_helper_activity_id,
 )
 
@@ -78,7 +80,7 @@ def _peer_events(
         event_id < cursor.event_id,
       ),
     ))
-  rows = query.order_by(
+  rows = with_note_heads(query).order_by(
     message.created_at.desc(), event_id.desc(),
   ).limit(limit).all()
   serialized = serialize_messages(db, rows)
@@ -131,6 +133,7 @@ def _helper_row_events(
     models.Delegation.created_at.desc(), event_id.desc(),
   ).limit(limit).all()
   events = []
+  titles = helper_titles(db, rows)
   for row in rows:
     status, run, _result = derived_status(db, row, load_result=False)
     if run is None and status == "completed" and row.source_work_id is None:
@@ -149,6 +152,7 @@ def _helper_row_events(
       "created_at": row.created_at.isoformat(),
       "delegation_id": row.id,
       "task_key": row.task_key,
+      "title": titles[row.id],
       "provider": row.provider,
       "model": row.model,
       "started_at": started.isoformat() if started else None,

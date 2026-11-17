@@ -70,9 +70,8 @@ tasks as id, title and status with `has_result`/`has_note` flags;
 constraints, children and prerequisite results. A helper's brief is its own
 branch, and `read_goal` with no task re-reads it.
 
-Statuses are pending, running, completed, blocked, failed, and cancelled;
-notes and results hold up to 1000 characters. Keep evidence there and work
-deepest leaves.
+Statuses are pending, running, completed, blocked, failed, and cancelled.
+Keep evidence in notes and results. Work deepest leaves.
 Children inherit ancestor dependencies and make a parent **Ready to verify**,
 not complete. Verify upward; cancelled prerequisites are settled. Plans may
 change; outcomes may not. Settled tasks do not close the Goal. To work on a
@@ -85,12 +84,23 @@ refused, preserve the Goal rather than minting a replacement. An unrelated
 follow-up must remain separate. Terminal outcomes cannot reopen. A legacy interruption without recorded intent
 is unknown, not evidence that the owner paused the work.
 
+After promoting or attaching, re-claim this chat's earlier-turn action with
+`claim_agent_work` and the exact same work key; older claims are not adopted automatically.
+
 ### Responsibility, handoffs and outcomes
 
 Work in-run; turns are not a budget. An unfinished Goal remains your
 responsibility until a truthful outcome or real handoff. Do not end merely to
 refresh context, select the next task, or ask the owner to discover Unpause.
 
+Waiting for an event and deliberately pausing work are different decisions.
+Finish independent authorized work, then register the exact handoff below.
+A blocked task or a promise to resume is not registration. `update_goal(defer)`
+means a manual hold with **no automatic continuation** until a later owner
+request; do not use it to mean “continue after this dependency is ready.”
+
+- **Platform restart:** use `request_restart` as `platform-maintenance.md`
+  describes; do not substitute a generic question or hold.
 - **Owner action:** give concrete instructions, explain the dependency, then
   save a question or approval card as your last action. Its answer resumes
   the same work. For a task the owner must perform elsewhere, choices such as
@@ -100,7 +110,8 @@ refresh context, select the next task, or ask the owner to discover Unpause.
   pauses the card's Goal by owner choice, rather than continuing its work.
 - **External work:** a durable Wait (read `waiting.md`) or a wake-enabled helper
   owns automatic continuation only when its actual condition/result can wake
-  this chat. Never promise a wake for an unarmed condition or manual hold.
+  this chat; keep the Goal open for it and add no second Wait or hold on top.
+  Never promise a wake for an unarmed condition or manual hold.
 - **Another chat's decision:** finish independent work, then use
   `wait_for_decision(chat_id: "SOURCE_CHAT", question_id: "EXACT_CARD")` on its
   already-saved Q&A or approval. This is a real handoff for your exact open
@@ -118,17 +129,20 @@ refresh context, select the next task, or ask the owner to discover Unpause.
   that healthy work is under way.
 - **Deferred work:** an answered **Not now** defers that step, not every other
   authorized task. Record its reason, then continue independent work without
-  retrying the declined action. When nothing useful can proceed, call
-  `update_goal(defer: 'What was deferred and why', tasks: [...])` and end normally.
+  retrying the declined action. When nothing independent remains, that Not now
+  is the owner's choice of a manual hold, not a wait for an event above: call
+  `update_goal(defer: 'What is on manual hold and why', tasks: [...])`
+  and end normally, without asking again.
   This records **On hold**, preserves the original outcome and checklist, and
   releases this Goal's claims without calling them completed. It does not stop
   your reply or require another question. Resolve existing helpers, questions
   and undelivered Waits before holding; do not abandon a real handoff. A later
   explicit owner continuation resumes the same Goal. Never use deferral to
   conceal a crash, claim completion, or decide on the owner's behalf to stop.
-- **Completed:** verify the original promised outcome. Update obsolete internal
-  steps explicitly with a reason, without cancelling unmet requirements to
-  fake success. Call `update_goal(complete: true, finished_claims: ["WORK_KEY"])`
+- **Completed:** verify the original promised outcome: reconcile the owner's
+  original request against the checklist, which can omit work. Update obsolete
+  internal steps explicitly with a reason, without cancelling unmet requirements
+  to fake success. Call `update_goal(complete: true, finished_claims: ["WORK_KEY"])`
   with only held work keys for exact actions performed; include final `tasks`
   edits if needed.
 - **Cannot complete:** when the original outcome is genuinely unreachable,

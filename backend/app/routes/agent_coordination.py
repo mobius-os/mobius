@@ -14,22 +14,27 @@ from app.agent_coordination import (
   MAX_PEERS,
   MESSAGE_DELIVERIES,
   chat_message_history,
-  deliver_peer_recipients,
+  context_message,
+  interrupt_recipients,
   MESSAGE_KINDS,
   agent_network_snapshot,
   embedded_chat_snapshot,
-  model_message,
   owner_chat_snapshot,
   owner_project_snapshot,
+  classify_undelivered,
+  peer_message_page_for_agent,
+  peer_message_for_chat,
   send_agent_message,
-  send_work_claim_transfer_notice,
+  deliver_work_claim_revocation,
   visible_peer_messages,
 )
 from app.agent_work_claims import (
-  acknowledge_transfer_notice,
+  pending_transfer_notices,
   claim_work,
   finish_work,
+  read_claim_text,
 )
+from app.context_budget import READ_PAGE_BYTES
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -39,7 +44,7 @@ from app.deps import (
   reject_cross_site,
   require_chat_embed_operation,
 )
-from app.resource_access import get_active_chat_for_principal
+from app.resource_access import get_active_chat_for_principal, require_active_chat_access
 from app import models
 
 
@@ -49,11 +54,11 @@ router = APIRouter(prefix="/api/agent-coordination", tags=["agent-coordination"]
 class AgentMessageCreate(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
-  recipients: list[str] = Field(default_factory=list, max_length=24)
+  recipients: list[str] = Field(default_factory=list)
   broadcast: bool = False
   kind: str = "note"
   delivery: str = "next_turn"
-  body: str = Field(min_length=1, max_length=4000)
+  body: str = Field(min_length=1)
   send_id: str | None = Field(default=None, min_length=1, max_length=64)
 
   @field_validator("body")
@@ -85,8 +90,9 @@ class AgentWorkClaimCreate(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  summary: str = Field(min_length=1, max_length=500)
-  takeover_reason: str | None = Field(default=None, min_length=10, max_length=1000)
+  summary: str = Field(min_length=1)
+  # A takeover must explain itself; ten characters rules out "x" or "ok".
+  takeover_reason: str | None = Field(default=None, min_length=10)
   expected_owner_chat_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
@@ -94,7 +100,7 @@ class AgentWorkClaimFinish(BaseModel):
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
   work_key: str = Field(min_length=3, max_length=256)
-  outcome: str = Field(min_length=1, max_length=1000)
+  outcome: str = Field(min_length=1)
   release: bool = False
 
 
@@ -114,36 +120,22 @@ async def claim_current_work(
     )
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc
-  previous = result.get("previous_owner_chat_id")
-  if previous and result.get("notification_pending"):
-    send_work_claim_transfer_notice(
-      db,
-      owner_id=principal.owner.id,
-      claim_id=result["id"],
-      revision=result["transfer_notice_revision"],
-      sender_chat_id=principal.chat_id,
-      recipients=[previous],
-      body=(
-        f"Work claim {result['work_key']} transferred to {principal.chat_id}: "
-        f"{result.get('takeover_reason') or 'ownership changed'}"
-      ),
-    )
-    delivery = await deliver_peer_recipients(
-      recipients=[previous], delivery=DELIVERY_INTERRUPT, kind="handoff",
-      sender_chat_id=principal.chat_id,
-    )
-    # Persist the retry latch only after the durable notice has also reached
-    # its requested live/wake/queue delivery path. A crash or delivery error
-    # before this point leaves notification_pending true, so the exact same
-    # transfer request retries idempotently instead of losing the wake.
-    acknowledge_transfer_notice(
-      db, claim_id=result["id"], revision=result["transfer_notice_revision"],
-    )
-    result["notification_pending"] = False
-    result["steered"] = delivery.steered
-    result["woken"] = delivery.woken
-    result["queued"] = delivery.queued
-    result["unreachable"] = delivery.unreachable
+  # Older obligations belong to the sweep, not a refresh/observer's request.
+  revision = result.pop("_created_transfer_notice_revision", None)
+  if revision is not None:
+    try:
+      notice = db.get(models.AgentWorkClaimRevocation, (result["id"], revision))
+      delivery = await deliver_work_claim_revocation(db, notice)
+      result["notification_pending"] = (
+        pending_transfer_notices(db, claim_id=result["id"]).first() is not None
+      )
+      for state in ("steered", "woken", "queued", "unreachable"):
+        result[state] = getattr(delivery, state)
+    except Exception:
+      # Ownership and its obligation already committed. Delivery failure must
+      # not turn that accepted transfer into a false failure or lose recovery.
+      db.rollback()
+      logging.getLogger(__name__).exception("Committed claim revocation awaits recovery")
   return result
 
 
@@ -153,6 +145,29 @@ async def _deliver_finished_claim_dependencies():
     await deliver_pending_dependencies()
   except Exception:
     logging.getLogger(__name__).exception("Finished claim dependencies were not nudged")
+
+
+@router.get("/work-claims/text")
+def read_current_work_claim_text(
+  work_key: str = Query(min_length=3, max_length=256),
+  field: str = Query(),
+  digest: str | None = Query(default=None, min_length=1, max_length=64),
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """One work-claim text whole, for an excerpt a claim result or notice named."""
+  if principal.chat_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  try:
+    text = read_claim_text(
+      db, owner_id=principal.owner.id, chat_id=principal.chat_id,
+      work_key=work_key, field=field, digest=digest,
+    )
+  except LookupError as exc:
+    raise HTTPException(404, str(exc)) from exc
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
+  return {"work_key": work_key, "field": field, "text": text}
 
 
 @router.post("/work-claims/finish", dependencies=[Depends(reject_cross_site)])
@@ -207,6 +222,7 @@ def current_network(
 @router.post("/messages", dependencies=[Depends(reject_cross_site)])
 async def send_current_message(
   body: AgentMessageCreate,
+  background_tasks: BackgroundTasks,
   principal: Principal = Depends(get_agent_run_principal),
 ):
   if principal.chat_id is None or principal.run_id is None:
@@ -233,33 +249,58 @@ async def send_current_message(
   # Meaning and delivery are independent. A direct interrupt steers a live
   # recipient or wakes its idle unfinished Goal; next_turn and every broadcast
   # stay quiet so one broad note cannot manufacture a wave of model work.
-  delivery = (
-    await deliver_peer_recipients(
-      recipients=body.recipients, delivery=body.delivery, kind=body.kind,
+  # The note is stored now and every recipient will read it. An interrupt is
+  # attempted for every recipient after this response, one by one, so the
+  # send returns at once however many it reaches; whether it lands is not
+  # known here (owner input, a held queue or no unfinished Goal can defer it
+  # to the recipient's next turn). An exact retry stores nothing new and
+  # attempts the interrupt again: a steer carries only undelivered notes and
+  # a wake needs an undelivered interrupt, so nothing arrives twice.
+  retry = bool(rows and rows[0].get("retry"))
+  recipients = [] if body.broadcast else list(dict.fromkeys(body.recipients))
+  interrupt = body.delivery == DELIVERY_INTERRUPT
+  reachable, reasons = await asyncio.to_thread(
+    classify_undelivered, recipients, interrupt=interrupt,
+  )
+  if interrupt and recipients:
+    background_tasks.add_task(
+      interrupt_recipients, recipients=recipients, kind=body.kind,
       sender_chat_id=principal.chat_id,
     )
-    if not body.broadcast else None
-  )
   # One row is stored per recipient inbox. The sender already knows the note,
-  # so return one canonical row plus the exact recipient count and names the
-  # owner-visible activity card needs, not the body repeated up to 24 times.
+  # so return one canonical row, its body under the same excerpt rule as turn
+  # context, plus the exact recipient count and names the owner-visible
+  # activity card needs, not the body repeated per recipient. An excerpted
+  # body is marked as the owner views mark it (truncated, body_chars), and
+  # send_id lets the owner's timeline join the card to the stored rows.
+  receipt = [context_message(row) for row in rows[:1]]
+  for shown, stored in zip(receipt, rows):
+    shown["send_id"] = stored["send_id"]
+    if shown.get("body") != stored.get("body"):
+      shown.update(truncated=True, body_chars=len(stored["body"]))
   result = {
-    "messages": [model_message(row) for row in rows[:1]],
+    "messages": receipt,
     "recipient_count": len(rows),
     "recipient_names": [
       name for name in dict.fromkeys(row["recipient_name"] for row in rows)
       if name
     ],
-    "steered": delivery.steered if delivery else [],
-    "woken": delivery.woken if delivery else [],
-    "queued": delivery.queued if delivery else [],
-    "unreachable": delivery.unreachable if delivery else [],
+    # Requested, not confirmed: the interrupt is attempted after this reply.
+    "interrupt_requested": reachable if interrupt else [],
+    "queued": [] if interrupt else reachable,
+    "unreachable": [chat_id for chat_id in recipients if chat_id in reasons],
   }
-  if delivery is not None and delivery.unreachable:
+  if retry:
+    result["retry"] = (
+      "This send was already stored; nothing was stored again"
+      + (", and its interrupt was attempted again where still undelivered."
+         if interrupt else ".")
+    )
+  if result["unreachable"]:
     # Recorded facts, never a timeout: the sender learns that nothing will
     # read this note soon instead of streaming more notes into a dead chat.
     result["unreachable_reasons"] = {
-      chat_id: delivery.reasons[chat_id] for chat_id in delivery.unreachable
+      chat_id: reasons[chat_id] for chat_id in result["unreachable"]
     }
     result["next_action"] = (
       "The note is stored, but no turn will read it soon at the unreachable "
@@ -267,6 +308,33 @@ async def send_current_message(
       "recipient or tell the owner."
     )
   return result
+
+
+# One page of a note, with room in a control-tool result for its footer.
+NOTE_PAGE_BYTES = READ_PAGE_BYTES - 400
+
+
+@router.get("/messages/{message_id}")
+def read_current_message(
+  message_id: str,
+  offset: int = Query(default=0, ge=0),
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """One page of a note this agent's chat sent, received or can see
+  broadcast, from a UTF-8 byte offset; next_offset names the next page."""
+  if principal.chat_id is None or principal.run_id is None:
+    raise HTTPException(403, "Current chat-bound agent run required.")
+  require_active_chat_access(db, principal.chat_id, principal)
+  try:
+    message = peer_message_page_for_agent(
+      db, principal.chat_id, message_id, offset=offset, page_bytes=NOTE_PAGE_BYTES,
+    )
+  except ValueError as exc:
+    raise HTTPException(422, str(exc)) from exc
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this agent.")
+  return message
 
 
 @router.get("/chats/{chat_id}")
@@ -326,6 +394,25 @@ def inspect_project_room(
     )
   except ValueError as exc:
     raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/chats/{chat_id}/messages/{message_id}")
+def inspect_chat_message(
+  chat_id: str,
+  message_id: str,
+  principal: Principal = Depends(get_owner_or_chat_embed_principal),
+  db: Session = Depends(get_db),
+):
+  """One whole note, for a view that showed its head marked truncated.
+
+  The same exact-chat visibility as this chat's history.
+  """
+  require_chat_embed_operation(principal, "chat:read")
+  require_active_chat_access(db, chat_id, principal)
+  message = peer_message_for_chat(db, chat_id, message_id)
+  if message is None:
+    raise HTTPException(404, "Peer note not found for this chat.")
+  return message
 
 
 @router.get("/chats/{chat_id}/history")

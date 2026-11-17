@@ -24,6 +24,11 @@
 #    container on the candidate image with the same volume, report success,
 #    and require the candidate to serve its own tree and settle the update.
 #    Source-only updates: Apply, restart, and require the candidate tree.
+# 6. Press Restart now on the updated instance. An image with the container
+#    supervisor must rerun its boot inside the same container, because
+#    `--restart no` (like Railway's default ON_FAILURE for a clean stop) would
+#    never bring a stopped one back, and the new boot must bind the accepted
+#    request that continues its chats.
 
 set -euo pipefail
 
@@ -89,6 +94,36 @@ field() {  # <json> <python expression over d>; JSON on stdin (a preview can exc
   python3 -c 'import json, sys; d = json.load(sys.stdin); print(eval(sys.argv[1]))' "$2" <<<"$1"
 }
 
+restart_now_in_place() {
+  local before boot new_boot="" back=0 reply logs ack
+  before=$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$name")
+  boot=$(docker exec "$name" cat /data/.restart-ledger/boot-id)
+  reply=$(api POST /api/admin/restart)
+  [ "$(code "$reply")" = 200 ] || fail "Restart now was refused ($(code "$reply")): $(body "$reply")"
+  for _ in $(seq 1 240); do
+    [ "$(docker inspect -f '{{.State.Running}}' "$name" 2>/dev/null)" = true ] \
+      || fail "Restart now stopped the container instead of restarting inside it"
+    new_boot=$(docker exec "$name" cat /data/.restart-ledger/boot-id 2>/dev/null || true)
+    if [ -n "$new_boot" ] && [ "$new_boot" != "$boot" ] \
+        && docker exec "$name" curl -fsS -o /dev/null http://127.0.0.1:8000/api/health 2>/dev/null; then
+      back=1
+      break
+    fi
+    sleep 1
+  done
+  [ "$back" = 1 ] || fail "the instance did not serve a new boot within 240s of Restart now"
+  [ "$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' "$name")" = "$before" ] \
+    || fail "Restart now replaced the container instead of rerunning its boot ($before before)"
+  logs=$(docker logs "$name" 2>&1)
+  grep -q "planned restart: starting a fresh boot" <<<"$logs" \
+    || fail "the container supervisor did not rerun the boot"
+  ack=$(docker exec "$name" cat /data/.restart-ledger/ack.json) \
+    || fail "the new boot did not bind the accepted restart, so its chats would not continue"
+  [ "$(field "$ack" 'd.get("source_boot_id")')" = "$boot" ] \
+    && [ "$(field "$ack" 'd.get("target_boot_id")')" = "$new_boot" ] \
+    || fail "the new boot bound another restart: $ack"
+}
+
 # A helper migration is a successful source install plus an explicit operator
 # handoff, not proof of a completed host upgrade. Other external work is not
 # covered by this fixture and must remain a failing, actionable result.
@@ -134,7 +169,11 @@ docker cp "$work/candidate.bundle" "$name:/tmp/candidate.bundle"
 docker exec "$name" chmod 0644 /tmp/candidate.bundle
 as_mobius git -C /data/platform fetch -q /tmp/candidate.bundle \
   "$bundle_ref:refs/remotes/origin/main" || fail "the previous release could not fetch the candidate"
-reply=$(api POST /api/auth/setup '{"username":"owner","password":"upgrade-path-owner-password"}')
+# Releases with a one-time owner setup code issue it on the status read and
+# keep it in the data folder; older releases have none and ignore the field.
+api GET /api/auth/setup/status >/dev/null
+setup_code=$(as_mobius cat /data/setup-code 2>/dev/null | tr -d '[:space:]' || true)
+reply=$(api POST /api/auth/setup "{\"username\":\"owner\",\"password\":\"upgrade-path-owner-password\",\"setup_code\":\"$setup_code\"}")
 [ "$(code "$reply")" = 200 ] || fail "owner setup failed: $(body "$reply")"
 token=$(field "$(body "$reply")" 'd["access_token"]')
 # Releases before #1561 refused such edits by design; test the promise from
@@ -280,6 +319,13 @@ if [ "$needs_image" = True ]; then
   done
   as_mobius test ! -e "$record" || fail "the update never settled: $(as_mobius cat "$record")"
 fi
+# Images from before the container supervisor restart by ending the container.
+case "$(docker inspect -f '{{join .Config.Entrypoint " "}}' "$name")" in
+  *container_supervisor.py*)
+    echo "6. the owner presses Restart now and the instance comes back in place"
+    restart_now_in_place ;;
+  *) echo "6. skipped: this image restarts by ending the container" ;;
+esac
 if [ "$needs_helper" = true ]; then
   reply=$(api GET /api/platform/status)
   [ "$(code "$reply")" = 200 ] && helper_maintenance_pending "$(body "$reply")" \

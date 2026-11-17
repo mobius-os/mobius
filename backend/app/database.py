@@ -12,23 +12,27 @@ import os
 import sys
 import threading
 import time
+from collections.abc import Callable
 from contextvars import ContextVar, Token
 from pathlib import Path
 
+import anyio
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import NullPool
 
-from app import sqlite_policy
+from app import sqlite_policy, stall_recorder
 from app.config import get_settings
 
 
 _log = logging.getLogger(__name__)
 sqlite_policy.install_adapters()
-_request_label: ContextVar[str] = ContextVar(
+_request_label: ContextVar[str | Callable[[], str]] = ContextVar(
   "mobius_database_request_label", default="background",
 )
-_checkout_warn_seconds = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
+# How long a connection may be held before it counts as long; the stall log
+# uses the same measure for a request that has not started responding.
+CHECKOUT_WARN_SECONDS = float(os.environ.get("DB_CHECKOUT_WARN_SECONDS", "2"))
 _pool_metrics_lock = threading.Lock()
 _pool_metrics = {
   "checked_out": 0,
@@ -64,7 +68,9 @@ def _assert_test_database_isolated() -> None:
     )
 
 
-def set_database_request_label(label: str) -> Token:
+def set_database_request_label(label: str | Callable[[], str]) -> Token:
+  """Name the work holding connections; a callable is resolved only when a
+  hold turns out long."""
   return _request_label.set(label)
 
 
@@ -118,7 +124,9 @@ def _make_engine():
       return
     started_at, label = started
     elapsed_ms = max(0, round((time.monotonic() - started_at) * 1000))
-    is_long = elapsed_ms >= round(_checkout_warn_seconds * 1000)
+    is_long = elapsed_ms >= round(CHECKOUT_WARN_SECONDS * 1000)
+    if is_long and callable(label):
+      label = label()
     with _pool_metrics_lock:
       _pool_metrics["checked_out"] = max(0, _pool_metrics["checked_out"] - 1)
       _pool_metrics["max_checkout_ms"] = max(
@@ -136,6 +144,7 @@ def _make_engine():
         elapsed_ms,
         label,
       )
+      stall_recorder.note_db_hold(label, elapsed_ms)
   @event.listens_for(eng, "handle_error")
   def _reject_out_of_range_integer(context):
     # sqlite3 refuses to bind an int outside 64 bits with a bare OverflowError
@@ -290,10 +299,21 @@ class Base(DeclarativeBase):
   pass
 
 
-def get_db():
-  """Yields a database session and closes it after the request."""
-  db = SessionLocal()
+async def get_db():
+  """Yields a database session and closes it after the request.
+
+  The close is shielded so a cancelled request (a client that disconnected)
+  still returns its connection at once. FastAPI exits a sync generator
+  dependency through a worker-thread hop that a pending cancellation skips,
+  which left the session open until garbage collection. Opening and closing
+  both stay in worker threads, off the event loop. The close has its own
+  limiter, as FastAPI's own dependency exit does: on the shared pool it could
+  wait behind threads that are themselves waiting for the connection it is
+  about to return.
+  """
+  db = await anyio.to_thread.run_sync(SessionLocal)
   try:
     yield db
   finally:
-    db.close()
+    with anyio.CancelScope(shield=True):
+      await anyio.to_thread.run_sync(db.close, limiter=anyio.CapacityLimiter(1))

@@ -174,6 +174,44 @@ def is_root_conversation_message(message: Any) -> bool:
   return getattr(message, "parent_tool_use_id", None) is None
 
 
+# The model name the Claude CLI stamps on assistant messages it fabricates
+# locally (API-error reports, "No response requested.", proactive tool stubs).
+_CLI_SYNTHETIC_MODEL = "<synthetic>"
+
+# The Messages streaming events that belong to one model response, from
+# `message_start` through `message_stop`. The stream also carries keepalive
+# `ping` frames, `error` frames and, by documented policy, new event types a
+# client must tolerate; none of those prove the model produced a response.
+_RESPONSE_STREAM_EVENT_TYPES = frozenset({
+  "message_start",
+  "content_block_start",
+  "content_block_delta",
+  "content_block_stop",
+  "message_delta",
+  "message_stop",
+})
+
+
+def is_provider_response(message: Any) -> bool:
+  """Whether one SDK frame is output the remote model produced.
+
+  A raw API response stream event, or an AssistantMessage the model generated,
+  proves the provider served this turn, even if a Stop or an owner card then
+  cut it short. Everything else is local to the CLI or not a response:
+  keepalive, error and unknown stream frames, replayed user input and tool
+  results, system/hook/task frames, the ResultMessage aggregate, rate-limit
+  notices, and synthetic assistant messages, including the one that wraps a
+  failed API call such as a usage limit. Native child sidechains count: their
+  calls are served by the same provider during this turn.
+  """
+  if isinstance(message, StreamEvent):
+    event = message.event if isinstance(message.event, dict) else {}
+    return event.get("type") in _RESPONSE_STREAM_EVENT_TYPES
+  if isinstance(message, AssistantMessage):
+    return message.error is None and message.model != _CLI_SYNTHETIC_MODEL
+  return False
+
+
 def _clip_task_text(value: object, cap: int) -> str | None:
   """Coerce a task_* text field to a bounded string (or None).
 
@@ -427,7 +465,8 @@ def dispatch_sdk_message(
   ``usage_state`` carries the latest root AssistantMessage usage to the
   terminal ResultMessage. Claude's result usage aggregates the whole agent
   turn; the assistant usage is the one-call value needed to measure current
-  context occupancy without counting every tool-loop refill.
+  context occupancy without counting every tool-loop refill. It also carries
+  whether the latest root call ended in a provider refusal.
 
   Extracted from the runner loop so unit tests can exercise the
   full dispatch matrix (named events, unknown fallthrough, usage
@@ -626,6 +665,11 @@ def dispatch_sdk_message(
       current_session_id = sdk_msg.session_id
     if native_work is not None:
       native_work.root_continuation_observed()
+    if usage_state is not None and sdk_msg.parent_tool_use_id is None:
+      # The provider's own refusal signal, not its wording. The CLI reports a
+      # refused root call as a synthetic error message with this stop reason;
+      # a later successful call (an internal retry or fallback) clears it.
+      usage_state["refused"] = sdk_msg.stop_reason == "refusal"
     if sdk_msg.error:
       # The CLI wraps a failed API call (a safety refusal, auth or billing
       # failure, an exhausted retry) in a synthetic assistant message: its
@@ -835,6 +879,10 @@ def dispatch_sdk_message(
       "error": (
         _result_error_message(sdk_msg)
         if sdk_msg.is_error else None
+      ),
+      "provider_refusal": bool(sdk_msg.is_error) and (
+        sdk_msg.stop_reason == "refusal"
+        or bool((usage_state or {}).get("refused"))
       ),
     }
 

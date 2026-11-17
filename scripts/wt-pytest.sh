@@ -17,19 +17,28 @@
 #   scripts/wt-pytest.sh backend/tests/test_foo.py -q  # repo-relative also works
 #   scripts/wt-pytest.sh -k name -x            # any pytest args
 #
-# Bypass the deps resolution by exporting SECRET_KEY yourself; this script
-# only fills it in when unset.
+# An exported SECRET_KEY is kept; this script only fills it in when unset. It
+# does not skip the Node dependency check: a checkout that locks different
+# rolldown, acorn or eslint-scope versions is refused. For tests that never
+# compile an app, set MOBIUS_WT_PYTEST_NODE_DRIFT=1 to reuse the primary
+# checkout's Node tree with a warning instead.
 set -uo pipefail
 
 # Isolate the database before Python imports anything. A test module outside
 # backend/tests is collected before that directory's conftest.py, so relying on
 # conftest to replace an inherited production DATABASE_URL is too late: a
 # module-level `from app.database import ...` has already bound the engine.
-TEST_RUNTIME_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/mobius-wt-pytest.XXXXXX")" \
+# The runtime lives on /tmp, not $TMPDIR: an agent chat's $TMPDIR is durable
+# scratch on the small data volume, and a suite's databases, tmp_path trees
+# and browser temp have filled that volume and broken the agent's own tool
+# output. TMPDIR is pointed inside the runtime below, so everything a test
+# creates through tempfile is removed with it.
+TEST_SCRATCH_PARENT=/tmp
+TEST_RUNTIME_ROOT="$(mktemp -d "$TEST_SCRATCH_PARENT/mobius-wt-pytest.XXXXXX")" \
   || { echo "wt-pytest: could not create isolated runtime" >&2; exit 1; }
 cleanup_test_runtime() {
   case "$TEST_RUNTIME_ROOT" in
-    "${TMPDIR:-/tmp}"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
+    "$TEST_SCRATCH_PARENT"/mobius-wt-pytest.*) rm -rf -- "$TEST_RUNTIME_ROOT" ;;
     *) echo "wt-pytest: refusing unsafe cleanup target: $TEST_RUNTIME_ROOT" >&2 ;;
   esac
 }
@@ -152,9 +161,21 @@ elif NODE_MODULES="$(matching_contrib_node_modules)"; then
   echo "wt-pytest: reusing exact-lock backend-test dependencies from $(dirname "$NODE_MODULES")" >&2
 elif NODE_MODULES="$(backend_lock_matching_node_modules)"; then
   echo "wt-pytest: frontend package-lock.json differs from $(dirname "$NODE_MODULES"), but it locks the backend's Node tools (rolldown, acorn, eslint-scope) identically; reusing them" >&2
+elif [ "${MOBIUS_WT_PYTEST_NODE_DRIFT:-0}" = "1" ]; then
+  # Opt-in only: refusing by default is what stops compiler tests from running
+  # against the wrong bundler (a mass false alarm), but Python-only tests do
+  # not need the locked tools.
+  if ! backend_test_node_deps "$MAIN/frontend"; then
+    echo "wt-pytest: MOBIUS_WT_PYTEST_NODE_DRIFT=1 needs the primary checkout's Node tools, and $MAIN/frontend/node_modules lacks them" >&2
+    echo "  install them with: (cd \"$MAIN/frontend\" && npm ci)" >&2
+    exit 1
+  fi
+  NODE_MODULES="$SHARED_NODE_MODULES"
+  echo "wt-pytest: WARNING — this checkout locks different backend Node tools; tests that compile apps are not dependency-authoritative" >&2
 else
   echo "wt-pytest: no verified backend Node dependencies match this worktree's locked rolldown, acorn, and eslint-scope" >&2
   echo "  install them with: (cd \"$ROOT/frontend\" && npm ci)" >&2
+  echo "  or, for tests that never compile an app, rerun with MOBIUS_WT_PYTEST_NODE_DRIFT=1" >&2
   exit 1
 fi
 NODE_BIN_DIR="$NODE_MODULES/.bin"
@@ -166,7 +187,7 @@ NODE_BIN_DIR="$NODE_MODULES/.bin"
 PYTEST_ARGS=()
 for arg in "$@"; do
   case "$arg" in
-    backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
+    backend/tests | backend/tests/*) PYTEST_ARGS+=("${arg#backend/}") ;;
     *) PYTEST_ARGS+=("$arg") ;;
   esac
 done
@@ -215,6 +236,7 @@ if [ "${MOBIUS_PYTEST_SERIALIZE:-0}" = "1" ] \
   fi
 fi
 
+mkdir -p "$TEST_RUNTIME_ROOT/tmp" || exit 1
 cd "$ROOT/backend" || exit 1
 # The worktree's backend/ is on sys.path (cwd); the venv supplies deps; the
 # generated SECRET_KEY satisfies pydantic Settings for tests that build it.
@@ -237,6 +259,7 @@ TEST_ENV=(env \
   MOBIUS_SSO_INSTANCE_ID= \
   MOBIUS_IDENTITY_BROKER_SOCKET="$TEST_RUNTIME_ROOT/no-identity-broker.sock" \
   RAILWAY_PUBLIC_DOMAIN= \
+  TMPDIR="$TEST_RUNTIME_ROOT/tmp" \
   MOBIUS_TEST_RUNTIME=1 \
   MOBIUS_TEST_DATABASE_ISOLATED=1 \
   MOEBIUS_SKIP_BOOTSTRAP=1 \

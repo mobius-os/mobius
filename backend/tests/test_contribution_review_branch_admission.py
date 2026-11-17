@@ -18,7 +18,7 @@ from app.database import SessionLocal
 from app.deps import Principal
 from app.routes import contribution_reviews as routes
 from tests.test_contribution_review_runs import setup, ITEM, TARGET, SHA, BASE, REPO, PULL, CHECKS, report
-from tests.test_contribution_review_workflows import configure_repair, overlapping_grant, publish_body, repairs, NEW
+from tests.test_contribution_review_workflows import configure_repair, overlapping_grant, publish_body, propose_and_push, repairs, NEW
 
 
 def inspected_target(monkeypatch, *, mode="review_merge", number=7, head_repo_id=1,
@@ -69,7 +69,7 @@ def test_normal_sibling_merge_blocks_prepared_takeover_branch_push(setup, monkey
     {"state": state, "head_sha": SHA, "merge_attempted": True})
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **k: pytest.fail("PUBLIC_PUSH"))
   with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+    propose_and_push(db, row, principal, publish_body())
   assert error.value.status_code == 409
 
 
@@ -422,7 +422,7 @@ def test_unproven_moved_head_leaves_the_attempt_fencing(setup, monkeypatch, pull
 def unknown_push(setup, monkeypatch):
   db, row, principal = configure_repair(setup, monkeypatch)
   monkeypatch.setattr(repairs, "push_repair", lambda *a, **k: DispatchResult.unknown("Lost push response"))
-  asyncio.run(routes.publish_repair(1, row.id, publish_body(), db, principal))
+  propose_and_push(db, row, principal, publish_body())
   assert row.outcomes_json[domain.key(ITEM)]["repair_attempts"][0]["state"] == "push_unknown"
   return db, row, principal
 

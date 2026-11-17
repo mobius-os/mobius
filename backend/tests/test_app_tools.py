@@ -7,10 +7,13 @@ from datetime import timedelta
 
 import pytest
 
-from app import app_tools, auth as auth_mod, models
+from app import app_tools, auth as auth_mod, models, provider_availability as pa
+from app.agent_activity import is_routine_tool
+from app.agent_activity_provider import resolve_agent_activity_binding
 from app.app_capabilities import contract_from_app_state, contract_from_manifest
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
 from app.platform_tools import codex_turn_mcp_config
+from app.timeutil import now_naive_utc
 
 
 LOG_TOOL = {
@@ -222,6 +225,7 @@ def test_call_runs_the_apps_service_with_arguments_and_moment(
       "chat_id": "chat-1", "run_id": "run-1",
       "provider": "claude", "call_id": "toolu_9",
     },
+    "limited_providers": [],
   }
   assert envelope["actor"] == {
     "scope": "owner", "app_id": None, "app_slug": None,
@@ -265,6 +269,7 @@ def test_call_tells_the_app_a_helper_called_and_whether_it_may_write(
   assert actors == [{
     "scope": "owner", "app_id": None, "app_slug": None,
     "delegated": True, "access": scope,
+    "delegation_id": "helper", "delegation_chat": "child",
   }]
 
 
@@ -376,6 +381,25 @@ def test_an_app_may_load_one_tool_up_front(db):
   assert "_meta" not in listings["memory_search"]
 
 
+def test_an_app_may_declare_a_tool_routine(db):
+  validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": True}]))
+  with pytest.raises(ManifestContractError, match="routine"):
+    validate_manifest_contract(_manifest(tools=[{**LOG_TOOL, "routine": "yes"}]))
+  routine = {**LOG_TOOL, "routine": True}
+  # The mark comes from the reviewed contract of a live app, never from a
+  # deleted app or plain declaration, and never claims a platform tool's name.
+  _app(db, "reflection", contract=_contract([routine]))
+  _app(db, "memory", contract=_contract([{**LOG_TOOL, "name": "search"}]))
+  _app(db, "journal", contract=_contract([routine]), deleted=True)
+  _app(db, "notify", contract=_contract([{**routine, "name": "owner"}]))
+
+  binding = resolve_agent_activity_binding(db)
+
+  assert binding.routine_app_tools == {"reflection_log_friction"}
+  assert is_routine_tool("mcp__mobius_control__reflection_log_friction", binding)
+  assert not is_routine_tool("mcp__mobius_control__notify_owner", binding)
+
+
 def test_retired_result_independent_declaration_stays_valid_without_effect(db):
   # Published manifests may still declare it; it no longer changes delivery.
   tool = {**LOG_TOOL, "always_load": True, "result_independent": True}
@@ -385,3 +409,30 @@ def test_retired_result_independent_declaration_stays_valid_without_effect(db):
   _app(db, contract=_contract([tool]))
   listed = app_tools.live_app_tools(db)[0]
   assert listed.listing()["_meta"] == {"anthropic/alwaysLoad": True}
+
+
+@pytest.mark.parametrize("access,expected", [("self", ["claude"]), ("public", None)])
+def test_only_a_service_that_may_run_provider_clis_learns_limited_providers(
+  client, auth, db, monkeypatch, access, expected,
+):
+  contract = _contract()
+  contract["service"]["access"] = access
+  _app(db, contract=contract)
+  _run(db)
+  pa.mark_provider_limited(db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit")
+  pa.mark_provider_limited(db, "codex", now_naive_utc() - timedelta(minutes=1), "usage_limit")
+  db.commit()
+  bodies = []
+
+  async def invoke(_app, _owner, envelope, **_kwargs):
+    bodies.append(envelope["body"])
+    return 200, "ok", {}, None
+
+  monkeypatch.setattr(app_tools.app_services, "invoke_service", invoke)
+  response = client.post("/api/agent/app-tools/call", headers=_agent_auth(db), json={
+    "name": "reflection_log_friction",
+    "arguments": {"friction": "example", "limited_providers": ["forged"]},
+  })
+  assert response.status_code == 200, response.text
+  assert bodies[0].get("limited_providers") == expected
+  assert bodies[0]["arguments"]["limited_providers"] == ["forged"]

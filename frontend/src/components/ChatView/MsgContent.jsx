@@ -7,7 +7,8 @@ import {
   mergeAdjacentPeerActivityEntries,
   mergePositionedActivityEntries,
 } from './activityPosition.js'
-import { ProgressiveMarkdown, StandardMarkdown, markdownImageHrefs } from './markdown/BlockRenderer.jsx'
+import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
 import {
@@ -15,17 +16,19 @@ import {
   groupActivityRuns,
   coalesceThinkingEntries,
 } from './groupBlocks.js'
-import { foldAppActivityOperations } from './activityGrouping.js'
+import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrouping.js'
 import QuestionCard from './QuestionCard.jsx'
-import { isDurableRestartOffer } from './restartCard.js'
+import { questionCardOpen } from './questionOpen.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
 import ContinuationCard from './ContinuationCard.jsx'
 import SideQuestionNote from './SideQuestionNote.jsx'
-import { isContinuationMessage, isSideQuestionMessage } from './chatRuntimeState.js'
+import PauseRecordCard from './PauseRecordCard.jsx'
+import { isContinuationMessage, isSideQuestionMessage, PAUSE_RECORD_BLOCK } from './chatRuntimeState.js'
 import { questionKey } from './questionKey.js'
 import {
+  cardMessageBlock,
   legacyRestartActivityOwners,
   repairInterleavedQuestionText,
   renderedBlockEntries,
@@ -34,6 +37,10 @@ import {
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
+import { helperCanRetry } from './helperRecovery.js'
+import { ParentChatLink } from './HelperChatSendNotice.jsx'
+import { HELPER_CHAT_SEND_LINK_TEXT } from './sendFailure.js'
+import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
 import { copyMarkdownSelection } from './markdownClipboard.js'
@@ -58,16 +65,10 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
   // not by block position, so a card trailed by parallel output or a terminal
   // error stays answerable. liveQuestionId clears when the question is answered
   // or the turn ends, so nothing is answerable once it's null.
-  const durableRestart = isDurableRestartOffer(block?.platform_action)
   return !!(
     onQuestionAnswer
     && msg.role === 'assistant'
-    && block?.type === 'question'
-    && !block.answers
-    && (
-      durableRestart
-      || (isLastMsg && liveQuestionId && block.question_id === liveQuestionId)
-    )
+    && questionCardOpen(block, isLastMsg ? liveQuestionId : null)
   )
 }
 
@@ -99,7 +100,7 @@ function MarkdownCopySurface({ msg, markdownByIndex, children }) {
 
 /** Owner text renders through the same formatter as replies, with the
  * owner-text rules (typed line breaks and tag-like text stay as typed; see
- * BlockRenderer's `configuredMarked`). A `/goal` command keeps its Goal tag. */
+ * markdownParser.js). A `/goal` command keeps its Goal tag. */
 function UserMessageText({ text, onInternalNav, mediaDimensions }) {
   const goalObjective = goalMessageObjectiveFromText(text)
   if (!goalObjective) {
@@ -208,6 +209,7 @@ function generatedFileLayout(files, { chatId, isStreaming, embeddedImageKey }) {
  * can depend on the set's content rather than on a per-render Set. */
 function embeddedImagePathKey(blocks) {
   return (blocks || [])
+    .map(block => cardMessageBlock(block) || block)
     .flatMap(block => block?.type === 'text' ? markdownImagePaths(block) : [])
     .sort()
     .join('\n')
@@ -225,6 +227,17 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
+  // A provider refusal changes the request instead of retrying it: open the
+  // model picker, or compact into a fresh provider session. Stable references.
+  onRefusalModelChoice,
+  onRefusalFreshSession,
+  // Only the installation owner may bypass the storage or process floor; the
+  // server refuses Continue anyway from anyone else, who keeps plain Resume.
+  canContinueAnyway = false,
+  // A helper's chat retries only its own usage-limit park through its
+  // delegation; every other recovery action is the parent chat's.
+  helperChat = false,
+  helperParentChatId = null,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -343,9 +356,16 @@ function MsgContentInner({
       activitySourceBlocks || displayBlocks,
       chatId,
     )
+    const coalescedEntries = coalesceThinkingEntries(
+      mergeAdjacentPeerActivityEntries(positionedEntries),
+    )
+    // A live turn keeps stream order; a settled reply folds its routine saves
+    // into its earlier activity line (joinRoutineToActivity).
+    // Folding paged app receipts removes separators between compact runs.
+    // Merge only afterward so newly adjacent work shares one disclosure.
     const finalEntries = mergeAdjacentCompactActivityEntries(
-      coalesceThinkingEntries(
-        mergeAdjacentPeerActivityEntries(positionedEntries),
+      foldAppActivityOperations(
+        isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
       ),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
@@ -455,6 +475,9 @@ function MsgContentInner({
         )
       }
       if (block.type === 'text') {
+        // A card's closing message hides with its card while the live
+        // surface renders both.
+        if (block.ownerCard && suppressedQuestionKeys?.has(questionKey(block.ownerCard))) return null
         const text = msg.role === 'user'
           ? stripAugmentation(block.content) : block.content
         if (!text) return null
@@ -465,23 +488,15 @@ function MsgContentInner({
             data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? i : undefined}
           >
             {msg.role === 'assistant'
-              ? (isActiveAnswer || block.reply_text_owner
-                  ? <ProgressiveMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />
-                  : <StandardMarkdown
-                      text={text}
-                      markdownRange={block.markdown_range}
-                      renderFraction={block._coldRenderFraction}
-                      onInternalNav={onInternalNav}
-                      mediaDimensions={msg.media_dimensions}
-                      allowAppBlocks
-                    />)
+              ? <StandardMarkdown
+                  text={text}
+                  markdownRange={block.markdown_range}
+                  isStreaming={block.reply_live_text || (isStreaming && i === lastEntryIdx)}
+                  renderFraction={block._coldRenderFraction}
+                  onInternalNav={onInternalNav}
+                  mediaDimensions={msg.media_dimensions}
+                  allowAppBlocks
+                />
               : msg.role === 'user'
                 ? <UserMessageText
                     text={text}
@@ -569,6 +584,9 @@ function MsgContentInner({
           />
         )
       }
+      if (block.type === PAUSE_RECORD_BLOCK) {
+        return <PauseRecordCard key={assistantBlockKey(block, i)} block={block} />
+      }
       if (block.type === 'error') {
         // Errors persist as their own block (backend's
         // process_event for 'error' events). Read as a system
@@ -597,17 +615,26 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait, modelCapacity } = errorCardViewModel(block)
+        const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
-        // A resource wait owns its automatic retry. Offering Resume while the
-        // same measured pressure remains only launches a turn admission will
-        // re-park. Once the scheduler reports manual recovery, expose the
-        // existing recovery action instead of leaving the owner at a dead end.
+        // Resource waits retain automatic retry. A warned storage or process
+        // action can admit one cleanup turn even while that measured pressure
+        // remains. Not while an update restores edits or awaits a restart: the
+        // server reports those for a resource wait as the handoff's reason.
+        const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
+        const continueAnywayAvailable = recoveryOwner && canContinueAnyway && !helperChat
+          && !!continueAnywayCopy
+          && ['automatic', 'recovery'].includes(handoff?.kind)
+          && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
+          && !continueAnywayAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
+          && (!helperChat || helperCanRetry(block))
+        // The server would refuse these actions here, so name where they live.
+        const parentOwnsRecovery = recoveryOwner && helperChat && !manualResumeAvailable
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
@@ -617,6 +644,10 @@ function MsgContentInner({
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
+            refusalActions={recoveryOwner && providerRefusal ? {
+              switchModel: !!onRefusalModelChoice,
+              freshSession: !!onRefusalFreshSession,
+            } : null}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
             {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
@@ -642,11 +673,45 @@ function MsgContentInner({
                 )}
               </div>
             )}
-            {manualResumeAvailable && (
+            {recoveryOwner && providerRefusal && (onRefusalModelChoice || onRefusalFreshSession) && (
+              <div className="chat__recovery-actions">
+                {onRefusalModelChoice && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalModelChoice}
+                    disabled={submissionBlocked}
+                  >
+                    Switch model
+                  </button>
+                )}
+                {onRefusalFreshSession && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onRefusalFreshSession}
+                    disabled={submissionBlocked}
+                  >
+                    Start fresh session
+                  </button>
+                )}
+              </div>
+            )}
+            {continueAnywayAvailable && (
+              <span className="chat__recovery-copy">{continueAnywayCopy}</span>
+            )}
+            {parentOwnsRecovery && (
+              <span className="chat__recovery-copy">
+                This helper continues from its {helperParentChatId
+                  ? <ParentChatLink parentChatId={helperParentChatId} onInternalNav={onInternalNav} />
+                  : HELPER_CHAT_SEND_LINK_TEXT}.
+              </span>
+            )}
+            {(manualResumeAvailable || continueAnywayAvailable) && (
               <button
                 type="button"
                 className="chat__resume chat__recovery-action"
-                onClick={onResume}
+                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
                 disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
                 aria-busy={resumeState?.pending || undefined}
                 title={submissionBlocked
@@ -655,7 +720,11 @@ function MsgContentInner({
                     ? 'Möbius is reconnecting this paused turn.'
                   : undefined}
               >
-                {resumeState?.pending ? 'Resuming…' : resumeState?.unavailable ? 'Reconnecting…' : parked
+                {resumeState?.pending
+                  ? continueAnywayAvailable ? 'Continuing…' : 'Resuming…'
+                  : resumeState?.unavailable ? 'Reconnecting…'
+                  : continueAnywayAvailable ? 'Continue anyway'
+                  : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
               </button>
@@ -675,7 +744,7 @@ function MsgContentInner({
     // stretch, after the pages of one app operation become one row. Live items
     // arrive here after conversion to the same block shape, so the transcript
     // doesn't reshuffle on promote.
-    const nodes = groupActivityRuns(foldAppActivityOperations(finalEntries))
+    const nodes = groupActivityRuns(finalEntries)
     // A picture follows the step that made it. If that step is not on screen
     // (an older or reduced transcript), it joins the files after the answer.
     const shownSteps = new Set(nodes.flatMap(node => (
@@ -769,27 +838,18 @@ function MsgContentInner({
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (
         <div
-          key={isActiveAnswer ? 0 : undefined}
           className={`chat__text chat__text--${msg.role}`}
           data-markdown-block={msg.role === 'assistant' || msg.role === 'user' ? 0 : undefined}
         >
           {msg.role === 'assistant'
-            ? (isActiveAnswer
-                ? <ProgressiveMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    isStreaming={isStreaming}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />
-                : <StandardMarkdown
-                    text={text}
-                    markdownRange={msg.markdown_range}
-                    onInternalNav={onInternalNav}
-                    mediaDimensions={msg.media_dimensions}
-                    allowAppBlocks
-                  />)
+            ? <StandardMarkdown
+                text={text}
+                markdownRange={msg.markdown_range}
+                isStreaming={isStreaming}
+                onInternalNav={onInternalNav}
+                mediaDimensions={msg.media_dimensions}
+                allowAppBlocks
+              />
             : msg.role === 'user'
               ? (msg.segments?.length > 1
                   ? <UserMessageSegments
@@ -830,6 +890,11 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
+    && prev.onRefusalModelChoice === next.onRefusalModelChoice
+    && prev.onRefusalFreshSession === next.onRefusalFreshSession
+    && prev.canContinueAnyway === next.canContinueAnyway
+    && prev.helperChat === next.helperChat
+    && prev.helperParentChatId === next.helperParentChatId
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

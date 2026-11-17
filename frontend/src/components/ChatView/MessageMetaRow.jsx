@@ -1,36 +1,65 @@
-/* MessageMetaRow keeps a message's time and actions in one revealable row:
-   beside an owner message's bubble, or on its own line at a reply's start
-   edge (`side="start"`), where the latest reply can also offer Try again.
-   `copy(button)` returns the clipboard payload (see MessageCopyButton). */
+/* MessageMetaRow keeps a message's time and actions in one row: its time,
+   Copy, and on the chat's reply footer (`side="start"`) Branch. Beside an
+   owner message's bubble it is revealed on tap; the reply footer reads how
+   long ago the reply settled (or, until that is known, began), aligned with the reply's prose, and appears
+   when the reply is tapped, keyboard-focused, or hovered with a fine pointer.
+   `copy(button)` returns the clipboard payload (see MessageCopyButton);
+   `branch()` opens a new chat continuing through this reply. */
+import { useEffect, useState } from 'react'
+import MessageBranchButton from './MessageBranchButton.jsx'
 import MessageCopyButton from './MessageCopyButton.jsx'
-import MessageRetryButton from './MessageRetryButton.jsx'
-import { formatDateTime } from '../../lib/dateTimeFormat.js'
+import { formatDateTime, formatRecentDateTime } from '../../lib/dateTimeFormat.js'
 
+/** The current time, refreshed each minute while `ticking`, and at once
+ *  when a suspended tab is shown again. */
+function useMinuteClock(ticking) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!ticking) return undefined
+    const refresh = () => setNow(Date.now())
+    refresh()
+    const timer = setInterval(refresh, 60_000)
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [ticking])
+  return now
+}
 
 export default function MessageMetaRow({
   timestamp,
+  timeIsStart = false,
   copy,
-  onTryAgain,
+  branch,
   side = 'end',
   visible,
 }) {
+  const footer = side === 'start'
+  const now = useMinuteClock(footer && !!timestamp)
   // A reply's start row is a line of its own, so it renders even with nothing
   // to show yet (a streaming reply); the overlay row beside a bubble does not.
-  if (side !== 'start' && !timestamp && !copy) return null
+  if (!footer && !timestamp && !copy) return null
 
-  // CSS visibility owns hiding: a hidden row leaves the focus order and the
-  // accessibility tree, and a hover-revealed one rejoins both.
+  // A footer time that is only when the reply began says so.
+  const recent = timestamp && formatRecentDateTime(timestamp, now)
+  const time = timestamp && (footer
+    ? <time className="chat__ts" title={`${timeIsStart ? 'Started ' : ''}${formatDateTime(timestamp)}`}>
+      {timeIsStart ? `Started ${recent === 'Just now' ? 'just now' : recent}` : recent}
+    </time>
+    : <time className="chat__ts">{formatDateTime(timestamp)}</time>)
+  // CSS owns hiding: a hidden owner row leaves the focus order and the
+  // accessibility tree, and a revealed one rejoins both; the reply footer
+  // stays reachable by keyboard while transparent.
   return (
     <div
       className={`chat__msg-meta chat__msg-meta--${side}${visible ? ' chat__msg-meta--visible' : ''}`}
     >
-      {timestamp && (
-        <time className="chat__ts">
-          {formatDateTime(timestamp)}
-        </time>
-      )}
+      {time}
       {copy && <MessageCopyButton read={copy} />}
-      {onTryAgain && <MessageRetryButton onTryAgain={onTryAgain} />}
+      {branch && <MessageBranchButton branch={branch} />}
     </div>
   )
 }

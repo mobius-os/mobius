@@ -40,11 +40,13 @@ export function resolveInitialNav({
   const homeChatId = storedChatId ?? null
 
   // Single precedence chain: a claimed shell reload normally wins, but the
-  // provider callback is a separate top-level navigation and must replace it.
+  // provider callback and an explicit result launch must replace it.
   // (Previously activeView/activeAppId/activeChatId were resolved by three
   // separate `||` chains that could cross-contaminate sources.)
   let dest
-  if (deepLink?.view === 'settings' && deepLink.providerReturn === true) {
+  if (deepLink?.view === 'artifact' && deepLink.projectId && deepLink.artifactId) {
+    dest = { view: 'artifact', appId: null, chatId: null }
+  } else if (deepLink?.view === 'settings' && deepLink.providerReturn === true) {
     dest = { view: 'settings', appId: null, chatId: null, section: 'ai-providers' }
   } else if (shellReload?.activeView) {
     dest = {
@@ -77,7 +79,7 @@ export function resolveInitialNav({
   // and the seed would resolve to the chat you're already on — a dead Back press
   // that just delays the PWA exit. Backing out of a root chat exits the PWA,
   // which is the standard, pre-existing behavior.
-  const seedHome = ['canvas', 'settings', 'projects', 'project'].includes(dest.view)
+  const seedHome = ['canvas', 'settings', 'projects', 'project', 'artifact'].includes(dest.view)
 
   return {
     view: dest.view,

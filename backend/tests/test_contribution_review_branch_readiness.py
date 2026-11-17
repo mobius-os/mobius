@@ -1,35 +1,12 @@
-"""Readiness uses the same immutable branch identity as ordinary merge grants."""
-import asyncio
-
+"""A readiness receipt an older build armed fences merges by the same branch identity."""
 import pytest
 from fastapi import HTTPException
 
 from app import contribution_review_runs as domain
-from app.routes import contribution_reviews as routes
-from tests.test_contribution_review_runs import setup, SHA, BASE
-from tests.test_contribution_review_readiness import ready_takeover, ready_body
+from tests.test_contribution_review_runs import setup, SHA, BASE  # noqa: F401  (fixture)
+from tests.test_contribution_review_readiness import ready_takeover
 from tests.test_contribution_review_workflows import overlapping_grant
-from tests.test_contribution_review_branch_admission import inspected_target, pending_outcome
-
-
-@pytest.mark.parametrize("state", ["merge_unknown", "queued"])
-@pytest.mark.parametrize("legacy", [False, True])
-def test_ready_does_not_cross_normal_sibling_merge_or_unmatchable_legacy_receipt(setup, monkeypatch, state, legacy):
-  db, row, principal = ready_takeover(setup, monkeypatch)
-  peer = overlapping_grant(db, row, number=8)
-  peer.mode = "review_merge"
-  target = inspected_target(monkeypatch, number=8)
-  if legacy:
-    target.pop("head_repo_id", None)
-    target.pop("head_ref", None)
-  peer.targets_json = [target]
-  db.commit()
-  domain.save_outcome(db, peer, domain.key(target), pending_outcome("merge", state))
-  monkeypatch.setattr(domain, "mark_ready", lambda *a: pytest.fail("PUBLIC_READY"))
-  with pytest.raises(HTTPException) as error:
-    asyncio.run(routes.mark_draft_ready(1, row.id, ready_body(), db, principal))
-  assert error.value.status_code == 409
-  assert not row.outcomes_json[domain.key(row.targets_json[0])].get("ready_attempt")
+from tests.test_contribution_review_branch_admission import inspected_target
 
 
 def test_normal_sibling_merge_cannot_cross_unknown_readiness_receipt(setup, monkeypatch):

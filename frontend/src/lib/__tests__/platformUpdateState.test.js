@@ -12,6 +12,38 @@ import {
   reviewedUpdateUsesContainerRebuild,
 } from '../platformUpdateState.js'
 
+test('image-only recovery does not announce a completed full update', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'available', available: true, image_build_applied: false,
+    update_contains_image_release: true,
+  }), 'Code update required')
+  // An unrelated update does not bring an unofficial image's revision.
+  assert.equal(platformUpdateStatusLabel({
+    state: 'available', available: true, image_build_applied: false,
+    update_contains_image_release: false,
+  }), 'New update available')
+  assert.equal(platformUpdateStatusLabel({
+    state: 'source_unconfirmed', available: false, image_build_applied: false,
+  }), 'Running code not confirmed')
+})
+
+test('optimistic apply does not borrow image pairing from checkout progress', () => {
+  const projected = platformStatusFromApply({ image_build_applied: false }, {
+    state: 'up_to_date', upstream_commit: 'a'.repeat(40),
+  })
+  assert.equal(platformUpdateStatusLabel(projected), 'Running code not confirmed')
+})
+
+test('paired local merge and separately owed image activation stay independent', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'up_to_date', available: false, image_build_applied: true,
+  }), 'Up to date')
+  assert.equal(platformUpdateStatusLabel({
+    state: 'activation_needed', image_build_applied: true,
+    activation: { level: 'image_rebuild' },
+  }), 'Ready to finish')
+})
+
 test('an unavailable release check cannot inherit a cached current claim', () => {
   const unavailable = platformStatusUnavailable({
     state: 'up_to_date',
@@ -32,6 +64,13 @@ test('host maintenance tells the owner where to finish the update', () => {
     state: 'activation_needed',
     activation: { level: 'host_maintenance' },
   }), 'Finish this update on your server')
+})
+
+test('the existing update restart takes precedence over newer releases', () => {
+  assert.equal(platformUpdateStatusLabel({
+    state: 'restart_needed', available: true, needs_restart: true,
+    unfinished_update: { stage: 'finish', action: 'restart' },
+  }), 'Restart to finish the update')
 })
 
 test('the deployment classifier stays as binary as the backend that emits it', () => {
@@ -326,4 +365,43 @@ test('a mixed gap with an uncommitted local edit still says to revert that edit'
     },
   })
   assert.match(warning.message, /Some come from a local change; if the new container still lacks them, revert the uncommitted edit\./)
+})
+
+test('Settings shows one coherent message for an unconfirmed image', async () => {
+  const { createElement } = await import('react')
+  const { renderToStaticMarkup } = await import('react-dom/server')
+  const { createSsrRenderServer } = await import('./ssrRenderServer.mjs')
+  const vite = await createSsrRenderServer()
+  try {
+    const { PlatformUpdatesView } = await vite.ssrLoadModule('/src/components/SettingsView/PlatformUpdates.jsx')
+    const render = (platform) => renderToStaticMarkup(createElement(PlatformUpdatesView, {
+      update: {
+        platform, cachedPlatform: null, rebuild: null, version: null, phase: 'idle',
+        busy: false, reconnecting: false, error: '', errorCode: '', checkResult: '',
+      },
+      onOpenChat: () => {},
+    }))
+    const live = render({
+      state: 'source_unconfirmed', available: false, image_build_applied: false,
+      served_sha: 'a'.repeat(40),
+    })
+    assert.match(live, /built outside the official releases .* nothing needs doing/)
+    const unknown = render({ state: 'source_unconfirmed', available: false, image_build_applied: false, served_sha: null })
+    assert.match(unknown, /running code could not be identified/)
+    assert.doesNotMatch(unknown, /official releases/)
+    const unrelated = render({
+      state: 'available', available: true, image_build_applied: false,
+      update_contains_image_release: false, served_sha: 'a'.repeat(40),
+    })
+    assert.match(unrelated, /built outside the official releases/)
+    assert.doesNotMatch(unrelated, /code update is still required/)
+    const restart = render({
+      state: 'activation_needed', available: false, image_build_applied: false,
+      activation: { level: 'server_restart', required_actions: ['server_restart'] },
+    })
+    assert.match(restart, /Your changes are ready/)
+    assert.doesNotMatch(restart, /own revision|code update is still required/)
+  } finally {
+    await vite.close()
+  }
 })

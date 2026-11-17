@@ -1,21 +1,21 @@
-/* HelperConversation shows one helper agent's own conversation, read-only, over its parent chat. */
+/* HelperConversation shows one helper agent's own conversation, read-only, beside or over its parent chat. */
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { apiFetch } from '../../api/client.js'
+import useHelperPreviewDocked from './hooks/useHelperPreviewDocked.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
-import { HELPER_AWAITING_PARENT_LABEL } from './workingHelper.js'
+import { helperPresentation, isTerminalHelperStatus } from './workingHelper.js'
 import { isPlainLeftClick } from './internalLink.js'
 import './HelperConversation.css'
 
-// A running helper keeps writing its conversation; re-read it on this cadence
-// while the dialog is open. A settled helper is read once.
+// Unfinished helpers may resume even after their footer row disappears. Keep
+// reading while the preview is open; terminal or unavailable helpers stop.
 const LIVE_REFRESH_MS = 3000
 
 const PROVIDER_NAMES = { claude: 'Claude', codex: 'Codex', mobius: 'Möbius' }
-const STATUS_LABELS = { running: 'Working', done: 'Finished', failed: 'Failed', waiting: HELPER_AWAITING_PARENT_LABEL }
 
 async function readConversation(chatId, taskId, signal) {
   const response = await apiFetch(
@@ -26,26 +26,40 @@ async function readConversation(chatId, taskId, signal) {
   if (!response.ok) throw new Error(`Request failed (${response.status})`)
   const data = await response.json()
   return {
-    phase: 'ready', blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider,
+    phase: 'ready', status: data.status, blocks: data.blocks || [], truncated: !!data.truncated, provider: data.provider,
     // A Möbius helper's conversation is its own chat; link to the full chat.
     childChatId: data.child_chat_id || null,
   }
 }
 
-// The dialog draws its own overlay (HelperConversation.css); `host` is the
-// chat pane it covers.
+// The dialog draws its own overlay (HelperConversation.css). `host` is the chat
+// pane it belongs to: a pane wide enough for two columns keeps its chat usable
+// with the preview docked beside it; a narrower one is covered and blocked.
 export default function HelperConversation({
-  chatId, taskId, name, status, host, onClose, onInternalNav,
+  chatId, taskId, name, status, host, opener, onClose, onInternalNav,
 }) {
+  const docked = useHelperPreviewDocked(host)
+  const hostRef = useRef(host)
+  hostRef.current = host
+  // Closing returns focus to the row that opened this preview. Recorded at the
+  // tap, not when the dialog mounts: a preview replacing another mounts just
+  // after the old one handed focus back to its own row.
+  const openerRef = useRef(opener)
   const [state, setState] = useState({ phase: 'loading' })
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const bodyRef = useRef(null)
   const followRef = useRef(true)
   const titleId = useId()
-  const running = status === 'running'
+  const currentStatus = state.status || status
+  const presentation = helperPresentation(currentStatus)
+  const refresh = !!currentStatus && !isTerminalHelperStatus(currentStatus) && state.phase !== 'unavailable'
+  const running = presentation.state === 'working'
 
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose })
+  // Without a host the dialog is modal over the whole page. Docking only swaps
+  // what it blocks, so crossing the width threshold keeps focus where it is.
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, restoreFocusRef: openerRef, onClose,
+    modal: !host, inertBoundaryRef: docked ? undefined : hostRef })
 
   useEffect(() => {
     const controller = new AbortController()
@@ -60,14 +74,14 @@ export default function HelperConversation({
           ? prev
           : { phase: 'error', message: error?.message || 'Could not load this conversation.' })
       }
-      if (running && !controller.signal.aborted) timer = setTimeout(load, LIVE_REFRESH_MS)
+      if (refresh && !controller.signal.aborted) timer = setTimeout(load, LIVE_REFRESH_MS)
     }
     load()
     return () => {
       controller.abort()
       clearTimeout(timer)
     }
-  }, [chatId, taskId, running])
+  }, [chatId, taskId, refresh, status])
 
   // Keep a live conversation on its newest step unless the reader scrolled up.
   useEffect(() => {
@@ -75,16 +89,19 @@ export default function HelperConversation({
     if (body && state.phase === 'ready' && followRef.current) body.scrollTop = body.scrollHeight
   }, [state])
 
-  const subtitle = [PROVIDER_NAMES[state.provider], STATUS_LABELS[status] || 'Stopped', 'read-only']
+  const subtitle = [PROVIDER_NAMES[state.provider], presentation.label, 'read-only']
     .filter(Boolean).join(' · ')
 
   return createPortal(
-    <div className="helper-convo__overlay" role="presentation" onClick={onClose}>
+    <div className={`helper-convo__overlay${docked ? ' helper-convo__overlay--docked' : ''}`} role="presentation" onClick={docked ? undefined : onClose}>
       <div
         ref={dialogRef}
         className="helper-convo"
         role="dialog"
-        aria-modal="true"
+        // Focusable but not a tab stop: a click on the transcript keeps focus
+        // inside, so Escape still closes this non-modal preview.
+        tabIndex={-1}
+        aria-modal={host ? undefined : true}
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}
       >
@@ -116,6 +133,11 @@ export default function HelperConversation({
         <div
           ref={bodyRef}
           className="helper-convo__body"
+          // Focusable so a click on the transcript keeps keyboard scrolling
+          // (arrows, Page Down, Space) on the element that scrolls.
+          tabIndex={0}
+          role="region"
+          aria-label="Helper transcript"
           onScroll={event => {
             const el = event.currentTarget
             followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48

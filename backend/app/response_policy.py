@@ -54,8 +54,14 @@ def app_frame_csp(
   gateway_origin: str = "",
   api_origin: str = "",
   delivery_origin: str = "",
+  direct_origins: tuple[str, ...] = (),
 ) -> str:
-  """Complete policy for the opaque mini-app document."""
+  """Complete policy for the opaque mini-app document.
+
+  ``direct_origins`` are the exact HTTPS origins an accepted ``network.direct``
+  grant names. They widen only image loads and requests, never scripts,
+  styles or frames, so they cannot add code to the app.
+  """
   origin = _validated_frontend_origin(frontend_origin)
   resource_sources = [origin]
   delivery = absolute_csp_origin(delivery_origin)
@@ -70,6 +76,15 @@ def app_frame_csp(
   gateway = absolute_csp_origin(gateway_origin)
   if gateway is not None and gateway != origin:
     frame_sources.append(gateway)
+  image_sources = [resource_source]
+  for candidate in direct_origins:
+    direct = absolute_csp_origin(candidate)
+    if direct is None or not direct.startswith("https://"):
+      continue
+    if direct not in connect_sources:
+      connect_sources.append(direct)
+    if direct not in image_sources:
+      image_sources.append(direct)
   return (
     # `allow-pointer-lock` gives games desktop mouse-look. Sandbox flags are
     # inherited by nested frames, so without it here a packaged game's own
@@ -92,7 +107,7 @@ def app_frame_csp(
     f"style-src {resource_source} 'unsafe-inline' https://fonts.googleapis.com; "
     f"font-src {resource_source} https://fonts.gstatic.com https://cdn.openai.com; "
     f"connect-src {' '.join(connect_sources)}; "
-    f"img-src {resource_source} data: blob:; "
+    f"img-src {' '.join(image_sources)} data: blob:; "
     f"frame-src {' '.join(frame_sources)}; "
     "frame-ancestors 'self'"
   )
@@ -106,6 +121,9 @@ def app_frame_csp(
 # being forgotten. The marker lives in the ASGI scope, which response headers
 # relayed from an upstream or an app cannot reach.
 PLATFORM_CODE_SCOPE_KEY = "mobius.platform_code"
+# The app frame route records the app's accepted direct origins here; like the
+# platform-code marker, a relayed header or app output cannot reach the scope.
+APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY = "mobius.app_frame_direct_origins"
 
 
 def serves_platform_code(request: Request) -> None:

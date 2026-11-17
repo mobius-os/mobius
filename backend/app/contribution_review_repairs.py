@@ -30,54 +30,27 @@ from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
 from app.contribution_review_effects import DispatchResult, NotDispatched
 from app.github_contribution_contract import COAUTHOR_TRAILER, coauthor_trailer_required
-from app.github_contribution_git import _git_env, _run_cmd, _validate_branch, _validate_repo_slug
-
-
-_GITHUB_AUTH_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN",
-                    "GITHUB_ENTERPRISE_TOKEN", "GH_CONFIG_DIR")
-# Command-scope config, exactly like ``-c``. Git passes it on to any nested
-# repository, so a submodule's own config cannot start an fsmonitor either.
-# No hook runs either, including a pre-push hook while the token is present.
-_INERT_CONFIG = (("core.fsmonitor", "false"), ("submodule.recurse", "false"),
-                 ("core.hooksPath", "/dev/null"))
+from app.github_contribution_git import (
+  _NETWORK_GIT, _SUBMIT_TIMEOUT, _git_env, _network_git, _run_cmd, _scratch_home,
+  _validate_branch, _validate_repo_slug,
+)
 
 
 def _repair_git_env(repo: Path, *, network: bool = False) -> dict[str, str]:
-  """One sanitized environment for every server proof in a repair checkout.
-
-  GitHub credentials are present only for ``network`` commands (fetch and
-  push). Local reads never carry them, so a program a checkout manages to
-  start cannot see the token.
-  """
-  env = _git_env(repo)
-  auth = {key: env.pop(key) for key in _GITHUB_AUTH_ENV if key in env}
-  for key in tuple(env):
-    if key.startswith("GIT_CONFIG_") or key in {
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
-        "GIT_ATTR_NOSYSTEM", "GIT_EXEC_PATH", "GIT_SSH_COMMAND", "GIT_SSH",
-        "GIT_ASKPASS", "GIT_TEMPLATE_DIR", "GIT_REPLACE_REF_BASE"}:
-      env.pop(key, None)
-  env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
-             GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0",
-             GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
-             GIT_CONFIG_COUNT=str(len(_INERT_CONFIG)))
-  for index, (name, value) in enumerate(_INERT_CONFIG):
-    env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
-  if network:
-    env.update(auth)
-  return env
+  """The contribution Git environment, without optional locks for proofs."""
+  return {**_git_env(repo, network=network), "GIT_OPTIONAL_LOCKS": "0"}
 
 
 def _git(repo: Path, *args: str, check: bool = True):
-  """Run server Git without inherited config, object redirects or prompts."""
-  network = args[:1] in {("fetch",), ("push",)}
-  env = _repair_git_env(repo, network=network)
-  # Global config is ignored, including the owner's configured credential
-  # helper. Supply the one fixed GitHub helper for network operations only.
-  # The empty value first resets the helper list, so a helper in the
-  # checkout's local config is never consulted with the token present.
-  auth = ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"] if network else []
-  return _run_cmd(["git", *auth, "-C", str(repo), *args], cwd=repo, check=check, env=env)
+  """Run server Git without inherited config, object redirects or prompts.
+
+  Network commands, which carry the token, run in a server scratch
+  repository like every contribution's, never in the agent-writable checkout.
+  """
+  if args[:1] in _NETWORK_GIT:
+    return _network_git(repo, args, check=check, timeout=_SUBMIT_TIMEOUT)
+  return _run_cmd(["git", "-C", str(repo), *args], cwd=repo, check=check,
+                  env=_repair_git_env(repo))
 
 
 _OID = re.compile(r"^[0-9a-f]{40}$")
@@ -317,8 +290,9 @@ def prepare_checkout(gh, cwd: Path, row, target: dict, allowed_files: list[str])
   try:
     _git(checkout, "init", "-q")
     _git(checkout, "fetch", "--no-tags", "--no-recurse-submodules",
-         f"https://github.com/{slug}.git", f"refs/heads/{branch}")
-    fetched = _git(checkout, "rev-parse", "FETCH_HEAD^{commit}").stdout.strip()
+         f"https://github.com/{slug}.git", f"+refs/heads/{branch}:{_PR_HEAD_REF}")
+    fetched = _git(checkout, "rev-parse", f"{_PR_HEAD_REF}^{{commit}}").stdout.strip()
+    _git(checkout, "update-ref", "-d", _PR_HEAD_REF)
     if fetched != initial:
       _fail("The PR head moved during checkout preparation.")
     _git(checkout, "checkout", "-q", "-b", "mobius-repair", initial)
@@ -334,6 +308,7 @@ def prepare_checkout(gh, cwd: Path, row, target: dict, allowed_files: list[str])
 
 
 TARGET_BASE_REF = "refs/mobius/target-base"
+_PR_HEAD_REF = "refs/mobius/pr-head"
 
 
 def fetch_target_base(gh, cwd: Path, checkout: Path, target: dict) -> str:
@@ -467,8 +442,8 @@ def validate_repair(gh, cwd: Path, row, target: dict, checkout: dict,
   path_diff = _git(path, "diff", "--name-only", "--no-renames", "-z",
                    f"{initial}..{head}", check=False)
   paths = {name for name in path_diff.stdout.split("\x00") if name} if path_diff.returncode == 0 else None
-  diff = app_git._canonical_diff(path, initial, head, read_only=True,
-                                 env=_repair_git_env(path))
+  with _scratch_home(_repair_git_env(path)) as env:
+    diff = app_git._canonical_diff(path, initial, head, read_only=True, env=env)
   if paths is None or diff is None or not diff:
     _fail("Git could not derive a nonempty repair diff.")
   base = _present_commit(path, base_sha) if base_sha is not None else None
@@ -512,12 +487,15 @@ def validate_repair(gh, cwd: Path, row, target: dict, checkout: dict,
   else:
     historical_paths.update(paths)
   _assert_path_scope(historical_paths, allowed, target_repo=target["repo"])
+  # Shown to the owner beside the proposed push, e.g. "2 files changed, 9 insertions(+)".
+  stat = _git(path, "diff", "--shortstat", "--no-renames", f"{initial}..{head}", check=False)
   return {"checkout": str(path), "initial_head_sha": initial,
           "head_sha": head, "head_repo": slug, "head_repo_id": repo_id,
           "head_ref": branch, "files": sorted(historical_paths if merges else paths),
           "allowed_files": sorted(allowed),
           **({"merged_base_sha": base} if merges else {}),
-          "diff_sha256": hashlib.sha256(diff).hexdigest()}
+          "diff_sha256": hashlib.sha256(diff).hexdigest(),
+          "diff_stat": stat.stdout.strip() if stat.returncode == 0 else ""}
 
 
 def _present_commit(path: Path, sha: str) -> str | None:

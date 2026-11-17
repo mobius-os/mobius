@@ -423,11 +423,13 @@ def test_chat_usage_reports_totals_and_historic_coverage(
 
   assert response.status_code == 200
   payload = response.json()
-  assert payload["coverage"] == {
-    "runs": 2,
-    "runs_with_usage": 1,
-    "runs_with_cost": 1,
-  }
+  assert payload["coverage"]["runs"] == 2
+  assert payload["coverage"]["runs_with_usage"] == 1
+  assert payload["coverage"]["runs_with_cost"] == 1
+  # The unmeasured historic run keeps the observed sums from reading as a
+  # complete chat aggregate.
+  assert payload["coverage"]["runs_by_quality"]["final"] == 1
+  assert payload["coverage"]["runs_by_quality"]["missing"] == 1
   assert payload["totals"] == {
     "input_tokens": 900,
     "output_tokens": 200,
@@ -443,6 +445,9 @@ def test_chat_usage_reports_totals_and_historic_coverage(
   assert measured["provider_session_id"] == "thread-1"
   assert measured["model_context_window"] == 200_000
   assert measured["usage"]["calculation"] == "thread_delta"
+  assert measured["usage_quality"] == "final"
+  historic = next(run for run in payload["runs"] if run["id"] == "historic-run")
+  assert historic["usage_quality"] == "missing"
 
 
 def test_current_chat_usage_is_bounded_to_selected_provider_session(
@@ -1452,3 +1457,54 @@ def test_compact_park_handoff_never_selects_chat_transcript(chat, db):
   assert chat_reads
   assert all("messages_v1" not in query for query in chat_reads)
   assert not any("FROM chat_messages" in query for query in queries)
+
+
+def test_detail_carries_when_each_reply_run_ended_without_changing_row_identity(client, auth, db):
+  """A row's `ts` is when its turn started; the footer needs when it ended."""
+  db.add(create_chat(id="run-ended", title="Ended", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "done-run", "content": "a", "ts": 2},
+    {"role": "user", "hidden": True, "steered": True, "content": "note", "ts": 3},
+    {"role": "assistant", "id": "done-run:assistant:1", "content": "b", "ts": 4},
+    {"role": "assistant", "id": "open-run", "content": "c", "ts": 5},
+    {"role": "assistant", "content": "legacy", "ts": 6},
+  ]))
+  ended = datetime(2026, 11, 14, 9, 30)  # stored naive, in UTC
+  db.add(models.ChatRun(id="done-run", chat_id="run-ended", status="completed", ended_at=ended))
+  db.add(models.ChatRun(id="open-run", chat_id="run-ended", status="running"))
+  db.commit()
+
+  rows = client.get("/api/chats/run-ended?limit=10", headers=auth).json()["messages"]
+
+  ended_ms = round(ended.replace(tzinfo=UTC).timestamp() * 1000)
+  assert [row.get("run_ended_ts") for row in rows] == [None, ended_ms, None, ended_ms, None, None]
+  assert [row["ts"] for row in rows] == [1, 2, 3, 4, 5, 6], "row identity is untouched"
+  stored = transcript_rows.at(db, db.get(models.Chat, "run-ended"), 1)
+  assert "run_ended_ts" not in stored, "the field is read-side only"
+
+
+def test_detail_end_times_skip_runs_closed_by_recovery_and_follow_branches(client, auth, db):
+  """A run closed by startup recovery records the recovery, not the reply's
+  end, so it has none. A branch's copied replies keep their source's runs."""
+  ended = datetime(2026, 11, 14, 9, 30)
+  db.add(create_chat(id="branch-source", title="Source", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "source-run", "content": "a", "ts": 2},
+    {"role": "user", "cid": "again", "content": "Again", "ts": 3},
+    {"role": "assistant", "id": "recovered-run", "content": "b", "ts": 4},
+  ]))
+  db.add(create_chat(id="branch-copy", title="Branch", messages=[
+    {"role": "user", "cid": "ask", "content": "Go", "ts": 1},
+    {"role": "assistant", "id": "source-run", "content": "a", "ts": 2},
+  ], branch_origin={"chat_id": "branch-source", "title": "Source", "through_count": 2}))
+  db.add(models.ChatRun(id="source-run", chat_id="branch-source", status="completed", ended_at=ended))
+  db.add(models.ChatRun(id="recovered-run", chat_id="branch-source", status="interrupted",
+                        end_reason="server_restart", ended_at=ended + timedelta(hours=3)))
+  db.commit()
+
+  source = client.get("/api/chats/branch-source?limit=10", headers=auth).json()["messages"]
+  branch = client.get("/api/chats/branch-copy?limit=10", headers=auth).json()["messages"]
+
+  ended_ms = round(ended.replace(tzinfo=UTC).timestamp() * 1000)
+  assert [row.get("run_ended_ts") for row in source] == [None, ended_ms, None, None]
+  assert [row.get("run_ended_ts") for row in branch] == [None, ended_ms]

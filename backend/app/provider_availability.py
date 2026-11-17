@@ -2,11 +2,13 @@
 
 Written only inside the ``chat_writer`` actor (the single serialized persistence
 owner): a turn that parks on a usage/rate limit records a bounded retry
-check, and an explicit provider-success acknowledgement clears only a limit no
-newer than that run.
+check, and a provider-success acknowledgement whose runner observed an actual
+provider response clears only a limit no newer than that run.
 Read by
 ``background_agents.resolve_background_provider`` to skip a provider that is
-currently out of quota when choosing which background/app agent to run.
+currently out of quota when choosing which background/app agent to run, and
+passed to app tool calls (``app_tools``) so an app that runs a provider CLI
+itself can skip it too.
 """
 
 from __future__ import annotations
@@ -28,6 +30,15 @@ def provider_within_quota(db, provider: str) -> bool:
   if row is None or row.limited_until is None:
     return True
   return now_naive_utc() >= row.limited_until
+
+
+def limited_providers(db) -> list[str]:
+  """Providers whose quota observation currently suppresses selection."""
+  now = now_naive_utc()
+  return sorted(
+    row.provider for row in db.query(ProviderAvailability)
+    .filter(ProviderAvailability.limited_until > now)
+  )
 
 
 def mark_provider_limited(
@@ -52,12 +63,14 @@ def mark_provider_limited(
   row.updated_at = now_naive_utc()
 
 
-def clear_provider_availability_after_success(
+def clear_provider_availability_after_response(
   db, provider: str | None, run_started_at: datetime | None,
 ) -> None:
-  """Drop a limit proven stale by one successful admitted provider run.
+  """Drop a limit proven stale by a provider response to one admitted run.
 
-  The run must have started at or after the limit observation. Otherwise an
+  The caller must hold response evidence, not merely submitted input: a turn
+  stopped before the provider answered proves nothing about its quota. The
+  run must have started at or after the limit observation. Otherwise an
   older overlapping run could finish after a newer run parks and incorrectly
   erase the newer quota signal.
   """

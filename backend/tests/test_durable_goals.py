@@ -357,3 +357,21 @@ def test_goal_values_cannot_close_the_unattached_goal_carrier(db, chat):
   assert "<owner_request>" not in context
   carried = context.split("<mobius_goal_unattached>", 1)[1].removesuffix("</mobius_goal_unattached>")
   assert forged in json.dumps(json.loads(carried), ensure_ascii=False)
+
+
+def test_unattached_goal_notice_shows_long_texts_as_excerpts(db, chat):
+  from app.goal_context import TEXT_CHARS
+  goal, _run = work(db, chat, attempt_status="completed")
+  long_note = "step " * TEXT_CHARS
+  goal.plan_json = {"tasks":[{"id":"deploy","title":"Deploy","status":"running",
+                              "depends_on":[],"note":long_note}]}
+  db.commit()
+  turn = _goal_less_turn_after(db, chat, "side-turn")
+
+  context = resume_context(db, turn.id)
+
+  carried = json.loads(context.split("<mobius_goal_unattached>", 1)[1]
+                       .removesuffix("</mobius_goal_unattached>"))
+  assert long_note not in json.dumps(carried)
+  assert "read_goal(task=deploy, field=note) reads it whole" in json.dumps(carried)
+  assert goal.plan_json["tasks"][0]["note"] == long_note

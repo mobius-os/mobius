@@ -2,7 +2,7 @@ import { useId } from 'react'
 import { BASE } from '../../api/client.js'
 import {
   recoveryPhaseForAttempt,
-  repairChatPath,
+  repairChatHref,
 } from '../../lib/errorRecovery.js'
 import './RecoveryPanel.css'
 
@@ -116,7 +116,7 @@ export default function RecoveryPanel({
           </button>
         )}
         {phase === 'recovery' && repairChatId && (
-          <a className="recovery-panel__button" href={repairChatPath(repairChatId, BASE)}>
+          <a className="recovery-panel__button" href={repairChatHref(repairChatId, BASE)}>
             Open repair chat
           </a>
         )}

@@ -67,6 +67,9 @@ async def _public_target_refusal(gh, cwd, target):
 
 async def post_public_review(db, row, item_key, target, outcome, principal, cwd, *, gh, authorize):
   """Freeze evidence before dispatch; only certified non-dispatch permits retry."""
+  # The published judgment stays frozen even when later merge gates rewrite
+  # this item's state or summary.
+  outcome = {**outcome, "frozen_evidence": public.evidence(outcome)}
   # Format before reserving: a known local rejection is not an uncertain send.
   marker = f"<!-- mobius-review:{uuid.uuid4().hex} -->"
   body = public.review_comment_body(outcome, marker=marker)

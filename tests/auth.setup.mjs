@@ -8,12 +8,28 @@
  * browser run is required to identify itself as an isolated test runtime,
  * and individual specs clean up only the fixture IDs they created.
  */
+import { execFileSync } from 'node:child_process'
 import { expect, test as setup } from '@playwright/test'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
 const USER = process.env.MOBIUS_USER || 'admin'
 const PASS = process.env.MOBIUS_PASS || 'admin'
 const AUTH_FILE = process.env.MOBIUS_AUTH_FILE || 'tests/.auth/state.json'
+const CONTAINER = process.env.MOBIUS_CONTAINER || 'mobius-test'
+
+// Creating the owner needs the one-time code the server writes to its data
+// folder; an operator reads it from the log, the harness from the container.
+function setupCode() {
+  try {
+    return execFileSync(
+      'docker',
+      ['exec', '--user', 'mobius', CONTAINER, 'cat', '/data/setup-code'],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
+    ).trim()
+  } catch {
+    return ''  // Already configured: the code was retired with first setup.
+  }
+}
 
 // First guard: only local-family hosts on a non-production port.
 const allowedHosts = [
@@ -44,8 +60,10 @@ setup('authenticate', async ({ page, request }) => {
   }
 
   // Ensure the owner account exists (idempotent — 400 if already set up).
+  // Asking for the status first makes the server issue the code if needed.
+  await request.get(`${BASE}/api/auth/setup/status`, { failOnStatusCode: false })
   const setupRes = await request.post(`${BASE}/api/auth/setup`, {
-    data: { username: USER, password: PASS },
+    data: { username: USER, password: PASS, setup_code: setupCode() },
     failOnStatusCode: false,
   })
   expect([200, 400], 'setup creates the owner or is already configured')

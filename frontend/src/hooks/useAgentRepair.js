@@ -5,7 +5,6 @@ import {
   runAgentRepair,
   writeRefreshedRecoveryAttempt,
 } from '../lib/errorRecovery.js'
-import { sharedBrowserShellHref } from '../lib/sharedBrowserWorkspace.js'
 
 /**
  * "Ask the agent to fix it" for one failure of one surface: owns that
@@ -61,7 +60,7 @@ export default function useAgentRepair({
     return () => window.removeEventListener('pageshow', onPageShow)
   }, [cancel, fingerprint, surfaceKey])
 
-  const repair = useCallback(async () => {
+  const repair = useCallback(async ({ agent, archiveOnGoalComplete = false } = {}) => {
     if (!fingerprint || controllerRef.current) return
     const controller = new AbortController()
     controllerRef.current = controller
@@ -88,9 +87,11 @@ export default function useAgentRepair({
           if (controllerRef.current === controller) setLive({ fingerprint, attempt: next })
         },
         prompt,
+        agent,
+        archiveOnGoalComplete,
       })
       if (controllerRef.current === controller && !controller.signal.aborted) {
-        window.location.assign(sharedBrowserShellHref(result.path))
+        window.location.assign(result.href)
       }
     } catch (error) {
       // Loading the client can fail before the shared runner records an attempt.

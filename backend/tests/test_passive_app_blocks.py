@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 from app import models
 from app.app_capabilities import (
-  RUNTIME_CAPABILITY_DEFINITIONS, _applied_passive_digest, contract_and_digest, diff_contracts,
-  passive_block_module_digest,
+  RUNTIME_CAPABILITY_DEFINITIONS, _applied_passive_admission, contract_and_digest, diff_contracts,
+  passive_block_ask, passive_block_module_digest,
 )
 from app.applied_app_runtime import runtime_parent
 from app.compiler import app_bundle_digest
@@ -82,7 +82,7 @@ def test_new_local_acceptance_cannot_admit_a_legacy_served_revision(client, auth
 def test_serialization_reads_the_applied_manifest_once_per_immutable_revision(client, auth, db):
   created = create_local_app(client, auth, name="Cached passive", capabilities={CAPABILITY: {"version": 1}})
   app = db.get(models.App, created["id"])
-  _applied_passive_digest.cache_clear()
+  _applied_passive_admission.cache_clear()
   real_open = Path.open
   opened = []
 
@@ -101,7 +101,7 @@ def test_missing_runtime_cache_is_unadmitted_without_rebuilding_or_caching(clien
   created = create_local_app(client, auth, name="Evicted passive", capabilities={CAPABILITY: {"version": 1}})
   app = db.get(models.App, created["id"])
   digest = created["passive_block_module_digest"]
-  _applied_passive_digest.cache_clear()
+  _applied_passive_admission.cache_clear()
   root = runtime_parent(app.id) / app.runtime_revision
   moved = root.with_name(root.name + ".moved")
   root.rename(moved)
@@ -129,3 +129,54 @@ def test_in_repo_browser_fixture_applies_as_an_admitted_session_app(client, auth
   app = db.get(models.App, created["id"])
   assert created["passive_block_module_digest"] == app_bundle_digest(app.id, app.compiled_path)
   assert "appBlockSessions" in Path(app.compiled_path).read_text()
+
+
+ASK = "chat.blocks.ask"
+
+
+def test_ask_is_its_own_reviewable_widening_whose_text_says_it_sends_a_message():
+  passive, _ = contract_and_digest({"capabilities": {CAPABILITY: {"version": 1}}})
+  both, _ = contract_and_digest({"capabilities": {CAPABILITY: {"version": 1}, ASK: {"version": 1}}})
+  assert ASK not in passive["runtime"]
+  assert diff_contracts(passive, both)["widens"] is True
+  assert diff_contracts(both, passive)["widens"] is False
+  description = RUNTIME_CAPABILITY_DEFINITIONS[ASK]["description"]
+  assert "press" in description and "your message" in description and "exact message" in description
+  assert "cannot choose the wording" in description
+
+
+def test_ask_needs_the_grant_the_applied_declaration_and_passive_admission(client, auth, db):
+  created = create_local_app(client, auth, name="Asking app",
+                             capabilities={CAPABILITY: {"version": 1}, ASK: {"version": 1}})
+  app = db.get(models.App, created["id"])
+  assert created["passive_block_ask"] is True
+  assert passive_block_ask(app) is True
+  row = next(item for item in client.get("/api/apps/", headers=auth).json() if item["id"] == app.id)
+  assert row["passive_block_ask"] is True
+  # Revoking the ask grant ends asks at once and leaves passive sessions.
+  app.capability_contract = deepcopy(app.capability_contract)
+  ask_grant = app.capability_contract["runtime"].pop(ASK)
+  db.commit()
+  assert passive_block_ask(app) is False
+  assert passive_block_module_digest(app) == created["passive_block_module_digest"]
+  # Without passive admission an ask grant admits nothing.
+  app.capability_contract = deepcopy(app.capability_contract)
+  app.capability_contract["runtime"][ASK] = ask_grant
+  app.capability_contract["runtime"].pop(CAPABILITY)
+  db.commit()
+  assert passive_block_ask(app) is False
+
+
+def test_an_ask_grant_cannot_admit_a_served_revision_that_never_declared_it(client, auth, db):
+  created = create_local_app(client, auth, name="Passive only", capabilities={CAPABILITY: {"version": 1}})
+  app = db.get(models.App, created["id"])
+  assert created["passive_block_ask"] is False
+  manifest_path = Path(app.source_dir) / "mobius.json"
+  manifest = json.loads(manifest_path.read_text())
+  manifest["capabilities"] = {CAPABILITY: {"version": 1}, ASK: {"version": 1}}
+  manifest_path.write_text(json.dumps(manifest))
+  # Accepting the edited declaration is not source Apply.
+  app.capability_contract = contract_and_digest(manifest)[0]
+  db.commit()
+  assert passive_block_module_digest(app) == created["passive_block_module_digest"]
+  assert passive_block_ask(app) is False

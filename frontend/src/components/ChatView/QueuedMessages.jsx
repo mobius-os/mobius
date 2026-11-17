@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import {
   ArrowRotateCw,
+  ArrowUp,
   ChevronDown,
   DoubleChevronRight,
   Paperclip,
@@ -26,18 +27,20 @@ import {
  * Each queued message is itself a collapsible row showing a truncated
  * first line. Click the row to expand and see the full content. The pencil
  * opens the message in the chat box (ChatInputBar's history), where Enter
- * saves it in the same queue position; while it is open there the row says
- * so instead of offering the pencil. The X cancels (DELETE the pending
- * message on the backend).
+ * saves it in the same queue position; while it is open there the row offers
+ * Stop editing instead of the pencil (or "Saving…" while Enter's save runs),
+ * and stays shown even when the tray is collapsed. The X cancels (DELETE the
+ * pending message on the backend).
  *
  * Visual model: a soft, slightly raised stack — distinct from the chat
  * transcript so it's clear these are "not yet sent" turns. Lives between
  * the chat list and the input form. Empty queue → nothing rendered.
  */
 export default function QueuedMessages({
-  items, onCancel, onEditInComposer, inComposerCid = null, onRetry, onSteerOne,
+  items, onCancel, onEditInComposer, inComposerCid = null, inComposerSaving = false, onStopEditing,
+  onRetry, onSteerOne,
   steerActive, steerBusy = false, turnActive = false, online = true,
-  restarting = false,
+  restarting = false, onSendHeld, sharedGuest = false,
 }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [collapsed, setCollapsed] = useState(false)
@@ -47,7 +50,10 @@ export default function QueuedMessages({
 
   // The caption states the real reason these are waiting (see queuedHint).
   const rejectedCount = items.filter(msg => msg.recoveryAvailable).length
-  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({ turnActive, online, restarting })
+  const hint = rejectedCount ? `${rejectedCount} ${rejectedCount === 1 ? 'needs' : 'need'} attention — kept here` : queuedHint({
+    turnActive, online, restarting, sharedGuest,
+    held: items.filter(msg => msg.held).length, total: items.length,
+  })
 
   // Stable key: the row's `cid` (client-minted, or a `legacy-<ts>`
   // derivation for pre-cid rows). cid is minted once at compose time and
@@ -78,13 +84,18 @@ export default function QueuedMessages({
   }
 
   const itemsId = 'queued-items'
+  // A collapsed tray still shows the row open in the chat box: with no strip
+  // above the box, that row and its Stop editing are the edit's only cue and
+  // its only touch exit.
+  const shownItems = collapsed ? items.filter(msg => keyOf(msg) === inComposerCid) : items
 
   return (
     <div
-      className={`queued${collapsed ? ' queued--collapsed' : ''}`}
+      className={`queued${shownItems.length ? '' : ' queued--collapsed'}`}
       role="list"
       aria-label="Queued messages"
     >
+      <div className="queued__bar">
       <div
         className="queued__hdr"
         role="button"
@@ -101,6 +112,9 @@ export default function QueuedMessages({
         <span className="queued__count">
           {items.length} queued
         </span>
+        {collapsed && shownItems.length > 0 && (
+          <span className="chat__sr-only">, showing only the message in the chat box</span>
+        )}
         <span className="queued__hint">
           {hint}
         </span>
@@ -111,9 +125,24 @@ export default function QueuedMessages({
           aria-hidden="true"
         />
       </div>
-      {!collapsed && (
+      {onSendHeld && (
+        // A Stop held the queue and nothing runs: send it as one turn. The
+        // composer keeps its mic; an empty Enter sends the queue too.
+        <button
+          type="button"
+          className="queued__action queued__send-held"
+          onPointerDown={event => event.preventDefault()}
+          onClick={onSendHeld}
+          aria-label="Send queued messages"
+          title="Send queued messages"
+        >
+          <ArrowUp width={16} height={16} aria-hidden="true" />
+        </button>
+      )}
+      </div>
+      {shownItems.length > 0 && (
         <div id={itemsId} className="queued__items">
-          {items.map(msg => {
+          {shownItems.map(msg => {
             const key = keyOf(msg)
             const text = stripAugmentation(msg.content || '')
             const isExpanded = expanded.has(key)
@@ -216,7 +245,21 @@ export default function QueuedMessages({
                   </button>
                 )}
                 {inComposer ? (
-                  <span className="queued__in-composer">In the chat box</span>
+                  // The chat box holds this message; this returns it to the
+                  // draft without saving (Esc on a keyboard).
+                  // While its save runs the control says so and is disabled:
+                  // stopping could not undo a save already sent.
+                  <button
+                    type="button"
+                    className="queued__in-composer"
+                    onPointerDown={(e) => e.preventDefault()}
+                    // A keyboard press is a click with no pointer detail.
+                    onClick={(event) => onStopEditing?.(event.detail === 0)}
+                    title={inComposerSaving ? undefined : 'Back to your draft (Esc)'}
+                    disabled={inComposerSaving}
+                  >
+                    {inComposerSaving ? 'Saving…' : 'Stop editing'}
+                  </button>
                 ) : (
                   <button
                     type="button"

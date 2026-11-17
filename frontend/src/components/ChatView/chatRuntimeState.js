@@ -44,6 +44,11 @@ export function activationRetryDelay(error, attempt, readTimeoutMs) {
  * - The load error wins over a cached running marker, and it is stable as soon
  *   as it renders. While quiet retries run it stays up, saying so, rather than
  *   holding Shell or flashing per attempt.
+ * - A saved window the owner already read presents at once, idle or
+ *   mid-reply: reopening a chat should not wait on the network. It opens at
+ *   the reader's saved coordinate; runtime truth and any live reply reconcile
+ *   beneath it. Controls that act on live state wait for it (see
+ *   liveControlsReady).
  * - Otherwise a transcript or empty frame waits for runtime truth; a cold
  *   activation or a failed one over a safe cached transcript is stable early. */
 export function chatEntryFrame({
@@ -55,19 +60,69 @@ export function chatEntryFrame({
   activationPhase,
   activationSettled,
   transcriptPaintable,
+  cachedFrame = false,
 }) {
   const empty = messageCount === 0
   const showLoadError = empty && (activationRetrying || (loadError && !loading))
   const showEmpty = empty && !loadError && !activationRetrying && !turnActive && !loading
   const displayReady = showLoadError
     || activationPhase === 'cold'
+    || (cachedFrame && !loading && !empty)
     || (activationSettled && !loading && (transcriptPaintable || showEmpty))
     || (activationPhase === 'error' && !loading && transcriptPaintable)
   return { showEmpty, showLoadError, displayReady }
 }
 
+/** Which controls a chat frame may offer, by activation phase. A saved frame
+ * presents before runtime truth, so its liveness, queue and open cards are
+ * provisional: Send, a reply's Try again, answers and Resume (`act`) wait for
+ * activation to settle. Stop (`stop`), whose queue resend is a send, waits
+ * too, and stays available on a failed activation, where the frame may show a
+ * turn that is still running and Stop is the only way to end it. */
+export function liveControlsReady(activationPhase, activationSettled) {
+  return { act: !!activationSettled, stop: !!activationSettled || activationPhase === 'error' }
+}
+
+const ANSWER_BEFORE_ACTIVATION = 'This chat is still loading. Your choice is still here — submit it again in a moment.'
+
+/** The refusal an answer tapped before activation settles reports on its own
+ * card. Shaped as a 409 so the card shows this detail and keeps the choice. */
+export function answerBeforeActivationError() {
+  return Object.assign(new Error(ANSWER_BEFORE_ACTIVATION), {
+    status: 409,
+    detail: ANSWER_BEFORE_ACTIVATION,
+  })
+}
+
+/** Display-only history of a pause that a later continuation resolved. It
+ * wraps the original pause as `source`, so the card classifies it exactly as
+ * the live pause card did, and its distinct type keeps every Resume,
+ * tail-recovery and nudge path from treating it as actionable. */
+export const PAUSE_RECORD_BLOCK = 'pause_record'
+
+// Continuations the owner or a parent agent chose. Each stays visible even
+// when the work paused again immediately.
+const DELIBERATE_CONTINUATIONS = new Set(['manual', 'question_answer', 'helper_answer'])
+
+// A continuation marker, or a recovery run's answer carrying its projected
+// continuation reason, resumes whatever the previous visible row paused.
+const resumesPreviousRow = message => isContinuationMessage(message)
+  || (message?.role === 'assistant' && !!message.continuation_reason)
+
+// Nothing but lifecycle history would remain once the pause block is gone.
+const onlyLifecycle = (row, remainingBlocks) => remainingBlocks.length === 0
+  && !row.goal_summaries?.length && !row.wait_summaries?.length
+
+const samePause = (a, b) => (a?.pause?.kind ?? null) === (b?.pause?.kind ?? null)
+  && (a?.code ?? null) === (b?.code ?? null)
+
 /**
- * A confirmed continuation replaces its actionable pause with one resume notice.
+ * A confirmed continuation settles its actionable pause into a history record:
+ * the chat keeps showing that work paused (a platform update, low storage, a
+ * limit) beside the resume notice, without a stale Resume control or "will
+ * continue" copy. An automatic retry that paused again for the same cause and
+ * produced nothing else is hidden, so a re-parking wait reads as one pause and
+ * one resume; a different cause or a deliberate continuation keeps its record.
  * The durable transcript is untouched. Runtime and stream identity can confirm
  * the successor before its transcript row has been hydrated.
  */
@@ -81,19 +136,27 @@ export function supersedeResumedPauseBlocks(messages, {
   let projected = messages
   let previousVisibleIndex = -1
   let activeAssistantInTranscript = false
+  // For each resuming row, the pause it settled: the cause a retry repeats.
+  const pauseResumedBy = new Map()
   const supersedePause = index => {
     const previous = projected[index]
     const blocks = Array.isArray(previous?.blocks) ? previous.blocks : []
     const tail = blocks.at(-1)
     if (previous?.role !== 'assistant' || tail?.type !== 'error'
-        || tail.resumable !== true) return
+        || tail.resumable !== true) return null
     if (projected === messages) projected = [...messages]
     const remainingBlocks = blocks.slice(0, -1)
+    const repeated = pauseResumedBy.get(index)
+    if (repeated && samePause(repeated, tail) && onlyLifecycle(previous, remainingBlocks)
+        && !DELIBERATE_CONTINUATIONS.has(previous.continuation_reason)) {
+      projected[index] = { ...previous, blocks: [], hidden: true }
+      return repeated
+    }
     projected[index] = {
       ...previous,
-      blocks: remainingBlocks,
-      ...(remainingBlocks.length === 0 ? { hidden: true } : {}),
+      blocks: [...remainingBlocks, { type: PAUSE_RECORD_BLOCK, source: tail }],
     }
+    return tail
   }
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index]
@@ -102,11 +165,9 @@ export function supersedeResumedPauseBlocks(messages, {
     }
     if (message?.hidden) continue
 
-    // A recovery run's answer carries its projected continuation reason.
-    const resumes = isContinuationMessage(message)
-      || (message?.role === 'assistant' && !!message.continuation_reason)
-    if (resumes && previousVisibleIndex >= 0) {
-      supersedePause(previousVisibleIndex)
+    if (resumesPreviousRow(message) && previousVisibleIndex >= 0) {
+      const settled = supersedePause(previousVisibleIndex)
+      if (settled) pauseResumedBy.set(index, settled)
     }
 
     previousVisibleIndex = index
@@ -119,6 +180,76 @@ export function supersedeResumedPauseBlocks(messages, {
     supersedePause(previousVisibleIndex)
   }
   return projected
+}
+
+const EMPTY_TIMELINE = new Map()
+const combinedRecoveryRows = new WeakMap()
+const sameRecoveryEvent = (a, b) => a.type === b.type && a.source === b.source
+  && a.ts === b.ts && a.reason === b.reason
+
+// The same resumed row and events reuse one display copy, so the reply
+// projection's identity check keeps the rendered answer across recomputes.
+function withRecoveryEvents(row, events) {
+  const cached = combinedRecoveryRows.get(row)
+  if (cached?.recovery_events.length === events.length
+      && cached.recovery_events.every((event, index) => sameRecoveryEvent(event, events[index]))) {
+    return cached
+  }
+  const combined = { ...row, recovery_events: events }
+  combinedRecoveryRows.set(row, combined)
+  return combined
+}
+
+/** Fold a settled pause record into the notice of the row that resumed it, for
+ * display only. Runs on the peer-timeline projection: a peer note or helper
+ * result drawn between the two rows (in a slot, or positioned on the pause row
+ * or a hidden carrier between them) is a boundary like prose, questions and
+ * Goal/Wait outcomes, so the timeline keeps its order. A row left with nothing
+ * but lifecycle history is hidden and its earlier events carried forward.
+ * Source rows and timestamps stay untouched for recovery and search. */
+export function combineRecoveryHistory(messages, { slots = EMPTY_TIMELINE, positions = EMPTY_TIMELINE } = {}) {
+  if (!Array.isArray(messages)) return messages
+  let result = messages
+  let previousIndex = -1
+  const write = (index, row) => {
+    if (result === messages) result = [...messages]
+    result[index] = row
+  }
+  const positioned = row => row?.id != null && !!positions.get(row.id)?.length
+  const timelineBetween = (from, to) => {
+    if (positioned(messages[from])) return true
+    for (let index = from + 1; index <= to; index += 1) {
+      if (slots.get(index)?.length || (index < to && positioned(messages[index]))) return true
+    }
+    return false
+  }
+  for (let index = 0; index < messages.length; index += 1) {
+    const row = messages[index]
+    if (row?.hidden) continue
+    const previous = result[previousIndex]
+    const pause = previous?.blocks?.at(-1)
+    if (resumesPreviousRow(row) && pause?.type === PAUSE_RECORD_BLOCK
+        && !timelineBetween(previousIndex, index)) {
+      const remaining = previous.blocks.slice(0, -1)
+      // A resumed row that paused again folds only when its own resume is
+      // already recorded; otherwise its notice would disappear.
+      const folds = onlyLifecycle(previous, remaining)
+        && (!previous.continuation_reason || !!previous.recovery_events)
+      if (folds || remaining.length) {
+        write(previousIndex, folds
+          ? { ...previous, blocks: [], hidden: true }
+          : { ...previous, blocks: remaining })
+        write(index, withRecoveryEvents(row, [
+          ...(folds ? previous.recovery_events || [] : []),
+          // The paused run's end; the row's own ts is when its answer began.
+          { type: 'pause', source: pause.source, ts: previous.run_ended_ts },
+          { type: 'resume', reason: row.continuation_reason, ts: row.ts },
+        ]))
+      }
+    }
+    previousIndex = index
+  }
+  return result
 }
 
 /** A visible transcript row authored by the owner, excluding product events

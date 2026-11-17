@@ -68,7 +68,9 @@ test('speech startup watchdog tracks progress and ends when model loading comple
   const start = frameSpeech.indexOf("if (data.type === 'load-complete')")
   const end = frameSpeech.indexOf("if (data.type === 'audio')", start)
   assert.ok(start >= 0 && end > start)
-  const branch = frameSpeech.slice(start, end)
+  assert.match(frameSpeech.slice(start, end), /startGenerating\(\)/)
+  const begin = frameSpeech.indexOf('const startGenerating = () => {')
+  const branch = frameSpeech.slice(begin, frameSpeech.indexOf('\n  }', begin))
   assert.match(branch, /clearStartupTimeout\(\)/)
   assert.ok(branch.indexOf('clearStartupTimeout()') < branch.indexOf('generateNext()'))
 

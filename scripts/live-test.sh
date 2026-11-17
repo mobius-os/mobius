@@ -134,9 +134,12 @@ bring_up_test_container() {
 
 setup_owner_and_creds() {
   log "Creating owner ${ADMIN_USER}..."
+  api_noauth GET /api/auth/setup/status >/dev/null
+  local setup_code
+  setup_code=$(docker exec "${CTR}" cat /data/setup-code 2>/dev/null | tr -d '[:space:]' || true)
   api_noauth POST /api/auth/setup \
     -H 'Content-Type: application/json' \
-    -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\"}" >/dev/null
+    -d "{\"username\":\"${ADMIN_USER}\",\"password\":\"${ADMIN_PASS}\",\"setup_code\":\"${setup_code}\"}" >/dev/null
 
   log "Copying Claude CLI credentials from host..."
   docker exec "${CTR}" mkdir -p /data/cli-auth/claude

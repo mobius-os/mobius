@@ -137,7 +137,7 @@ def _public_host_html(app: models.App, token: str) -> str:
   </style>
 </head>
 <body>
-  <iframe id="app" title="{title}" allow="fullscreen *; gamepad *"></iframe>
+  <iframe id="app" title="{title}" allow="fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"></iframe>
   <div id="status" role="status">Opening {title}…</div>
   <script type="application/json" id="mobius-public-host">{_json_for_slot(config)}</script>
   <script type="module" src="{script_url}"></script>

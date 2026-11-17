@@ -1,8 +1,8 @@
-/* A reply has one action row, on its own line at its end, holding a Copy of
- * its answer. It appears only once the reply has settled. The latest reply
- * keeps it in view; earlier replies reveal it by tap (or hover with a mouse).
- * #1290 attached copy to every assistant row and #1342 reverted that; a reply
- * now owns exactly one row instead. */
+/* The chat has one footer, on the reply at its very end: its time, Copy of
+ * everything the agent said since the owner last spoke, and Branch. Replies
+ * above it have no row at all, so there is no gap between them. While the
+ * agent works the footer's line is reserved but empty.
+ * #1290 attached copy to every assistant row and #1342 reverted that. */
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -21,14 +21,12 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
+const { agentStretches, footerCopyParts, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
-const { replyOutcome } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
-const replyAnswerText = messages => replyOutcome(messages).answer
-const summary = messages => {
-  const { answer, endingError } = replyOutcome(messages)
-  return { answer, failed: !!endingError }
-}
+const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
+const { replyProse } = await vite.ssrLoadModule('/src/components/ChatView/messageCopy.js')
+const proseText = (messages, options) => replyProse(messages, options).map(part => part.markdown).join('\n\n')
 
 const turn = {
   role: 'assistant',
@@ -48,133 +46,136 @@ function renderReply(messages, props = {}) {
     { value: { tools: new Map(), positions: new Map() } },
     createElement(Reply, {
       replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
-      useDbActivePayload: true, chatId: 'fixture', onRevealMeta: () => {}, ...props,
+      useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
+      // ChatView offers Copy exactly when the stretch's prose has a part.
+      copy: stretchProse([group]).length ? () => null : undefined,
+      ...props,
     })))
 }
 const metaRows = html => html.match(/class="chat__msg-meta[ "]/g) || []
 // The reply's action row alone: an error card carries its own Copy.
 const actionRow = html => html.slice(html.indexOf('class="chat__msg-meta'))
 
-test('a settled reply ends with exactly one start-edge action row holding Copy', () => {
+test('the footer reply ends with exactly one start-edge action row holding Copy', () => {
   const html = renderReply([turn])
   assert.equal(metaRows(html).length, 1)
-  assert.match(html, /chat__msg-meta chat__msg-meta--start"/)
+  assert.match(html, /chat__msg-meta chat__msg-meta--start"/, 'hidden until tapped or hovered')
+  assert.match(renderReply([turn], { metaVisible: true }), /chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"/,
+    'a tap reveals it, as on owner rows')
   assert.match(html, /aria-label="Copy message"/)
   assert.ok(html.indexOf('chat__msg-meta') > html.indexOf('Nothing else is pending.'),
     'the action row sits after the reply’s last text, not beside any earlier part')
 })
 
-test('an earlier reply hides its action row until revealed', () => {
-  assert.doesNotMatch(renderReply([turn]), /chat__msg-meta--visible/)
-  assert.match(renderReply([turn], { metaVisible: true }), /chat__msg-meta--visible/)
+test('a reply above the end of the chat has no action row, so no gap', () => {
+  assert.equal(metaRows(renderReply([turn], { footer: null })).length, 0)
 })
 
-test('a hidden action row is not also hidden from assistive technology', () => {
-  // Hover reveals the row through CSS alone; an aria-hidden ancestor would
-  // leave its now-focusable buttons without accessible semantics.
+test('the footer retains its accessible semantics', () => {
+  // CSS owns visibility; an aria-hidden ancestor would leave buttons
+  // focusable but without accessible semantics.
   const row = renderReply([turn]).match(/<div class="chat__msg-meta[^>]*>/)[0]
   assert.doesNotMatch(row, /aria-hidden/)
 })
 
-test('a streaming reply already reserves its action row, empty until it settles', () => {
-  // Settling must fill the line, not add one: a followed transcript would
-  // grow and jump at the end of every turn (streaming-cursor.spec).
-  const html = renderReply([turn], { isStreaming: true, metaVisible: true, onTryAgain: () => {} })
-  assert.equal(metaRows(html).length, 1)
-  assert.match(html, /<div class="chat__msg-meta chat__msg-meta--start chat__msg-meta--visible"><\/div>/,
-    'no time, Copy or Try again while the reply is still being written')
+test('a stretch runs across hidden carriers and ends where the owner speaks', () => {
+  const reply = (id, extra = {}) => ({ role: 'assistant', id, ts: turn.ts, blocks: [{ type: 'text', content: id }], ...extra })
+  const owner = { role: 'user', content: 'Next', ts: turn.ts }
+  const answered = { role: 'user', content: 'Answer', hidden: true, kind: 'continuation', ts: turn.ts }
+  const stretches = messages => [...agentStretches(messages, assistantReplyGroups(messages))]
+    .map(([end, groups]) => [messages[end.start].id, groups.map(group => messages[group.start].id)])
+  assert.deepEqual(stretches([reply('a'), answered, reply('b')]), [['b', ['a', 'b']]],
+    'an answered card is not the owner speaking')
+  assert.deepEqual(stretches([reply('a'), answered, reply('b'), owner, reply('c')]),
+    [['b', ['a', 'b']], ['c', ['c']]])
+  assert.deepEqual(stretches([owner, reply('a'), owner]), [['a', ['a']]])
+  // ChatView appends the live reply as a placeholder group; it extends the
+  // stretch of the replies before it.
+  assert.deepEqual(stretches([reply('a'), answered, { role: 'assistant', id: 'live', blocks: [] }]),
+    [['live', ['a', 'live']]])
 })
 
-test('a reply with no prose offers no Copy but keeps its time', () => {
+test('a stretch lists its References once, after its last reply', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  assert.doesNotMatch(renderReply([sourced], { stretchSourceRows: null }), /chat__sources/,
+    'a reply inside a stretch lists none')
+  assert.match(renderReply([turn], { stretchSourceRows: [sourced] }), /References/,
+    'the stretch’s last reply lists the sources of the replies before it')
+  assert.match(renderReply([sourced]), /References/, 'its own sources too')
+  assert.doesNotMatch(renderReply([sourced], { isStreaming: true }), /chat__sources/,
+    'only once the reply has settled')
+})
+
+test('while the agent works the footer line is reserved but empty', () => {
+  // Settling must fill the line, not add one: a followed transcript would
+  // grow and jump at the end of every turn (streaming-cursor.spec).
+  const empty = /<div class="chat__msg-meta chat__msg-meta--start"><\/div>/
+  assert.match(renderReply([turn], { footer: 'working' }), empty,
+    'a new turn clears the footer, an answered card included')
+  assert.match(renderReply([turn], { isStreaming: true }), empty,
+    'no time or Copy while the reply is still being written')
+})
+
+test('a stretch with no prose offers no Copy but keeps its time', () => {
   const toolsOnly = { role: 'assistant', id: 'run', ts: turn.ts, blocks: [{ type: 'tool', name: 'Bash' }] }
   const row = actionRow(renderReply([toolsOnly]))
   assert.doesNotMatch(row, /aria-label="Copy message"/)
-  assert.match(row, /<time class="chat__ts">/)
+  assert.match(row, /<time class="chat__ts"/)
 })
 
-test('reply Copy takes the answer after the last activity, not the progress notes', () => {
-  assert.equal(replyAnswerText([turn]),
-    'The board is **up to date**.\n\nNothing else is pending.')
+test('Copy takes everything the reply said, progress notes included', () => {
+  assert.equal(proseText([turn]),
+    'Checking the board first.\n\nThe board is **up to date**.\n\nNothing else is pending.')
 })
 
-test('cards neither copy nor split the answer; thinking does split it', () => {
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [
-    { type: 'thinking', content: 'private' },
-    { type: 'text', content: 'Which option?' },
-    { type: 'question', questions: [] },
-  ] }]), 'Which option?')
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [
-    { type: 'text', content: 'Before.' },
-    { type: 'thinking', content: 'private' },
-    { type: 'text', content: 'After.' },
-  ] }]), 'After.')
-})
-
-test('activity after the answer does not erase it', () => {
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [
-    { type: 'tool', name: 'Read' },
-    { type: 'text', content: 'Pick a direction below.' },
-    { type: 'tool', name: 'request_question' },
-    { type: 'question', questions: [] },
-  ] }]), 'Pick a direction below.')
-})
-
-test('the answer reads across a reply’s rows and skips hidden or system rows', () => {
-  assert.equal(replyAnswerText([
-    { role: 'assistant', blocks: [{ type: 'tool', name: 'Read' }, { type: 'text', content: 'Part one.' }] },
+test('tools and thinking never copy; prose reads across rows and skips hidden or system rows', () => {
+  assert.equal(proseText([
+    { role: 'assistant', blocks: [
+      { type: 'thinking', content: 'private' },
+      { type: 'tool', name: 'Read', output: 'file contents' },
+      { type: 'text', content: 'Part one.' },
+    ] },
     { role: 'user', hidden: true, content: 'carrier' },
     { role: 'assistant', kind: 'compaction', content: 'summary' },
     { role: 'assistant', content: 'Part two.' },
   ]), 'Part one.\n\nPart two.')
 })
 
-test('the reply row shows the reply’s date and time after its actions', () => {
-  const html = renderReply([turn])
-  assert.match(html, /<time class="chat__ts">21st Oct 2026, /)
-})
-
-test('Try again appears only where the conversation offers it', () => {
-  assert.doesNotMatch(renderReply([turn]), /aria-label="Try again"/,
-    'an earlier reply, or one while a turn runs, has no Try again')
-  const latest = renderReply([turn], { metaVisible: true, onTryAgain: () => {} })
-  assert.match(latest, /aria-label="Try again"/)
-  assert.ok(latest.indexOf('aria-label="Copy message"') < latest.indexOf('aria-label="Try again"'))
-})
-
-test('a progress note followed by real work is not the answer; the card it ends on is', () => {
-  // A common turn shape: a short note, more tool work, a save, then a
-  // question card with no closing prose. Copy used to take the note.
-  const question = { type: 'question', questions: [{
+test('an open card copies; answered, completed, stopped and sealed cards do not', () => {
+  const card = { type: 'question', question_id: 'logs', questions: [{
     question: 'What did the logs show?',
     options: [{ label: 'Nothing unusual' }, { label: 'Something else' }],
   }] }
-  const narration = [
-    { type: 'text', content: 'The build looks **fine**. Checking the logs next:' },
-    { type: 'tool', tool: 'Bash' },
-    { type: 'thinking', content: 'private' },
-    { type: 'tool', tool: 'mcp__mobius_control__checkpoint_chat' },
-    { type: 'tool', tool: 'mcp__mobius_control__request_question' },
-  ]
-  assert.deepEqual(summary([{ role: 'assistant', blocks: [...narration, question] }]), {
-    answer: 'What did the logs show?\n- Nothing unusual\n- Something else', failed: false,
-  })
-  assert.deepEqual(summary([{ role: 'assistant', blocks: narration }]),
-    { answer: '', failed: false }, 'a note with no card after it copies nothing')
-  assert.doesNotMatch(actionRow(renderReply([{ role: 'assistant', id: 'run', blocks: narration }])),
-    /aria-label="Copy message"/)
+  const blocks = [{ type: 'text', content: 'Checking the logs:' }, { type: 'tool', tool: 'Bash' }]
+  const open = { liveQuestionId: 'logs' }
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, card] }], open),
+    'Checking the logs:\n\nWhat did the logs show?\n- Nothing unusual\n- Something else')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, { ...card, answers: { 0: 'A' } }] }], open),
+    'Checking the logs:')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks, card] }]), 'Checking the logs:',
+    'no longer the chat’s open question: stopped or superseded')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks,
+    { ...card, platform_action: { type: 'restart', version: 2, status: 'activated' } }] }], open),
+  'Checking the logs:', 'a restart card already acted on')
+  assert.equal(proseText([{ role: 'assistant', blocks: [...blocks,
+    { type: 'question', question_id: 'logs', secure_input: { fields: [] }, questions: [{ question: 'Service API key' }] }] }], open),
+  'Checking the logs:')
 })
 
-test('thinking and closing bookkeeping after the answer keep it', () => {
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [
-    { type: 'tool', tool: 'Read' },
-    { type: 'text', content: 'The build is clean.' },
-    { type: 'tool', tool: 'mobius_control:memory_remember' },
-    { type: 'thinking', content: 'private' },
-    { type: 'tool', tool: 'mcp__mobius_control__notify_owner' },
-    { type: 'tool', tool: 'mobius_control:checkpoint_chat' },
-    { type: 'tool', tool: 'mcp__mobius_control__request_question' },
-    { type: 'question', questions: [{ question: 'What next?' }] },
-  ] }]), 'The build is clean.')
+test('the footer shows an older reply’s date and time, with the full date on hover', () => {
+  // Recent replies read "23 minutes ago" (dateTimeFormat.test); this one is
+  // weeks old, so it shows its date.
+  const html = renderReply([turn])
+  assert.match(renderReply([{ ...turn, run_ended_ts: turn.ts }]), /<time class="chat__ts" title="21st Oct 2026, \d\d:\d\d">21st Oct 2026, /)
+  assert.match(html, /title="Started 21st Oct 2026, /, 'a run not yet known to have ended reads as its start')
+})
+
+test('the footer offers Copy without Try again', () => {
+  const html = renderReply([turn])
+  assert.match(html, /aria-label="Copy message"/)
+  assert.doesNotMatch(html, /aria-label="Try again"/)
+  const timeIndex = html.indexOf('<time class="chat__ts"')
+  assert.ok(timeIndex >= 0 && timeIndex < html.indexOf('aria-label="Copy message"'), 'the time leads, then Copy')
 })
 
 // A reloaded transcript folds two or more adjacent tool/thinking steps into
@@ -185,62 +186,36 @@ const folded = (...items) => ({
   tool_count: items.filter(item => item.type === 'tool').length,
 })
 
-test('folded bookkeeping after the answer keeps it after a reload', () => {
-  const question = { type: 'question', questions: [{ question: 'Which way?', options: [{ label: 'A' }] }] }
+test('a reloaded reply with folded activity keeps its prose and Copy', () => {
   const reloaded = { role: 'assistant', id: 'run', blocks: [
     { type: 'text', content: 'The build is clean.' },
     folded({ type: 'thinking' },
       { type: 'tool', tool: 'mcp__mobius_control__checkpoint_chat', status: 'done' }),
   ] }
-  assert.equal(replyAnswerText([reloaded]), 'The build is clean.')
-  assert.match(actionRow(renderReply([reloaded])), /aria-label="Copy message"/,
-    'the reloaded reply keeps its Copy')
-  assert.equal(replyAnswerText([{ ...reloaded, blocks: [...reloaded.blocks, question] }]),
-    'The build is clean.', 'a card after folded bookkeeping does not replace the answer')
+  assert.equal(proseText([reloaded]), 'The build is clean.')
+  assert.match(actionRow(renderReply([reloaded])), /aria-label="Copy message"/)
 })
 
-test('folded real work after a note still makes it a progress note', () => {
-  const question = { type: 'question', questions: [{ question: 'Which way?', options: [{ label: 'A' }] }] }
-  const narration = [
-    { type: 'text', content: 'Checking the logs next:' },
-    folded({ type: 'tool', tool: 'Bash', status: 'done' },
-      { type: 'tool', tool: 'mcp__mobius_control__checkpoint_chat', status: 'done' }),
-  ]
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: narration }]), '')
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [...narration, question] }]),
-    'Which way?\n- A')
-})
-
-test('a sealed secret card is never copied as the answer', () => {
-  assert.equal(replyAnswerText([{ role: 'assistant', blocks: [
-    { type: 'text', content: 'Opening the sealed card:' },
-    { type: 'tool', tool: 'Bash' },
-    { type: 'tool', tool: 'mcp__mobius_control__request_secret' },
-    { type: 'question', secure_input: { fields: [] }, questions: [{ question: 'Service API key' }] },
-  ] }]), '')
-})
-
-test('Copy locates the answer blocks MsgContent renders, after its duplicate-text repair', () => {
+test('Copy locates the prose blocks MsgContent renders, after its duplicate-text repair', () => {
   // A provider once re-sent the whole answer after a question card; rendering
   // repairs that to one block, so Copy must neither duplicate nor misplace it.
-  const { answer, parts } = replyOutcome([
+  assert.deepEqual(replyProse([
     { role: 'assistant', blocks: [{ type: 'tool', tool: 'Read' }] },
     { role: 'assistant', blocks: [
       { type: 'tool', tool: 'Bash' },
       { type: 'text', content: 'Review res' },
-      { type: 'question', questions: [{ question: 'Merge?' }] },
+      { type: 'question', question_id: 'merge', questions: [{ question: 'Merge?' }] },
       { type: 'text', content: 'Review result' },
     ] },
-  ])
-  assert.equal(answer, 'Review result')
-  assert.deepEqual(parts, [{ message: 1, block: 1, markdown: 'Review result' }])
+  ], { liveQuestionId: 'merge' }), [{ message: 1, block: 1, markdown: 'Review result' },
+    { markdown: 'Merge?', card: { questions: [{ question: 'Merge?', options: [] }] } }])
 })
 
-test('Copy numbers answer blocks as they render, past deliverables and a card’s tool twin', () => {
+test('Copy numbers prose blocks as they render, past deliverables and a card’s tool twin', () => {
   // MsgContent renders neither a deliverables block in place nor the tool
   // call a question or Restart card already shows, so later text blocks carry
   // a smaller `data-markdown-block` than their raw position. Copy must read
-  // the element that shows its answer, not a neighbour.
+  // the element that shows its text, not a neighbour.
   const replies = [
     [
       { type: 'tool', tool: 'Bash', input: { command: 'ls' }, output: 'x' },
@@ -256,7 +231,7 @@ test('Copy numbers answer blocks as they render, past deliverables and a card’
   ]
   for (const blocks of replies) {
     const message = { role: 'assistant', id: 'run', ts: turn.ts, blocks }
-    const { parts } = replyOutcome([message])
+    const parts = replyProse([message]).filter(part => Number.isInteger(part.block))
     const html = renderReply([message])
     assert.ok(parts.length > 0)
     for (const part of parts) {
@@ -267,88 +242,180 @@ test('Copy numbers answer blocks as they render, past deliverables and a card’
   }
 })
 
-// Caller eligibility, the real retry click/draft path, and footer flow geometry
-// run in tests/hidden-reply-continuity.spec.mjs against the painted ChatView.
+// Stretch-wide Copy and footer geometry run in
+// tests/hidden-reply-continuity.spec.mjs against the painted ChatView.
 
 const failedReply = (...blocks) => ({ role: 'assistant', id: 'run', ts: turn.ts, blocks })
 
-test('a reply ending on a failure card leaves recovery to that card', () => {
+test('provider text that repeats an error is the error, not prose to copy', () => {
   const limit = 'You\'ve hit your session limit · resets 10:30am (UTC)'
-  const parked = failedReply(
+  assert.equal(proseText([failedReply(
     { type: 'text', content: 'Checking the board.' },
     { type: 'tool', name: 'Bash' },
     { type: 'text', content: limit },
     { type: 'error', message: limit, resumable: true },
-  )
-  assert.deepEqual(summary([parked]), { answer: '', failed: true },
-    'the provider’s echo of the limit is the error, not an answer')
-  const row = actionRow(renderReply([parked], { onTryAgain: () => {}, onResume: () => {} }))
-  assert.doesNotMatch(row, /aria-label="(Copy message|Try again)"/)
+  )]), 'Checking the board.')
 })
 
-test('a stopped reply copies only the answer it was still writing, never Try again', () => {
-  const narration = failedReply(
-    { type: 'text', content: 'Let me check the API access.' },
-    { type: 'tool', name: 'Bash' },
-    { type: 'error', message: 'The agent stopped before finishing this turn.', resumable: true },
-  )
-  assert.deepEqual(summary([narration]), { answer: '', failed: true })
-  const partial = failedReply(
-    { type: 'tool', name: 'Bash' },
-    { type: 'text', content: 'The board is up to' },
-    { type: 'error', message: 'The agent stopped before finishing this turn.', resumable: true },
-  )
-  assert.deepEqual(summary([partial]), { answer: 'The board is up to', failed: true })
-  const html = renderReply([partial], { metaVisible: true, onTryAgain: () => {}, onResume: () => {} })
-  assert.match(html, /aria-label="Copy message"/)
-  assert.doesNotMatch(html, /aria-label="Try again"/)
+test('an error echo is dropped even when its error card is on another row', () => {
+  const limit = 'Usage limit reached'
+  assert.equal(proseText([
+    failedReply({ type: 'text', content: 'Checking.' }, { type: 'text', content: limit }),
+    failedReply({ type: 'error', message: limit, resumable: true }),
+  ]), 'Checking.')
 })
 
-test('an error card that cannot recover leaves Try again to the latest reply', () => {
-  // Only a resumable tail card owns recovery (ownsRecoveryAction); a plain
-  // provider error shows neither Try now nor Resume.
-  const latest = { metaVisible: true, onTryAgain: () => {}, onResume: () => {} }
-  const providerError = failedReply(
-    { type: 'tool', name: 'Bash' },
-    { type: 'error', message: 'The provider returned an error.' },
-  )
-  const bare = actionRow(renderReply([providerError], latest))
-  assert.match(bare, /aria-label="Try again"/)
-  assert.doesNotMatch(bare, /aria-label="Copy message"/,
-    'no answer, so the row has nothing to copy (the error card copies its own message)')
-  assert.match(bare, /<time class="chat__ts">/)
-  const partial = failedReply(
-    { type: 'text', content: 'The board is up to' },
-    { type: 'error', message: 'The provider returned an error.' },
-  )
-  const html = actionRow(renderReply([partial], latest))
-  assert.match(html, /aria-label="Copy message"/)
-  assert.match(html, /aria-label="Try again"/)
-})
-
-test('a resumable error card owns recovery only where it can act', () => {
+test('a failed reply leaves recovery to its error card, never Try again', () => {
   const stopped = failedReply(
     { type: 'tool', name: 'Bash' },
     { type: 'error', message: 'The agent stopped before finishing this turn.', resumable: true },
   )
-  assert.doesNotMatch(actionRow(renderReply([stopped], { onTryAgain: () => {}, onResume: () => {} })),
-    /aria-label="Try again"/, 'its Resume is the way on')
-  assert.match(renderReply([stopped], { onTryAgain: () => {} }), /aria-label="Try again"/,
-    'without a Resume path the card offers nothing, so Try again does')
+  const html = renderReply([stopped], { onResume: () => {} })
+  assert.match(html, /class="chat__resume chat__recovery-action">Resume<\/button>/)
+  const row = actionRow(html)
+  assert.doesNotMatch(row, /aria-label="Try again"/)
+  assert.doesNotMatch(row, /aria-label="Copy message"/,
+    'no prose, so the row has nothing to copy (the error card copies its own message)')
+  assert.match(row, /<time class="chat__ts"/)
 })
 
-test('an error card above a later row does not end the reply', () => {
-  const later = { role: 'assistant', id: 'later', ts: turn.ts, kind: 'compaction', blocks: [] }
-  const { endingError } = replyOutcome([failedReply(
-    { type: 'error', message: 'Interrupted', resumable: true },
-  ), later])
-  assert.equal(endingError, null)
+test('the footer offers Branch right after Copy', () => {
+  const branched = []
+  const html = renderReply([turn], { onBranch: through => branched.push(through) })
+  const row = actionRow(html)
+  assert.match(row, /aria-label="Branch in new chat"/)
+  assert.ok(row.indexOf('aria-label="Copy message"') < row.indexOf('aria-label="Branch in new chat"'),
+    'Branch sits to the right of Copy')
+  assert.ok(row.indexOf('<time') < row.indexOf('aria-label="Copy message"'), 'the time leads')
+  assert.doesNotMatch(renderReply([turn], { footer: 'working', onBranch: () => {} }),
+    /aria-label="Branch in new chat"/, 'no Branch while the agent works')
 })
 
-test('an error the reply recovered from does not count as failing', () => {
-  assert.deepEqual(summary([failedReply(
-    { type: 'error', message: 'Temporary glitch' },
-    { type: 'tool', name: 'Bash' },
-    { type: 'text', content: 'Done.' },
-  )]), { answer: 'Done.', failed: false })
+// Which reply holds the footer, in what state, and the stretch it copies.
+const row = (id, extra = {}) => ({ role: 'assistant', id, ts: turn.ts, blocks: [{ type: 'text', content: id }], ...extra })
+const ownerRow = { role: 'user', content: 'Next', ts: turn.ts }
+const cardAnswer = { role: 'user', content: 'Answer', hidden: true, kind: 'continuation', ts: turn.ts }
+function footerOf(messages, options = {}) {
+  const replyGroups = assistantReplyGroups(messages)
+  const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
+  return replyFooter({
+    messages, replyGroups, stretches: agentStretches(messages, replyGroups), lastVisibleIndex, ...options,
+  })
+}
+const firstIds = (messages, footer) => footer.groups.map(group => messages[group.start].id)
+
+test('the footer sits on the chat’s last reply and spans its stretch', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, row('b')]
+  const footer = footerOf(messages)
+  assert.equal(footer.group.start, 3)
+  assert.equal(footer.state, 'settled')
+  assert.deepEqual(firstIds(messages, footer), ['a', 'b'], 'an answered card does not end the stretch')
+  assert.equal(footer.start, 1, 'the stretch starts after the owner’s row')
+  assert.equal(footer.truncated, false)
+  assert.equal(footerOf([row('a'), ownerRow]), null, 'no footer once the owner has spoken')
+})
+
+test('a stretch that reaches the loaded page’s first row may have begun earlier', () => {
+  const messages = [cardAnswer, row('a'), cardAnswer, row('b')]
+  assert.deepEqual({ ...footerOf(messages, { offset: 40 }), group: undefined, groups: undefined },
+    { group: undefined, groups: undefined, state: 'settled', end: 43, start: 0, truncated: true })
+  assert.equal(footerOf(messages).truncated, false, 'the whole chat is loaded')
+})
+
+test('a starting turn clears the footer; only a reply the turn writes reserves its line', () => {
+  const messages = [ownerRow, row('a')]
+  const settledEnd = footerOf(messages).end
+  assert.equal(footerOf(messages, { turnStarting: true, settledEnd }).state, null,
+    'sending or answering a card clears the footer at once')
+  assert.equal(footerOf(messages, { turnStarting: true, settledEnd, liveIndex: 1 }).state, null,
+    'the live surface briefly reselecting the settled reply does not bring its line back')
+  const live = [...messages, ownerRow, { role: 'assistant', id: 'live', blocks: [] }]
+  const working = footerOf(live, { turnStarting: true, settledEnd, liveIndex: 3 })
+  assert.equal(working.group.start, 3)
+  assert.equal(working.state, 'working')
+})
+
+test('a turn continuing the reply that held the footer keeps its line reserved', () => {
+  // A hidden steer joins the same run's next row into the same reply group,
+  // so its first row (and the group's key) is unchanged; its end moves.
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const settled = [ownerRow, row('run')]
+  const settledEnd = footerOf(settled).end
+  const resumed = [...settled, steer, row('run:assistant:1')]
+  const footer = footerOf(resumed, { turnStarting: true, settledEnd, liveIndex: 3 })
+  assert.equal(footer.group.start, 1, 'the same reply')
+  assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
+})
+
+test('Copy’s parts come from the stretch’s replies as they render, each naming its row', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, failedReply(
+    { type: 'text', content: 'Usage limit reached' }, { type: 'error', message: 'Usage limit reached' })]
+  const footer = footerOf(messages)
+  assert.deepEqual(stretchProse(footer.groups), [{ block: 0, markdown: 'a', key: 'a' }],
+    'an error echo is the error, so a stretch ending on one copies only what came before')
+  assert.deepEqual(stretchProse(footerOf([ownerRow, row('tools', { blocks: [{ type: 'tool', name: 'Bash' }] })]).groups), [],
+    'nothing to copy, so no Copy')
+})
+
+test('the footer reads when the reply’s run ended, or says it is the start', () => {
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const ended = Date.UTC(2026, 9, 22, 7, 5)
+  const footerTime = messages => {
+    const group = assistantReplyGroups(messages).get(0)
+    return actionRow(renderWithModels(createElement(PeerTimelineContext.Provider,
+      { value: { tools: new Map(), positions: new Map() } },
+      createElement(Reply, {
+        replyGroup: group, activeRowIndex: -1, activeMirrorMsg: group.rows.at(-1).message,
+        useDbActivePayload: true, chatId: 'fixture', footer: 'settled', stretchSourceRows: [],
+      }))))
+  }
+  assert.match(footerTime([row('run'), steer, row('run:assistant:1', { run_ended_ts: ended })]),
+    /<time class="chat__ts" title="22nd Oct 2026, \d\d:\d\d">22nd Oct 2026, /,
+    'the server’s end of the run that wrote the last row')
+  assert.match(footerTime([row('run'), steer, row('run:assistant:1')]),
+    /<time class="chat__ts" title="Started 21st Oct 2026, \d\d:\d\d">Started 21st Oct 2026, /,
+    'without it, the reply’s start, named as such')
+})
+
+test('a stretch whose start was read copies as the same stretch wholly loaded, peer notes included', () => {
+  // One run split by a hidden steer whose seam carries a peer note: the note
+  // keeps the replay from joining, so the parts depend on the note slots.
+  const steer = { role: 'user', hidden: true, steered: true, source_work_id: 'run', kind: 'peer_message' }
+  const sealed = { role: 'assistant', id: 'run', ts: turn.ts, content: 'The frame', blocks: [{ type: 'text', content: 'The frame' }] }
+  const continuation = { role: 'assistant', id: 'run:assistant:1', ts: turn.ts, blocks: [{ type: 'text', content: 'The framework survives.' }] }
+  const note = [{ id: 'note', type: 'peer_message' }]
+  const partsOf = (messages, { slots = new Map(), offset = 0, startRows } = {}) => {
+    const replyGroups = assistantReplyGroups(messages, { slots, offset })
+    const footer = replyFooter({
+      messages, replyGroups, stretches: agentStretches(messages, replyGroups),
+      lastVisibleIndex: messages.findLastIndex(message => !message.hidden), offset,
+    })
+    return footerCopyParts(footer, { startRows, messages, offset, slots })
+  }
+  const loaded = [ownerRow, sealed, steer, continuation]
+  const whole = partsOf(loaded, { slots: new Map([[2, note]]) })
+  const page = [steer, continuation]
+  assert.equal(partsOf(page, { offset: 2, slots: new Map([[0, note]]) }), null,
+    'unknown until the start is read, so no Copy yet')
+  assert.deepEqual(partsOf(page, { offset: 2, slots: new Map([[0, note]]), startRows: [sealed] }), whole,
+    'the read start joins the loaded rows with the transcript’s own note slots')
+  assert.notDeepEqual(partsOf(loaded), whole, 'the note does change how the reply reads')
+})
+
+test('Copy has no parts until the footer settles', () => {
+  const messages = [ownerRow, row('a')]
+  const footer = footerOf(messages)
+  assert.equal(footerCopyParts({ ...footer, state: 'working' }, { messages }), null)
+  assert.equal(footerCopyParts(null, { messages }), null)
+})
+
+test('every action row reads time, then Copy, then Branch', () => {
+  for (const side of ['end', 'start']) {
+    const html = renderWithModels(createElement(MetaRow, {
+      timestamp: turn.ts, copy: () => null, branch: () => {}, side,
+    }))
+    const at = needle => html.indexOf(needle)
+    assert.ok(at('<time') >= 0 && at('<time') < at('aria-label="Copy message"')
+      && at('aria-label="Copy message"') < at('aria-label="Branch in new chat"'), side)
+  }
 })

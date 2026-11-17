@@ -310,7 +310,7 @@ def test_empty_queue_terminal_clears_marker(monkeypatch):
   assert not chat_mod.registry.is_alive("t1")
 
 
-def test_settled_turn_reclaims_caches_without_retired_summary_publisher(monkeypatch):
+def test_settled_turn_reclaims_caches_off_the_event_loop(monkeypatch):
   """Removing routine summaries must not remove upstream terminal cleanup.
 
   The allocator trim and page-cache reclaim run in a worker; there is no
@@ -349,7 +349,6 @@ def test_settled_turn_reclaims_caches_without_retired_summary_publisher(monkeypa
   assert "gc" not in calls
   assert "trim off loop" in calls
   assert any(item[1] == "settled-reclaim" for item in calls if isinstance(item, tuple))
-  assert not hasattr(chat_mod, "_ensure_chat_note")
 
 
 def test_provider_error_clears_marker_but_records_failed_run(monkeypatch):
@@ -970,16 +969,16 @@ def test_stop_handoff_clears_only_immediate_successor_marker(monkeypatch):
   )
 
 
-# -- 7. unsupported runtime cleanup: marker cleared, pending dropped -----
+# -- 7. unsupported runtime cleanup: marker cleared, pending held --------
 @pytest.mark.parametrize("superseded", [None, "before_close", "during_close"])
-def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, superseded):
+def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatch, superseded):
   """An unsupported provider hits the setup-error terminal cleanup: the
-  pending queue is cleared durably, the marker is cleared before the
+  pending queue is held durably, the marker is cleared before the
   registry release, and no continuation is scheduled."""
   _seed_owner_and_creds()
   _seed_chat(
     "t7", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
 
@@ -995,6 +994,9 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, sup
 
     def build_env(self, **kwargs):
       return {}
+
+    def resolve_selection(self, model, effort):
+      return model, effort
 
   monkeypatch.setattr(chat_mod, "registered_provider", lambda pid: _Unsupported())
 
@@ -1056,7 +1058,7 @@ def test_unsupported_provider_cleanup_clears_marker_and_pending(monkeypatch, sup
     "browser cleanup must hold the lifecycle gate before terminal ownership is released"
   )
   assert state["running"] is False, "unsupported cleanup must clear marker"
-  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], "pending is held for the owner"
   assert state["messages"][-1]["blocks"] == [{
     "type": "error",
     "message": "Provider 'Bogus' has no supported runtime.",
@@ -1363,10 +1365,62 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
   assert "done" in published
 
 
-# -- 11. no-owner setup cleanup: marker cleared, pending dropped ------------
+def _done_events(chat_id, run_token):
+  """Run `chat_id`'s turn for real and return its `done` events."""
+  chat_mod.mark_starting(chat_id)
+  gen = chat_mod.current_run_generation(chat_id)
+  bc = create_broadcast(chat_id)
+  events = []
+  orig = bc.publish
+  bc.publish = lambda event: (events.append(event), orig(event))[1]
+  asyncio.run(chat_mod.run_chat(
+    [chat_mod.schemas.ChatMessage(role="user", content="hi")],
+    chat_id=chat_id, session_id="sess", provider_id="claude",
+    run_gen=gen, run_token=run_token,
+  ))
+  _drain_actor()
+  return [event for event in events if event.get("type") == "done"]
+
+
+def test_done_carries_when_the_run_ended_as_chat_detail_reads_it(monkeypatch):
+  """The client promotes a finished reply from the stream without a refetch,
+  so the final `done` event carries the same run end time a chat detail read
+  later puts on the reply's rows."""
+  from app.run_end_times import run_ended_ts
+  from app.routes.chats import _chat_detail_response
+  _seed_owner_and_creds()
+  _seed_chat("t-ended", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], running="running", run_token="rt-ended")
+  _patch_claude_runner(monkeypatch)
+
+  done = _done_events("t-ended", "rt-ended")
+
+  assert len(done) == 1
+  with SessionLocal() as db:
+    ended = run_ended_ts(db, "t-ended", {"rt-ended"})["rt-ended"]
+    reply = _chat_detail_response(db.get(models.Chat, "t-ended"), db=db)["messages"][-1]
+  assert done[0]["run_ended_ts"] == ended
+  assert (reply["role"], reply["run_ended_ts"]) == ("assistant", ended)
+
+
+def test_a_setup_failure_done_carries_its_run_end_too():
+  """Error exits publish `done` through the same path as a normal end."""
+  from app.run_end_times import run_ended_ts
+  _seed_chat("t-setup", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], running="running", run_token="rt-setup")  # no owner
+
+  done = _done_events("t-setup", "rt-setup")
+
+  with SessionLocal() as db:
+    ended = run_ended_ts(db, "t-setup", {"rt-setup"}).get("rt-setup")
+  assert ended is not None, "the failed setup ended its run"
+  assert [event.get("run_ended_ts") for event in done] == [ended]
+
+
+# -- 11. no-owner setup cleanup: marker cleared, pending held ---------------
 def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   """The no-owner setup-error early return routes through the bounded
-  terminal cleanup: the pending queue is cleared durably, the marker is
+  terminal cleanup: the pending queue is held durably, the marker is
   cleared, the registry is released, and no continuation is scheduled."""
   # Seed creds but NO owner so run_chat bails at the no-owner guard (which
   # is checked before the auth guard).
@@ -1378,7 +1432,7 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   creds.write_text("{}", encoding="utf-8")
   _seed_chat(
     "t11", messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
 
@@ -1400,7 +1454,9 @@ def test_no_owner_cleanup_clears_marker_before_registry_release(monkeypatch):
   assert scheduled == []
   state = _load("t11")
   assert state["running"] is False, "no-owner cleanup must clear the marker"
-  assert state["pending_messages"] == [], "pending must be cleared durably"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], (
+    "pending is held for the owner"
+  )
   assert not chat_mod.registry.is_alive("t11"), "registry released"
 
 
@@ -1639,7 +1695,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   _seed_chat(
     "t12-auth-error",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 3}],
+    pending=[{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
   )
   _seed_run("rt-12-auth", "t12-auth-error")
@@ -1660,7 +1716,7 @@ def test_auth_error_cleanup_when_another_provider_is_connected(monkeypatch):
   assert "text" not in published
   state = _load("t12-auth-error")
   assert state["running"] is False
-  assert state["pending_messages"] == []
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 3, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}]
   assert state["messages"][-1]["blocks"]
   assert state["messages"][-1]["blocks"][-1]["type"] == "error"
   assert _run_outcomes("t12-auth-error") == {"rt-12-auth": "failed"}
@@ -1713,13 +1769,13 @@ def test_setup_error_cleanup_stale_gen_does_not_clobber_successor():
 
 
 def test_setup_error_cleanup_owned_gen_clears_and_forgets():
-  """When this run still owns the generation, the cleanup clears the pending
-  queue + the marker and forgets the chat (EMPTY_TERMINAL_CLEARED) — the gate
+  """When this run still owns the generation, the cleanup holds the pending
+  queue, clears the marker and forgets the chat (EMPTY_TERMINAL_CLEARED) — the gate
   is transparent on the common, uncontended path."""
   _seed_chat(
     "se-own",
     messages=[{"role": "user", "content": "hi", "ts": 1}],
-    pending=[{"role": "user", "content": "queued", "ts": 2}],
+    pending=[{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00"}],
     running="running",
     run_token="rt-own",
   )
@@ -1736,7 +1792,9 @@ def test_setup_error_cleanup_owned_gen_clears_and_forgets():
   assert disposition is chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
   state = _load("se-own")
   assert state["running"] is False, "owned cleanup clears the marker"
-  assert state["pending_messages"] == [], "owned cleanup clears pending"
+  assert state["pending_messages"] == [{"role": "user", "content": "queued", "ts": 2, "_owner_input_at": "2026-11-06T10:00:00+00:00", "held": True}], (
+    "owned cleanup holds pending for the owner"
+  )
   assert state["messages"][-1]["blocks"] == [
     {"type": "error", "message": "setup failed"}
   ], "owned cleanup persists the setup error before clearing the marker"

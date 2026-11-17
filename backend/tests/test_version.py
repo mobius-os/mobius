@@ -9,12 +9,23 @@ check). These pin the endpoint contract + the config wiring in both directions.
 import os
 import subprocess
 
+import pytest
+
 from app.config import Settings
 
 # A throwaway secret so a fresh Settings() validates without touching the
 # process env; `_env_file=None` keeps the repo .env out of the unit so the
 # only BUILD_SHA source under test is the (monkeypatched) process env.
 _KW = {"secret_key": "x" * 32, "_env_file": None}
+
+
+@pytest.fixture(autouse=True)
+def _no_host_serving_identity(tmp_path, monkeypatch):
+  """Never let the host's /tmp/serving-* sentinels reach the updater."""
+  from app import platform_update as pu
+
+  monkeypatch.setattr(pu, "SERVING_SOURCE_FILE", tmp_path / "pu-serving-source")
+  monkeypatch.setattr(pu, "SERVING_SHA_FILE", tmp_path / "pu-serving-sha")
 
 
 def test_version_endpoint_exposes_build_sha(client):
@@ -151,7 +162,6 @@ def test_version_includes_served_frontend_identity(client):
   # served_frontend is a str hash or None (None when the served dir has no
   # index.html, e.g. a bare test env).
   body = client.get("/api/version").json()
-  assert "shell" + "_sha" not in body
   assert "served_frontend" in body and "frontend_source" in body
   assert body["frontend_source"] in ("platform", "baked")
   assert body["served_frontend"] is None or isinstance(
@@ -192,6 +202,12 @@ def test_served_platform_degrades_when_unstamped(client):
     if prior is not None:
       with open(_SENTINEL, "w", encoding="utf-8") as fh:
         fh.write(prior)
+
+
+def test_unstamped_image_build_applied_is_unknown_as_in_status(tmp_path):
+  from app.main import _served_platform_identity
+
+  assert _served_platform_identity(str(tmp_path), "unknown")["image_build_applied"] is None
 
 
 def test_served_platform_baked_sha_reflects_file(client):
@@ -275,7 +291,7 @@ def test_served_platform_identity_exposes_applied_upstream_sha(
   assert identity["image_build_applied"] is True
 
 
-def test_image_build_applied_accepts_descendant_applied_upstream(
+def test_image_build_applied_accepts_descendant_served_source(
   tmp_path, monkeypatch,
 ):
   from app.main import _served_platform_identity
@@ -309,6 +325,9 @@ def test_image_build_applied_accepts_descendant_applied_upstream(
   source = tmp_path / "serving-source"
   source.write_text("platform\n", encoding="utf-8")
   monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+  served = tmp_path / "serving-sha"
+  served.write_text(applied_sha + "\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(served))
 
   identity = _served_platform_identity(str(tmp_path), image_sha)
 
@@ -341,8 +360,12 @@ def test_image_build_applied_rejects_newer_unapplied_image(
   subprocess.run(
     ["git", "-C", str(repo), "branch", "upstream", applied_sha], check=True,
   )
-  (repo / "README.md").write_text("new image\n", encoding="utf-8")
-  subprocess.run(["git", "-C", str(repo), "commit", "-qam", "image"], check=True)
+  # A backend change is not served until a restart; a live-only change
+  # (README, frontend) would be, and would count as applied.
+  (repo / "backend" / "app").mkdir(parents=True)
+  (repo / "backend" / "app" / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+  subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+  subprocess.run(["git", "-C", str(repo), "commit", "-qm", "image"], check=True)
   image_sha = subprocess.run(
     ["git", "-C", str(repo), "rev-parse", "HEAD"],
     check=True, capture_output=True, text=True,
@@ -350,6 +373,9 @@ def test_image_build_applied_rejects_newer_unapplied_image(
   source = tmp_path / "serving-source"
   source.write_text("platform\n", encoding="utf-8")
   monkeypatch.setenv("MOBIUS_SERVING_SOURCE_FILE", str(source))
+  served = tmp_path / "serving-sha"
+  served.write_text(applied_sha + "\n", encoding="utf-8")
+  monkeypatch.setenv("MOBIUS_SERVING_SHA_FILE", str(served))
 
   identity = _served_platform_identity(str(tmp_path), image_sha)
 

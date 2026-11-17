@@ -144,9 +144,13 @@ test('retained sends move into the tray while authoritative failures restore the
   )
   assert.match(
     freshSend,
-    /else \{[\s\S]*?rememberFailedAttempt\(failedAttempt\)[\s\S]*?restoreComposerAfterFailedSend\(\)/,
+    /else \{[\s\S]*?keepFailedDraft\(failedAttempt, err\)/,
     'only the non-retained branch may restore the composer',
   )
+  // A helper's chat refuses every owner send, so that refusal settles any
+  // remembered attempt instead of keeping one to reconcile; the draft still
+  // comes back.
+  assert.match(chatView, /function keepFailedDraft\(failedAttempt, error\) \{\n\s+if \(!fromComposer\) return\n(?:\s+\/\/.*\n)*\s+if \(isHelperChatSendFailure\(error\)\) clearFailedAttempt\(\)\n\s+else rememberFailedAttempt\(failedAttempt\)\n\s+restoreComposerAfterFailedSend\(\)/)
   assert.match(chatView, /if \(keepQueued\) \{[\s\S]*?status: 'locally_queued', cid: silentCid/,
     'a retained answer must return a local receipt, not pretend server acceptance')
   assert.doesNotMatch(chatView, /queuedAnswerMsg|const silentUserMsg/,
@@ -285,4 +289,23 @@ test('Retry is a keyboard-safe non-submitting button with a visible focus ring',
     chatCss,
     /\.connection-status__retry:focus-visible\s*\{[\s\S]*?outline:\s*2px solid var\(--accent\);/,
   )
+})
+
+
+test('handoff motion is isolated from connection, queued input and the composer', () => {
+  const start = chatView.indexOf('<div ref={footHandoffsRef} className="chat__foot-handoffs">')
+  const end = chatView.indexOf('</div>', start)
+  const layer = chatView.slice(start, end)
+  assert.ok(start >= 0 && end > start)
+  assert.match(layer, /<ProgressRail/)
+  assert.match(layer, /<WaitingChip/)
+  assert.doesNotMatch(layer, /<ConnectionStatus|<QueuedMessages|<ChatInputBar/)
+  assert.match(chatView, /useFootReveal\(scrollRef, footRef, footHandoffsRef, !showEmpty && !showLoadError\)/)
+  const rule = chatCss.match(/\.chat__foot-handoffs\s*\{([^}]+)\}/)[1]
+  assert.match(rule, /transform:\s*translateY\(var\(--foot-hide\)\)/)
+  assert.match(rule, /z-index:\s*-1/)
+  assert.doesNotMatch(rule, /opacity:|clip-path:|height:/,
+    'the viewport clips the rows; hiding must not collapse their layout clearance')
+  assert.match(chatCss, /transform:\s*translateY\(min\(var\(--foot-hide, 0px\), var\(--foot-rows-travel, 0px\)\)\)/,
+    'floating navigation shares the motion but stops above input')
 })

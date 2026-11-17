@@ -214,6 +214,8 @@ def _seed_data_dir(root):
   (root / "shared" / "skills" / "s.md").write_text("# skill")
   (root / "cli-auth" / "claude").mkdir(parents=True)
   (root / "cli-auth" / "claude" / ".credentials.json").write_text("SECRET")
+  (root / "credits-client").mkdir()
+  (root / "credits-client" / "credentials.json").write_text('{"sealed": "KEY"}')
   (root / ".secret-key").write_text("SIGNING-KEY")
   (root / "service-token.txt").write_text("JWT")
   (root / ".recovery-secret").write_text("RSECRET")
@@ -306,6 +308,7 @@ def test_backup_skips_secrets_without_recipient(tmp_path):
   assert not any("logs" in m for m in members)
   assert not any(m.startswith("platform") for m in members)
   assert not any(".secret-key" in m for m in members)
+  assert not any("credits-client" in m for m in members)
   assert not any(".recovery-secret" in m for m in members)
   assert not any(".recovery-owner.json" in m for m in members)
   assert not any(".recover-pending" in m for m in members)
@@ -330,8 +333,10 @@ def test_backup_plaintext_secrets_perms_and_hashes(tmp_path):
     assert any(m == expected or m.endswith("/" + expected)
                for m in secret_members), f"{expected} missing from secrets"
   assert any("cli-auth" in m for m in secret_members)
+  assert any(m.endswith("credits-client/credentials.json") for m in secret_members)
   with tarfile.open(bdir / "data.tar.gz") as t:
     data_members = t.getnames()
+  assert not any("credits-client" in m for m in data_members)
   allm = secret_members + data_members
   assert not any(m.endswith(".recovery-secret") for m in allm)
   assert not any(m.endswith(".recovery-owner.json") for m in allm)
@@ -505,6 +510,10 @@ def test_restore_round_trip_and_gates(tmp_path):
     '{"k":"v"}'
   assert (dest / ".secret-key").read_text() == "SIGNING-KEY"
   assert (os.stat(dest / ".secret-key").st_mode & 0o777) == 0o600
+  credits_key = dest / "credits-client" / "credentials.json"
+  assert credits_key.read_text() == '{"sealed": "KEY"}'
+  assert (os.stat(credits_key).st_mode & 0o777) == 0o600
+  assert (os.stat(credits_key.parent).st_mode & 0o777) == 0o700
   assert (dest / "recovery_chat.jsonl").read_text() == "{}"
   assert not (dest / ".recovery-secret").exists()
   assert not (dest / ".recovery-owner.json").exists()

@@ -11,7 +11,7 @@ F="python3 $SCRIPTS_DIR/folders.py"
 $F list                                  # shared folders: device, rights, state, id
 $F ls "Downloads"                        # contents; big folders page with --cursor
 $F info "Downloads/report.pdf"
-$F read "Downloads/notes.txt"            # first 256 KB; --offset N / --length N
+$F read "Downloads/notes.txt"            # first 24 KB; --offset N / --length N
 $F read "Downloads/app.log" --tail 20000 # the end of a big file
 $F show "Downloads/scan.jpg"             # temporary copy to view; photos are shrunk on the device first
 $F write "Downloads/summary.md" --text "…"        # or --from-file PATH, or --from-file - for stdin

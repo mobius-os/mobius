@@ -326,37 +326,6 @@ test('hydrate reuses the local row identity when the server row shares its cid',
   assert.equal(list[0].ts, 12345)
 })
 
-test('clear resets state and ref synchronously', () => {
-  // handleStop calls clear() then reads pendingMessagesRef.current
-  // synchronously to decide whether to skip an in-flight fetchMessages.
-  const { result } = renderHook(usePendingQueue)
-  result.current.add(fixtureMsg({ ts: 1 }))
-  result.current.add(fixtureMsg({ cid: 'cid-2', ts: 2 }))
-  result.current.clear()
-  assert.deepEqual(result.current.pendingMessagesRef.current, [])
-})
-
-test('stop-timeout: restoring the local snapshot preserves the queue a refetch would drop', () => {
-  // handleStop snapshots the queue, clear()s it, then POSTs /chat/stop. On an
-  // SDK interrupt TIMEOUT the backend has already cleared persisted pending, so
-  // hydrating the empty server response WIPES the queue while re-adding the
-  // snapshot KEEPS it.
-  const { result } = renderHook(usePendingQueue)
-  const snapshot = [
-    fixtureMsg({ cid: 'q1', ts: 11, content: 'first queued' }),
-    fixtureMsg({ cid: 'q2', ts: 22, content: 'second queued' }),
-  ]
-  for (const m of snapshot) result.current.add(m)
-  result.current.clear()
-  assert.deepEqual(result.current.pendingMessagesRef.current, [])
-  result.current.hydrate([])
-  assert.deepEqual(result.current.pendingMessagesRef.current, [],
-    'hydrating the empty server response on a stop timeout drops the queue')
-  for (const m of snapshot) result.current.add(m)
-  const restored = result.current.pendingMessagesRef.current
-  assert.equal(restored.length, 2, 'both queued messages are restored')
-})
-
 test('hydrate([]) PRESERVES an optimistic entry whose POST is still in flight', () => {
   // A reconcile-fetch that lands while an optimistic entry's persistence POST
   // is still in flight must NOT drop it: the server is racing this read.
@@ -520,24 +489,43 @@ test('confirming the deferred steer row is a no-op once the cut retired it', () 
   )
 })
 
-test('hydrating the deferred steer snapshot WOULD resurrect and drop rows', () => {
-  // The failure mode the confirm avoids, asserted on the real hook so the
-  // reason for not calling hydrate here is executable rather than a comment.
+test('a pre-cut queue snapshot cannot resurrect a committed steer or drop later sends', () => {
   const { result } = renderHook(usePendingQueue)
-  result.current.add(fixtureMsg({ cid: 'steered', ts: 500 }), { inFlight: true })
-  // A second send queues and its own POST acks while the steer's 202 is still
-  // in flight, so it is confirmed and no longer in-flight.
+  const steered = fixtureMsg({ cid: 'steered', ts: 500 })
+  result.current.add(steered, { inFlight: true })
+  result.current.reserveForSteer(['steered'])
   result.current.add(fixtureMsg({ cid: 'later', ts: 600 }), { inFlight: true })
   result.current.confirmQueued('later', { ts: 600 })
-  // The cut retires the steered row.
-  result.current.cancelByCid('steered')
-  // Now the stale snapshot arrives.
-  result.current.hydrate([{ role: 'user', content: 'hi', ts: 500, cid: 'steered' }])
-  assert.deepEqual(
-    result.current.pendingMessagesRef.current.map(m => m.cid), ['steered'],
-    'wholesale reconcile against a pre-cut snapshot resurrects the row the cut '
-    + 'retired AND drops the row queued after the snapshot was taken',
-  )
+  result.current.completeByCid([steered.cid])
+  result.current.hydrate([steered])
+  assert.deepEqual(result.current.visiblePendingMessages.map(m => m.cid), ['later'])
+  assert.deepEqual(result.current.steerReservedMessages, [])
+  assert.deepEqual(result.current.getSteerCandidates().map(m => m.cid), ['later'])
+})
+
+for (const lateAction of ['confirm', 'cancel', 'restore', 'add']) {
+  test(`a committed steer stays retired after late ${lateAction} and stale hydration`, () => {
+    const { result } = renderHook(usePendingQueue)
+    const row = fixtureMsg({ cid: 'steered' })
+    result.current.add(row)
+    result.current.hydrateFromTranscript([], [row])
+    if (lateAction === 'confirm') result.current.confirmQueued(row.cid, { ts: 300 })
+    if (lateAction === 'cancel') result.current.cancelByCid(row.cid)
+    if (lateAction === 'restore') result.current.restoreByCid(row, 0)
+    if (lateAction === 'add') result.current.add(row)
+    result.current.hydrate([row])
+    assert.deepEqual(result.current.pendingMessages, [])
+  })
+}
+
+test('a genuinely refused steer remains recoverable through queue refresh', () => {
+  const { result } = renderHook(usePendingQueue)
+  const row = fixtureMsg()
+  result.current.add(row)
+  result.current.reserveForSteer([row.cid])
+  result.current.releaseSteerReservation([row.cid])
+  result.current.hydrate([row])
+  assert.deepEqual(result.current.visiblePendingMessages.map(m => m.cid), [row.cid])
 })
 
 test('confirming one cid leaves a concurrently-queued row alone', () => {
@@ -915,3 +903,129 @@ test('recovery copies stay visible but never block or enter the Steer candidate 
     'optimistic candidates still need server confirmation before dispatch')
   hook.unmount()
 })
+
+test('starting the owner\'s own message releases the held rows locally, as the server does', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'held-a', ts: 1, held: true }),
+    fixtureMsg({ cid: 'held-b', ts: 2, held: true }),
+  ])
+  result.current.add(fixtureMsg({ cid: 'typed', ts: 3 }), { inFlight: true })
+  result.current.promoteManyByCid(['typed'])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, row.held]),
+    [['held-a', false], ['held-b', false]],
+  )
+})
+
+test('a machine or app row starting leaves the held rows held', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'wake', ts: 1, hidden: true }),
+    fixtureMsg({ cid: 'app', ts: 2, _initiated_by_app_id: 4 }),
+    fixtureMsg({ cid: 'held-a', ts: 3, held: true }),
+  ])
+  result.current.promoteManyByCid(['wake'])
+  result.current.promoteManyByCid(['app'])
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, row.held]),
+    [['held-a', true]],
+  )
+})
+
+test('an accepted empty Send clears every local hold, also on rows it did not start', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([
+    fixtureMsg({ cid: 'wake', ts: 1, hidden: true }),
+    fixtureMsg({ cid: 'held-a', ts: 2, held: true }),
+  ])
+  result.current.releaseHolds()
+  assert.deepEqual(
+    result.current.pendingMessagesRef.current.map(row => [row.cid, !!row.held]),
+    [['wake', false], ['held-a', false]],
+  )
+})
+
+
+test('only a row with owner proof releases the held rows', () => {
+  for (const [row, releases] of [
+    [fixtureMsg({ cid: 'owner', ts: 3, _owner_input_at: '2026-11-06T10:00:00+00:00' }), true],
+    [fixtureMsg({ cid: 'agent', ts: 3, _agent_input: true }), false],
+    [fixtureMsg({ cid: 'legacy', ts: 3 }), false],
+  ]) {
+    const { result } = renderHook(usePendingQueue)
+    result.current.hydrate([fixtureMsg({ cid: 'held-a', ts: 1, held: true }), row])
+    result.current.promoteManyByCid([row.cid])
+    assert.equal(result.current.pendingMessagesRef.current[0].held, !releases, row.cid)
+  }
+})
+
+test('a held row is shown in the tray again even if a Stop ended its steer', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.hydrate([fixtureMsg({ cid: 'steering', ts: 1 })])
+  result.current.reserveForSteer(['steering'])
+  assert.equal(result.current.visiblePendingMessages.length, 0)
+  result.current.hydrate([fixtureMsg({ cid: 'steering', ts: 1, held: true })])
+  assert.deepEqual(result.current.visiblePendingMessages.map(row => row.cid), ['steering'])
+})
+
+test('a steer cut does not confirm or discard an in-flight sibling', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'steered' }))
+  result.current.add(fixtureMsg({ cid: 'in-flight' }), { inFlight: true })
+  result.current.completeByCid(['steered'])
+  assert.equal(result.current.pendingMessages[0].serverTs, false)
+  result.current.hydrate([])
+  assert.deepEqual(result.current.pendingMessages.map(row => row.cid), ['in-flight'])
+})
+
+test('a steer cut preserves a sibling recovery copy without changing its flags', () => {
+  const { result } = renderHook(usePendingQueue)
+  result.current.add(fixtureMsg({ cid: 'steered' }))
+  result.current.add(fixtureMsg({ cid: 'recovery', localOnly: true, recoveryAvailable: true }))
+  const recovery = result.current.pendingMessages[1]
+  result.current.completeByCid(['steered'])
+  assert.equal(result.current.pendingMessages[0], recovery)
+  assert.deepEqual(result.current.getSteerCandidates(), [])
+})
+
+test('a fresh queue snapshot still reconciles after rejecting a pre-cut snapshot', () => {
+  const { result } = renderHook(usePendingQueue)
+  const row = fixtureMsg({ cid: 'steered' })
+  result.current.add(row)
+  result.current.add(fixtureMsg({ cid: 'later' }))
+  result.current.completeByCid([row.cid])
+  result.current.hydrate([row])
+  assert.deepEqual(result.current.pendingMessages.map(m => m.cid), ['later'])
+  result.current.hydrate([fixtureMsg({ cid: 'fresh' })])
+  assert.deepEqual(result.current.pendingMessages.map(m => m.cid), ['fresh'])
+})
+
+test('completed identities do not leak across chat or principal changes', async () => {
+  await localFixture()
+  const hook = renderHook(scope => usePendingQueue([], scope), localScope)
+  await flushLocalRead()
+  const row = fixtureMsg({ cid: 'same-id' })
+  hook.result.current.completeByCid([row.cid])
+  hook.rerender({ ...localScope, chatId: 'another-chat' })
+  hook.result.current.hydrate([row])
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  hook.result.current.completeByCid([row.cid])
+  hook.rerender({ ...localScope, chatId: 'another-chat', principalKey: 'another-principal' })
+  hook.result.current.hydrate([row])
+  assert.equal(hook.result.current.pendingMessages.length, 1)
+  hook.unmount()
+})
+
+for (const priorCut of [false, true]) {
+  test(`a stale queue paired with newer transcript preserves siblings (prior cut: ${priorCut})`, () => {
+    const { result } = renderHook(usePendingQueue)
+    const steered = fixtureMsg({ cid: 'steered' })
+    result.current.add(steered)
+    if (priorCut) result.current.completeByCid([steered.cid])
+    result.current.add(fixtureMsg({ cid: 'later' }))
+    result.current.confirmQueued('later', { ts: 600 })
+    result.current.hydrateFromTranscript([steered], [steered])
+    assert.deepEqual(result.current.pendingMessages.map(row => row.cid), ['later'])
+  })
+}

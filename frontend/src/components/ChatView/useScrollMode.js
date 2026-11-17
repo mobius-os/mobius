@@ -90,6 +90,7 @@ import {
   applyMode,
   contentHoldModeFromScroll,
   isQuestionSubmissionMode,
+  modeForInlineEditorGrowth,
   modeForInlineEditorReveal,
   modeForQuestionEditingViewportChange,
   nextPinViewportHeight,
@@ -124,7 +125,6 @@ import {
   readerScrollEscapeDirection,
   scrollAuthorityAllowsCommit,
   settledPinMode,
-  resizeReappliesMode,
   shouldPinSend,
   terminalLayoutAuthority,
 } from './scroll/policy.js'
@@ -377,6 +377,10 @@ export default function useScrollMode({
   // to null and `maybeApplyMode()` would re-write scrollTop with the
   // same mode it already applied, visibly snapping the viewport.
   const lastAppliedModeRef = useRef(null)
+  // The scrollTop FOLLOW_BOTTOM itself last wrote, cleared by every mode
+  // transition. Send pinning reads it as the autoscroll tail while live output
+  // has committed but the next layout observation has not followed it yet.
+  const followTailTopRef = useRef(null)
   // The pinned message's offsetTop at the last PIN_USER_MSG apply. The RO
   // re-pins when this shifts (content ABOVE the message grew — an image
   // finished loading, an error/question card rendered), which the identity
@@ -390,6 +394,9 @@ export default function useScrollMode({
   // paneResized() forwards to it (null when no scroll DOM is mounted). Mirrors
   // the forceRevealRef / resumeLayoutAfterGestureRef effect-bridge pattern.
   const paneResizeRunRef = useRef(null)
+  // Transcript-source handoffs share the observer's guarded geometry pass;
+  // sizing the reservation and applying its mode must happen before paint.
+  const committedLayoutRunRef = useRef(null)
   // Footer height changes are scroll geometry: the controller observes the
   // footer and publishes its list clearance in the same guarded transaction.
   // Controlled composer edits must publish their draft before a PIN -> FOLLOW
@@ -490,6 +497,7 @@ export default function useScrollMode({
     if (!nextMode) return previousMode
     if (nextMode === previousMode) return previousMode
     modeRef.current = nextMode
+    followTailTopRef.current = null
     modeAdoptedAtReaderIntentVersionRef.current = readerIntentVersionRef.current
     const pinOwnedBefore = previousMode?.kind === 'PIN_USER_MSG'
     const pinOwnedAfter = nextMode?.kind === 'PIN_USER_MSG'
@@ -537,6 +545,9 @@ export default function useScrollMode({
     if (!allowed) return false
     const before = scrollEl.scrollTop
     applyMode(scrollEl, mode)
+    if (mode.kind === 'FOLLOW_BOTTOM' && mode === modeRef.current) {
+      followTailTopRef.current = scrollEl.scrollTop
+    }
     if (Math.abs(scrollEl.scrollTop - before) > 0.5) {
       recordTrace('writes', event, {
         from: mode,
@@ -678,6 +689,7 @@ export default function useScrollMode({
       scrollEl: scrollRef.current,
       mode: modeRef.current,
       isFirstUserMsg,
+      followTailTop: followTailTopRef.current,
     })
     const intent = {
       willPin: delayedSendWillPin({
@@ -1365,11 +1377,15 @@ export default function useScrollMode({
 
     /** Keep the focused answer fully visible above the overlaid composer, then
      * record that exact position as the ordinary reading hold. Keyboard resize,
-     * native caret movement, and field growth all use this one operation. */
+     * native caret movement, and field growth all use this one operation.
+     * `editorBottomBefore` is the field's client bottom edge before the edit
+     * that resized it: at the bottom of the chat the field grows upward, like
+     * the composer. */
     function revealFocusedQuestionEditor(event, {
       editor = focusedQuestionEditor(),
       nativePositionAlreadyApplied = false,
       authorityVersion = currentAuthority(),
+      editorBottomBefore = null,
     } = {}) {
       if (!editor
           || focusedQuestionEditor() !== editor
@@ -1381,7 +1397,15 @@ export default function useScrollMode({
         scrollRect?.bottom ?? Infinity,
         footRect?.top ?? Infinity,
       )
-      const revealAnchor = modeForInlineEditorReveal({
+      const growthHold = modeForInlineEditorGrowth({
+        scrollEl,
+        editor,
+        editorBottomBefore,
+        visibleTop,
+        visibleBottom,
+        bottomBand: FOLLOW_STICK_BAND_PX,
+      })
+      const revealAnchor = growthHold || modeForInlineEditorReveal({
         scrollEl,
         editor,
         visibleTop,
@@ -1493,6 +1517,7 @@ export default function useScrollMode({
       settleAnchoredMode(authorityVersion)
       return true
     }
+    committedLayoutRunRef.current = syncLayout
     syncLayout({ authorityVersion: currentAuthority() })
 
     // Shell supplies committed pane geometry separately from viewport resize.
@@ -1590,6 +1615,10 @@ export default function useScrollMode({
     // Inline Q&A editing joins this same layout transaction only while focused.
     // The observer tells us when the field actually changed size; ordinary
     // characters read only scrollTop and therefore do not force layout.
+    // The first edit since the field's last layout pass: its editor, the
+    // scrollTop and the field's client bottom edge read before it, and the
+    // reader-intent version they were read under. The caret check compares
+    // the scrollTop; the growth hold returns the edge to where it was.
     let pendingInlineEditorInput = null
     let inlineEditorRaf = 0
     let observedQuestionEditor = null
@@ -1597,6 +1626,16 @@ export default function useScrollMode({
     const questionEditorResized = entries => entries.some(
       entry => entry.target === observedQuestionEditor,
     )
+    // Consumes the pending edit; an edit read under older reader intent has
+    // no pre-edit edge to hold.
+    const questionEditorBottomBeforeEdit = (authorityVersion) => {
+      const edit = pendingInlineEditorInput
+      pendingInlineEditorInput = null
+      return edit?.editor === observedQuestionEditor
+        && edit.authorityVersion === authorityVersion
+        ? edit.editorBottom
+        : null
+    }
 
     const observeQuestionEditor = (editor) => {
       if (!isQuestionEditor(editor) || observedQuestionEditor === editor) return
@@ -1615,20 +1654,24 @@ export default function useScrollMode({
       if (!isQuestionEditor(event.target)) return
       observeQuestionEditor(event.target)
       // Typing supersedes an unfinished gesture settlement, but is not itself
-      // reader scroll intent. Keep only the cheap pre-input scroll coordinate;
-      // geometry is consulted later only if the browser actually moved.
+      // reader scroll intent. Several edits can land before one layout pass;
+      // only the first reads the pre-edit coordinates, while layout is still
+      // clean from the last frame. Newer reader intent starts afresh.
       supersedePendingReaderGesture()
+      const authorityVersion = currentAuthority()
+      if (pendingInlineEditorInput?.editor === event.target
+          && pendingInlineEditorInput.authorityVersion === authorityVersion) return
       pendingInlineEditorInput = {
         editor: event.target,
         scrollTop: scrollEl.scrollTop,
-        authorityVersion: currentAuthority(),
+        editorBottom: event.target.getBoundingClientRect?.().bottom,
+        authorityVersion,
       }
     }
 
     const settleInlineEditorInput = (event) => {
       if (!isQuestionEditor(event.target)) return
       const plan = pendingInlineEditorInput
-      pendingInlineEditorInput = null
       if (!plan || plan.editor !== event.target) return
       cancelAnimationFrame(inlineEditorRaf)
       inlineEditorRaf = requestAnimationFrame(() => {
@@ -1636,6 +1679,9 @@ export default function useScrollMode({
         // second frame is still layout-free unless scrollTop actually changed.
         inlineEditorRaf = requestAnimationFrame(() => {
           inlineEditorRaf = 0
+          // Any layout pass this edit caused has run; an edit that did not
+          // resize the field must not lend its position to a later resize.
+          if (pendingInlineEditorInput === plan) pendingInlineEditorInput = null
           if (Math.abs(scrollEl.scrollTop - plan.scrollTop) <= 0.5) return
           revealFocusedQuestionEditor('reader:inline-editor-caret', {
             editor: plan.editor,
@@ -1651,8 +1697,8 @@ export default function useScrollMode({
     // ResizeObserver — re-runs spacer sizing on content size changes.
     // Re-applies content-tracking modes:
     //   FOLLOW_BOTTOM — every firing, so streaming keeps the user
-    //                   glued to the tail (except the reader's own typing in
-    //                   the inline answer editor; see resizeReappliesMode).
+    //                   glued to the tail; the reader's own answer typing
+    //                   therefore grows upward, like the composer.
     //   ANCHOR_AT     — during the reveal window, re-applied every firing
     //                   (lazy renderers — KaTeX, highlight.js, markdown
     //                   re-wrap — settle in the first ~1s and shift the
@@ -1675,10 +1721,15 @@ export default function useScrollMode({
       // performs one authoritative spacer + mode pass after reader ownership
       // ends.
       if (!layoutOwnsScroll(authorityVersion)) {
+        // Growth painted under the reader's gesture is not held later.
+        if (editorResized) pendingInlineEditorInput = null
         deferLayoutUntilReaderYields(authorityVersion)
         requestRevealOnQuiet()
         return
       }
+      const editorBottomBefore = editorResized
+        ? questionEditorBottomBeforeEdit(authorityVersion)
+        : null
       const previousViewportH = observedScrollViewportRef.current.height
       const previousViewportW = observedScrollViewportRef.current.width
       const currentViewportH = scrollEl.clientHeight
@@ -1702,6 +1753,8 @@ export default function useScrollMode({
           viewportChange: true,
           authorityVersion,
         })
+        // The viewport itself moved, so pre-edit screen positions no longer
+        // compare; the ordinary reveal keeps the field visible instead.
         if (editorResized) revealFocusedQuestionEditor(
           'layout:question-edit-resize',
           { nativePositionAlreadyApplied: true, authorityVersion },
@@ -1723,16 +1776,16 @@ export default function useScrollMode({
         // every late renderer or font swap becomes a visible jump.
         || (k === 'ANCHOR_AT' && !revealedRef.current)
       ) {
-        if (resizeReappliesMode(k, { editorResized })) {
-          writeMode(
-            scrollEl,
-            modeRef.current,
-            k === 'FOLLOW_BOTTOM'
-              ? 'layout:follow-live-tail'
-              : 'layout:restore-anchor',
-            authorityVersion,
-          )
-        }
+        // Answer typing is followed too: at the tail the field grows upward
+        // like the composer instead of sliding the card under it.
+        writeMode(
+          scrollEl,
+          modeRef.current,
+          k === 'FOLLOW_BOTTOM'
+            ? 'layout:follow-live-tail'
+            : 'layout:restore-anchor',
+          authorityVersion,
+        )
       } else if (k === 'PIN_USER_MSG') {
         // Repair only a shifted row or a previously clamped target that has
         // become reachable. The predicate deliberately gates on the target,
@@ -1745,7 +1798,7 @@ export default function useScrollMode({
       }
       if (editorResized) revealFocusedQuestionEditor(
         'layout:question-edit-resize',
-        { nativePositionAlreadyApplied: true, authorityVersion },
+        { nativePositionAlreadyApplied: true, authorityVersion, editorBottomBefore },
       )
       requestRevealOnQuiet()  // each RO firing pushes the reveal back
     })
@@ -2329,6 +2382,7 @@ export default function useScrollMode({
       scrollEl.removeEventListener('error', requestRevealOnQuiet, true)
       ro.disconnect()
       if (paneResizeRunRef.current === runPaneResize) paneResizeRunRef.current = null
+      if (committedLayoutRunRef.current === syncLayout) committedLayoutRunRef.current = null
       scrollEl.removeEventListener('scroll', onScroll)
       scrollEl.removeEventListener('scrollend', settleReaderScroll)
       scrollEl.removeEventListener('pointerdown', onPointerDownInput)
@@ -2370,36 +2424,17 @@ export default function useScrollMode({
     footRef,
   ])
 
-  // Re-hold the reading position after an atomic transcript-source commit
-  // lands post-reveal. Reconnect catch-up and authoritative compact reads can
-  // both re-settle row heights without changing message count. Apply the mode
-  // already owned by the controller before paint; ResizeObserver remains the
-  // fallback for later intrinsic media/markdown growth. Before reveal,
-  // hide-then-reveal already owns the position, so this no-ops.
+  // Synchronize each transcript-source handoff before
+  // paint, including reservation consumption and an armed PIN -> FOLLOW
+  // transition. The same effect-owned pass handles reader-gesture deferral
+  // and conditional anchor/pin repair; no second scroll authority is created.
+  // ResizeObserver owns live reveal and intrinsic media/markdown growth.
   const reapplyActiveMode = useCallback(() => {
-    if (!revealedRef.current) return
-    const scrollEl = scrollRef.current
-    if (!scrollEl) return
-    const authorityVersion = readerIntentVersionRef.current
-    if (!scrollAuthorityAllowsCommit({
-      capturedVersion: authorityVersion,
-      currentVersion: readerIntentVersionRef.current,
-      gestureWindowUntil: gestureWindowUntilRef.current,
-      now: performance.now(),
-      touchContactActive: touchContactCountRef.current > 0,
-    })) return
-    const k = modeRef.current.kind
-    if (k === 'ANCHOR_AT'
-        && !_anchorReapplyNeeded(scrollEl, modeRef.current, lastAnchorTopRef.current)) return
-    if (k === 'FOLLOW_BOTTOM' || k === 'ANCHOR_AT' || k === 'PIN_USER_MSG') {
-      if (writeMode(
-        scrollEl,
-        modeRef.current,
-        'lifecycle:transcript-reapply',
-        authorityVersion,
-      )) rememberAppliedMode(scrollEl)
-    }
-  }, [rememberAppliedMode, scrollRef, writeMode])
+    if (!revealedRef.current || !readingPositionOwnerRef.current) return
+    committedLayoutRunRef.current?.({
+      forceApply: modeRef.current.kind === 'FOLLOW_BOTTOM',
+    })
+  }, [])
 
   // Terminal stream promotion and final buffered text can land in separate
   // React/browser phases. Observe committed geometry until two consecutive

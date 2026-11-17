@@ -2,18 +2,25 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import re
+import shutil
+import signal
 import subprocess
+import tempfile
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import quote
 
 from app import app_git, github_auth
-from app.contribution_errors import ContributionSubmitError
+from app.config import get_settings
+from app.contribution_errors import ContributionSubmitError, push_gate_refused
 from app.github_contribution_contract import (
   BRANCH_NAME as _BRANCH_NAME,
   COAUTHOR_TRAILER as _COAUTHOR_TRAILER,
@@ -82,24 +89,85 @@ def _validate_branch(value: object) -> str:
   return branch
 
 
-def _git_env(repo: Path) -> dict:
-  env = dict(os.environ)
-  for var in (
-    "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
-    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
-  ):
-    env.pop(var, None)
-  env["GIT_CEILING_DIRECTORIES"] = str(repo.resolve().parent)
-  env["GIT_TERMINAL_PROMPT"] = "0"
-  env["GH_PROMPT_DISABLED"] = "1"
-  token = github_auth.get_token()
-  if token:
-    env["GH_TOKEN"] = token
-  if github_auth.GH_AUTH_DIR.exists():
-    env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
+# The only inherited variables any contribution command (or the pre-push
+# gate, which runs checkout code) sees: where programs live, locale, time,
+# temp space, what https needs to reach GitHub, and the repository gate's own
+# MOBIUS_PREPUSH_* switches. Everything else, server
+# secrets and Git's own GIT_* settings and traces among it, is left out.
+_INHERITED_ENV = frozenset({
+  "PATH", "LANG", "LANGUAGE", "TZ", "TMPDIR",
+  "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO",
+  "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "NODE_EXTRA_CA_CERTS",
+  "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY",
+  "https_proxy", "http_proxy", "no_proxy", "all_proxy",
+})
+# Command-scope config, exactly like ``-c``: it outranks the checkout's own
+# config and reaches nested repositories, so the programs local commands
+# would most often start (fsmonitor, hooks, ssh, credential helper) do not
+# run. The empty helper drops every helper configured so far.
+_INERT_CONFIG = (
+  ("core.fsmonitor", "false"), ("submodule.recurse", "false"),
+  ("core.hooksPath", "/dev/null"), ("core.sshCommand", "false"),
+  # A scratch borrows the checkout's objects; without this, its token-bearing
+  # fetch would start Git in the checkout to list the alternate's refs.
+  ("core.alternateRefsCommand", "true"),
+  ("credential.helper", ""),
+)
+# The one credential source, for commands that talk to GitHub.
+_GITHUB_CREDENTIAL_HELPER = ("credential.helper", "!gh auth git-credential")
+_NETWORK_GIT = frozenset({("fetch",), ("push",), ("ls-remote",)})
+# Contribution remotes are GitHub over https; other transports can run
+# programs, so they are refused.
+_ALLOWED_PROTOCOLS = "https"
+def _git_env(repo: Path, *, network: bool = False) -> dict:
+  """The one environment for every contribution Git and gh command.
+
+  Global and system config are ignored, nothing prompts, only https transport
+  is allowed, and the commonest programs a checkout's config can name
+  (fsmonitor, hooks, credential helper, askpass, ssh, pager, editor) are
+  inert. GitHub credentials are present only for ``network`` commands, and
+  those never run in an agent-writable checkout: ``_git`` runs them in a
+  server-owned scratch repository and ``_gh`` outside any checkout. A local
+  command never carries credentials, though it can still run a program the
+  checkout names, such as a filter. ``_run_cmd`` also gives every command an
+  empty home.
+  """
+  env = {
+    key: value for key, value in os.environ.items()
+    if key in _INHERITED_ENV or key.startswith(("LC_", "MOBIUS_PREPUSH_"))
+  }
+  config = _INERT_CONFIG + ((_GITHUB_CREDENTIAL_HELPER,) if network else ())
+  env.update(
+    GIT_CEILING_DIRECTORIES=str(repo.resolve().parent),
+    GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
+    GIT_TERMINAL_PROMPT="0", GCM_INTERACTIVE="Never",
+    GIT_ASKPASS="/bin/false", SSH_ASKPASS="/bin/false",
+    GIT_PAGER="cat", GIT_EDITOR=":", GH_PROMPT_DISABLED="1",
+    GIT_ALLOW_PROTOCOL=_ALLOWED_PROTOCOLS, GIT_CONFIG_COUNT=str(len(config)),
+  )
+  for index, (name, value) in enumerate(config):
+    env[f"GIT_CONFIG_KEY_{index}"], env[f"GIT_CONFIG_VALUE_{index}"] = name, value
+  if network:
+    token = github_auth.get_token()
+    if token:
+      env["GH_TOKEN"] = token
+    if github_auth.GH_AUTH_DIR.exists():
+      env["GH_CONFIG_DIR"] = str(github_auth.GH_AUTH_DIR)
   return env
+
+
+@contextmanager
+def _scratch_home(env: dict) -> Iterator[dict]:
+  """``env`` with a fresh, empty home, removed afterwards.
+
+  The service account's home links gh's token store, so a program a command
+  starts must not find it there.
+  """
+  home = tempfile.mkdtemp(prefix="home-", dir=scratch_root())
+  try:
+    yield {**env, "HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config")}
+  finally:
+    shutil.rmtree(home, ignore_errors=True)
 
 
 def _run_cmd(
@@ -110,16 +178,17 @@ def _run_cmd(
   env: dict | None = None,
   input_text: str | None = None,
 ) -> subprocess.CompletedProcess:
-  proc = subprocess.run(
-    argv,
-    cwd=str(cwd),
-    capture_output=True,
-    text=True,
-    input=input_text,
-    timeout=timeout,
-    check=False,
-    env=env or _git_env(cwd),
-  )
+  with _scratch_home(env or _git_env(cwd)) as run_env:
+    proc = subprocess.run(
+      argv,
+      cwd=str(cwd),
+      capture_output=True,
+      text=True,
+      input=input_text,
+      timeout=timeout,
+      check=False,
+      env=run_env,
+    )
   if check and proc.returncode != 0:
     detail = (proc.stderr or proc.stdout or "command failed").strip()
     raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
@@ -132,17 +201,310 @@ def _git(
   check: bool = True,
 ) -> subprocess.CompletedProcess:
   timeout = _PUSH_TIMEOUT if args[:1] == ("push",) else _SUBMIT_TIMEOUT
+  if args[:1] in _NETWORK_GIT:
+    if not isinstance(repo, ServerRepo):
+      return _network_git(repo, args, check=check, timeout=timeout)
   return _run_cmd(
     ["git", "-C", str(repo), *args],
     cwd=repo,
     check=check,
     timeout=timeout,
+    env=_git_env(repo, network=args[:1] in _NETWORK_GIT),
   )
 
 
-def _gh(repo: Path, *args: str, check: bool = True,
+def _scratch_parent() -> Path:
+  return Path(get_settings().data_dir) / "run" / "contribution-git"
+
+
+def sweep_scratch_root() -> None:
+  """Discard scratch directories a crashed process left behind.
+
+  Run at startup, before any contribution command can start.
+  """
+  shutil.rmtree(_scratch_parent(), ignore_errors=True)
+
+
+def scratch_root() -> Path:
+  """The one private parent of every scratch directory; cleared at startup."""
+  root = _scratch_parent()
+  root.mkdir(mode=0o700, parents=True, exist_ok=True)
+  root.chmod(0o700)
+  return root
+
+
+class ServerRepo(type(Path())):
+  """A repository the server created for one operation.
+
+  ``_git`` runs network commands in it directly; anything else is a
+  contribution checkout and gets a scratch repository. It lives under the
+  private ``scratch_root``, but code running as the same user could still
+  reach it.
+  """
+
+
+@contextmanager
+def _server_scratch(*, bare: bool = True) -> Iterator[ServerRepo]:
+  """A fresh repository the server creates, removed afterwards."""
+  root = ServerRepo(tempfile.mkdtemp(prefix="repo-", dir=scratch_root()))
+  try:
+    _run_cmd(["git", "init", "-q", *(("--bare",) if bare else ()), str(root)],
+             cwd=root, env=_git_env(root))
+    yield root
+  finally:
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def _refs(repo: Path) -> dict[str, str]:
+  listed = _git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
+  return dict(reversed(line.split(" ", 1)) for line in listed.stdout.splitlines() if line)
+
+
+# The options contribution fetches and pushes use, all in ``--name[=value]``
+# form. Anything else is refused rather than guessed at, so the positional
+# arguments (URL, then refspecs) are always read correctly.
+_NETWORK_OPTIONS = {
+  "fetch": {"--no-tags", "--force", "--quiet", "--depth", "--filter", "--no-recurse-submodules"},
+  "push": {"--force-with-lease", "--porcelain"},
+  "ls-remote": set(),
+}
+
+
+def _network_args(args: tuple[str, ...]) -> list[str]:
+  """The positional arguments of a fetch, push or ls-remote, checked."""
+  command, rest = args[0], args[1:]
+  positional = []
+  for arg in rest:
+    if arg.startswith("-"):
+      if arg.split("=", 1)[0] not in _NETWORK_OPTIONS[command]:
+        raise ContributionSubmitError(f"Contribution Git does not run {command} {arg}.")
+    else:
+      positional.append(arg)
+  # A remote name or a relative path would be resolved through the checkout:
+  # callers pass the URL they verified.
+  if not positional or not ("/" in positional[0] or ":" in positional[0]):
+    raise ContributionSubmitError(f"A contribution {command} must name its URL.")
+  if command == "fetch" and (
+      len(positional) < 2
+      or any(not refspec.partition(":")[2] for refspec in positional[1:])):
+    raise ContributionSubmitError("A contribution fetch must name each destination ref.")
+  return positional
+
+
+def _network_git(
+  checkout: Path, args: tuple[str, ...], *, check: bool, timeout: int,
+) -> subprocess.CompletedProcess:
+  """Run one token-bearing fetch, push or ls-remote for ``checkout``.
+
+  It runs in a scratch repository the server creates, reading the checkout's
+  objects through an alternates file the server writes. With the alternate's
+  ref listing switched off, no process that holds the token reads the
+  checkout's config, hooks or attributes. A fetch names each destination
+  ref: it starts from the checkout's refs, and a local, credential-free
+  fetch hands what it fetched back to the checkout.
+  """
+  _network_args(args)
+  objects = _git(
+    checkout, "rev-parse", "--path-format=absolute", "--git-path", "objects",
+  ).stdout.strip()
+
+  def failed(proc: subprocess.CompletedProcess) -> subprocess.CompletedProcess:
+    if check:
+      detail = (proc.stderr or proc.stdout or "command failed").strip()
+      raise ContributionSubmitError(detail[:600] or "GitHub command failed.")
+    return proc
+
+  with _server_scratch() as scratch:
+    (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (scratch / "objects" / "info" / "alternates").write_text(objects + "\n")
+    before = {}
+    if args[0] == "fetch":
+      before = _refs(checkout)
+      seeded = _run_cmd(
+        ["git", "-C", str(scratch), "update-ref", "--stdin"], cwd=scratch,
+        check=False, env=_git_env(scratch),
+        input_text="".join(f"create {ref} {sha}\n" for ref, sha in before.items()),
+      )
+      if seeded.returncode != 0:
+        return failed(seeded)
+    proc = _run_cmd(
+      ["git", "-C", str(scratch), *args], cwd=scratch, check=False,
+      timeout=timeout, env=_git_env(scratch, network=True),
+    )
+    if args[0] == "fetch" and proc.returncode == 0:
+      fetched = [ref for ref, sha in _refs(scratch).items() if before.get(ref) != sha]
+      if fetched:
+        # Local and credential-free: the checkout copies what it fetched.
+        copied = _run_cmd(
+          ["git", "-C", str(checkout), "fetch", "--quiet", "--no-tags", "--force",
+           "--no-write-fetch-head", str(scratch), *(f"+{ref}:{ref}" for ref in fetched)],
+          cwd=checkout, check=False, timeout=timeout,
+          env={**_git_env(checkout), "GIT_ALLOW_PROTOCOL": "file"},
+        )
+        if copied.returncode != 0:
+          return failed(copied)
+  return proc if proc.returncode == 0 else failed(proc)
+
+
+class PushGateRefused(ContributionSubmitError):
+  """The repository's pre-push gate refused, timed out or could not start.
+
+  It ran locally before the push, so nothing reached GitHub.
+  """
+
+  def __init__(self, transcript: str):
+    refused = push_gate_refused(transcript)
+    super().__init__(refused.message, code=refused.code, detail=refused.detail)
+
+
+def push(
+  repo: Path, remote: str, commit: str, ref: str, *, lease: str,
+) -> subprocess.CompletedProcess:
+  """Push one exact commit to ``ref`` behind the repository's pre-push gate.
+
+  The gate runs once, as its own local step, then the token-bearing push
+  sends the same commit id. ``lease`` is the expected remote tip ("" for
+  absent). Raises ``PushGateRefused`` when the gate refuses, times out or
+  cannot start, and otherwise returns the push's result unchecked.
+  """
+  _pre_push_gate(repo, remote, commit, ref, lease)
+  return _send_push(repo, remote, commit, ref, lease)
+
+
+def _exact_commit(commit: str) -> str:
+  if not _FULL_GIT_OID.match(commit):
+    raise ContributionSubmitError("Only an exact commit id can be pushed.")
+  return commit
+
+
+def _send_push(
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
+) -> subprocess.CompletedProcess:
+  """The network push alone, hooks inert; callers run the gate first."""
+  return _git(
+    repo, "push", f"--force-with-lease={ref}:{lease}", remote, f"{_exact_commit(commit)}:{ref}",
+    check=False,
+  )
+
+
+def _executable(path: Path) -> bool:
+  return path.is_file() and os.access(path, os.X_OK)
+
+
+def _pre_push_hook(repo: Path) -> Path | None:
+  """The pre-push hook Git would run in ``repo``, or None when there is none."""
+  common = Path(_git(
+    repo, "rev-parse", "--path-format=absolute", "--git-common-dir",
+  ).stdout.strip())
+  default = common / "hooks" / "pre-push"
+  # Only the checkout's own scopes: command scope carries the inert override.
+  listed = _git(repo, "config", "--show-scope", "--get-all", "core.hooksPath", check=False)
+  if listed.returncode not in (0, 1):
+    raise PushGateRefused("Git could not read where this checkout keeps its hooks.")
+  configured = [
+    value for scope, _, value in
+    (line.partition("\t") for line in listed.stdout.splitlines())
+    if scope in ("local", "worktree")
+  ]
+  if not configured:
+    return default if _executable(default) else None
+  # Git runs hooks from the worktree root, so a relative path starts there.
+  top = _git(repo, "rev-parse", "--show-toplevel", check=False).stdout.strip()
+  hooks = Path(configured[-1])
+  hook = (hooks if hooks.is_absolute() else Path(top or common) / hooks) / "pre-push"
+  if _executable(hook):
+    return hook
+  if _executable(default):
+    raise PushGateRefused(
+      "This checkout points its hooks away from the repository's pre-push "
+      "checks, so they could not run."
+    )
+  return None
+
+
+def _pre_push_gate(
+  repo: Path, remote: str, commit: str, ref: str, lease: str,
+) -> None:
+  """Run the pre-push hook Git would run, as a pre-push hook, without credentials.
+
+  The hook is found as Git finds it: under the checkout's own core.hooksPath
+  when set, otherwise in the common hooks directory, where the platform
+  installs its gate. A hooksPath without a pre-push hook while the common
+  one exists is refused rather than skipping the gate. Like Git, it passes
+  the pushed commit on stdin; checks the hook
+  makes of HEAD or the working tree see the checkout as it is, as they did
+  inside a push. It runs in its own process group, which is killed when it
+  ends; a child that starts its own session leaves that group and can
+  outlive it, though it never had credentials in its environment.
+  """
+  try:
+    hook = _pre_push_hook(repo)
+    if hook is None:
+      return
+    named = _git(repo, "remote", "get-url", remote, check=False)
+  except (subprocess.TimeoutExpired, OSError, ContributionSubmitError) as exc:
+    # Still local: nothing was sent, so this is a refusal, never ambiguous.
+    if isinstance(exc, PushGateRefused):
+      raise
+    raise PushGateRefused(f"Git could not prepare the pre-push checks: {exc}") from exc
+  url = named.stdout.strip() if named.returncode == 0 else remote
+  line = f"{_exact_commit(commit)} {commit} {ref} {lease or '0' * 40}\n"
+  with _scratch_home(_git_env(repo)) as env, \
+      tempfile.TemporaryFile("w+") as stdin, tempfile.TemporaryFile("w+") as output:
+    stdin.write(line)
+    stdin.seek(0)
+    def start(argv: list[str]) -> subprocess.Popen:
+      return subprocess.Popen(
+        argv, cwd=str(repo), env=env, stdin=stdin,
+        stdout=output, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+      )
+
+    try:
+      try:
+        proc = start([str(hook), remote, url])
+      except OSError as exc:
+        if exc.errno != errno.ENOEXEC:
+          raise
+        # Like Git, run a hook without an interpreter line through sh.
+        proc = start(["/bin/sh", str(hook), remote, url])
+    except OSError as exc:
+      raise PushGateRefused(f"The pre-push checks could not start: {exc}") from exc
+    try:
+      returncode = proc.wait(timeout=_PUSH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+      returncode = None
+    finally:
+      try:
+        os.killpg(proc.pid, signal.SIGKILL)
+      except ProcessLookupError:
+        pass
+      proc.wait()
+    output.seek(0)
+    transcript = output.read()
+  if returncode is None:
+    raise PushGateRefused(
+      f"{transcript}\nThe pre-push checks did not finish within {_PUSH_TIMEOUT} seconds."
+    )
+  if returncode != 0:
+    raise PushGateRefused(transcript)
+
+
+def _gh(cwd: Path, *args: str, check: bool = True,
         input_text: str | None = None) -> subprocess.CompletedProcess:
-  return _run_cmd(["gh", *args], cwd=repo, check=check, input_text=input_text)
+  """Run gh with the token, never in a contribution checkout.
+
+  Every call names its repository (-R or an API path), so gh runs in an
+  empty directory. Only a ``ServerRepo`` is used as gh's directory: the
+  in-repo fork command needs one whose origin is upstream. Any other
+  ``cwd`` is ignored; it keeps the ``gh(cwd, *args)`` shape the review
+  modules share.
+  """
+  if isinstance(cwd, ServerRepo):
+    return _run_cmd(["gh", *args], cwd=cwd, check=check, input_text=input_text,
+                    env=_git_env(cwd, network=True))
+  with tempfile.TemporaryDirectory(prefix="gh-", dir=scratch_root()) as empty:
+    return _run_cmd(["gh", *args], cwd=Path(empty), check=check, input_text=input_text,
+                    env=_git_env(Path(empty), network=True))
 
 
 def _assert_clean_worktree(repo: Path) -> None:
@@ -155,18 +517,32 @@ def _assert_clean_worktree(repo: Path) -> None:
     )
 
 
+_GITHUB_WEB_COMMITTER = "noreply@github.com"
+
+
 def _assert_coauthor_trailer(
   repo: Path, branch: str, record: dict | None = None,
 ) -> None:
   if not coauthor_trailer_required(record):
     return
   body = _git(repo, "log", "-1", "--format=%B", branch).stdout
-  if _COAUTHOR_TRAILER not in body:
-    raise ContributionSubmitError(
-      "This staged commit is missing the Möbius Agent co-author trailer. "
-      "Leave feedback so your agent can prepare it again.",
-      code="missing_coauthor",
+  if _COAUTHOR_TRAILER in body:
+    return
+  committer = _git(repo, "log", "-1", "--format=%ce", branch).stdout.strip()
+  if committer == _GITHUB_WEB_COMMITTER:
+    # GitHub's own commits (Update branch, web edits) cannot carry the
+    # trailer, which otherwise reads as a defect in the agent's commit.
+    message = (
+      "The newest commit on this pull request was added on GitHub (for "
+      "example by Update branch) and doesn't carry the Möbius co-author "
+      "line. Nothing was changed. Ask your agent to prepare it again."
     )
+  else:
+    message = (
+      "This staged commit is missing the Möbius Agent co-author trailer. "
+      "Leave feedback so your agent can prepare it again."
+    )
+  raise ContributionSubmitError(message, code="missing_coauthor")
 
 
 def _connected_git_identity(state: dict, login: str) -> tuple[str, str]:
@@ -228,6 +604,19 @@ def _merge_error_patch(exc: ContributionSubmitError, patch: dict) -> Contributio
   )
 
 
+def _nothing_published(
+  exc: ContributionSubmitError, record_patch: dict,
+) -> ContributionSubmitError:
+  """Send's wording for a shared check that refused before any public step."""
+  return ContributionSubmitError(
+    f"{exc.message} Nothing was published.",
+    exc.status_code,
+    record_patch=record_patch,
+    code=exc.code,
+    detail=exc.detail,
+  )
+
+
 def _record_patch_with(base: dict, extra: dict) -> dict:
   if not extra:
     return base
@@ -248,11 +637,8 @@ def _normalize_head_attribution(
   before_amend: Callable[[dict], None] | None = None,
 ) -> dict:
   before = _head_commit_metadata(repo, branch)
-  if (
-    before["author_name"] == author_name
-    and before["author_email"] == author_email
-    and before["committer_name"] == author_name
-    and before["committer_email"] == author_email
+  if head_attribution_matches(
+    before, author_name=author_name, author_email=author_email,
   ):
     return {}
 
@@ -339,11 +725,8 @@ def _normalize_head_attribution(
       "Normalizing commit attribution changed the staged source tree. "
       "Ask your agent to prepare this PR again."
     )
-  if (
-    after["author_name"] != author_name
-    or after["author_email"] != author_email
-    or after["committer_name"] != author_name
-    or after["committer_email"] != author_email
+  if not head_attribution_matches(
+    after, author_name=author_name, author_email=author_email,
   ):
     raise ContributionSubmitError(
       "Could not normalize the staged commit attribution. Ask your agent "
@@ -360,6 +743,53 @@ def _normalize_head_attribution(
   return _head_sha_patch(record, before["sha"], after["sha"])
 
 
+def commit_identity_mismatch() -> ContributionSubmitError:
+  """The shared review/Send refusal for a direct commit with another identity."""
+  return ContributionSubmitError(
+    "The reviewed commit's author or committer is not the connected GitHub "
+    "account. It is published directly to the target repository, where "
+    "reviewed commits are never rewritten, so nothing was published. Ask the "
+    "agent to recommit it with the connected identity and stage it again.",
+    code="commit_identity_mismatch",
+  )
+
+
+def publishes_to_target_repository(
+  upstream_repo: str,
+  login: str,
+  *,
+  direct_base: bool,
+  existing_head_repository: str | None,
+  push_permission: Callable[[], bool | None],
+) -> bool | None:
+  """Whether a reviewed PR's branch is pushed to the target repository itself.
+
+  The reviewed commit is then published as-is: rewriting it would break a
+  stack's reviewed parent links or an existing PR's public history. Its author
+  and committer must already be the connected account. A fork publication
+  instead normalizes the one reviewed commit before push. ``None`` means the
+  push permission that decides it could not be read.
+  """
+  if existing_head_repository is not None:
+    # A known PR's live head repository fixes the destination regardless of
+    # the connected account's generic upstream permission.
+    return existing_head_repository.casefold() == upstream_repo.casefold()
+  if direct_base or upstream_repo.split("/", 1)[0].casefold() == login.casefold():
+    return True
+  return push_permission()
+
+
+def head_attribution_matches(
+  metadata: dict, *, author_name: str, author_email: str,
+) -> bool:
+  return (
+    metadata["author_name"] == author_name
+    and metadata["author_email"] == author_email
+    and metadata["committer_name"] == author_name
+    and metadata["committer_email"] == author_email
+  )
+
+
 def _assert_head_attribution(
   repo: Path,
   branch: str,
@@ -367,25 +797,17 @@ def _assert_head_attribution(
   author_name: str,
   author_email: str,
 ) -> None:
-  """Require a stack commit to already carry the connected owner identity.
+  """Require a directly published commit to carry the connected identity.
 
-  Standalone submissions may safely amend their one reviewed commit before
-  push.  A stack cannot: rewriting a parent commit would invalidate every
-  child's reviewed base SHA and ancestry.  Stack preparation therefore pins
-  the identity up front and submission only verifies it.
+  Review applies the same rule, so this repeats it only for an account or
+  branch that changed after review.
   """
-  metadata = _head_commit_metadata(repo, branch)
-  if (
-    metadata["author_name"] != author_name
-    or metadata["author_email"] != author_email
-    or metadata["committer_name"] != author_name
-    or metadata["committer_email"] != author_email
+  if not head_attribution_matches(
+    _head_commit_metadata(repo, branch),
+    author_name=author_name,
+    author_email=author_email,
   ):
-    raise ContributionSubmitError(
-      "This PR stack was prepared with a different commit identity. Leave "
-      "feedback so your agent can rebuild the stack without rewriting its "
-      "reviewed parent links."
-    )
+    raise commit_identity_mismatch()
 
 
 def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
@@ -402,14 +824,22 @@ def _upstream_default_branch(repo: Path, upstream_repo: str) -> str:
   return _validate_branch(branch)
 
 
-def _has_upstream_push_permission(repo: Path, upstream_repo: str) -> bool:
+def upstream_push_permission(repo: Path, upstream_repo: str) -> bool | None:
+  """Read the connected account's push permission; ``None`` if unreadable."""
   proc = _gh(
     repo,
     "api", f"repos/{upstream_repo}",
     "--jq", ".permissions.push",
     check=False,
   )
-  return proc.returncode == 0 and (proc.stdout or "").strip().lower() == "true"
+  value = (proc.stdout or "").strip().lower()
+  if proc.returncode != 0 or value not in ("true", "false"):
+    return None
+  return value == "true"
+
+
+def _has_upstream_push_permission(repo: Path, upstream_repo: str) -> bool:
+  return upstream_push_permission(repo, upstream_repo) is True
 
 
 def _assert_upstream_push_permission(repo: Path, upstream_repo: str) -> None:
@@ -722,9 +1152,32 @@ def fetch_upstream_head(
     _git(repo, "update-ref", "-d", upstream_ref, check=False)
 
 
-def _assert_merges_with_upstream(
+@dataclass(frozen=True)
+class UpstreamMerge:
+  """The exact upstream tip a branch was checked against, and whether it merges."""
+
+  branch: str
+  sha: str
+  conflicts: bool
+
+  @property
+  def record_patch(self) -> dict:
+    return {
+      "last_submit_upstream_branch": self.branch,
+      "last_submit_upstream_sha": self.sha,
+    }
+
+
+def inspect_upstream_merge(
   repo: Path, upstream_repo: str, branch: str,
-) -> dict:
+) -> UpstreamMerge:
+  """Fetch today's upstream default tip and report whether ``branch`` merges.
+
+  A conflict is a fact about two exact commits, returned rather than raised.
+  Failing to learn that fact (transport, unresolved ref, auth, or a
+  ``merge-tree`` that could not run) still raises with its own code, so it is
+  never mislabelled as a conflict.
+  """
   upstream_branch = _upstream_default_branch(repo, upstream_repo)
   preflight_patch = {"last_submit_upstream_branch": upstream_branch}
   try:
@@ -750,53 +1203,177 @@ def _assert_merges_with_upstream(
       code=exc.code,
       detail=exc.detail,
     ) from None
-  preflight_patch["last_submit_upstream_sha"] = upstream_sha
-  merged = _git(
-    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
-  )
-  if merged.returncode != 0:
-    raise ContributionSubmitError(
-      (
-        f"This PR no longer merges cleanly with upstream {upstream_branch}. "
-        "Leave feedback so your agent can refresh the branch before it is "
-        "pushed."
-      ),
-      record_patch=preflight_patch,
-    )
-  return preflight_patch
+  try:
+    return merge_with_upstream(repo, upstream_branch, upstream_sha, branch)
+  except ContributionSubmitError as exc:
+    raise _nothing_published(exc, exc.record_patch) from None
 
-def _conflicts_with_recorded_upstream(record: dict, repo, branch: str) -> bool:
-  """Whether this branch still fails to merge the upstream it last saw.
 
-  A conflict is a fact about two commits, so DERIVE it from the branch as it
-  stands rather than trusting a verdict a past attempt left behind. A refreshed
-  branch stops reporting one the moment it genuinely merges, and nothing has to
-  remember to clear a flag — the failure mode of every stored classification.
+def merge_with_upstream(
+  repo: Path, upstream_branch: str, upstream_sha: str, branch: str,
+) -> UpstreamMerge:
+  """Report whether ``branch`` merges with one exact, already-local upstream tip.
 
-  The upstream commit is already in this checkout's object store, fetched by the
-  submit that recorded its sha, so this stays local and never reaches the
-  network. It can only go stale in the safe direction: upstream moving on is
-  invisible here, and the authoritative check against live upstream still runs
-  at submit before anything is pushed.
-
-  ``merge-tree --write-tree`` writes the merged tree it computes, so this leaves
-  unreferenced objects behind for gc — the same objects the submit-time check
-  already writes. It touches no working tree, index, branch or ref, which is
-  what the read-only review endpoint calling it promises.
+  Raises ``upstream_merge_unavailable`` when the merge cannot be judged, for
+  example when either commit is not available locally. Callers that refuse to
+  publish on that say so themselves.
   """
-  upstream_sha = str(record.get("last_submit_upstream_sha") or "")
-  if not _GIT_SHA.match(upstream_sha):
-    return False
-  present = _git(
-    repo, "cat-file", "-e", f"{upstream_sha}^{{commit}}", check=False,
-  )
-  if present.returncode != 0:
-    return False
-  merged = _git(
-    repo, "merge-tree", "--write-tree", upstream_sha, branch, check=False,
-  )
-  return merged.returncode != 0
+  def unknown(detail: str) -> ContributionSubmitError:
+    return ContributionSubmitError(
+      f"Contribute could not check whether this PR merges with upstream "
+      f"{upstream_branch}. Leave feedback so your agent can inspect it.",
+      record_patch=UpstreamMerge(upstream_branch, upstream_sha, False).record_patch,
+      code="upstream_merge_unavailable",
+      detail=readable_output(detail),
+    )
 
+  # ``merge-tree`` exits 1 both for a conflict and for a commit it cannot
+  # find, so both commits must exist before its exit code means anything.
+  for rev in (upstream_sha, branch):
+    if _git(
+      repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}",
+      check=False,
+    ).returncode != 0:
+      raise unknown(f"Commit {rev} is not available locally.")
+  # ``--no-messages`` leaves only the tree id and the conflicted-file list,
+  # whose paths git quotes by default. A repository that turns
+  # ``core.quotePath`` off can still print a path that is not UTF-8, which
+  # leaves the verdict unknown rather than crashing.
+  try:
+    merged = _git(
+      repo, "merge-tree", "--write-tree", "--no-messages", upstream_sha, branch,
+      check=False,
+    )
+  except UnicodeDecodeError:
+    raise unknown("git merge-tree printed a path that is not UTF-8.") from None
+  # ``merge-tree --write-tree`` exits 0 when clean and 1 when conflicted.
+  # Histories with no common ancestor cannot merge at all (git refuses them
+  # fatally), which is a deterministic fact about the two commits, proven
+  # structurally rather than from localized stderr. Anything else (a fatal
+  # 128, a usage error, unreadable objects) is an unknown merge verdict, not a
+  # conflict, and never a licence to publish.
+  if merged.returncode in (0, 1):
+    return UpstreamMerge(upstream_branch, upstream_sha, merged.returncode == 1)
+  if _git(repo, "merge-base", upstream_sha, branch, check=False).returncode == 1:
+    return UpstreamMerge(upstream_branch, upstream_sha, True)
+  raise unknown(
+    merged.stderr or merged.stdout or
+    f"git merge-tree exited {merged.returncode} without diagnostic output."
+  )
+
+
+def _upstream_conflict_error(merge: UpstreamMerge) -> ContributionSubmitError:
+  return ContributionSubmitError(
+    (
+      f"This PR no longer merges cleanly with upstream {merge.branch}. "
+      "Leave feedback so your agent can refresh the branch before it is "
+      "pushed."
+    ),
+    record_patch=merge.record_patch,
+    code="upstream_conflict",
+  )
+
+
+def _assert_merges_with_upstream(
+  repo: Path, upstream_repo: str, branch: str,
+) -> dict:
+  """Refuse a branch that conflicts with today's upstream (stacks, updates)."""
+  merge = inspect_upstream_merge(repo, upstream_repo, branch)
+  if merge.conflicts:
+    raise _upstream_conflict_error(merge)
+  return merge.record_patch
+
+
+def opens_new_standalone_pr(
+  plan: dict, *, existing_pr_number: int | None = None,
+  direct_base: str | None = None,
+) -> bool:
+  """Whether publishing ``plan`` opens a new PR against the default branch.
+
+  Only such a PR may open over an upstream overlap, and only it is shown by
+  GitHub as ``merge-base..head``. A stack layer or an existing PR's update
+  must still merge cleanly before anything is pushed.
+  """
+  return (
+    existing_pr_number is None
+    and direct_base is None
+    and not isinstance(plan.get("stack"), dict)
+    and plan.get("action") == "pr"
+  )
+
+
+def reviewed_base_is_sole_merge_base(
+  run: Callable[..., subprocess.CompletedProcess],
+  upstream_sha: str, head: str, base_sha: str,
+) -> bool:
+  """Whether GitHub would show a new PR as exactly its reviewed diff.
+
+  GitHub shows a new PR as ``merge-base..head``. That is byte-for-byte the
+  reviewed ``base..head`` only when the reviewed base is the SOLE merge base
+  of upstream and head. Ancestry alone is not enough: upstream may already
+  hold some of the head's own commits (moving the merge base and shrinking
+  the diff), or the histories may criss-cross. ``run`` executes one git
+  command without raising, so Send and the read-only status card share this
+  one proof. A git failure is an unknown answer and raises.
+  """
+  bases = run("merge-base", "--all", upstream_sha, head)
+  if bases.returncode not in (0, 1):
+    raise ContributionSubmitError(
+      "Could not compare this PR's reviewed base with upstream.",
+      code="upstream_merge_unavailable",
+      detail=readable_output(bases.stderr or bases.stdout or ""),
+    )
+  return bases.returncode == 0 and (bases.stdout or "").split() == [
+    str(base_sha).lower()
+  ]
+
+
+def upstream_merge_for_new_pr(
+  repo: Path, upstream_repo: str, branch: str, base_sha: str, head_sha: str,
+) -> dict:
+  """Preflight a NEW standalone PR: publish only the exact reviewed diff.
+
+  The PR may open even while it conflicts with newer upstream, because the
+  owner approved this exact change and resolving the overlap is its next
+  update. The returned patch then carries ``last_submit_upstream_conflict``,
+  which Send records only once the PR is open, so Contribute and agents see
+  that it needs upstream merged in (GitHub runs no PR workflows while it
+  conflicts). Clean or not, a reviewed base that is not the sole merge base
+  refuses. Stacks and existing-PR updates keep ``_assert_merges_with_upstream``.
+  """
+  merge = inspect_upstream_merge(repo, upstream_repo, branch)
+  try:
+    exact = reviewed_base_is_sole_merge_base(
+      lambda *args: _git(repo, *args, check=False), merge.sha, branch, base_sha,
+    )
+  except ContributionSubmitError as exc:
+    raise _nothing_published(exc, merge.record_patch) from None
+  if not exact:
+    raise _upstream_conflict_error(merge) if merge.conflicts else (
+      ContributionSubmitError(
+        f"This PR's reviewed base is not its only merge base with upstream "
+        f"{merge.branch}, so GitHub would not show the reviewed diff. Nothing "
+        "was published. Leave feedback so your agent can refresh the branch "
+        "before it is pushed.",
+        record_patch=merge.record_patch,
+        code="upstream_base_moved",
+      )
+    )
+  return {**merge.record_patch, **upstream_overlap_patch(merge, head_sha)}
+
+
+def upstream_overlap_patch(merge: UpstreamMerge, head_sha: str) -> dict:
+  """The ``last_submit_upstream_conflict`` a new PR opened over ``merge`` records."""
+  if not merge.conflicts:
+    return {}
+  return {
+    "last_submit_upstream_conflict": {
+      "upstream_branch": merge.branch,
+      "upstream_sha": merge.sha,
+      "head_sha": str(head_sha).lower(),
+      "next_pr_action": "merge_upstream_into_pr",
+    },
+  }
 
 
 def _canonical_reviewed_oid(value: object, label: str) -> str:

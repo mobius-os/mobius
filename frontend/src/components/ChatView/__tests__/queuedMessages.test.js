@@ -6,9 +6,24 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createSsrRenderServer } from '../../../lib/__tests__/ssrRenderServer.mjs'
 
-const vite = await createSsrRenderServer()
+// `?hook-shim` loads a second copy of the tray whose `react` is the hook shim,
+// so a test can collapse it the way the header tap does and render the result.
+// Server rendering never resolves a bare `react` through plugins, so the
+// import is rewritten.
+const SHIM = '/src/components/ChatView/hooks/__tests__/react-hook-shim.mjs'
+const vite = await createSsrRenderServer({
+  plugins: [{
+    name: 'queued-tray-hook-shim',
+    enforce: 'pre',
+    transform: (code, id) => (
+      id.endsWith('/QueuedMessages.jsx?hook-shim') ? code.replace("from 'react'", `from '${SHIM}'`) : null
+    ),
+  }],
+})
 after(() => vite.close())
 const { default: QueuedMessages } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx')
+const { renderHook } = await vite.ssrLoadModule(SHIM)
+const { default: ShimTray } = await vite.ssrLoadModule('/src/components/ChatView/QueuedMessages.jsx?hook-shim')
 const { PrimaryAction } = await vite.ssrLoadModule('/src/components/ChatView/ChatInputBar.jsx')
 const { composerDraftPreview, composerHistoryKeyHint } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
 
@@ -17,9 +32,9 @@ const items = [
   { cid: 'q2', content: 'Also update the changelog' },
 ]
 
-test('the queued message open in the chat box is tagged instead of offering the pencil', () => {
+test('the queued message open in the chat box offers Stop editing instead of the pencil', () => {
   const html = renderToStaticMarkup(createElement(QueuedMessages, { items, inComposerCid: 'q2' }))
-  assert.match(html, /queued__row queued__row--in-composer[^>]*>[\s\S]*Also update the changelog[\s\S]*In the chat box/)
+  assert.match(html, /queued__row queued__row--in-composer[^>]*>[\s\S]*Also update the changelog[\s\S]*<button[^>]*class="queued__in-composer"[^>]*>Stop editing<\/button>/)
   assert.equal(html.match(/aria-label="Edit queued message"/g)?.length, 1,
     'only the other row keeps its pencil')
 })
@@ -36,7 +51,7 @@ test('the row open in the chat box offers no Send now, which would skip the edit
   }))
   assert.equal(html.match(/aria-label="Send this queued message now"/g)?.length, 1,
     'only the other row can be sent now')
-  assert.match(html, /queued__row--in-composer(?:(?!queued__row ).)*In the chat box/s)
+  assert.match(html, /queued__row--in-composer(?:(?!queued__row ).)*Stop editing/s)
   assert.doesNotMatch(html, /queued__row--in-composer(?:(?!queued__row ).)*queued__steer/s)
 })
 
@@ -67,6 +82,36 @@ test('an open queued message can be saved while a question waits or the draft up
     'a draft still waits for the question card')
   assert.match(primaryButton({ hasUploading: true }), /aria-label="Send"[^>]*disabled/,
     'a draft still waits for its uploads')
+})
+
+test('a held queue is sent from its tray while the empty composer keeps the mic', () => {
+  const sendHeld = /<button[^>]*aria-label="Send queued messages"[^>]*>/
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), onSendHeld() {},
+  }))
+  assert.match(html, sendHeld)
+  assert.match(html, /Waiting for you — sends when you send/)
+  assert.doesNotMatch(renderToStaticMarkup(createElement(QueuedMessages, { items })), sendHeld,
+    'an ordinary queue has no send-all control')
+  assert.match(primaryButton({ hasInput: false }), /aria-label="Voice input"/,
+    'dictation stays reachable')
+})
+
+test('held rows never claim to send after a running turn', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), turnActive: true,
+  }))
+  assert.match(html, /Waiting for you — sends when you send/)
+  assert.doesNotMatch(html, /after the current turn/)
+  assert.doesNotMatch(html, /aria-label="Send queued messages"/)
+})
+
+test('a shared-browser guest sees the held queue waiting for the owner, with no send', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: items.map(row => ({ ...row, held: true })), sharedGuest: true,
+  }))
+  assert.match(html, /Waiting for the owner to send/)
+  assert.doesNotMatch(html, /aria-label="Send queued messages"/)
 })
 
 test('the strip counts the draft\'s files, which stay with the draft', () => {
@@ -149,4 +194,82 @@ test('a queued message without files shows no file label', async () => {
     renderToStaticMarkup(createElement(QueuedMessages, { items })),
     /queued__files/,
   )
+})
+
+test('a message queued during a turn is not captioned as waiting for the owner', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items: [{ ...items[0], held: true }, items[1]], turnActive: true,
+  }))
+  assert.match(html, /1 waiting for you; the rest send after this turn/)
+})
+
+test('a queued edit shows the strip only after a failed save, and speaks through one status region', async () => {
+  const { default: ComposerHistoryStrip } = await vite.ssrLoadModule('/src/components/ChatView/ComposerHistoryStrip.jsx')
+  const render = props => renderToStaticMarkup(createElement(ComposerHistoryStrip, props))
+  const queued = { kind: 'queued', queuedNumber: 1, queuedCount: 1 }
+  const region = /^<span class="chat__sr-only" role="status" aria-live="polite">([^<]*)<\/span>/
+  assert.equal(render({ position: null }).match(region)?.[1], '', 'present and empty outside history')
+  const editing = render({ position: queued })
+  assert.equal(editing.match(region)?.[1], 'Editing queued message 1 of 1. Enter saves it, Esc goes back',
+    'opening a queued message is spoken')
+  assert.doesNotMatch(editing, /chat__history-strip/, 'and nothing is shown')
+  assert.equal(render({ position: queued, touch: true }).match(region)?.[1],
+    'Editing queued message 1 of 1. Send saves it')
+  const saving = render({ position: queued, saving: true })
+  assert.equal(saving.match(region)?.[1], 'Editing queued message 1 of 1. Saving…', 'a save is spoken')
+  assert.doesNotMatch(saving, /chat__history-strip/, 'the tray row shows it, so the box never jumps')
+  const failed = render({ position: queued, note: 'Could not save' })
+  assert.equal(failed.match(region)?.[1], 'Editing queued message 1 of 1. Could not save')
+  assert.match(failed, /chat__history-strip--warn/, 'a failed save is shown too')
+  assert.equal(failed.match(/role="status"/g).length, 1, 'the visible strip is not a second region')
+  const sent = render({ position: { kind: 'sent', draft: 'Then deploy it' } })
+  assert.match(sent, /class="chat__history-strip"[\s\S]*Earlier message/, 'browsing earlier messages keeps its strip')
+  assert.equal(sent.match(region)?.[1],
+    'Earlier message. Enter sends it again, Esc goes back. Draft kept: Then deploy it', 'and says the draft is kept')
+  assert.equal(render({ position: { kind: 'started' } }).match(region)?.[1],
+    'This message already started. Your text is kept, so you can send it as a new message.',
+    'a title that ends its own sentence gets no second period')
+})
+
+function findByClass(node, className) {
+  if (Array.isArray(node)) return node.map(child => findByClass(child, className)).find(Boolean)
+  if (!node?.props) return undefined
+  if (node.props.className === className) return node
+  return findByClass(node.props.children, className)
+}
+
+test('a collapsed tray still shows the row open in the chat box and its Stop editing', () => {
+  const stops = []
+  const props = { items, inComposerCid: null, onStopEditing: fromKeyboard => stops.push(fromKeyboard) }
+  const tray = renderHook(() => ShimTray(props))
+  const html = () => renderToStaticMarkup(tray.result.current)
+  findByClass(tray.result.current, 'queued__hdr').props.onClick()
+  assert.doesNotMatch(html(), /role="listitem"/, 'collapsing hides the rows')
+
+  props.inComposerCid = 'q2'
+  tray.rerender()
+  assert.match(html(), /aria-expanded="false"/, 'the tray stays collapsed')
+  assert.match(html(), /showing only the message in the chat box/, 'and says what it still shows')
+  assert.equal(html().match(/role="listitem"/g)?.length, 1, 'only the row in the chat box')
+  assert.match(html(), /queued__row--in-composer[\s\S]*Also update the changelog[\s\S]*>Stop editing</)
+  const stop = findByClass(tray.result.current, 'queued__in-composer').props
+  stop.onClick({ detail: 1 })
+  stop.onClick({ detail: 0 })
+  assert.deepEqual(stops, [false, true],
+    'reachable while collapsed; only a keyboard press asks for focus back')
+
+  props.inComposerCid = null
+  tray.rerender()
+  assert.doesNotMatch(html(), /role="listitem"/, 'the owner’s collapse holds after the edit')
+})
+
+test('while its save runs, the row says Saving… and Stop editing is disabled', () => {
+  const html = renderToStaticMarkup(createElement(QueuedMessages, {
+    items, inComposerCid: 'q2', inComposerSaving: true,
+  }))
+  assert.match(html, /<button[^>]*class="queued__in-composer"[^>]*disabled=""[^>]*>Saving…<\/button>/)
+  assert.doesNotMatch(html, /Stop editing/, 'it cannot stop a save already sent')
+  const settled = renderToStaticMarkup(createElement(QueuedMessages, { items, inComposerCid: 'q2' }))
+  assert.match(settled, /<button type="button" class="queued__in-composer" title="[^"]*">Stop editing<\/button>/,
+    'enabled again once the save settles')
 })

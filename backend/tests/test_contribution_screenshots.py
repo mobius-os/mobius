@@ -22,6 +22,8 @@ from app.github_contributions import (
 from app.routes import contribution_relay
 from tests.test_contribution_staging import staging  # noqa: F401  (fixture)
 
+pytestmark = pytest.mark.usefixtures("allow_local_test_remotes")
+
 
 def _png(seed: int) -> bytes:
   """A tiny valid PNG whose pixel differs per seed."""
@@ -273,6 +275,18 @@ def test_send_stops_when_github_does_not_serve_the_images_publicly(fork):
   with pytest.raises(ContributionSubmitError) as raised:
     fork["publish"](read_public=lambda _url: None)
   assert raised.value.code == "screenshot_not_public"
+
+
+def test_a_failed_public_readback_follows_a_real_image_push(fork):
+  """The known screenshot error is raised after the images are already public."""
+  with pytest.raises(ContributionSubmitError) as raised:
+    fork["publish"](read_public=lambda _url: None)
+  assert raised.value.code == "screenshot_not_public"
+  pushed = subprocess.run(
+    ["git", "rev-parse", "--verify", f"refs/heads/{shots.ASSETS_BRANCH}"],
+    cwd=fork["remote"], capture_output=True, text=True,
+  )
+  assert pushed.returncode == 0  # the upload landed before the error
 
 
 def test_an_open_pr_update_cannot_carry_screenshots(fork):
@@ -552,6 +566,9 @@ def submit(tmp_path, monkeypatch):
     "_assert_merges_with_upstream": lambda *_a, **_k: {
       "last_submit_upstream_branch": "main", "last_submit_upstream_sha": base,
     },
+    "upstream_merge_for_new_pr": lambda *_a, **_k: {
+      "last_submit_upstream_branch": "main", "last_submit_upstream_sha": base,
+    },
   }.items():
     monkeypatch.setattr(git_ops + name, value)
   monkeypatch.setattr(github_contributions.shutil, "which", lambda name: f"/bin/{name}")
@@ -597,8 +614,8 @@ def submit(tmp_path, monkeypatch):
   monkeypatch.setattr(git_ops + "_git", fake_git)
   monkeypatch.setattr(git_ops + "_gh", fake_gh)
 
-  def send(upstream_repo):
-    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path)
+  def send(upstream_repo, **kwargs):
+    return github_contributions._submit_prepared_pr(record(upstream_repo), diff_path, **kwargs)
 
   return {"send": send, "events": events, "push": push}
 
@@ -634,6 +651,23 @@ def test_a_failed_push_after_the_upload_keeps_the_upload_for_the_retry(submit):
   }
 
 
+def test_an_upload_before_the_first_signed_push_phase_leaves_the_attempt_armed(submit, monkeypatch):
+  """The images can be public while the receipt still says armed.
+
+  Send's failure mapping therefore never treats an armed attempt with
+  screenshots as certainly unpublished.
+  """
+  phases = []
+  def unreadable_tip(*_a, **_k):
+    raise RuntimeError("remote tip read failed after the image push")
+  monkeypatch.setattr("app.github_contribution_git._authoritative_upstream_branch_sha", unreadable_tip)
+  with pytest.raises(RuntimeError):
+    submit["send"]("octocat/project", attempt_event=lambda phase, *_a: phases.append(phase))
+  assert ("upload", "octocat/project") in submit["events"]
+  assert not any(event[0] == "push" for event in submit["events"] if isinstance(event, tuple))
+  assert set(phases) <= {"armed"}
+
+
 # --- Stacks ---------------------------------------------------------------------
 
 
@@ -665,7 +699,7 @@ def stack(tmp_path, monkeypatch):
   for name in (
     "_assert_clean_worktree", "_assert_fresh", "_assert_coauthor_trailer",
     "_assert_head_attribution", "_assert_merges_with_upstream",
-    "_assert_upstream_push_permission",
+    "upstream_merge_for_new_pr", "_assert_upstream_push_permission",
   ):
     monkeypatch.setattr(git_ops + name, lambda *_a, **_k: None)
   monkeypatch.setattr(git_ops + "_upstream_default_branch", lambda *_a: "main")
@@ -720,7 +754,7 @@ def test_a_fork_send_resolves_the_fork_once(submit, monkeypatch):
   monkeypatch.setattr(git_ops + "_normalize_head_attribution", lambda *_a, **_k: {})
   monkeypatch.setattr(
     github_contributions, "_push_topic_branch",
-    lambda *_a: submit["events"].append(("push", "fork")),
+    lambda *_a, **_k: submit["events"].append(("push", "fork")),
   )
   submit["send"]("octo-org/project")
   assert submit["events"].count("fork") == 1

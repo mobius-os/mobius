@@ -62,7 +62,7 @@ DOCKERFILE = REPO_ROOT / "Dockerfile"
 def _compile(entry: Path, output: Path, *, report: Path | None = None):
   report = report or output.with_name(f"{output.name}.report.json")
   return subprocess.run(
-    rolldown_command(entry, output, report=report),
+    rolldown_command(entry, output, report=report, source_root=entry.parent),
     capture_output=True,
     check=False,
     text=True,
@@ -89,7 +89,9 @@ def test_supported_runtime_packages_are_production_dependencies():
 
 
 def test_compile_command_bundles_the_complete_runtime_graph():
-  command = rolldown_command("entry.jsx", "app.js", report="report.json")
+  command = rolldown_command(
+    "entry.jsx", "app.js", report="report.json", source_root="app",
+  )
   assert command[:2] == ["node", str(rolldown_runner_path())]
   config = json.loads(command[2])
   assert config["entry"] == "entry.jsx"

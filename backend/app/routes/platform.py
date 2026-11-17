@@ -6,11 +6,13 @@ line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 (an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
 and merge it with local edits, or record a conflict),
-``GET /update-progress`` (the active Apply phase),
+``GET /update-progress`` (the active Apply or overlay-finish phase),
+``POST /overlay-finish`` (the backend-owned finish of a staged resolution),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
-``POST /restart`` (owner-confirmed self-restart, same SIGTERM pattern as the
-normal Settings restart). Read failures are explicit so Settings cannot mistake
-an unavailable update source for an up-to-date installation. Conflict resolution
+``POST /restart`` (owner-confirmed self-restart through the same drained,
+supervisor-handled path as the normal Settings restart). Read failures are
+explicit so Settings cannot mistake an unavailable update source for an
+up-to-date installation. Conflict resolution
 is a separate owner-clicked endpoint so applying an update never silently starts an agent turn.
 """
 
@@ -27,9 +29,11 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app import auth, deployment_control, models, platform_activation, platform_update
+from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.platform_update import (
@@ -114,11 +118,28 @@ class PlatformApplyIn(BaseModel):
   )
 
 
-def _with_stall(read_status, **kwargs) -> PlatformStatus:
-  """Status plus whether its unfinished update has stalled (resolver chat state)."""
-  status = read_status(**kwargs)
-  with SessionLocal() as db:
-    return platform_update.with_update_stall(db, status)
+async def _owner_status(read_status, *, stall: bool = True, **kwargs) -> PlatformStatus:
+  """Status for Settings: Cancel is offered only when cancelling can succeed,
+  decided before the stall view, whose actions depend on it.
+
+  The updater alone cannot tell whether a bound replacement ended; the
+  deployment controller can.
+  """
+  status = await asyncio.to_thread(read_status, **kwargs)
+  pending = status.get("unfinished_update")
+  if (
+    pending and pending["cancellable"]
+    and await deployment_control.bound_replacement_may_run()
+  ):
+    status["unfinished_update"] = {**pending, "cancellable": False}
+  if not stall:
+    return status
+
+  def with_stall() -> PlatformStatus:
+    with SessionLocal() as db:
+      return platform_update.with_update_stall(db, status)
+
+  return await asyncio.to_thread(with_stall)
 
 
 @router.get("/status")
@@ -137,11 +158,10 @@ async def get_platform_status(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        _with_stall, platform_update.platform_status,
-        target_sha=release["build_sha"],
+      return await _owner_status(
+        platform_update.platform_status, target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(_with_stall, platform_update.platform_status)
+    return await _owner_status(platform_update.platform_status)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -169,11 +189,11 @@ async def check_platform_updates(
   try:
     if platform_activation.deployment_kind() == "railway":
       release = await deployment_control.latest_official_release()
-      return await asyncio.to_thread(
-        platform_update.check_for_updates,
+      return await _owner_status(
+        platform_update.check_for_updates, stall=False,
         target_sha=release["build_sha"],
       )
-    return await asyncio.to_thread(platform_update.check_for_updates)
+    return await _owner_status(platform_update.check_for_updates, stall=False)
   except deployment_control.DeploymentControlError as exc:
     raise HTTPException(
       status_code=exc.status_code,
@@ -249,14 +269,14 @@ async def get_platform_update_progress(
   _: models.Owner = Depends(get_current_owner),
 ) -> PlatformUpdateProgress:
   """Observable phase of the active or most recent owner-triggered Apply."""
-  return platform_update.platform_update_progress()
+  return platform_update.current_update_progress()
 
 
 @router.post("/apply", dependencies=[Depends(reject_cross_site)])
 async def apply_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> PlatformApplyResult:
   """Apply exactly the release represented by the reviewed immutable plan."""
   try:
@@ -348,7 +368,7 @@ async def park_platform_update_for_agent(
   status_code=204,
 )
 async def cancel_unfinished_platform_update(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> None:
   """Drop an update that has not been swapped in; the live checkout never changed."""
   try:
@@ -381,9 +401,54 @@ async def keep_settling_platform_update(
     ) from exc
 
 
+class PlatformOverlayFinishIn(BaseModel):
+  """The release whose parked resolution the caller has staged."""
+
+  target_sha: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+  # Run a failed finish of this exact answer again. Without it, repeating a
+  # request returns the recorded operation instead of running it twice.
+  retry_operation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post(
+  "/overlay-finish",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+async def finish_platform_overlay_update(
+  request: PlatformOverlayFinishIn,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> PlatformUpdateProgress:
+  """Start or join the backend-owned finish of a staged parked resolution.
+
+  Answers once the operation is admitted; its phases and outcome follow in
+  ``GET /update-progress`` under the returned ``plan_id``. A refused request
+  (stale or unstaged answer, another update running) changes nothing.
+  """
+  try:
+    return await platform_update.finish_platform_overlay_update(
+      target_sha=request.target_sha,
+      retry_operation_id=request.retry_operation_id,
+    )
+  except PlatformUpdateError as exc:
+    code = str(exc)
+    detail = (
+      {"code": code, "message": (
+        "Another platform update task is running. Nothing changed: repeat "
+        "this same request shortly, and it joins this finish if it is the "
+        "one running."
+      )} if code == "platform_update_in_progress"
+      else _plan_error_detail(exc) if code in _PLAN_ERROR_MESSAGES
+      # The resolver acts on the precise refusal: which file, which stage.
+      else {"code": "overlay_finish_refused", "message": code}
+    )
+    raise HTTPException(status_code=409, detail=detail) from exc
+
+
 class ConflictResolverChatIn(BaseModel):
   # Resume a stalled resolver: start its bound chat again, or open a new one.
   resume: bool = False
+  agent: UpdateAgentChoice | None = None
 
 
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])
@@ -395,7 +460,15 @@ async def create_platform_conflict_resolver_chat(
   """Create or return the resolver chat for a recorded platform update conflict."""
   try:
     if request is not None and request.resume:
+      if request.agent is not None:
+        return await platform_update.resume_platform_conflict_resolver(
+          db, agent=request.agent,
+        )
       return await platform_update.resume_platform_conflict_resolver(db)
+    if request is not None and request.agent is not None:
+      return await platform_update.create_platform_conflict_resolver_chat(
+        db, agent=request.agent,
+      )
     return await platform_update.create_platform_conflict_resolver_chat(db)
   except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -403,10 +476,11 @@ async def create_platform_conflict_resolver_chat(
 
 @router.post("/restart", dependencies=[Depends(reject_cross_site)])
 def restart_platform(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
-  restarts this worker (force-exit fallback) so it reboots with the new code."""
+  drains and asks the container supervisor to rerun the boot in place, so it
+  starts with the new code (force-exit fallback)."""
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:

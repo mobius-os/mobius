@@ -14,6 +14,9 @@ used by chat turns, model pickers, and background agents:
     runner) reuses one helper from `codex_appserver.py`
     (`_extract_bash_command`); the provider itself shapes credentials + env.
 
+`MobiusProvider` discovers the service-owned subscription catalogue through
+the local identity broker; it needs no app or model-specific client release.
+
 `AppModelProvider` binds one installed app's reviewed Responses endpoint and
 model list. New Responses-compatible services need a manifest declaration and
 an app-owned setup UI, not another platform runner or picker branch.
@@ -22,17 +25,25 @@ an app-owned setup UI, not another platform runner or picker branch.
 import asyncio
 import base64
 import copy
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import json
 import logging
+import math
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
 
 from app.storage_io import atomic_write
 
@@ -271,15 +282,29 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when `model` is a KNOWN model for some OTHER provider.
-  Use this to reject cross-provider mismatches without blocking
-  unknown / future model names — the SDK is the authority on what
-  it accepts; we only intercept the specific failure mode of
-  sending a Codex model to Claude or vice versa."""
+  """True when another provider owns `model` and `provider` does not.
+
+  Ownership is the (provider, model) pair: an id that two providers both list
+  (an app declaration and Codex discovery, say) stays valid for each of them.
+  Use this to reject cross-provider mismatches without blocking unknown /
+  future model names — the SDK is the authority on what it accepts; we only
+  intercept sending a Codex model to Claude or vice versa."""
+  if model in known_model_ids(provider):
+    return False
   for p in PROVIDERS:
     if p != provider and model in known_model_ids(p):
       return True
   return False
+
+
+def _declared_model_ids(provider_ids: Iterable[str]) -> set[str]:
+  """Built-in and declared ids of these providers, never discovered ones.
+
+  The one collision rule for both the Möbius catalogue and app declarations:
+  an id discovery also lists is shared by (provider, model), not a collision.
+  """
+  return {mid for pid in provider_ids
+          for mid in known_model_ids(pid, include_discovered=False)}
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -329,14 +354,66 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
   ]
 
 
-def known_model_ids(provider_id: str) -> list[str]:
-  """Built-in fallback IDs or an installed app's accepted model IDs."""
+RECENT_MODEL_LIMIT = 20
+
+
+def recent_model_ids(model_prefs: Any) -> list[str]:
+  """Confirmed owner picker choices, newest first; stale catalog ids are safe."""
+  raw = model_prefs.get("recent_ids", []) if isinstance(model_prefs, dict) else []
+  if not isinstance(raw, list):
+    return []
+  return list(dict.fromkeys(
+    model_id for model_id in raw
+    if isinstance(model_id, str) and model_id
+  ))[:RECENT_MODEL_LIMIT]
+
+
+def picker_recent_model_ids(model_prefs: Any, data_dir: str) -> list[str]:
+  """Seed an upgraded owner's empty history from their explicit last pick.
+
+  This reads only the saved global choice, never the runtime/provider default.
+  It does not write synthetic history; the next confirmed pick starts it.
+  """
+  recent = recent_model_ids(model_prefs)
+  if recent:
+    return recent
+  saved = _load_agent_settings(data_dir)
+  model_id = saved.get("model")
+  return [model_id] if isinstance(model_id, str) and model_id.strip() else []
+
+
+def remember_recent_model(model_prefs: Any, model_id: str) -> dict:
+  """Move a committed picker choice to the front without changing visibility."""
+  prefs = dict(model_prefs) if isinstance(model_prefs, dict) else {}
+  prefs["recent_ids"] = [
+    model_id, *(old for old in recent_model_ids(prefs) if old != model_id)
+  ][:RECENT_MODEL_LIMIT]
+  return prefs
+
+
+def known_model_ids(
+  provider_id: str, *, include_discovered: bool = True,
+) -> list[str]:
+  """Accepted identities, including newly discovered native-provider models.
+
+  Catalog expiry and availability govern discovery, not ownership: the last
+  served catalog is reused without I/O, and offline identities stay when a
+  live catalog is partial. App providers retain their declaration as
+  authority. Discovery lives only in this process's memory, so after a
+  restart a discovered id is unknown here until the model list is fetched
+  again; meanwhile the provider saved on the chat, and the provider the
+  picker sends with every pick, carry the pair. ``include_discovered=False``
+  gives only the built-in and declared ids, which do not depend on timing.
+  """
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    return [model["id"] for model in provider.declaration["models"]]
-  if isinstance(provider, AppModelProvider):
-    return [model["id"] for model in provider.declaration["models"]]
-  return KNOWN_MODELS.get(provider_id, [])
+  if isinstance(provider, (MobiusProvider, AppModelProvider)):
+    return ([model["id"] for model in provider.declaration["models"]]
+            + list(provider.declaration.get("replacements", {})))
+  if not include_discovered:
+    return list(KNOWN_MODELS.get(provider_id, []))
+  cached = _model_registry_cache.get(provider_id)
+  discovered = [entry["id"] for entry in cached[1]] if cached else []
+  return list(dict.fromkeys([*KNOWN_MODELS.get(provider_id, []), *discovered]))
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -393,6 +470,8 @@ def effective_agent_settings(
   data_dir: str,
   chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
+  *,
+  file_layer: dict | None = None,
 ) -> dict:
   """Merge per-chat choices on top of the owner's latest picker choices.
 
@@ -428,7 +507,7 @@ def effective_agent_settings(
   # provider switch — without this, a brand-new empty chat would lose
   # the user's previously-picked Claude effort the moment they
   # switched to Codex in the panel (and vice versa).
-  file_layer = _load_agent_settings(data_dir)
+  file_layer = file_layer if file_layer is not None else _load_agent_settings(data_dir)
   if file_layer.get("effort") is not None:
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
@@ -457,6 +536,10 @@ def effective_agent_settings(
       if v is None:
         continue
       merged[k] = v
+  if prov in PROVIDERS:
+    merged["model"], merged["effort"] = PROVIDERS[prov].resolve_selection(
+      merged["model"], merged["effort"],
+    )
   return merged
 
 
@@ -467,6 +550,7 @@ def snapshot_chat_agent_settings(
   model: str | None = None,
   effort: str | None = None,
   fallback_model: str | None = None,
+  file_layer: dict | None = None,
 ) -> dict | None:
   """Freeze one coherent, explicit runtime choice onto a new chat.
 
@@ -495,8 +579,10 @@ def snapshot_chat_agent_settings(
   if isinstance(effort, str) and effort.strip():
     overrides["effort"] = effort.strip()
   effective = effective_agent_settings(
-    data_dir, overrides or None, provider=provider,
+    data_dir, overrides or None, provider=provider, file_layer=file_layer,
   )
+  if provider == "mobius" and chosen_model and not effective.get("model"):
+    return None
   chosen_model = effective.get("model") or fallback_model
   if not isinstance(chosen_model, str) or not chosen_model.strip():
     return None
@@ -510,6 +596,31 @@ def snapshot_chat_agent_settings(
     if value is not None:
       snapshot[key] = value
   return snapshot
+
+
+def snapshot_owner_chat_choice(
+  data_dir: str,
+  configured_provider: str | None = None,
+  *,
+  allow_unselected: bool = False,
+) -> tuple[str, dict | None]:
+  """Freeze provider and model from one picker revision for a new owner chat.
+
+  Resolving the provider and snapshotting the model each used to read the
+  settings file, so a pick landing between the two reads could split a valid
+  pair, especially for a future model absent from the offline catalog. The
+  file is read once here (``atomic_write`` makes one read a whole revision)
+  and that dict feeds both steps. No lock is held: the app registry refresh is
+  a database read and the provider checks read sign-in files.
+  """
+  sync_app_model_providers(data_dir)
+  settings = _load_agent_settings(data_dir)
+  provider = owner_default_provider(data_dir, configured_provider, settings=settings)
+  return provider, snapshot_chat_agent_settings(
+    data_dir, provider,
+    fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
+    file_layer=settings,
+  )
 
 
 def _background_default_choice(
@@ -692,6 +803,20 @@ class BaseProvider:
   # Provider-wide switch boundary; model catalogs can advertise narrower scales.
   switch_efforts: frozenset[str] = frozenset()
 
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """The model and effort a turn actually runs with; saved state is unchanged.
+
+    Native providers take the saved choice as is; providers with a declared
+    catalogue hold it to what that catalogue offers.
+    """
+    return model, effort
+
+  def engine_home(self, data_dir: str) -> Path:
+    """The engine's own home (Claude config dir or CODEX_HOME) for this provider."""
+    return Path(data_dir) / "cli-auth" / self.auth_dir
+
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
     return None
@@ -726,6 +851,15 @@ class BaseProvider:
   def codex_config_overrides(self) -> list[str]:
     return []
 
+  def measured_run_accounting(
+    self, cost_usd: float | None, usage: dict | None,
+  ) -> tuple[float | None, dict | None]:
+    """The run cost and usage this provider's engine truthfully measured.
+
+    Recorded as-is by default; `None` means unknown and is omitted from display.
+    """
+    return cost_usd, usage
+
   async def fetch_models(self, data_dir: str) -> list[Any]:
     """Return the provider's live or declared catalog before normalization."""
     raise NotImplementedError
@@ -753,36 +887,35 @@ class ClaudeProvider(BaseProvider):
 
   def check_auth(self, data_dir):
     creds = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
-    if not creds.exists():
+    try:
+      raw = _read_claude_credentials(creds) if creds.exists() else {}
+    except (OSError, ValueError):  # also an int past Python's digit limit
+      raw = None
+    if isinstance(raw, dict) and "claudeAiOauth" not in raw:
+      # No file, or one a disconnect left with only MCP sign-ins.
       return (
         "Not signed in. Open Settings and connect "
         "under AI provider."
       )
-    try:
-      raw = json.loads(creds.read_text())
-    except (json.JSONDecodeError, OSError, UnicodeError):
-      raw = None
     oauth = raw.get("claudeAiOauth") if isinstance(raw, dict) else None
     if isinstance(oauth, dict):
       access_token = oauth.get("accessToken")
       refresh_token = oauth.get("refreshToken")
-      expires_at = oauth.get("expiresAt")
-      refresh_expires_at = oauth.get("refreshTokenExpiresAt")
+      expires_at = _finite_number(oauth.get("expiresAt"))
+      refresh_expires_at = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
       now_ms = time.time() * 1000
       access_is_current = (
         isinstance(access_token, str)
         and bool(access_token.strip())
-        and isinstance(expires_at, (int, float))
-        and not isinstance(expires_at, bool)
+        and expires_at is not None
         and expires_at - now_ms >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
       )
+      # The CLI's storage and display rule counts an end outside the range
+      # it accepts as no end (its own usability check would count it as
+      # ended). Möbius follows the storage rule and lets the refresh decide;
+      # a successful refresh then drops the bad end.
       refresh_expiry_is_current = (
-        "refreshTokenExpiresAt" not in oauth
-        or (
-          isinstance(refresh_expires_at, (int, float))
-          and not isinstance(refresh_expires_at, bool)
-          and refresh_expires_at > now_ms
-        )
+        refresh_expires_at is None or refresh_expires_at > now_ms
       )
       can_refresh = (
         isinstance(refresh_token, str)
@@ -879,20 +1012,18 @@ CODEX_NATIVE_HELPERS_OFF = (
 # Agent Coaching) pass CODEX_TOOLS_OFF last, so it wins over a provider's own
 # settings (the Möbius subscription turns web search on for chats).
 #
-# Traced on Codex 0.162.0 on 2026-10-16, through the real fork and compaction
-# paths: the tools in the `response.created` echo of a RUST_LOG=trace log,
-# plus an in-fork probe that runs `exec` to print ALL_TOOLS (deferred nested
-# tools are missing from exec's description). What stays reaches no file or
-# network: `exec`, which refuses to run with code_mode_host off, so its nested
-# apply_patch, clock and MCP resource readers are unreachable; `wait`, for exec
-# cells only; and request_user_input, for Plan mode only. `unified_exec` is
-# not listed: 0.162.0 keeps it on whatever the switch says, and
-# shell_tool=false already removes its exec_command and write_stdin tools.
+# Traced on Codex 0.167.2 on 2026-11-13 with the same native-helper and
+# tool-off overrides used by fork and compaction, against a local fake
+# Responses endpoint (no paid request). A known model, gpt-5.6-sol, sent
+# `tools: []`; an unknown fallback model offered only `request_user_input`.
+# `codex features list` also reported every switch below known and false.
+# The earlier 0.163.0 trace additionally exercised a local `exec` call to
+# inspect deferred tools; do that again if a future release exposes exec here.
 #
 # Re-trace the same way before changing CODEX_TOOLS_OFF_VERIFIED_FOR. A test
 # fails while it differs from the Dockerfile's CODEX_VERSION, and session
 # forks refuse to run unless Codex reports every feature below as known and off.
-CODEX_TOOLS_OFF_VERIFIED_FOR = "0.162.0"
+CODEX_TOOLS_OFF_VERIFIED_FOR = "0.167.2"
 CODEX_TOOL_FEATURES_OFF = (
   "shell_tool",
   "apps",
@@ -1000,20 +1131,25 @@ def _write_responses_catalog(
       "supported_reasoning_levels": [
         {"effort": effort, "description": effort.title()} for effort in efforts
       ],
-      "default_reasoning_level": "medium" if "medium" in efforts else efforts[0],
+      "default_reasoning_level": model.get("default_effort") or (
+        "medium" if "medium" in efforts else efforts[0] if efforts else "none"
+      ),
     })
+    if broker:
+      for field in ("supports_parallel_tool_calls", "supports_search_tool",
+                    "supports_image_detail_original", "supports_reasoning_summaries"):
+        row[field] = model.get(field, False)
+      row["supports_reasoning_summary_parameter"] = row["supports_reasoning_summaries"]
     catalog.append(row)
   atomic_write(path, json.dumps({"models": catalog}))
 
 
 class MobiusProvider(BaseProvider):
-  """Protected local-broker transport for an accepted app declaration."""
+  """Protected local-broker transport for the platform's Möbius catalogue."""
 
-  name = "Möbius"
   cli_cmd = "codex"
   auth_dir = "mobius"
   runtime_kind = "codex_sdk"
-  switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
 
   # Account reads sit on every provider-status and auth decision, and the
   # balance is a remote round trip (0.3-0.8 s). Successful reads are held
@@ -1024,36 +1160,153 @@ class MobiusProvider(BaseProvider):
   BALANCE_HOLD_SECONDS = 60.0
 
   def __init__(self):
-    self.declaration: dict[str, Any] | None = None
-    self.app_id: int | None = None
+    # Named like AppModelProvider.declaration because it has the same shape.
+    self.declaration: dict[str, Any] = {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": None,
+      "models": [], "replacements": {},
+    }
+    self._catalogue_scope = None
+    self.name = self.declaration["name"]
+    self.switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
     self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
     self._held_generation = 0
     self._held_lock = threading.Lock()
 
-  def set_declaration(self, app_id: int | None, declaration: dict[str, Any] | None) -> None:
-    if self.app_id == app_id and self.declaration == declaration:
-      return
-    self.app_id = app_id
-    self.declaration = declaration
-    self.forget_account_reads()
-    self.name = declaration["name"] if declaration else "Möbius"
-    self.switch_efforts = (
-      frozenset(
-        effort for model in declaration["models"]
-        for effort in model.get("effort_levels", [])
-      ) or frozenset({"low", "medium", "high"})
-    ) if declaration else frozenset({"minimal", "low", "medium", "high", "max"})
-
   async def fetch_models(self, data_dir: str) -> list[Any]:
-    # Accepted app declarations are authoritative for every Responses
-    # connection. A broker's live list may use a different product alias from
-    # a stable saved-chat model ID; filtering it here would hide that model.
-    return self.declaration["models"] if self.declaration else []
+    # Registry owns refresh cadence and coalescing. Keep the complete snapshot
+    # here so execution and the picker use identical capabilities/defaults.
+    return await asyncio.to_thread(self._refresh_catalogue, data_dir)
+
+  def _refresh_catalogue(self, data_dir: str) -> list[Any]:
+    from app.runtime_identity import broker_client
+    with self._held_lock:
+      generation = self._held_generation
+    identity = self._identity()
+    if identity.get("linked") is not True:
+      with self._held_lock:
+        if generation == self._held_generation:
+          self._clear_catalogue()
+      raise ValueError("Möbius account is not linked")
+    scope = hashlib.sha256(json.dumps([
+      identity.get(k) for k in ("issuer", "subject", "instance_id", "key_generation")
+    ]).encode()).hexdigest()
+    cache_path = Path(data_dir) / "cache" / "mobius-models.json"
+    # A restart may reuse public metadata only for the same broker identity.
+    # No API key, private route, or model transcript is stored in this cache.
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      if self._catalogue_scope != scope:
+        self._clear_catalogue()
+        self._catalogue_scope = scope
+        try:
+          saved = json.loads(cache_path.read_text())
+          if saved.get("scope") == scope:
+            self._publish_catalogue(self._validate_catalogue(saved["catalogue"]))
+        except (OSError, ValueError, KeyError, TypeError):
+          pass
+    with broker_client(timeout=5.0) as client:
+      response = client.get("/v1/models")
+      response.raise_for_status()
+      payload = response.json()
+    declaration = self._validate_catalogue(payload)
+    public_payload = {
+      "contract_version": 1, "default_model": declaration["default_model"],
+      "replacements": declaration["replacements"],
+      "data": [{**row, "name": row["label"], "owned_by": "mobius"}
+               for row in declaration["models"]],
+    }
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      try:
+        atomic_write(cache_path, json.dumps({"scope": scope, "catalogue": public_payload}), mode=0o600)
+      except OSError:
+        log.warning("Could not save Möbius model metadata cache")
+      self._publish_catalogue(declaration)
+      return copy.deepcopy(declaration["models"])
+
+  @staticmethod
+  def _validate_catalogue(payload: Any) -> dict[str, Any]:
+    from app.mobius_catalogue import parse_catalogue
+    declaration = parse_catalogue(payload)
+    ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
+    # Built-in and app-declared ids only: Claude or Codex later discovering
+    # one of these ids shares it by (provider, model); it is not a collision
+    # that should discard the whole catalogue. The current Möbius declaration
+    # is what this replaces, so it grants no ownership here.
+    claimed = _declared_model_ids(pid for pid in PROVIDERS if pid != "mobius")
+    if any(mid in claimed for mid in ids):
+      raise ValueError("Möbius catalogue collides with another provider")
+    return declaration
+
+  def _publish_catalogue(self, declaration: dict[str, Any]) -> None:
+    self.declaration = declaration
+    self.switch_efforts = frozenset(
+      effort for model in declaration["models"] for effort in model["effort_levels"]
+    )
+    DEFAULT_MODELS["mobius"] = declaration["default_model"]
+    DEFAULT_BACKGROUND_MODELS["mobius"] = declaration["default_model"]
+
+  def _clear_catalogue(self) -> None:
+    _model_registry_cache.pop("mobius", None)
+    self._publish_catalogue({**self.declaration, "models": [],
+                             "default_model": None, "replacements": {}})
+
+  def registry_snapshot(self) -> dict[str, Any]:
+    """Read rows and selection metadata from one immutable published version."""
+    declaration = self.declaration
+    return {
+      "models": _live_model_entries("mobius", declaration["models"]),
+      "default": declaration["default_model"],
+      "replacements": dict(declaration["replacements"]),
+    }
+
+  def resolve_model(self, model: str | None) -> str | None:
+    """Resolve only service-declared retirement edges; never guess a successor."""
+    if not model or not self.declaration["models"]:
+      return model
+    if model in self.declaration.get("replacements", {}):
+      return self.declaration["replacements"][model]
+    return model if model in {m["id"] for m in self.declaration["models"]} else None
+
+  def model_effort_levels(self, model: str | None) -> list[str] | None:
+    """None means unknown; [] means this selected model rejects effort."""
+    for row in self.declaration["models"]:
+      if row["id"] == model:
+        return row.get("effort_levels")
+    return None
+
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """Apply declared retirement and effort policy without changing saved state.
+
+    A formerly valid effort may not exist on the successor's scale. Use that
+    model's declared default, not a provider-wide guess; an empty scale sends
+    no override at all.
+    """
+    resolved = self.resolve_model(model)
+    for row in self.declaration["models"]:
+      if row["id"] == resolved:
+        levels = row["effort_levels"]
+        if not levels:
+          return resolved, None
+        if effort is not None and effort not in levels:
+          return resolved, row["default_effort"]
+        break
+    return resolved, effort
+
+  def validate_model_effort(self, model: str | None, effort: str | None) -> bool:
+    levels = self.model_effort_levels(model)
+    if levels is None:
+      return effort is None or effort in self.switch_efforts
+    return effort is None or effort in levels
 
   @staticmethod
   def _catalog_path() -> Path:
-    # Möbius intentionally owns the public product catalog instead of exposing
-    # implementation model names. The context cap also bounds trial exposure.
+    # Runtime wire defaults, independent of the service-owned model list.
     return Path(__file__).with_name("responses_codex_template.json").resolve()
 
   def forget_account_reads(self) -> None:
@@ -1061,6 +1314,8 @@ class MobiusProvider(BaseProvider):
     with self._held_lock:
       self._held_generation += 1
       self._held_reads.clear()
+      self._clear_catalogue()
+      self._catalogue_scope = None
 
   def _held_broker_read(
     self, route: str, *, hold_seconds: float, timeout: float,
@@ -1096,31 +1351,27 @@ class MobiusProvider(BaseProvider):
     )
 
   def check_auth(self, data_dir: str) -> str | None:
-    if not self.declaration:
-      return "Install Möbius · You to use these models."
     if not provider_enabled(data_dir, "mobius"):
-      return "This model provider is turned off in its app."
+      return "Möbius models are turned off in Settings."
     try:
       if self._identity().get("linked") is True:
         return None
     except Exception:
       pass
-    return (
-      "Your Möbius subscription is not linked. Sign in from Möbius · You "
-      "to activate your trial."
-    )
+    return "Sign in to your Möbius account in Settings to use Möbius models."
 
   def codex_config_overrides(self, catalog_path: Path | None = None) -> list[str]:
     quote = json.dumps
-    if catalog_path is None and self.declaration:
+    if catalog_path is None:
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"] if self.declaration else "evolve")}',
+      *([f'model={quote(self.declaration["default_model"])}']
+        if self.declaration["default_model"] else []),
       'model_provider="mobius_trial"',
-      f"model_catalog_json={quote(str(catalog_path or self._catalog_path()))}",
+      f"model_catalog_json={quote(str(catalog_path))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
-      f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"] if self.declaration else "http://127.0.0.1:8765/v1")}',
+      f'model_providers.mobius_trial.base_url={quote(self.declaration["base_url"])}',
       'model_providers.mobius_trial.env_key="MOBIUS_LOCAL_BROKER_KEY"',
       'model_providers.mobius_trial.wire_api="responses"',
       "model_providers.mobius_trial.supports_standalone_web_search=true",
@@ -1166,10 +1417,8 @@ class MobiusProvider(BaseProvider):
       env[key] = ""
     config_dir = Path(data_dir) / "cli-auth" / "mobius"
     config_dir.mkdir(parents=True, exist_ok=True)
-    catalog_path = self._catalog_path()
-    if self.declaration:
-      catalog_path = config_dir / "catalog.json"
-      _write_responses_catalog(catalog_path, self.declaration, broker=True)
+    catalog_path = config_dir / "catalog.json"
+    _write_responses_catalog(catalog_path, self.declaration, broker=True)
     atomic_write(
       config_dir / "config.toml",
       "\n".join(self.codex_config_overrides(catalog_path)) + "\n",
@@ -1184,50 +1433,210 @@ class MobiusProvider(BaseProvider):
     return env
 
 
+@dataclass(frozen=True)
+class MobiusRuntimeSnapshot:
+  model: str | None
+  effort: str | None
+  declaration: dict[str, Any]
+  config_overrides: list[str]
+
+
+@asynccontextmanager
+async def mobius_runtime_snapshot(
+  data_dir: str, model: str | None, effort: str | None,
+) -> AsyncIterator[MobiusRuntimeSnapshot]:
+  """Freeze one discovered service catalogue for the entire CLI/SDK lifetime.
+
+  The provider owns discovery, selection and the temporary catalogue. Callers
+  retain this context until their Codex process has stopped, not merely until
+  startup, so a concurrent registry refresh cannot alter the running model.
+  """
+  await _fetch_model_entries(data_dir, "mobius")
+  provider = copy.copy(PROVIDERS["mobius"])
+  provider.declaration = copy.deepcopy(provider.declaration)
+  resolved_model, resolved_effort = provider.resolve_selection(model, effort)
+  if not resolved_model or not provider.declaration["models"]:
+    yield MobiusRuntimeSnapshot(None, None, provider.declaration, [])
+    return
+  with tempfile.TemporaryDirectory(prefix="mobius-models-") as directory:
+    catalog_path = Path(directory) / "catalog.json"
+    _write_responses_catalog(catalog_path, provider.declaration, broker=True)
+    yield MobiusRuntimeSnapshot(
+      resolved_model, resolved_effort, provider.declaration,
+      provider.codex_config_overrides(catalog_path),
+    )
+
+
+def model_relay_token(provider_id: str, consent_scope: str = "") -> str:
+  """Local credential the agent presents to the model relay for one provider.
+
+  Derived from the server secret, so it needs no storage and survives restarts,
+  and it is only honoured by the loopback-only relay. The provider's real key
+  never enters the agent process.
+  """
+  from app.config import get_settings
+  return hmac.new(
+    get_settings().secret_key.encode(),
+    f"mobius-model-relay:v1:{provider_id}:{consent_scope}".encode(),
+    hashlib.sha256,
+  ).hexdigest()
+
+
+class RelayKeyRead(NamedTuple):
+  key: str | None
+  unavailable: str | None
+
+
+def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
+  """An app model provider's engine home (Codex threads, Claude config).
+
+  Platform-owned, like the owner's engine homes: never under the app's own
+  storage, where the app could read transcripts or plant engine config
+  (Codex config.toml, Claude settings.json hooks).
+  """
+  return Path(data_dir) / "cli-auth" / f"app-{app_id}"
+
+
+def remove_legacy_app_engine_homes(data_dir: str | Path, app_ids) -> list[str]:
+  """Once, delete engine homes older versions kept in model-provider apps' storage.
+
+  ``apps/<id>/model-runtime`` held that provider's Codex threads and Claude
+  config, readable by the app. They are not moved: the app could have written
+  engine config there, so nothing in them is trusted; chats on those
+  providers start a new thread, reseeded from the chat. Only apps that
+  declare a model provider are touched (another app may use that name for
+  its own data), and only until a sweep completes; a failed removal is
+  logged and retried on the next boot. Returns the removed app ids.
+  """
+  from app.storage_io import atomic_write, rmtree_strict
+  marker = Path(data_dir) / "cli-auth" / ".legacy-app-engine-homes-removed"
+  if marker.exists():
+    return []
+  removed, failed = [], False
+  for app_id in sorted(app_ids):
+    old = Path(data_dir) / "apps" / str(app_id) / "model-runtime"
+    if not (old.is_symlink() or old.is_dir()):
+      continue
+    try:
+      rmtree_strict(old)
+      removed.append(str(app_id))
+    except OSError as exc:
+      failed = True
+      _model_registry_log.warning("legacy engine home for app %s not removed: %s", app_id, exc)
+  if not failed:
+    atomic_write(marker, "")
+  return removed
+
+
 class AppModelProvider(BaseProvider):
-  """An accepted app's declarative Responses-API model connection."""
+  """An accepted app's declarative model connection.
 
-  runtime_kind = "codex_sdk"
-  cli_cmd = "codex"
+  `responses` declarations run on the Codex engine and `anthropic_messages`
+  declarations on the Claude engine. Both talk to the local model relay
+  (`routes/model_relay.py`) with a relay token; the relay holds the real key
+  and repairs request shapes compatible providers reject.
+  """
 
-  def __init__(self, app_id: int, declaration: dict[str, Any]):
+  def __init__(self, app_id: int, declaration: dict[str, Any], consent_scope: str = ""):
     self.app_id = app_id
     self.declaration = declaration
+    # Bound to the acceptance observed by the registry. A stale provider must
+    # never mint a credential for a later acceptance of the same declaration.
+    self.consent_scope = consent_scope
     self.name = declaration["name"]
     self.auth_dir = f"app-{app_id}"
+    self.protocol = declaration.get("protocol", "responses")
+    self.runtime_kind = "claude_sdk" if self.protocol == "anthropic_messages" else "codex_sdk"
+    self.cli_cmd = "claude" if self.protocol == "anthropic_messages" else "codex"
     self.switch_efforts = frozenset(
       effort for model in declaration["models"]
       for effort in model.get("effort_levels", [])
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
+    # Availability only: the registry already omits apps whose consent is
+    # inactive, and the relay re-checks consent on every request.
+    return self.read_relay_key(data_dir, authorize=False).unavailable
+
+  def read_relay_key(self, data_dir: str, *, authorize: bool = True) -> RelayKeyRead:
+    """Resolve current authorization and the saved key in one blocking read.
+
+    The relay runs this in a worker; a stale registry object or failed consent
+    read must be refused before touching the encrypted app secret.
+    """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
-      return f"{self.name} is turned off in its app."
+      return RelayKeyRead(None, f"{self.name} is turned off in its app.")
+    if authorize and not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
+      return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
     path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
     if not path.is_file():
-      return f"Connect {self.name} in its app to use these models."
+      return RelayKeyRead(None, f"Connect {self.name} in its app to use these models.")
     try:
       from app.app_secret_crypto import decrypt_app_secret
-      if decrypt_app_secret(path).strip():
-        return None
+      key = decrypt_app_secret(path).strip()
+      if key:
+        return RelayKeyRead(key, None)
     except Exception:
       pass
-    return f"Reconnect {self.name} in its app; its saved key is unavailable."
+    return RelayKeyRead(None, f"Reconnect {self.name} in its app; its saved key is unavailable.")
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
 
+  def resolve_selection(self, model, effort):
+    # An effort inherited from another provider (Claude's ultracode or xhigh,
+    # a level this model lacks) is not sent: the provider's own default
+    # applies. A model with no declared levels takes the provider's scale.
+    levels = next((
+      row.get("effort_levels") for row in self.declaration["models"]
+      if row["id"] == (model or self.declaration["default_model"])
+    ), None)
+    allowed = self.switch_efforts if levels is None else levels
+    return model, (effort if effort in allowed else None)
+
+  def relay_token(self) -> str:
+    return model_relay_token(f"app-{self.app_id}", self.consent_scope)
+
+  def measured_run_accounting(self, cost_usd, usage):
+    # The engines price tokens at their own vendor's rates, meaningless for
+    # another company's model, so no cost is kept. Some compatible providers
+    # stream no usage at all and the engine then reports zeros, which would
+    # read as a free run: all-zero usage is unknown, not zero.
+    counted = isinstance(usage, dict) and any(
+      (usage.get(field) or 0) > 0
+      for field in ("input_tokens", "output_tokens", "total_tokens")
+    )
+    return None, (usage if counted else None)
+
+  def _relay_base_url(self) -> str:
+    # Direct loopback to the listener: the relay refuses proxied requests.
+    from app.config import loopback_listener_url
+    return loopback_listener_url(f"/api/model-relay/app-{self.app_id}")
+
+  def _runtime_home(self, data_dir: str) -> Path:
+    return app_engine_home(data_dir, self.app_id)
+
+  def engine_home(self, data_dir: str) -> Path:
+    home = self._runtime_home(data_dir)
+    return home / "claude" if self.protocol == "anthropic_messages" else home
+
+  @property
+  def _relay_token_env(self) -> str:
+    # Outside the per-turn MOBIUS_APP_* namespace (helper_hosts): a shared
+    # helper host holds it, as it does any other inference credential.
+    return f"MOBIUS_MODEL_RELAY_TOKEN_{self.app_id}"
+
   def codex_config_overrides(self) -> list[str]:
     provider_id = f"app_{self.app_id}"
-    key_name = f"MOBIUS_APP_MODEL_KEY_{self.app_id}"
+    key_name = self._relay_token_env
     return [
       f'model_provider={json.dumps(provider_id)}',
       f'model_providers.{provider_id}.name={json.dumps(self.name)}',
-      f'model_providers.{provider_id}.base_url={json.dumps(self.declaration["base_url"])}',
+      f'model_providers.{provider_id}.base_url={json.dumps(self._relay_base_url() + "/v1")}',
       f'model_providers.{provider_id}.env_key={json.dumps(key_name)}',
       f'model_providers.{provider_id}.wire_api="responses"',
       f'model_catalog_json={json.dumps(str(self._catalog_path()))}',
-      # The key is for the inference transport, not shell tools.
+      # The relay token is for the inference transport, not shell tools.
       f'shell_environment_policy.exclude=[{json.dumps(key_name)}]',
       'features.enable_request_compression=false',
       'features.apps=false',
@@ -1237,24 +1646,78 @@ class AppModelProvider(BaseProvider):
 
   def _catalog_path(self) -> Path:
     from app.config import get_settings
-    return Path(get_settings().data_dir) / "apps" / str(self.app_id) / "model-runtime" / "catalog.json"
+    return self._runtime_home(get_settings().data_dir) / "catalog.json"
 
   def build_env(self, base_env, data_dir, chat_id=None):
-    from app.app_secret_crypto import decrypt_app_secret
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    key = decrypt_app_secret(path)
     env = dict(base_env)
-    for name in list(env):
+    # SDKs merge the ambient environment underneath this override mapping.
+    # Apply the existing credential-name policy to both sets of names without
+    # copying ambient values or stripping unrelated control/run variables.
+    for name in os.environ.keys() | env.keys():
       if name.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN")) or name in {
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
       }:
         env[name] = ""
-    env[f"MOBIUS_APP_MODEL_KEY_{self.app_id}"] = key
+    # SDK subprocesses inherit ambient proxy settings. Keep the relay token
+    # off those proxies without discarding the owner's other exclusions.
+    no_proxy = ",".join(filter(None, (
+      os.environ.get("NO_PROXY"), os.environ.get("no_proxy"),
+      env.get("NO_PROXY"), env.get("no_proxy"),
+    )))
+    no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
+    env["NO_PROXY"] = no_proxy
+    env["no_proxy"] = no_proxy
+    if self.protocol == "anthropic_messages":
+      return self._claude_relay_env(env, data_dir, chat_id)
+    env[self._relay_token_env] = self.relay_token()
     # Isolate custom-provider threads and auth from the owner's Codex login.
-    home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime"
+    home = self._runtime_home(data_dir)
     home.mkdir(parents=True, exist_ok=True)
     _write_responses_catalog(home / "catalog.json", self.declaration)
     env["CODEX_HOME"] = str(home)
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    return env
+
+  def _claude_relay_env(self, env, data_dir, chat_id):
+    """Point the Claude engine at the loopback relay with a relay-only token."""
+    # Own config dir: sessions and settings never mix with the owner's Claude
+    # sign-in, which must not be used for another company's models.
+    home = self.engine_home(data_dir)
+    home.mkdir(parents=True, exist_ok=True)
+    # The same Möbius defaults as the owner's Claude home: Claude's own
+    # transcript retention and no Claude co-author trailer on commits.
+    from app.provider_session_retention import ensure_claude_settings_defaults
+    ensure_claude_settings_defaults(data_dir, config_dir=home)
+    env["CLAUDE_CONFIG_DIR"] = str(home)
+    # The SDK merges os.environ underneath options.env. Omitting a key here
+    # would restore ambient owner auth or select a different inference route.
+    for name in (
+      "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+      "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+      "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_MANTLE",
+      "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_GATEWAY_TOKEN",
+      "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    ):
+      env[name] = ""
+    env.update(CLAUDE_CLI_POLICY_ENV)
+    env["ANTHROPIC_BASE_URL"] = self._relay_base_url()
+    env["ANTHROPIC_API_KEY"] = self.relay_token()
+    # Background and alias model slots must resolve to this provider's models;
+    # Anthropic model ids would be unknown to it.
+    default_model = self.declaration["default_model"]
+    for slot in (
+      "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    ):
+      env[slot] = default_model
+    # Nothing in this run should reach Anthropic's services (updates, telemetry).
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
@@ -1266,6 +1729,9 @@ PROVIDERS: dict[str, BaseProvider] = {
   "claude": ClaudeProvider(),
   "codex": CodexProvider(),
 }
+
+DEFAULT_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
+DEFAULT_BACKGROUND_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
 
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
@@ -1302,7 +1768,7 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     _apply_app_model_declarations(_read_app_model_declarations())
 
 
-async def refresh_app_model_providers(data_dir: str) -> None:
+async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> None:
   """``sync_app_model_providers`` for async callers, with the read off-loop.
 
   The declaration query froze the event loop for seconds on a saturated disk.
@@ -1310,35 +1776,73 @@ async def refresh_app_model_providers(data_dir: str) -> None:
   on the loop.
   """
   async with _app_provider_refresh_lock:
-    if not _app_providers_fresh():
+    if force or not _app_providers_fresh():
       declarations = await asyncio.to_thread(_read_app_model_declarations)  # unsettled: read-only (app declarations)
       _apply_app_model_declarations(declarations)
 
 
-def _read_app_model_declarations() -> list[tuple[Any, dict]] | None:
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app_id, declaration, relay scope)`` for each app whose consent is active.
+
+  Loads only the contract and consent columns, never app source or icon blobs:
+  the registry refresh runs about once a second and the relay on every request.
+  """
+  from sqlalchemy.orm import load_only
+  from app import app_consent, models
+  query = db.query(models.App).options(load_only(
+    models.App.id, models.App.capability_contract, models.App.manifest_url,
+    models.App.accepted_consent, models.App.project_templates_json,
+  )).filter(models.App.deleted_at.is_(None))
+  if app_id is not None:
+    query = query.filter(models.App.id == app_id)
+  return [
+    (app.id, app.capability_contract["model_provider"], _app_model_relay_scope(app))
+    for app in query.all()
+    if isinstance(app.capability_contract, dict)
+    and isinstance(app.capability_contract.get("model_provider"), dict)
+    and not app_consent.dormant(app)
+  ]
+
+
+def _read_app_model_declarations() -> list[tuple[Any, dict, str]] | None:
   """Accepted app model declarations as plain data; safe in a worker."""
   try:
-    from app import models
     from app.database import SessionLocal
     with SessionLocal() as db:
-      # Only the contract column: full App rows carry source and icon blobs
-      # (megabytes across installs) and this runs about once a second.
-      rows = db.query(models.App.id, models.App.capability_contract).filter(
-        models.App.deleted_at.is_(None)
-      ).all()
-      return [
-        (app_id, contract["model_provider"])
-        for app_id, contract in rows
-        if isinstance(contract, dict)
-        and isinstance(contract.get("model_provider"), dict)
-      ]
+      return _usable_app_model_declarations(db)
   except Exception as exc:
     _model_registry_log.warning("app model registry read failed: %s", exc)
     return None
 
 
+def _app_model_relay_scope(app) -> str:
+  """Bind relay credentials to both the acceptance and reviewed endpoint."""
+  accepted = app.accepted_consent
+  accepted_id = accepted.get("id") if isinstance(accepted, dict) else None
+  declaration = app.capability_contract.get("model_provider")
+  fingerprint = hashlib.sha256(json.dumps(declaration, sort_keys=True).encode()).hexdigest()
+  return f"{accepted_id or ''}:{fingerprint}"
+
+
+def _app_model_declaration_usable(
+  app_id: int, declaration: dict, consent_scope: str,
+) -> bool:
+  """Fail closed for stale provider objects, consent changes, and read errors.
+
+  A registry snapshot is deliberately throttled; it cannot authorize a new
+  relay request after revocation or contract replacement.
+  """
+  try:
+    from app.database import SessionLocal
+    with SessionLocal() as db:
+      return (app_id, declaration, consent_scope) in _usable_app_model_declarations(db, app_id)
+  except Exception as exc:
+    _model_registry_log.warning("app model authorization read failed: %s", exc)
+    return False
+
+
 def _apply_app_model_declarations(
-  declarations: list[tuple[Any, dict]] | None,
+  declarations: list[tuple[Any, dict, str]] | None,
 ) -> None:
   """Apply one completed load; a failed read keeps the current registry."""
   global _app_provider_sync_at
@@ -1346,23 +1850,15 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
-  native_match = next(((app_id, declaration) for app_id, declaration in declarations
-                       if declaration.get("transport") == "identity_broker"), None)
-  native_id, native = native_match if native_match else (None, None)
-  mobius = PROVIDERS["mobius"]
-  if isinstance(mobius, MobiusProvider) and (mobius.app_id != native_id or mobius.declaration != native):
-    mobius.set_declaration(native_id, native)
-    _model_registry_cache.pop("mobius", None)
-  if native:
-    DEFAULT_MODELS["mobius"] = native["default_model"]
-    DEFAULT_BACKGROUND_MODELS["mobius"] = native["default_model"]
-  else:
-    DEFAULT_MODELS.pop("mobius", None)
-    DEFAULT_BACKGROUND_MODELS.pop("mobius", None)
-  claimed_models = {mid for key, ids in KNOWN_MODELS.items() if key != "mobius" for mid in ids}
-  if native:
-    claimed_models.update(model["id"] for model in native["models"])
-  for app_id, declaration in declarations:
+  # Built-in, Möbius and earlier apps' declared ids collide, exactly as for the
+  # Möbius catalogue. Claude/Codex discovery does not: an id both list is
+  # shared by (provider, model), so registration never depends on discovery
+  # timing and an app update cannot evict a live provider and orphan its chats.
+  claimed_models = _declared_model_ids(("claude", "codex", "mobius"))
+  for app_id, declaration, consent_scope in declarations:
+    # Installed Möbius · You copies still declare the broker transport; the
+    # platform's own catalogue is the Möbius provider, so the declaration is
+    # inert rather than a second app-NNN provider (see manifest_contract).
     if declaration.get("transport") == "identity_broker":
       continue
     provider_id = f"app-{app_id}"
@@ -1376,8 +1872,9 @@ def _apply_app_model_declarations(
     next_ids.add(provider_id)
     claimed_models.update(model_ids)
     current = PROVIDERS.get(provider_id)
-    if not isinstance(current, AppModelProvider) or current.declaration != declaration:
-      PROVIDERS[provider_id] = AppModelProvider(app_id, declaration)
+    if (not isinstance(current, AppModelProvider) or current.declaration != declaration
+        or current.consent_scope != consent_scope):
+      PROVIDERS[provider_id] = AppModelProvider(app_id, declaration, consent_scope)
       _model_registry_cache.pop(provider_id, None)
     DEFAULT_MODELS[provider_id] = declaration["default_model"]
     DEFAULT_BACKGROUND_MODELS[provider_id] = declaration["default_model"]
@@ -1395,8 +1892,7 @@ def _apply_app_model_declarations(
 def provider_selectable(data_dir: str, provider_id: str) -> bool:
   """Whether a registered provider has an active, declared model connection."""
   provider = PROVIDERS.get(provider_id)
-  return (provider is not None and provider_enabled(data_dir, provider_id)
-          and (not isinstance(provider, MobiusProvider) or provider.declaration is not None))
+  return provider is not None and provider_enabled(data_dir, provider_id)
 
 # The default provider when none is configured.
 DEFAULT_PROVIDER = "claude"
@@ -1404,7 +1900,7 @@ DEFAULT_PROVIDER = "claude"
 # When the stored provider is still the historical default but is not
 # authenticated, prefer a connected provider over showing a dead default.
 # Codex is first because the setup wizard leads with it for new installs.
-# The app-owned subscription never silently replaces a user's connected coding
+# The Möbius subscription never silently replaces a user's connected coding
 # provider. It remains selectable whenever its own credential preflight passes.
 CONNECTED_DEFAULT_ORDER = ("codex", "claude")
 
@@ -1483,12 +1979,20 @@ def resolve_default_provider(
   return provider_id
 
 
-def provider_of_model(model: str | None) -> str | None:
-  """The provider a model id belongs to, or None for unknown/blank ids."""
+def provider_of_model(
+  model: str | None, *, preferred: str | None = None,
+) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids.
+
+  ``preferred`` (a chat's saved provider or the picker's mirrored one) wins
+  when it also owns the id, so a shared id keeps its (provider, model) pair.
+  """
   from app.config import get_settings
   sync_app_model_providers(get_settings().data_dir)
   if not isinstance(model, str) or not model:
     return None
+  if isinstance(preferred, str) and preferred in PROVIDERS and model in known_model_ids(preferred):
+    return preferred
   for provider_id in PROVIDERS:
     if model in known_model_ids(provider_id):
       return provider_id
@@ -1498,6 +2002,8 @@ def provider_of_model(model: str | None) -> str | None:
 def owner_default_provider(
   data_dir: str,
   configured_provider: str | None = None,
+  *,
+  settings: dict | None = None,
 ) -> str:
   """The provider from the owner's latest atomic picker choice.
 
@@ -1527,11 +2033,11 @@ def owner_default_provider(
 
   Background agents are deliberately NOT routed here: they carry their own
   configured provider/model block, a separate selection from the interactive
-  last-used model.
+  last-used model. ``settings`` lets a caller reuse one file read.
   """
-  settings = _load_agent_settings(data_dir)
+  settings = settings if settings is not None else _load_agent_settings(data_dir)
   model = settings.get("model")
-  prov = provider_of_model(model)
+  prov = provider_of_model(model, preferred=settings.get("provider"))
   if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")
@@ -1634,9 +2140,7 @@ def _fallback_models(provider_id: str) -> list[dict[str, Any]]:
   the same dict shape the route layer's Pydantic serialization would
   produce."""
   provider = PROVIDERS.get(provider_id)
-  if isinstance(provider, MobiusProvider) and provider.declaration:
-    return _live_model_entries(provider_id, provider.declaration["models"])
-  if isinstance(provider, AppModelProvider):
+  if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return _live_model_entries(provider_id, provider.declaration["models"])
   return [
     {
@@ -1703,7 +2207,7 @@ def _live_model_entries(
       and not isinstance(context_window, bool)
       and context_window > 0
     ):
-      entry["context_window"] = round(context_window)
+      entry["context_window"] = _catalog_context_window(metadata) or round(context_window)
     elif model_id in MODEL_CONTEXT_WINDOWS:
       entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
@@ -1722,6 +2226,128 @@ _CLAUDE_OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 # token that expires mid-flight doesn't 401. 60s comfortably covers the
 # 10s request timeout plus clock skew.
 _CLAUDE_TOKEN_REFRESH_MARGIN_MS = 60_000
+# The CLI accepts a stored sign-in end only between 2025-01-01 and ten years
+# from now; anything else it treats as no end.
+_CLAUDE_LOGIN_END_EARLIEST_MS = 1_735_689_600_000
+_CLAUDE_LOGIN_END_HORIZON_MS = 315_360_000_000
+# The CLI treats a stored sign-in end more than this far before the access
+# token's own expiry as stale and reports no end at all.
+_CLAUDE_LOGIN_END_STALE_MS = 3 * 24 * 60 * 60 * 1000
+# The top-level credential keys that belong to one Claude account. The CLI's
+# own sign-in removes exactly these and keeps the rest (such as mcpOAuth), so
+# a new sign-in never inherits another account's; a Möbius disconnect removes
+# the same set. (The CLI's logout deletes the whole file, MCP sign-ins too.)
+_CLAUDE_ACCOUNT_KEYS = (
+  "claudeAiOauth", "organizationUuid", "trustedDeviceToken",
+  "trustedDeviceEnrolledAfterRefusalAtMs", "enterpriseGateway", "designOauth",
+  "cloudSessionsOauth",
+)
+
+
+def _finite_number(value: Any) -> float | None:
+  """A stored time or duration, or None unless it is a finite non-bool number.
+
+  An int is returned exact, unless it is beyond float range: the CLI reads
+  that as Infinity, and callers compare it with the float clock."""
+  if isinstance(value, bool) or not isinstance(value, (int, float)):
+    return None
+  try:
+    return value if math.isfinite(value) else None
+  except OverflowError:
+    return None
+
+
+def _claude_login_end_ms(value: Any) -> float | None:
+  """A sign-in end the CLI would accept, or None."""
+  end = _finite_number(value)
+  if end is None or not (
+    _CLAUDE_LOGIN_END_EARLIEST_MS <= end
+    <= time.time() * 1000 + _CLAUDE_LOGIN_END_HORIZON_MS
+  ):
+    return None
+  return end
+
+
+def claude_login_end_after(now_ms: int, lifetime_s: Any) -> int | None:
+  """The sign-in end `lifetime_s` seconds after `now_ms`, or None unless the
+  lifetime is a finite number and the end is one the CLI accepts.
+
+  Like the CLI, a zero or negative lifetime is recorded as an end at or
+  before now (an ended sign-in); only the range check rejects an end."""
+  lifetime = _finite_number(lifetime_s)
+  if lifetime is None:
+    return None
+  end = _claude_login_end_ms(now_ms + lifetime * 1000)
+  return None if end is None else int(end)
+
+
+def _token_grant_text(tokens: dict, *path: str) -> str | None:
+  """A non-empty string at `path` in a token response, or None when any step
+  is missing or malformed (optional fields never fail a grant)."""
+  value: Any = tokens
+  for key in path:
+    value = value.get(key) if isinstance(value, dict) else None
+  return value if isinstance(value, str) and value else None
+
+
+def claude_oauth_after_token_grant(tokens: Any, stored: dict | None) -> dict:
+  """The claudeAiOauth block a token endpoint response leaves behind.
+
+  `stored` is the current block for a refresh, whose other keys are kept, or
+  None for a new sign-in, whose block also records the account's `email`
+  ('' when the response has none). Raises RuntimeError for a response that
+  cannot be stored, so the caller stores nothing.
+
+  A new sign-in needs an access token, a refresh token and an `expires_in`
+  that ends after now and within the latest sign-in end the CLI accepts. A
+  refresh needs an access token; one without is refused, so the next turn
+  fails and asks the owner to reconnect. Otherwise its response is kept, since Anthropic has already
+  rotated the single-use refresh token: like the CLI, a refresh without a
+  `refresh_token` keeps the stored one, and an unusable `expires_in` saves
+  the tokens with the access token already expired, so the next use
+  refreshes again.
+
+  The sign-in end follows the CLI: a new sign-in records the response's
+  `refresh_token_expires_in` (and no end, rather than the CLI's 30-day
+  default, when it has none the CLI accepts); a refresh never adds or extends
+  the end: it drops a stored end the CLI would reject and keeps the earlier of
+  a valid one and the response's."""
+  if not isinstance(tokens, dict):
+    raise RuntimeError("token response is not an object")
+  access_token = _token_grant_text(tokens, "access_token")
+  refresh_token = _token_grant_text(tokens, "refresh_token")
+  if stored is not None and refresh_token is None:
+    refresh_token = _token_grant_text(stored, "refreshToken")
+  for field, value in (("access_token", access_token), ("refresh_token", refresh_token)):
+    if value is None:
+      raise RuntimeError(f"token response missing '{field}'")
+  now_ms = int(time.time() * 1000)
+  lifetime = _finite_number(tokens.get("expires_in"))
+  expires_at = None if lifetime is None else now_ms + lifetime * 1000
+  # An access token cannot outlast the latest sign-in end the CLI accepts.
+  if expires_at is None or not (
+    now_ms < expires_at <= now_ms + _CLAUDE_LOGIN_END_HORIZON_MS
+  ):
+    if stored is None:
+      raise RuntimeError("token response has no usable 'expires_in'")
+    expires_at = now_ms
+  oauth = {"scopes": []} if stored is None else dict(stored)
+  oauth["accessToken"] = access_token
+  oauth["refreshToken"] = refresh_token
+  oauth["expiresAt"] = int(expires_at)
+  end = claude_login_end_after(now_ms, tokens.get("refresh_token_expires_in"))
+  if stored is not None:
+    stored_end = _claude_login_end_ms(oauth.pop("refreshTokenExpiresAt", None))
+    end = stored_end if end is None or stored_end is None else min(stored_end, end)
+  if end is not None:
+    oauth["refreshTokenExpiresAt"] = end
+  scope = _token_grant_text(tokens, "scope")
+  if scope is not None:
+    oauth["scopes"] = scope.split()
+  if stored is None:
+    oauth["email"] = _token_grant_text(tokens, "account", "email_address") or ""
+  return oauth
+
 
 # Serializes Claude OAuth refreshes within this process. Anthropic rotates
 # the single-use refresh token on every grant, so two concurrent refreshes
@@ -1739,17 +2365,16 @@ def _read_claude_oauth(data_dir: str) -> tuple[Path, dict]:
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   if not creds_path.exists():
     raise RuntimeError("claude credentials missing")
-  raw = json.loads(creds_path.read_text())
-  oauth = raw.get("claudeAiOauth")
+  oauth = _read_claude_credentials(creds_path).get("claudeAiOauth")
   if not isinstance(oauth, dict):
     raise RuntimeError("claude credentials malformed")
   return creds_path, oauth
 
 
-def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
-  """Persist a claudeAiOauth block, or remove it when oauth is None,
-  in the CLI's expected shape (atomic tmp+rename so a crash mid-write can't
-  leave a truncated file the chat path then reads).
+def _write_claude_oauth(creds_path: Path, oauth: dict) -> None:
+  """Persist a claudeAiOauth block in the CLI's expected shape (atomic
+  tmp+rename so a crash mid-write can't leave a truncated file the chat path
+  then reads).
 
   Writing it back is the point of refreshing here: the chat runner and the
   CLI read the same file, so a refresh on the registry path also un-expires
@@ -1760,21 +2385,58 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
   documented `docker cp ~/.claude/.credentials.json` dev workflow) also
   carries mcpOAuth and organizationUuid. Rewriting just {"claudeAiOauth": …}
   would drop those sibling keys on the first registry-path refresh, which is
-  what 'the file stays the single source of truth' is meant to prevent. The
-  file mode is preserved (the CLI writes 0600); we mirror it on the tmp file
-  and default to 0600 when the source is gone."""
+  what 'the file stays the single source of truth' is meant to prevent."""
+  try:
+    raw = _read_claude_credentials(creds_path)
+  except (OSError, ValueError):
+    raw = {}
+  raw["claudeAiOauth"] = oauth
+  _replace_claude_credentials(creds_path, raw)
+
+
+def write_claude_sign_in(creds_path: Path, tokens: Any) -> str:
+  """Store a new Claude sign-in from the token endpoint response and return
+  its account email ('' when unknown). Raises RuntimeError, storing nothing,
+  for a response claude_oauth_after_token_grant refuses.
+
+  Like the CLI's own sign-in, the previous account's keys
+  (_CLAUDE_ACCOUNT_KEYS) are dropped and the file's other keys are kept.
+  The response's organization uuid is then recorded as the top-level
+  `organizationUuid`: that key is Möbius's own convention, read by its usage
+  controls through claude_organization_uuid (the CLI records the
+  organization elsewhere)."""
+  oauth = claude_oauth_after_token_grant(tokens, None)
+  try:
+    raw = _read_claude_credentials(creds_path)
+  except (OSError, ValueError):
+    raw = {}
+  for key in _CLAUDE_ACCOUNT_KEYS:
+    raw.pop(key, None)
+  raw["claudeAiOauth"] = oauth
+  organization = _token_grant_text(tokens, "organization", "uuid")
+  if organization is not None:
+    raw["organizationUuid"] = organization
+  _replace_claude_credentials(creds_path, raw)
+  return oauth["email"]
+
+
+def _read_claude_credentials(creds_path: Path) -> dict:
+  """The credentials file as an object; raises OSError or ValueError, the
+  latter for anything json.loads cannot read (including a too-deeply nested
+  file, which it reports as RecursionError)."""
   try:
     raw = json.loads(creds_path.read_text())
-    if not isinstance(raw, dict):
-      raise ValueError("Claude credentials are not an object")
-  except (OSError, ValueError):
-    if oauth is None:
-      raise  # Disconnect must not discard unrelated, unreadable credentials.
-    raw = {}
-  if oauth is None:
-    raw.pop("claudeAiOauth", None)
-  else:
-    raw["claudeAiOauth"] = oauth
+  except RecursionError as exc:
+    raise ValueError("Claude credentials are nested too deeply") from exc
+  if not isinstance(raw, dict):
+    raise ValueError("Claude credentials are not an object")
+  return raw
+
+
+def _replace_claude_credentials(creds_path: Path, raw: dict) -> None:
+  """Atomically replace the credentials file with `raw`. The file mode is
+  preserved (the CLI writes 0600); we mirror it on the tmp file and default
+  to 0600 when the source is gone."""
   try:
     mode = stat.S_IMODE(creds_path.stat().st_mode)
   except OSError:
@@ -1793,6 +2455,11 @@ def _write_claude_oauth(creds_path: Path, oauth: dict | None) -> None:
 async def disconnect_provider(data_dir: str, provider_id: str) -> None:
   """Remove only the local provider sign-in, not configuration or MCP access.
 
+  A Claude disconnect removes every account-bound key (_CLAUDE_ACCOUNT_KEYS),
+  so no trusted-device token or account id stays on disk, and keeps the rest
+  such as MCP sign-ins (the CLI's own logout deletes the whole file). An
+  unreadable credentials file raises rather than being discarded.
+
   Already-running SDKs may retain their session; this is not remote token
   revocation. Login cancellation belongs to the auth route. The Claude lock
   prevents an in-flight model-registry refresh from restoring removed tokens.
@@ -1801,7 +2468,10 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
     async with _claude_refresh_lock:
       path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
       if path.exists():
-        _write_claude_oauth(path, None)
+        raw = _read_claude_credentials(path)
+        for key in _CLAUDE_ACCOUNT_KEYS:
+          raw.pop(key, None)
+        _replace_claude_credentials(path, raw)
   elif provider_id == "codex":
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   else:
@@ -1811,10 +2481,10 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
 async def _refresh_claude_access_token(oauth: dict) -> dict:
   """Exchanges the stored refresh token for a fresh access token.
 
-  Returns the new claudeAiOauth dict (accessToken/refreshToken/expiresAt/
-  scopes preserved). Raises when there's no refresh token or the token
-  endpoint rejects the exchange — the caller then falls back to
-  KNOWN_MODELS, same as any other registry-fetch failure.
+  Returns the new claudeAiOauth dict (claude_oauth_after_token_grant).
+  Raises when there's no refresh token or the token endpoint rejects the
+  exchange — the caller then falls back to KNOWN_MODELS, same as any other
+  registry-fetch failure.
 
   Anthropic's OAuth refresh-token grant rotates the refresh token, so we
   persist whatever the endpoint returns (a stale refresh token would fail
@@ -1836,16 +2506,7 @@ async def _refresh_claude_access_token(oauth: dict) -> dict:
     )
     resp.raise_for_status()
     data = resp.json()
-  for field in ("access_token", "refresh_token", "expires_in"):
-    if field not in data:
-      raise RuntimeError(f"refresh response missing '{field}'")
-  refreshed = dict(oauth)
-  refreshed["accessToken"] = data["access_token"]
-  refreshed["refreshToken"] = data["refresh_token"]
-  refreshed["expiresAt"] = int(time.time() * 1000) + data["expires_in"] * 1000
-  if data.get("scope"):
-    refreshed["scopes"] = data["scope"].split()
-  return refreshed
+  return claude_oauth_after_token_grant(data, oauth)
 
 
 async def claude_access_token(data_dir: str) -> str:
@@ -1862,10 +2523,10 @@ async def claude_access_token(data_dir: str) -> str:
   single source of truth."""
   def _token_if_fresh(oauth: dict) -> str | None:
     token = oauth.get("accessToken")
-    expires_at = oauth.get("expiresAt")
+    expires_at = _finite_number(oauth.get("expiresAt"))
     if (
       token
-      and isinstance(expires_at, (int, float))
+      and expires_at is not None
       and expires_at - time.time() * 1000 >= _CLAUDE_TOKEN_REFRESH_MARGIN_MS
     ):
       return token
@@ -1905,12 +2566,43 @@ def claude_subscription_type(data_dir: str) -> str | None:
   return value if isinstance(value, str) and value.strip() else None
 
 
+def claude_login_expires_at(data_dir: str) -> str | None:
+  """When the stored Claude sign-in ends (ISO 8601 UTC), or None if unknown.
+
+  This is the `refreshTokenExpiresAt` the CLI reports as `loginExpiresAt`,
+  under the CLI's three rules: only a sign-in with a refresh token has an
+  end, the end must be a time between 2025-01-01 and ten years from now, and
+  an end more than three days before the access token's expiry is stale.
+  A refresh never moves the date later; only a new sign-in does. check_auth
+  already refuses credentials past it, so this lets the owner reconnect
+  beforehand.
+
+  The date is an upper bound, not an exact end: the CLI treats it as a
+  window, so the sign-in can end up to three days before it.
+  """
+  try:
+    _, oauth = _read_claude_oauth(data_dir)
+  except (OSError, RuntimeError, ValueError):
+    return None
+  end = _claude_login_end_ms(oauth.get("refreshTokenExpiresAt"))
+  if not oauth.get("refreshToken") or end is None:
+    return None
+  # Compare the raw stored expiry, as the CLI does: a value beyond float
+  # range is Infinity there and marks the end stale. Python compares an int
+  # with a float exactly, so this cannot overflow.
+  access = oauth.get("expiresAt")
+  if (isinstance(access, (int, float)) and not isinstance(access, bool)
+      and access > end + _CLAUDE_LOGIN_END_STALE_MS):
+    return None
+  ended = datetime.fromtimestamp(end / 1000, timezone.utc)
+  return ended.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def claude_organization_uuid(data_dir: str) -> str:
   """Return the connected Claude organization identity, never its secrets."""
   creds_path = Path(data_dir) / "cli-auth" / "claude" / ".credentials.json"
   try:
-    raw = json.loads(creds_path.read_text())
-    value = raw.get("organizationUuid") if isinstance(raw, dict) else None
+    value = _read_claude_credentials(creds_path).get("organizationUuid")
     parsed = uuid.UUID(value) if isinstance(value, str) else None
   except (OSError, ValueError, AttributeError) as exc:
     raise RuntimeError("Claude organization identity is unavailable") from exc
@@ -2243,13 +2935,14 @@ async def _fetch_model_entries(
         "model registry fetch failed for %s: %s; %s", provider_id, exc,
         "keeping the last live catalog" if keep_live else "using KNOWN_MODELS",
       )
-      if keep_live:
+      if keep_live or provider_id == "mobius":
+        entries = prior[1] if keep_live else entries
         # Stamp it so it expires after the retry interval, not a full TTL.
         _model_registry_cache[provider_id] = (
           time.monotonic() - _MODEL_CACHE_TTL_SECONDS + _MODEL_REFRESH_RETRY_SECONDS,
-          prior[1],
+          entries,
         )
-        return provider_id, prior[1]
+        return provider_id, entries
     _model_registry_cache[provider_id] = (time.monotonic(), entries)
     return provider_id, entries
 
@@ -2272,7 +2965,7 @@ async def list_models(
   KNOWN_MODELS fallback for both.
   """
 
-  sync_app_model_providers(data_dir, force=force_refresh)
+  await refresh_app_model_providers(data_dir, force=force_refresh)
 
   # Serve cached reads (fresh or stale, unless forced) without taking a
   # lock. Only providers with no catalog go through _fetch_model_entries
@@ -2302,23 +2995,29 @@ async def list_models(
   return result
 
 
-async def model_supports_effort(data_dir: str, model: str | None) -> bool:
-  """Use a current Claude capability at execution, not a stale picker row.
+async def model_supports_effort(
+  data_dir: str, model: str | None, *, provider_id: str = "claude",
+) -> bool:
+  """Use a current capability from the selected provider at execution.
 
-  Unlike list_models, this does not serve an expired catalog: a saved effort
-  sent to a newly effortless model is rejected by Claude, so an expired
-  Claude catalog is refreshed (only Claude) before answering. A fresh catalog
-  answers without I/O; unrelated discovery never belongs here.
+  A cold or expired Claude catalog refreshes before answering so a saved
+  effort cannot reach a newly effortless model. App providers use their own
+  declared catalog and never discover the owner's Claude connection.
   """
   if not model:
     return True
-  entries = _fresh_model_entries("claude")
-  if entries is None:
-    entries = (await _fetch_model_entries(data_dir, "claude"))[1]
+  # A provider removed since admission fails as "not installed".
+  provider = registered_provider(provider_id)
+  if isinstance(provider, AppModelProvider):
+    entries = provider.declaration["models"]
+  else:
+    entries = _fresh_model_entries(provider_id)
+    if entries is None:
+      entries = (await _fetch_model_entries(data_dir, provider_id))[1]
   for entry in entries:
     if entry.get("id") == model:
       return entry.get("effort_levels") != []
-  return MODEL_EFFORT_LEVELS.get(model) != []
+  return provider_id != "claude" or MODEL_EFFORT_LEVELS.get(model) != []
 
 
 def invalidate_model_cache() -> None:

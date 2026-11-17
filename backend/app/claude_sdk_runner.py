@@ -61,6 +61,7 @@ from collections import deque
 from collections.abc import Awaitable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from uuid import uuid4
 from typing import Any, Literal
 
@@ -87,6 +88,7 @@ from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
   dispatch_sdk_message,
+  is_provider_response,
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
@@ -106,7 +108,7 @@ from app.process_groups import (
   terminate_agent_processes,
 )
 from app.runner_registry import RunnerKind, registry
-from app.runtime_types import RunnerResult
+from app.runtime_types import RunnerResult, prompt_not_sent_result
 
 log = logging.getLogger(__name__)
 
@@ -469,12 +471,39 @@ def _resumable(
   """
   if not session_id:
     return False
+  path = claude_session_path(config_dir, cwd, session_id)
+  return path is not None and path.is_file()
+
+
+def claude_session_path(config_dir: str | os.PathLike | None, cwd: str, session_id: str) -> Path | None:
+  """Where the CLI keeps the transcript of ``session_id`` started in ``cwd``.
+
+  ``config_dir`` is the turn's ``CLAUDE_CONFIG_DIR`` (``ClaudeProvider.build_env``);
+  without one the CLI uses this process's own. None when neither is set.
+  """
   base = config_dir or os.environ.get("CLAUDE_CONFIG_DIR", "")
   if not base:
-    return False
+    return None
   proj = "-" + cwd.strip("/").replace("/", "-")
-  return os.path.isfile(
-    os.path.join(base, "projects", proj, f"{session_id}.jsonl")
+  return Path(base) / "projects" / proj / f"{session_id}.jsonl"
+
+
+# The CLI's refusals of a resume target. It prints them and exits before any
+# session starts, so no session id has been reported (see fork_rejected).
+_RESUME_TARGET_REFUSALS = ("No message found with message.uuid", "No conversation found")
+
+
+def fork_rejected(result: RunnerResult) -> bool:
+  """Whether a turn started with ``fork_from`` failed because the fork was refused.
+
+  Only a refused resume target ends a turn before Claude reports its new
+  session id. Usage limits, auth and provider errors come from the API after
+  the session started, so they keep the fork for the next attempt.
+  """
+  error = result.get("error")
+  return (
+    bool(error) and not result.get("session_id")
+    and any(refusal in str(error) for refusal in _RESUME_TARGET_REFUSALS)
   )
 
 
@@ -504,7 +533,7 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None,
+    *, sink=None, run_generation: int | None = None,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
@@ -517,7 +546,13 @@ class ActiveClaudeClient:
     # after the first hard stop.
     self._force_stop_started = False
     self._interrupt_owner: Literal["stop", "card"] | None = None
-    self._run_generation = registry.current_generation(chat_id)
+    # The generation this run was admitted for, not whatever is current when
+    # the handle is built: a Stop during startup must leave this handle stale.
+    self._run_generation = (
+      registry.current_generation(chat_id)
+      if run_generation is None else run_generation
+    )
+    self._connected = False
     self._ready = False
     self._admission_closed = False
     self._native_queue_needs_cancel = False
@@ -542,6 +577,10 @@ class ActiveClaudeClient:
   @property
   def is_steerable(self) -> bool:
     return self._ready and self.accepts_native_prompt
+
+  def mark_connected(self) -> None:
+    """The SDK client connected; before this it cannot take an interrupt."""
+    self._connected = True
 
   def mark_ready(self) -> None:
     """The initial query is on the wire; steers can no longer overtake it."""
@@ -764,27 +803,23 @@ class ActiveClaudeClient:
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
-    Bounds the `_finished` wait at 5s as a defense-in-depth so a
-    wedged runner (one that never reaches its `finally` block) can't
-    hang Stop indefinitely. `chat.py:stop_chat_for` adds its own 2s
-    bound at the call site; this inner timeout protects any other
-    direct caller.
+    Waits on `_finished` without a bound of its own: ``stop(timeout)`` is
+    the only budget, so its caller decides how long a drain may take (2s for
+    ordinary Stop, longer for the restart drain). A wedged runner (one that
+    never reaches its `finally` block) makes ``stop`` time out and report the
+    turn as not stopped.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
     """
     self._interrupt_owner = "stop"
     self.close_admission()
-    if not await self.cancel_native_queue():
+    # Before connect() returns the SDK refuses an interrupt ("Not connected"),
+    # and there is no model request to cut yet: the runner sees this Stop at
+    # its pre-prompt `accepts_native_prompt` check and ends cleanly.
+    if not await self.cancel_native_queue() and self._connected:
       await self._client.interrupt()
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      import logging
-      logging.getLogger("moebius.chat").warning(
-        "ActiveClaudeClient._finished never resolved within 5s; "
-        "runner is wedged",
-      )
+    await asyncio.shield(self._finished)
 
   @property
   def interrupt_requested(self) -> bool:
@@ -1103,6 +1138,60 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
+# The owner reads only a turn's text blocks; thinking is folded away. A turn
+# that ends with a short visible reply after long reasoning is the shape in
+# which the agent composed its answer in thinking and closed with a line such
+# as "Nothing has been changed." — the owner then sees no answer at all. The
+# shape is rare (under 1% of stored replies on one instance), so the check
+# below rarely costs an extra model call, and the agent itself judges whether
+# its reply is complete.
+_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
+_ANSWER_CHECK_THINKING_MIN_CHARS = 600
+_ANSWER_CHECK_REASON = (
+  "Möbius end-of-turn check. The owner sees only your visible reply; your "
+  "thinking is hidden from them. This turn's reasoning is long but its "
+  "visible reply is short, so your answer may exist only in your thinking. "
+  "Re-read the owner's latest message. If your visible reply does not "
+  "already answer it or report the result, write that answer now as visible "
+  "text, without mentioning this check. If it already does, end your turn "
+  "without writing anything more."
+)
+
+
+def _answer_may_be_only_in_thinking(
+  blocks: object, last_assistant_message: object = None,
+) -> bool:
+  """Whether this reply's reasoning dwarfs what the owner can actually read.
+
+  ``blocks`` is the sink's current assistant segment. The Stop hook can run
+  before the stream reader has dispatched the final text, so the CLI's own
+  ``last_assistant_message`` is counted when the blocks do not contain it yet.
+  """
+  if not isinstance(blocks, list):
+    return False
+  visible = "".join(
+    block["content"] for block in blocks
+    if isinstance(block, dict) and block.get("type") == "text"
+    and isinstance(block.get("content"), str)
+  )
+  visible_chars = len(visible.strip())
+  if isinstance(last_assistant_message, str):
+    tail = last_assistant_message.strip()
+    if tail and tail not in visible:
+      visible_chars += len(tail)
+  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
+    return False
+  longest_thinking = max(
+    (
+      len(block["content"].strip()) for block in blocks
+      if isinstance(block, dict) and block.get("type") == "thinking"
+      and isinstance(block.get("content"), str)
+    ),
+    default=0,
+  )
+  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
+
+
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1117,18 +1206,27 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
+  provider_id: str = "claude",
   goal_brief_refresh=None,
+  fork_from: dict | None = None,
+  run_generation: int | None = None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
   Args:
     user_message: Fully prepared user prompt for this turn.
     session_id: Existing Claude session to resume, or None on first turn.
+    fork_from: On a branch's first turn (no ``session_id``), the source
+      ``{"session_id", "at"}``: the turn starts in a new session forked from
+      that one at entry ``at`` (chat_branches.claude_fork_point).
     base_env: Environment passed through to the Claude subprocess.
     cwd: Working directory for the SDK run.
     chat_id: Möbius chat identifier used for registries.
     skill_text: Möbius skill/system prompt text, passed as the system
       prompt on every turn (including resumes).
+    run_generation: The chat run generation this turn was admitted for. A
+      Stop or delete during startup supersedes it, and the turn then ends
+      before sending its prompt instead of running unseen.
     bc: Chat broadcast object with a publish(event) method.
     skills_enabled: When True, offer SDK skills to the agent
       (`setting_sources` including user+project + `skills="all"`). This
@@ -1144,6 +1242,8 @@ async def run_claude_sdk_turn(
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Whether any frame of this attempt was remote model output (RunnerResult).
+  provider_responded = False
   # The handle for the client currently streaming this turn. Declared in the
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
@@ -1329,7 +1429,9 @@ async def run_claude_sdk_turn(
   # A saved or global default effort must not reach a model that rejects the
   # parameter (the picker hides the control, but defaults still carry one).
   from app.config import get_settings
-  if not await model_supports_effort(get_settings().data_dir, _model):
+  if not await model_supports_effort(
+    get_settings().data_dir, _model, provider_id=provider_id,
+  ):
     _effort = None
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
@@ -1341,11 +1443,42 @@ async def run_claude_sdk_turn(
   # Cross-provider mismatch defense (mirrors codex_sdk_runner). Admission and
   # effective settings normally reject this before the SDK boundary. Keep the
   # boundary strict too: a legacy/corrupt value must never become an implicit
-  # provider-chosen model.
-  if _model and _model_belongs_to_other_provider(_model, "claude"):
+  # provider-chosen model. This runner also serves app Messages providers, so
+  # validate against the active provider rather than a hardcoded 'claude'.
+  if _model and _model_belongs_to_other_provider(_model, provider_id):
     raise ValueError(
-      f"Selected model {_model!r} does not belong to provider 'claude'."
+      f"Selected model {_model!r} does not belong to provider {provider_id!r}."
     )
+  # Fires when the root agent is about to end its turn. At most once per turn,
+  # when the visible reply is short beside long reasoning, it returns the turn
+  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
+  # thinking gets written where the owner can read it. A Stop or a saved owner
+  # card owns the turn's end, so neither is ever reopened here.
+  answer_check_sent = False
+
+  async def visible_answer_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    nonlocal answer_check_sent
+    del tool_use_id, context
+    if (
+      answer_check_sent
+      or hook_input.get("stop_hook_active")
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return {"continue_": True}
+    if not _answer_may_be_only_in_thinking(
+      getattr(bc, "assistant_blocks", None),
+      hook_input.get("last_assistant_message"),
+    ):
+      return {"continue_": True}
+    answer_check_sent = True
+    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
+    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
     del hook_input, tool_use_id, context
@@ -1354,7 +1487,7 @@ async def run_claude_sdk_turn(
     return {"continue_": True}
 
   async def _run_once() -> RunnerResult:
-    nonlocal current_session_id, cost_usd, active_client
+    nonlocal current_session_id, cost_usd, active_client, provider_responded
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
     # can park until the STRUCTURED reset time rather than parsing the error
@@ -1422,7 +1555,15 @@ async def run_claude_sdk_turn(
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
-        "UserPromptSubmit": [HookMatcher(matcher=None, hooks=[queued_prompt_hook])],
+        # The queued-prompt gate keeps Stop and a saved owner card final, so a
+        # hook that raises or returns no valid decision refuses the prompt
+        # rather than letting it start new work.
+        # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
+        # one closed would turn a completed tool (even the saved card itself)
+        # into an error result, inviting a duplicate.
+        "UserPromptSubmit": [HookMatcher(
+          matcher=None, hooks=[queued_prompt_hook], on_failure="block",
+        )],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
@@ -1431,6 +1572,7 @@ async def run_claude_sdk_turn(
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
         ],
+        "Stop": [HookMatcher(matcher=None, hooks=[visible_answer_hook])],
       },
     }
     if run_policy is not None:
@@ -1452,6 +1594,10 @@ async def run_claude_sdk_turn(
       options_kwargs["thinking"] = thinking_config
     if _effort:
       options_kwargs["effort"] = _effort
+    if session_id is None and fork_from is not None:
+      options_kwargs["resume"] = fork_from["session_id"]
+      options_kwargs["fork_session"] = True
+      options_kwargs["resume_session_at"] = fork_from["at"]
     # Arm ultracode via its documented `ultracode` settings flag; on every other
     # turn set the documented `disableWorkflows` flag so a stray "ultracode" token
     # in injected memory/context can't arm the Workflow fleet on a turn the owner
@@ -1515,8 +1661,13 @@ async def run_claude_sdk_turn(
 
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
+      run_generation=run_generation,
     )
-    registry.register(active_client)
+    if not registry.register(active_client, run_generation=run_generation):
+      startup_file_stack.close()
+      active_client.mark_finished()
+      log.info("Claude turn superseded before registration chat_id=%s", chat_id)
+      return prompt_not_sent_result(current_session_id)
     # The root result reached while native helpers still owe a follow-up. Its
     # cost and usage are already spent, so any exit before the follow-up keeps
     # them.
@@ -1528,6 +1679,7 @@ async def run_claude_sdk_turn(
         try:
           with tracing.span("claude.connect"):
             await asyncio.wait_for(client.connect(), timeout=30.0)
+          active_client.mark_connected()
           with tracing.span("claude.control_mcp_ready"):
             control_ready_error = await _await_control_mcp_ready(
               client,
@@ -1574,6 +1726,11 @@ async def run_claude_sdk_turn(
         label="Claude CLI",
       )
       active_client.set_process_group_id(process_group_id)
+      if not active_client.accepts_native_prompt:
+        # Stopped or superseded while connecting: end here, through the
+        # normal teardown, without a model request.
+        log.info("Claude turn superseded before its prompt chat_id=%s", chat_id)
+        return prompt_not_sent_result(current_session_id)
       await client.query(turn_message)
       active_client.mark_ready()
       # Startup timing: from the query to Claude's first message of any kind,
@@ -1599,6 +1756,8 @@ async def run_claude_sdk_turn(
           if first_output_span is not None and isinstance(sdk_msg, (StreamEvent, AssistantMessage)):
             tracing.end_span(first_output_span)
             first_output_span = None
+          if is_provider_response(sdk_msg):
+            provider_responded = True
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -1824,4 +1983,17 @@ async def run_claude_sdk_turn(
             finally:
               teardown.finish()
 
-  return await _run_once()
+  result = await _run_once()
+  if provider_responded:
+    result["provider_responded"] = True
+  # CLI 2.1.277+ restores the earlier session's cost on resume, and the source
+  # session's on a fork. The durable metrics owner has the prior snapshot and
+  # derives the additive turn cost from how this session started.
+  result["cost_scope"] = "session"
+  if session_id is not None:
+    result["session_start"] = {"kind": "resumed", "session_id": session_id}
+  elif fork_from is not None:
+    result["session_start"] = {"kind": "forked", "session_id": fork_from["session_id"]}
+  else:
+    result["session_start"] = {"kind": "fresh"}
+  return result

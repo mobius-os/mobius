@@ -171,8 +171,10 @@ test('question option explanations remain selectable without choosing them', () 
   assert.match(optionRule, /user-select:\s*text/)
   assert.match(optionRule, /-webkit-user-select:\s*text/)
   assert.match(optionRule, /-webkit-touch-callout:\s*default/)
-  assert.match(component, /const OptionSurface = inactive \? 'div' : 'button'/,
-    'answered or disabled options should become static selectable content')
+  assert.match(component, /tabIndex=\{inactive \? undefined : 0\}/,
+    'answered or disabled options stay selectable but leave the tab order')
+  assert.match(component, /onClick=\{inactive \? undefined/,
+    'answered or disabled options cannot change the answer')
   assert.match(
     component,
     /event\.detail !== 0[\s\S]*pointerSelectionChangedWithin\([\s\S]*event\.currentTarget[\s\S]*\) return[\s\S]*selectOption/,
@@ -187,11 +189,13 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not receive a stale visual class')
   assert.doesNotMatch(component, /This question is no longer active/,
     'unanswered cards should not tell the user the question expired')
-  assert.match(component, /\{!completedAction && \(answered \|\| !disabled\) && \([\s\S]*<button[\s\S]*className="qcard__submit"/,
+  assert.match(component, /const showsAnswerControls = answered \|\| shownAnswerableRef\.current/,
+    'answered cards and cards this mount has shown answerable keep their controls')
+  assert.match(component, /\{!completedAction && showsAnswerControls && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /let submitLabel = writtenRestartAction \? 'Continue' : 'Submit'[\s\S]*if \(answered\) submitLabel = 'Submitted'[\s\S]*if \(submitting\) submitLabel = 'Submitting…'/,
     'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
-  assert.match(component, /\{!completedAction && \(!disabled \|\| answered\) && hasOptions && \(\s*<div className="qcard__hint"/,
+  assert.match(component, /\{!completedAction && showsAnswerControls && hasOptions && \(\s*<div className="qcard__hint"/,
     'selection hints should stay in place after submission only when there are choices')
   assert.doesNotMatch(component, /qcard__opt--other/,
     'a custom answer should be a direct writing surface, not an Other option')
@@ -370,4 +374,29 @@ test('terminal restart actions show upstream status detail without dead submissi
     assert.match(html, /qcard__action-detail/)
     assert.doesNotMatch(html, /qcard__submit|qcard__opts/)
   }
+})
+
+test('incomplete cards omit progress counts but still guide a Submit attempt', async () => {
+  const { unansweredQuestions } = await import('../questionSubmission.js')
+  const pending = [{ question: 'A?' }, { question: 'B?' }, { question: 'C?' }]
+  assert.deepEqual(
+    unansweredQuestions(pending, { 'B?': 'Yes' }, {}, [{ name: 'c.txt', group: 'C?' }])
+      .map(q => q.question),
+    ['A?'],
+    'a choice or a file of its own answers a question; the rest stay in card order',
+  )
+
+  const questions = ['First?', 'Second?', 'Third?'].map(question => ({
+    question, options: [{ label: 'Yes' }, { label: 'No' }],
+  }))
+  const html = renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'hint-chat', questionId: 'hint-q', questions, onAnswer: () => {},
+  }))
+  assert.doesNotMatch(html, /qcard__submit-hint|questions still need|questions to submit/)
+  const submit = html.match(/<button[^>]*class="qcard__submit[^"]*"[^>]*>/)?.[0] || ''
+  assert.match(submit, /qcard__submit--incomplete/)
+  assert.match(submit, /aria-disabled="true"/)
+  assert.doesNotMatch(submit, /\sdisabled=""/, 'a native disabled button could not lead to the missing question')
+  assert.match(html, /data-question-index="2"/)
+  assert.match(component, /if \(needsAnswers\) \{\s*showFirstUnanswered/)
 })

@@ -33,6 +33,7 @@ from app.delegations import (
   normalize_cwd,
   parent_root_run_id,
   delegation_source_work_id,
+  humanize_task_key,
   _parent_wake_continuation_root,
   parent_wake_blocker,
   publish_parent_waiting_changed,
@@ -53,13 +54,21 @@ class DelegationSubmit(BaseModel):
   app_id: int | None = Field(default=None, gt=0)
   parent_chat_id: str = Field(min_length=1, max_length=64)
   task_key: str = Field(min_length=1, max_length=128)
-  prompt: str = Field(min_length=1, max_length=200_000)
+  # Uncapped like an owner message: it becomes the helper's first user
+  # message over the provider's stdin/JSON-RPC stream (no argv limit). A prompt
+  # beyond the model's context fails that helper's turn with the provider's own
+  # context-length error, reported to this parent like any failed helper turn.
+  prompt: str = Field(min_length=1)
   provider: str
   model: str | None = Field(default=None, max_length=256)
   effort: str | None = Field(default=None, max_length=32)
   # An older app may send this field. Reject read, never silently promote it.
   scope: Literal["write"] | None = None
   cwd: str | None = Field(default=None, max_length=1024)
+  # What the owner reads for this helper; task_key stays its identity. It is
+  # stored as the helper's chat title, so it is bounded by that column. The
+  # stored copy only collapses whitespace, so it never exceeds this bound.
+  title: str | None = Field(default=None, max_length=256)
   # The parent Goal plan task this helper works on; omitted means the plan's
   # single running task, if there is exactly one.
   plan_task: str | None = Field(default=None, min_length=1, max_length=128)
@@ -128,15 +137,33 @@ def _require_submitter(
   return parent
 
 
+def _app_reads_all_helpers(db: Session, principal: Principal) -> bool:
+  """Whether an app holds the owner-reviewed grant to observe every helper.
+
+  The grant lives in the accepted capability contract, like the other
+  contract-only grants, so a later app version that omits it loses access on
+  the next request. It covers reading helper records only: their history and
+  every mutation stay with the helper's own app.
+  """
+  if principal.app_id is None or principal.delegation_id is not None:
+    return False
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  contract = app.capability_contract if app and isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  return data.get("helper_activity_read") is True
+
+
 def _row_for_principal(
-  db: Session, delegation_id: str, principal: Principal,
+  db: Session, delegation_id: str, principal: Principal, *, observe: bool = False,
 ) -> models.Delegation:
   query = db.query(models.Delegation).filter(
     models.Delegation.id == delegation_id,
   )
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
-  elif principal.app_id is not None:
+  elif principal.app_id is not None and not (
+    observe and _app_reads_all_helpers(db, principal)
+  ):
     query = query.filter(models.Delegation.app_id == principal.app_id)
   row = query.first()
   if row is None:
@@ -199,6 +226,8 @@ async def submit_or_attach(
     ).first()
     if app is None:
       raise HTTPException(status_code=404, detail="Delegation owner app not found.")
+  if body.provider == "mobius":
+    await providers._fetch_model_entries(get_settings().data_dir, "mobius")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, body.provider,
   ):
@@ -298,6 +327,7 @@ async def submit_or_attach(
       cwd=cwd,
       notify_parent_on_complete=body.notify_parent_on_complete,
       browser_grant_id=principal.browser_grant_id,
+      title=body.title,
     )
     try:
       row, attached = create_or_attach_delegation(db, intent)
@@ -377,6 +407,9 @@ async def delegation_capabilities(
       "error": error,
     }
   registry = await providers.list_models(get_settings().data_dir)
+  snapshot = providers.PROVIDERS["mobius"].registry_snapshot()
+  if "mobius" in registry:
+    registry["mobius"] = snapshot["models"]
   models_by_provider = {
     provider_id: [
       {"id": entry["id"], "name": entry["label"]}
@@ -402,7 +435,8 @@ async def delegation_capabilities(
     "connections": connections,
     "models": models_by_provider,
     "aliases": aliases,
-    "defaults": providers.DEFAULT_MODELS,
+    "defaults": {**providers.DEFAULT_MODELS, "mobius": snapshot["default"]},
+    "replacements": {"mobius": snapshot["replacements"]},
   }
 
 
@@ -418,7 +452,7 @@ def list_delegations(
   query = db.query(models.Delegation)
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
-  elif principal.app_id is not None:
+  elif principal.app_id is not None and not _app_reads_all_helpers(db, principal):
     query = query.filter(models.Delegation.app_id == principal.app_id)
   elif app_id is not None:
     query = query.filter(models.Delegation.app_id == app_id)
@@ -435,7 +469,11 @@ def get_delegation(
   principal: Principal = Depends(get_delegation_principal),
   db: Session = Depends(get_db),
 ):
-  row = _row_for_principal(db, delegation_id, principal)
+  row = _row_for_principal(db, delegation_id, principal, observe=True)
+  if include_history and principal.app_id is not None and row.app_id != principal.app_id:
+    raise HTTPException(
+      status_code=403, detail="Only the helper's own app may read its history.",
+    )
   payload = serialize_delegation(db, row)
   if include_history:
     child = db.query(models.Chat).filter(models.Chat.id == row.child_chat_id).first()
@@ -465,11 +503,8 @@ def read_delegation_result(
     )
   payload = serialize_delegation(db, row)
   # A settled outcome is received even without report text (a failure that
-  # wrote nothing); a truncated report and still-working helpers stay owed.
-  if (
-    not payload.get("result_truncated")
-    and record_result_read_by_parent(db, row)
-  ):
+  # wrote nothing); still-working helpers stay owed.
+  if record_result_read_by_parent(db, row):
     db.commit()
     publish_parent_waiting_changed(row.parent_chat_id)
   return payload
@@ -533,7 +568,7 @@ async def cancel_delegation(
 
 
 class DelegationMessage(BaseModel):
-  message: str = Field(min_length=1, max_length=200_000)
+  message: str = Field(min_length=1)
   # Correlates an answer with the helper's exact question; required while the
   # helper is waiting, so a retried answer can never become a fresh follow-up.
   question_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -730,7 +765,7 @@ async def message_delegation(
       db.commit()
       started = await start_programmatic_chat_turn(
         chat_id=row.child_chat_id,
-        title=f"Delegation · {row.task_key}",
+        title=humanize_task_key(row.task_key),
         content=body.message,
         provider=row.provider,
         initiated_by_app_id=row.app_id,
@@ -814,8 +849,8 @@ def ask_parent(
 
 
 class DelegationQuestionAsk(BaseModel):
-  question: str = Field(min_length=1, max_length=200_000)
-  options: list[str] = Field(default_factory=list, max_length=16)
+  question: str = Field(min_length=1)
+  options: list[str] = Field(default_factory=list)
 
   @field_validator("question")
   @classmethod
@@ -831,8 +866,6 @@ class DelegationQuestionAsk(BaseModel):
     cleaned = [value.strip() for value in values]
     if any(not value for value in cleaned):
       raise ValueError("options must not be empty")
-    if any(len(value) > 200_000 for value in cleaned):
-      raise ValueError("options must be at most 200000 characters")
     return cleaned
 
 

@@ -282,3 +282,17 @@ test('every other paste stays ordinary', () => {
   assert.equal(linkPasteText('word', 'https://a.example and more'), null)
   assert.equal(linkPasteText('two\nlines', 'https://example.com'), null)
 })
+
+test('Enter in an empty box sends a held queue, and text still wins', () => {
+  assert.equal(resolveComposerEnterAction(enter(), { canSendQueue: true }), 'send-queue')
+  assert.equal(
+    resolveComposerEnterAction(enter(), { hasInput: true, canSendQueue: true }),
+    'submit',
+  )
+  assert.equal(resolveComposerEnterAction(enter(), {}), 'noop')
+  assert.equal(
+    resolveComposerEnterAction(enter(), { canSendQueue: true, isTouchPrimary: true }),
+    null,
+    'touch Enter stays a newline',
+  )
+})

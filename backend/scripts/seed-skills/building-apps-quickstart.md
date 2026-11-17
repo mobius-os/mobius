@@ -103,10 +103,22 @@ const CSS = `
 ```
 
 Use Möbius theme variables (`--bg`, `--surface`, `--surface-2`, `--text`,
-`--muted`, `--border`, `--accent`, `--font`). Add a short app-specific prefix
-to classes. Prefer CSS classes over inline style objects except for truly
-computed values. Use generic interface icons from the OpenAI Apps SDK UI rather
-than Lucide, hand-drawn SVG, emoji, or text characters:
+`--muted`, `--border`, `--accent`, `--font`). Colour roles keep text and
+labels readable in both modes:
+
+- Coloured text (links, status labels, small accents) uses `--accent-text`,
+  `--danger-text`, `--green-text` or `--warning-text`; each reads on `--bg`,
+  `--surface` and `--surface-2`.
+- A filled button or badge uses `--accent-fill` (hover/pressed
+  `--accent-fill-hover`), `--danger-fill` or `--green-fill`, labelled with
+  `--accent-fg`.
+- `--accent`, `--danger`, `--green` and `--warning` stay for dots, borders,
+  focus rings and `color-mix()` washes, not small text or labelled fills.
+
+Add a short app-specific prefix to classes. Prefer CSS classes over inline
+style objects except for truly computed values. Use generic interface icons
+from the OpenAI Apps SDK UI rather than Lucide, hand-drawn SVG, emoji, or text
+characters:
 
 ```jsx
 import { Plus, Search, Trash } from '@openai/apps-sdk-ui/components/Icon'
@@ -120,6 +132,23 @@ For an ordinary app, make one strong visual decision—a calm breathing orb, a
 bright decision wheel, a tactile stack of cards—then support it with restrained
 chrome. Visual richness should come from hierarchy, composition, motion, and
 state feedback, not extra screens.
+
+A few defaults keep every app readable and operable:
+
+- **Type floor:** meaning-bearing text (labels, status, metadata, controls) is
+  at least 12px. Dense domain UI such as instrument scales, map labels or
+  chart ticks may go smaller; name that exception in a CSS comment and check
+  it at rendered size.
+- **Input semantics:** give each field the `type`, `inputMode`,
+  `enterKeyHint` and `autoComplete` its meaning implies (for example
+  `inputMode="decimal"` for an amount, `autoComplete="off"` for a search box),
+  and keep focusable fields at 16px.
+- **Reduced motion:** under `prefers-reduced-motion: reduce`, replace movement
+  with an instant or opacity change, including JS-driven animation.
+- **Modals:** focus moves in and stays, Escape and Back close, and focus
+  returns to the opener (catalog Sheet).
+- **Dates and times:** format with `Intl` in the viewer's locale and time zone
+  rather than a hardcoded locale.
 
 The manifest should truthfully describe the local app. A typical private app
 uses:
@@ -141,6 +170,12 @@ uses:
 List every imported sibling source file in `source_files`. Keep
 `offline_capable` false for a new app and preserve an existing app's value on
 update; see `building-apps.md` if offline use is a real product promise.
+
+Privileged grants (`manage_apps`, `manage_skills`, `github_access`,
+`github_connect`, `filesystem_access`, `connections_manage`, `connect_manage`)
+come only from a reviewed Store install. A local app's manifest value for them
+is ignored and the owner has no route to grant them, so do not plan a local
+feature on them.
 
 The manifest's `icon` is the package-artwork source of truth: apply validates
 and materializes that exact accepted file, so do not upload a second copy after
@@ -284,8 +319,13 @@ isolated browser session; it does not mark onboarding complete.
 
 Check the partner's actual viewport first. Add one phone-sized check only when
 the supplied viewport is not already phone-sized or the layout materially
-changes on small screens. Keep only screenshots that show a useful distinct
-state—never a loader, drawer transition, or redundant verification frame.
+changes on small screens. For a height-sensitive app (an instrument, game,
+canvas or fixed-height workspace), also check a short landscape viewport such
+as 844×390 and confirm the core controls stay reachable. Make sure the app
+reads in both light and dark themes; `visual-testing.md` says how to check the
+other theme without changing the owner's. Keep only screenshots that show a
+useful distinct state—never a loader, drawer transition, or redundant
+verification frame.
 
 The default visual-test budget for an ordinary one-screen app is:
 

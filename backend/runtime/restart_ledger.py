@@ -7,8 +7,8 @@ helper runs from the baked, root-owned runtime bundle and maintains a
 root-owned ledger under ``/data/.restart-ledger``:
 
 * ``accept`` validates and consumes one untrusted platform request, records its
-  one-shot nonce, and is called immediately before the entrypoint poller
-  terminates pid 1.
+  one-shot nonce, and is called immediately before the entrypoint poller ends
+  the boot (the container supervisor then reruns it in place).
 * ``begin-boot`` binds that accepted request to exactly the next boot id.
 * ``harden`` restores root ownership after the entrypoint's broad compatibility
   chown. If that cannot be proven, authorization is deleted and continuation
@@ -54,7 +54,7 @@ MANAGED_CUTOVER_REQUEST_PATH = DATA_DIR / ".managed-cutover-request.json"
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_REQUEST_AGE_SECONDS = 120
-# A planned restart is accepted just before pid 1 stops, so its boot follows
+# A planned restart is accepted just before its boot ends, so the next boot follows
 # within moments.
 MAX_ACCEPTED_AGE_SECONDS = 10 * 60
 # An external cutover's provider decides when the replacement boots: a managed

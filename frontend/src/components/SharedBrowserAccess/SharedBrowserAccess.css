@@ -3,7 +3,7 @@
 .shared-browser-access__card { width: min(100%, 32rem); padding: 28px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface); }
 .shared-browser-access__card h1 { margin: 0 0 1rem; font-size: 1.5rem; }
 .shared-browser-access__card p { line-height: 1.5; }
-.shared-browser-access__card button, .shared-browser-access__card a { display: inline-block; margin-top: 1rem; border-radius: 8px; padding: .7rem 1rem; background: var(--accent); color: var(--bg); border: 0; font: inherit; cursor: pointer; }
+.shared-browser-access__card button, .shared-browser-access__card a { display: inline-block; margin-top: 1rem; border-radius: 8px; padding: .7rem 1rem; background: var(--accent-fill, var(--accent)); color: var(--accent-fg, #fff); border: 0; font: inherit; cursor: pointer; }
 .shell__shared-access { position: fixed; top: calc(var(--shell-bar-height) + env(safe-area-inset-top) + 6px); right: 8px; z-index: 110; display: flex; align-items: center; gap: .5rem; min-width: 0; max-width: min(70vw, 20rem); padding: .35rem .55rem; font-size: .8rem; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .shell__shared-access span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .shell__shared-access button { color: var(--text); background: transparent; border: 0; text-decoration: underline; cursor: pointer; }

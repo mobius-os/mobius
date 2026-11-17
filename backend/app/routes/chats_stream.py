@@ -45,6 +45,8 @@ from app.chat_writer import (
   ResolvePlatformRestartCard,
   RestartCardStateChanged,
 )
+from app.app_chat_scopes import ScopedStartRefused
+from app.continuations import has_runnable_pending
 from app.chat_steering import (
   has_live_steerable_turn,
   steer_into_active_turn,
@@ -79,13 +81,16 @@ router = APIRouter(prefix="/api/chats", tags=["chats"])
 log = logging.getLogger(__name__)
 
 
-async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | None:
+async def start_queued_owner_continuation(
+  chat_id: str, db: Session, *, owner_send: bool = False, restore_archived: bool = False,
+) -> dict | None:
   """Start an already-committed owner response through the ordinary queue.
 
   Caller holds the queue lock (saved input also holds the transition gate).
   A still-finishing publishing turn
   owns its terminal drain; otherwise this is the one immediate admission path
-  shared by saved questions and sealed consumer outcomes.
+  shared by saved questions, sealed consumer outcomes and the owner's empty
+  send (`owner_send`, which releases the held queue in the starting commit).
   """
   if is_chat_running(chat_id):
     return None
@@ -99,8 +104,14 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
     drain_token = alloc_run_token()
     messages, next_user, session_id = await chat_queue.promote_pending_messages_locked(
       db, chat_id, drain_token,
+      owner_send=owner_send, restore_archived=restore_archived,
     )
     if not next_user:
+      if owner_send:
+        # Nothing was held or runnable any more: the empty send's caller
+        # settles that without an error (`_send_queue`).
+        discard_starting(chat_id)
+        return None
       raise HTTPException(503, detail="Could not resume the question; please try again.")
     get_system_broadcast().publish({"type": "chat_run_started", "chatId": chat_id})
     _schedule_continuation(
@@ -113,17 +124,150 @@ async def start_queued_owner_continuation(chat_id: str, db: Session) -> dict | N
     raise
 
 
-def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Return whether a parent delegation owns this chat's send lifecycle.
+def _input_must_queue(db: Session, chat_id: str, *, waits_for_park: bool) -> bool:
+  """Whether new input must join the queue behind work that already owns the
+  chat, whether or not a turn is running.
+
+  - A restart drain: no turn may start until the restart (design §2.2). The
+    input self-heals on the owner's next action after it. Steers queue too: a
+    steer into a dying runner could start provider work mid-shutdown.
+  - An approved typed restart wait (unfinished work A): later input B is
+    durable but cannot be promoted until the ready-boot continuation owns A.
+  - A provider-limit park that resumes by itself, when the caller says this
+    input waits for it (`waits_for_park`): the input waits for the resumed
+    turn rather than spending a new attempt or disabling the automatic
+    recovery.
+
+  The typed send and the owner's empty send (`_send_queue`) share this one
+  admission rule.
+  """
+  from app.platform_restart import activation_barrier_wait_id
+  return (
+    is_draining()
+    or activation_barrier_wait_id(db, chat_id) is not None
+    or (
+      waits_for_park
+      and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
+    )
+  )
+
+
+async def _send_queue(
+  chat_id: str, db: Session, principal: Principal, restore_archived: bool,
+):
+  """The owner's empty send: release the queue a Stop held.
+
+  The held rows rejoin the ordinary queue as owner input of this moment, so
+  they take exactly the admission a typed owner message would: while other
+  work owns the chat (a running turn, or `_input_must_queue`) they rejoin
+  the queue and drain after it (`ReleaseHeld`); otherwise they start now as
+  the same turn the queue would drain into, released in the commit that
+  starts it, so a refused start leaves them held. When nothing is held any
+  more (another device already sent or cancelled them) the send has nothing
+  left to do and says so, rather than failing. A shared browser guest cannot
+  send the owner's queue: it would run as the owner's work, outside the
+  guest's revocable grant.
+  """
+  if not is_owner_input_principal(principal) or principal.browser is not None:
+    raise HTTPException(403, detail="Only the owner can send queued messages.")
+  # The held rows are the owner's own, never stamped as app work, so waiting
+  # behind an auto-resuming park keeps its recovery for every viewer.
+  if not (is_chat_running(chat_id) or _input_must_queue(db, chat_id, waits_for_park=True)):
+    try:
+      started = await start_queued_owner_continuation(
+        chat_id, db, owner_send=True, restore_archived=restore_archived,
+      )
+    except chat_queue.PendingAdmissionBlocksPromotion as exc:
+      if exc.reason != "activation":
+        raise _pending_question_open_conflict() from exc
+      started = None  # An activation armed meanwhile: wait behind it.
+    if started:
+      return JSONResponse(status_code=202, content={"status": "started", "message": started})
+  from app.chat_writer import ReleaseHeld
+  released = await await_ack(get_writer().submit(ReleaseHeld(
+    chat_id=chat_id, restore_archived=restore_archived,
+  )))
+  if not released["released"]:
+    return JSONResponse(status_code=200, content={
+      "status": "duplicate", "running": is_chat_running(chat_id),
+    })
+  return JSONResponse(status_code=202, content={
+    "status": "queued", "running": is_chat_running(chat_id),
+  })
+
+
+def _managing_delegation(db: Session, chat_id: str):
+  """The delegation (``id``, ``parent_chat_id``) that owns this chat, if any.
 
   Keep the send gate beside the route that enforces it. Delegation policy
   loading is intentionally a separate concern and may evolve independently;
   this guard only needs the durable ownership row already available through
-  the request session.
+  the request session. The chat detail reads the same row, so a helper's
+  recovery card and its send refusal can never disagree about ownership.
   """
-  return db.query(models.Delegation.id).filter(
+  return db.query(
+    models.Delegation.id, models.Delegation.parent_chat_id,
+  ).filter(
     models.Delegation.child_chat_id == chat_id,
-  ).first() is not None
+  ).limit(1).first()
+
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
+  """The parent chat whose delegation owns this chat's send lifecycle, if any."""
+  row = _managing_delegation(db, chat_id)
+  return row.parent_chat_id if row is not None else None
+
+
+def _owner_chat_above(db: Session, chat_id: str, parent_chat_id: str) -> str | None:
+  """The nearest live chat above a helper that accepts owner messages.
+
+  A nested helper's parent is itself a helper chat and refuses owner sends
+  too, so walk the delegation rows up to the first chat no delegation owns.
+  A cycle or a deleted chat yields None: there is nowhere useful to link.
+  """
+  seen = {chat_id}
+  while parent_chat_id not in seen:
+    seen.add(parent_chat_id)
+    above = _delegation_manages_chat(db, parent_chat_id)
+    if above is None:
+      live = db.query(models.Chat.id).filter(
+        models.Chat.id == parent_chat_id,
+        models.Chat.deleted_at.is_(None),
+      ).first()
+      return parent_chat_id if live is not None else None
+    parent_chat_id = above
+  return None
+
+
+def helper_chat_ref(db: Session, chat_id: str) -> dict | None:
+  """A helper chat's delegation and the nearest chat the owner can write in.
+
+  Recovery retries that exact delegation; every other action belongs to the
+  parent, which the card links exactly as the send refusal does.
+  """
+  row = _managing_delegation(db, chat_id)
+  if row is None:
+    return None
+  return {
+    "delegation_id": row.id,
+    "parent_chat_id": _owner_chat_above(db, chat_id, row.parent_chat_id),
+  }
+
+
+def _delegation_managed_conflict(
+  db: Session, chat_id: str, parent_chat_id: str,
+) -> HTTPException:
+  # A helper chat is messaged through its parent (message_agent), never
+  # directly, so the refusal names that route and, when it can, links the
+  # chat where the owner can actually write.
+  detail = {
+    "code": "delegation_managed",
+    "message": "This is a helper's chat. Message it from its parent chat.",
+  }
+  owner_chat_id = _owner_chat_above(db, chat_id, parent_chat_id)
+  if owner_chat_id is not None:
+    detail["parent_chat_id"] = owner_chat_id
+  return HTTPException(status_code=409, detail=detail)
 
 
 def _pending_question_open_conflict() -> HTTPException:
@@ -162,16 +306,17 @@ def _selected_model_for_chat(
 def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
   provider = chat.provider or "claude"
-  # A model selected on this exact pristine chat is more specific than the
-  # owner's latest global pick. This occurs when an app/test/API client creates
-  # an empty chat and then chooses its model before the first send. Re-routing
-  # it to an unrelated global provider makes the explicit model invalid and
-  # rejects the turn. Ordinary newly-created owner chats carry no per-chat
-  # model, so they still follow the latest owner selection below.
+  # A model saved on the chat is more specific than the owner's latest global
+  # pick. New owner chats snapshot their model at creation, and an app, test or
+  # API client may choose one before the first send. Re-routing it to an
+  # unrelated global provider makes the model invalid and rejects the turn. A
+  # saved model this process does not know yet (a discovered id after a
+  # restart) stays with the provider saved beside it. Only a chat with no model
+  # of its own follows the latest owner selection below.
   chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
-  explicit_provider = provider_of_model(chat_settings.get("model"))
-  if explicit_provider is not None:
-    return explicit_provider
+  model = chat_settings.get("model")
+  if isinstance(model, str) and model.strip():
+    return provider_of_model(model, preferred=provider) or provider
   # StartTurn alone re-reads the owner's latest provider for a pristine owner
   # chat. Queued, draining, app-owned, and already-started chats keep their
   # durable provider, so the model check must evaluate against that same value.
@@ -379,6 +524,7 @@ async def _append_to_pending(
       owner_input=owner_input,
       front=front, require_answer_match=require_answer_match,
       restore_archived=restore_archived,
+      scoped_start=body._scoped_start,
     ),
   )
   return result["stored"]
@@ -410,7 +556,7 @@ async def _submit_pending_message(
   ack = get_writer().submit(command)
   try:
     result = await await_ack(ack)
-  except (RestartCardStateChanged, RestartCardActionConflict):
+  except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartRefused):
     raise
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
@@ -778,6 +924,17 @@ async def _send_message_impl(
   is_card_answer = bool(body.answers or body.selected_options)
   if not is_card_answer:
     require_nondelegated_owner_control(principal)
+  # The disk and process floors protect the whole installation, so only its
+  # owner may lift them: never a shared-browser guest, an app, an embed or an
+  # agent.
+  if body.allow_low_storage and (
+    principal.scope != "owner" or principal.browser is not None
+    or not is_owner_input_principal(principal)
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Only the installation owner can continue past a resource floor.",
+    )
   chat = get_active_chat_for_principal(db, chat_id, principal)
   agent_exact_retry = False
   if is_card_answer and not is_owner_input_principal(principal):
@@ -1028,14 +1185,9 @@ async def _send_message_impl(
         "message": "Clear the Goal from its confirmed × control instead.",
       },
     )
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -1140,7 +1292,8 @@ async def _send_message_impl(
         # terminal drain), never append a synthetic answer continuation.
         from app.run_state import latest_run
         current = latest_run(db, chat_id)
-        if (chat.pending_messages and not chat.pending_question_id and not is_chat_running(chat_id)
+        if (has_runnable_pending(chat.pending_messages) and not chat.pending_question_id
+            and not is_chat_running(chat_id)
             and (current is None or current.status != "stopped")):
           await start_queued_owner_continuation(chat_id, db)
         publish_owner_input_changed(chat_id,
@@ -1396,14 +1549,9 @@ async def _send_message_locked(
     return duplicate
   await sweep_expired_uploads(db, chat, attachment_names(body.attachments))
 
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
 
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(
@@ -1415,6 +1563,8 @@ async def _send_message_locked(
     chat, provider=next_execution_provider,
   ) is None:
     raise _model_selection_required_conflict()
+  if body.continuation == "queue":
+    return await _send_queue(chat_id, db, principal, restore_archived)
   record_memory_checkpoint_once(
     "chat_send_first_request",
     chat_id=chat_id,
@@ -1473,6 +1623,7 @@ async def _send_message_locked(
       if not manual_resume_matches(
         control, control_id=body.cid, run_id=body.resume_run_id,
         goal_id=body.resume_goal_id, goal_revision=body.resume_goal_revision,
+        allow_low_storage=body.allow_low_storage,
       ):
         raise HTTPException(409, detail={
           "code": "recovery_changed",
@@ -1488,57 +1639,21 @@ async def _send_message_locked(
       "message": "This chat is already continuing or restarting. Refresh its state before resuming.",
     })
 
-  # Drain gate (design §2.2): while the worker is draining for a restart, never
-  # start a new turn or promote the queue — append to pending and return
-  # "queued". The send is preserved and self-heals on the owner's next action
-  # after the restart (the stale-pending drain), so nothing the owner sent is
-  # lost. This must intercept BEFORE the queue-or-start branches below, which
-  # would otherwise spawn a turn (fresh StartTurn, or a stale-pending drain).
-  # force_steer is deliberately NOT exempt: a steer accepted while the drain is
-  # interrupting a handle can buffer into the dying runner's continuation and
-  # start fresh provider work mid-shutdown (or, with no running turn at all,
-  # fall through to a fresh StartTurn). During the restart window every send —
-  # steer included — queues.
-  if is_draining():
-    new_msg = await _append_to_pending(
-      chat, body, db, initiated_by_app_id=principal.app_id,
-      browser_grant_id=principal.browser_grant_id,
-      restore_archived=restore_archived,
-      owner_input=is_owner_input_principal(principal),
-    )
-    db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
-
-  # An approved typed restart wait is unfinished work A. Later owner input B is
-  # durable, but cannot be promoted until the ready-boot continuation owns A.
-  # The activation writer command has the sole authenticated bypass.
-  from app.platform_restart import activation_barrier_wait_id
-  if activation_barrier_wait_id(db, chat_id) is not None:
+  # Work that already owns the chat (a restart drain, an approved restart's
+  # activation, an auto-resuming limit park) takes new input into its queue
+  # before the queue-or-start branches below could spawn a turn. A typed send
+  # through an app carries the app's id, which the park's auto-resume treats
+  # as app work, so only input without one waits for the park. Resume bypasses
+  # the park; a drain refused it above, so only an activation is left to
+  # refuse it here.
+  if _input_must_queue(
+    db, chat_id, waits_for_park=principal.app_id is None and not manual_resume,
+  ):
     if manual_resume:
       raise HTTPException(409, detail={
         "code": "recovery_changed",
         "message": "The saved restart must finish before this chat can resume.",
       })
-    new_msg = await _append_to_pending(
-      chat, body, db, initiated_by_app_id=principal.app_id,
-      browser_grant_id=principal.browser_grant_id,
-      restore_archived=restore_archived,
-      owner_input=is_owner_input_principal(principal),
-    )
-    db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
-
-  # A provider-limit park has no live process, but it is still the chat's
-  # exact unfinished run. Ordinary owner messages join its durable queue and
-  # wait until the resumed turn finishes; they do not implicitly spend a new
-  # provider attempt or disable automatic recovery. The explicit recovery
-  # control sends ``continuation=manual`` and deliberately bypasses this hold
-  # after credits or an account reset restore availability.
-  if (
-    principal.app_id is None
-    and body.continuation != "manual"
-    and _future_auto_resuming_limit_park_for_chat(db, chat_id) is not None
-  ):
     new_msg = await _append_to_pending(
       chat, body, db, initiated_by_app_id=principal.app_id,
       browser_grant_id=principal.browser_grant_id,
@@ -1585,6 +1700,8 @@ async def _send_message_locked(
       and (
         body.force_steer
         or body.direct_steer
+        # Held rows count here on purpose: steering past them would never
+        # release them, while a queued owner message releases them at its turn.
         or not chat.pending_messages
       )
       and has_live_steerable_turn(chat_id, provider)
@@ -1800,6 +1917,8 @@ async def _send_message_locked(
         resume_run_id=body.resume_run_id,
         resume_goal_id=body.resume_goal_id,
         resume_goal_revision=body.resume_goal_revision,
+        scoped_start=body._scoped_start,
+        allow_low_storage=body.allow_low_storage,
       )
     )
     # StartTurn returns the agent history (schemas.ChatMessage list built
@@ -1809,6 +1928,8 @@ async def _send_message_locked(
     # the send immediately, and run_chat sees the marker).
     try:
       result = await await_ack(ack)
+    except ScopedStartRefused:
+      raise
     except Exception as exc:
       raise _message_persist_unavailable(exc, chat_id=chat_id) from exc
     if isinstance(result, StartTurnRecoveryChanged):

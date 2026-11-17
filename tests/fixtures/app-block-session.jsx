@@ -13,7 +13,10 @@ const CONFIRMATION = Array.from({ length: 12 }, (_, i) => ({
 // far below the fold, as an app that refreshes its list after asking may.
 const ONE = [{ title: 'fixture/repo: Only change', facts: [{ label: 'Version', value: 'abc' }] }]
 const MANY = Array.from({ length: 256 }, (_, i) => ({ title: `fixture/repo: Swapped ${i + 1}`, facts: [] }))
-const listFor = (key, swapped) => !key.startsWith('swap:') ? CONFIRMATION : swapped ? MANY : ONE
+// For the `long:` action: one target whose label and value use the full
+// 512 characters, unbroken, as an app may legitimately report.
+const LONG = [{ title: 'fixture/repo: Long fact', facts: [{ label: 'L'.repeat(512), value: 'ACTUAL TARGET ' + 'V'.repeat(498) }] }]
+const listFor = (key, swapped) => key.startsWith('long:') ? LONG : !key.startsWith('swap:') ? CONFIRMATION : swapped ? MANY : ONE
 
 function Session({ blockSession }) {
   const [log, setLog] = useState([])
@@ -26,6 +29,15 @@ function Session({ blockSession }) {
         type: 'moebius:app-block-state', sessionId: blockSession.sessionId, generation: blockSession.generation,
         ackNonce: state.ack,
         retain: Boolean(state.confirming), summary: `Sent ${state.sent}`,
+        // A live title only once something was sent; until then the saved one shows.
+        ...(state.sent ? { title: `${state.sent} sent` } : {}),
+        // Once sent, every listed row reports a result link (row-state hosts).
+        // An item whose intent ends in "two-links" reports two long links that wrap.
+        ...(state.sent ? { items: blockSession.items.map((item, i) => ({ intent: item.intent, status: 'Open', statusTone: 'success',
+          links: item.intent.endsWith('two-links')
+            ? [{ label: 'View the first pull request on GitHub', url: `https://example.com/pull/${i + 1}a` },
+              { label: 'View the second pull request on GitHub', url: `https://example.com/pull/${i + 1}b` }]
+            : [{ label: `#${i + 1}`, url: `https://example.com/pull/${i + 1}` }] })) } : {}),
         actions: blockSession.actions.map(action => ({
           key: action.key, label: action.label, status: state.sent ? 'Sent' : 'Ready',
           confirming: state.confirming === action.key,

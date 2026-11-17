@@ -33,7 +33,7 @@ def queue_timeline():
   # Actual GraphQL shapes: removal has no entry id and beforeCommit is NOT
   # the PR head. Neither reason nor this synthetic SHA supplies identity.
   return {"id": TARGET["pr_id"], "headRefOid": SHA, "state": "OPEN",
-    "merged": False, "mergeQueueEntry": None, "timelineItems": {
+    "merged": False, "mergeQueueEntry": None, "autoMergeRequest": None, "timelineItems": {
       "pageInfo": {"hasPreviousPage": False, "hasNextPage": False},
       "nodes": [
         {"__typename": "AddedToMergeQueueEvent", "id": "added-1", "createdAt": QUEUE_TIME},
@@ -123,6 +123,48 @@ def test_removal_proof_fails_closed(monkeypatch, case):
   elif case == "unknown_entry": node.pop("mergeQueueEntry")
   elif case == "prior_proof_changed": previous["queue_removal"] = {"removed_event_id": "older"}
   gh, _ = queue_graphql(monkeypatch, node)
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous) is None
+
+
+def lost_attempt(armed_seconds_ago=2 * domain.MERGE_DISPATCH_WINDOW_SECONDS, **changes):
+  """A merge or queue request whose response was lost: no confirmed admission."""
+  armed = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - armed_seconds_ago))
+  return {"state": "merge_unknown", "head_sha": SHA, "merge_attempted": True,
+    "merge_armed_at": armed, **changes}
+
+
+@pytest.mark.parametrize("receipt", [{}, {"state": "merging"},
+  {"state": "queued", "queue_entry_id": "entry-1", "queue_receipt_unconfirmed": True}])
+def test_unconfirmed_attempt_ends_only_after_its_dispatch_window(monkeypatch, receipt):
+  node = queue_timeline()
+  node["timelineItems"]["nodes"] = []
+  gh, calls = queue_graphql(monkeypatch, node)
+  recent = lost_attempt(armed_seconds_ago=60, **receipt)
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, recent) is None and calls == []
+  previous = lost_attempt(**receipt)
+  proof = domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous)
+  assert proof == {"head_sha": SHA, "merge_armed_at": previous["merge_armed_at"],
+    "dispatch_window_closed": True}
+  assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, {**previous, "queue_removal": proof}) == proof
+
+
+@pytest.mark.parametrize("case", ["merged", "closed", "live_entry", "unknown_entry", "auto_merge",
+  "unknown_auto_merge", "changed_head", "wrong_pr", "base_contains_head", "prior_proof_changed"])
+def test_lost_attempt_proof_fails_closed(monkeypatch, case):
+  node = queue_timeline()
+  previous = lost_attempt()
+  compare = None
+  if case == "merged": node["merged"] = True
+  elif case == "closed": node["state"] = "CLOSED"
+  elif case == "live_entry": node["mergeQueueEntry"] = {"id": "entry-2"}
+  elif case == "unknown_entry": node.pop("mergeQueueEntry")
+  elif case == "auto_merge": node["autoMergeRequest"] = {"enabledAt": QUEUE_TIME}
+  elif case == "unknown_auto_merge": node.pop("autoMergeRequest")
+  elif case == "changed_head": node["headRefOid"] = "c" * 40
+  elif case == "wrong_pr": node["id"] = "PR_other"
+  elif case == "base_contains_head": compare = {"status": "identical"}
+  elif case == "prior_proof_changed": previous["queue_removal"] = {"removed_event_id": "older"}
+  gh, _ = queue_graphql(monkeypatch, node, compare)
   assert domain.confirmed_queue_removal(gh, "/tmp", TARGET, previous) is None
 
 

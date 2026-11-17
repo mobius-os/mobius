@@ -111,7 +111,7 @@
   padding: 2px 6px;
   font-size: 13px;
   font-family: var(--mono);
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
 }
 
 .md-project-download {
@@ -119,7 +119,7 @@
   padding: 0;
   border: 0;
   background: none;
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font: inherit;
   text-decoration: underline;
   cursor: pointer;
@@ -135,14 +135,39 @@
   color: var(--danger);
 }
 
+/* The drawn bar below replaces the native one here even when a theme opts
+   back into shell scrollbars (index.css), so a table never shows two. */
 .md-table-wrap {
   overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.md-table-wrap::-webkit-scrollbar {
+  display: none;
+}
+
+/* The drawn bar under a table that cannot fit (see useTableScrollbar). The
+   padded track is the touch target; the thumb is the visible part. A vertical
+   swipe that starts on the bar still scrolls the chat (pan-y); the bar takes
+   horizontal drags. */
+.md-table-scrollbar {
+  padding: 6px 0 4px;
+  cursor: pointer;
+  touch-action: pan-y;
+}
+
+.md-table-scrollbar__thumb {
+  cursor: grab;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 45%, transparent);
 }
 
 .md-table {
   border-collapse: collapse;
   font-size: 13px;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
 }
 
 .md-table th,
@@ -150,6 +175,24 @@
   padding: 6px 12px;
   border: 1px solid var(--border);
   text-align: left;
+  vertical-align: top;
+  word-break: normal;
+  overflow-wrap: break-word;
+}
+
+.md-table-cell {
+  /* Bound prose without squeezing short columns or letting unbroken code
+     spill over its neighbours: min-content keeps those spans inside the cell. */
+  display: inline-block;
+  vertical-align: top;
+  width: max-content;
+  max-width: 32ch;
+  min-width: min-content;
+}
+
+/* Prose wraps, but ids, versions and commands in code spans stay whole; a
+   column of them widens the table and the drawn bar takes over. */
+.md-table .md-inline-code {
   white-space: nowrap;
 }
 
@@ -224,8 +267,11 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
    frame rather than resizing after load. `max-height` caps extreme tall ratios;
    `object-fit:contain` letterboxes inside the stable frame when necessary. */
 .md-image-frame {
+  position: relative;
   display: block;
-  width: min(100%, var(--md-image-fit-width, 520px));
+  /* A definite preferred width participates in a short reply's intrinsic
+     sizing; a percentage inside min() collapses until image bytes arrive. */
+  width: var(--md-image-fit-width, 520px);
   max-width: 100%;
   aspect-ratio: var(--md-image-ratio, 4 / 3);
   max-height: min(60dvh, 480px);
@@ -237,6 +283,20 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
   font: inherit;
   cursor: pointer;
   overflow: hidden;
+}
+
+/* Image reservation is scroll geometry. Its loading/error treatment overlays
+   that same box instead of inserting or collapsing space when bytes arrive. */
+.md-image-placeholder {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: var(--surface-2);
+  color: var(--muted);
+  font-size: 13px;
+  pointer-events: none;
 }
 
 .md-image-frame:focus-visible {
@@ -442,11 +502,13 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 
 /* Links in markdown */
 .md-blocks a {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
   text-underline-offset: 2px;
 }
-.md-blocks a:hover { color: var(--accent-hover); }
+/* Hover thickens the underline rather than shifting hue: the darker
+   --accent-hover drops below 4.5:1 on dark surfaces. */
+.md-blocks a:hover { text-decoration-thickness: 2px; }
 
 .md-blocks strong { font-weight: 600; }
 
@@ -557,7 +619,7 @@ ol.md-list ol.md-list ol.md-list { list-style: lower-roman; }
 .md-app-card__app-icon { width: 2.25rem; height: 2.25rem; object-fit: contain; }
 .md-app-card__text { min-width: 0; display: flex; flex-direction: column; gap: 0.25rem; }
 .md-app-card__eyebrow {
-  color: var(--accent);
+  color: var(--accent-text, var(--accent));
   font-size: 0.6875rem;
   line-height: 1.2;
   font-weight: 760;

@@ -8,8 +8,10 @@ therefore serve bounded diagnostics without executing partial maintenance.
 
 from __future__ import annotations
 
+import importlib.metadata
 import inspect
 import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -177,6 +179,36 @@ def _validate_provider_defaults(context: StartupContext) -> None:
   context.assert_provider_defaults(PROVIDER_NAMES)
 
 
+_DOCKERFILE = Path(__file__).resolve().parents[2] / "Dockerfile"
+
+
+def _check_codex_sdk_pin(_context: StartupContext) -> None:
+  """Name an image whose Codex SDK differs from the served source's pin.
+
+  Served source can move ahead of the image (an update that needs a rebuild).
+  This logs the mismatch at boot in addition to, not instead of, whatever the
+  first Codex turn then raises. It reads package metadata only: importing the
+  SDK here would load it on every boot (#1623 keeps it lazy). The import
+  contract itself is checked by test_codex_sdk_contract and the image build.
+  """
+  try:
+    dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+  except FileNotFoundError:
+    return  # The baked fallback platform carries no Dockerfile.
+  match = re.search(r"(?m)^ARG CODEX_SDK_VERSION=(\S+)$", dockerfile)
+  if not match:
+    raise RuntimeError("Dockerfile does not pin CODEX_SDK_VERSION")
+  try:
+    installed = importlib.metadata.version("openai-codex")
+  except importlib.metadata.PackageNotFoundError:
+    installed = "not installed"
+  if installed != match.group(1):
+    raise RuntimeError(
+      f"openai-codex is {installed} but the Dockerfile pins {match.group(1)}; "
+      "Codex chats may fail until the image is rebuilt"
+    )
+
+
 def _remove_legacy_auto_resume_setting(context: StartupContext) -> None:
   from app.providers import remove_legacy_global_auto_resume_setting
 
@@ -223,6 +255,21 @@ def _configure_claude_settings_defaults(context: StartupContext) -> None:
   added = ensure_claude_settings_defaults(context.settings.data_dir)
   if added:
     context.logger.info("set Claude settings defaults: %s", ", ".join(added))
+
+
+def _remove_legacy_app_engine_homes(context: StartupContext) -> None:
+  """Drop app model engine homes older versions kept in app storage."""
+  from app import models
+  from app.providers import remove_legacy_app_engine_homes
+
+  with SessionLocal() as db:
+    app_ids = [
+      app_id for app_id, contract in db.query(models.App.id, models.App.capability_contract)
+      if isinstance(contract, dict) and isinstance(contract.get("model_provider"), dict)
+    ]
+  removed = remove_legacy_app_engine_homes(context.settings.data_dir, app_ids)
+  if removed:
+    context.logger.info("removed legacy app engine homes: %s", ", ".join(removed))
 
 
 def _migrate_theme_surface_token(context: StartupContext) -> None:
@@ -298,8 +345,15 @@ def _verify_app_identity_cutover(context: StartupContext) -> None:
 def _purge_expired_chats(context: StartupContext) -> None:
   from app.chat_retention import purge_expired_chat_tombstones
 
+  from app.agent_coordination import delete_unreferenced_bodies
+
   with SessionLocal() as db:
     purged = purge_expired_chat_tombstones(db)
+    if not purged:
+      # A purge already swept; otherwise converge any shared peer-note body
+      # that concurrent prunes left behind.
+      delete_unreferenced_bodies(db)
+      db.commit()
   if purged:
     context.logger.info("purged %s expired chat tombstone(s)", len(purged))
 
@@ -470,6 +524,13 @@ def _sweep_git_transfers(_context: StartupContext) -> None:
   shutil.rmtree(git_transfer_root(), ignore_errors=True)
 
 
+def _sweep_contribution_git_scratch(_context: StartupContext) -> None:
+  """Discard contribution Git scratch an earlier process left behind."""
+  from app.github_contribution_git import sweep_scratch_root
+
+  sweep_scratch_root()
+
+
 async def _reconcile_compiled_bundles(context: StartupContext) -> None:
   from app.compiler import (
     reap_orphaned_bundles,
@@ -613,6 +674,20 @@ async def _install_bootstrap_apps(context: StartupContext) -> None:
   context.bootstrap_retry = outcome if outcome.pending else None
 
 
+def _announce_setup_code(context: StartupContext) -> None:
+  """Print the one-time owner setup code while a self-hosted instance has none."""
+  from app import models, setup_code
+  from app.config import get_settings
+
+  if get_settings().mobius_sso_enabled:
+    return
+  with SessionLocal() as db:
+    if db.query(models.Owner).first() is not None:
+      setup_code.retire()
+      return
+  setup_code.current(announce=True)
+
+
 def _reconcile_app_cron(context: StartupContext) -> None:
   from app.routes.app_schedules import reconcile_app_cron_supervision
 
@@ -631,19 +706,26 @@ def _reconcile_app_cron(context: StartupContext) -> None:
 def _route_diagnostics_to_chat_log(_context: StartupContext) -> None:
   from app.chat_logging import get_chat_log_handler
 
-  handler = get_chat_log_handler()
+  # The `app.*` loggers below inherit the shared handler that
+  # `chat_logging.install_platform_warning_log` puts on `app`; attaching it to
+  # them as well would write each record twice. Only their level is set here.
   for name, level in (
     ("app.providers.models", logging.WARNING),
-    ("moebius.memory", logging.INFO),
     # Shared helper hosts: starts, exits with stderr, reseeds, and dispatches
     # that never start a helper are otherwise lost with the process output.
     ("app.helper_hosts", logging.INFO),
     ("app.claude_helper_host", logging.INFO),
+    # Update phases, durations, local-test verdicts and client disconnects:
+    # the progress file keeps only the latest phase.
+    ("app.platform_update", logging.INFO),
   ):
-    logger = logging.getLogger(name)
-    if handler not in logger.handlers:
-      logger.addHandler(handler)
-    logger.setLevel(level)
+    logging.getLogger(name).setLevel(level)
+  # Outside `app`, so it needs the handler itself.
+  memory = logging.getLogger("moebius.memory")
+  handler = get_chat_log_handler()
+  if handler not in memory.handlers:
+    memory.addHandler(handler)
+  memory.setLevel(logging.INFO)
 
 
 def _capture_platform_activation_snapshot(context: StartupContext) -> None:
@@ -662,6 +744,7 @@ def _capture_platform_activation_snapshot(context: StartupContext) -> None:
 PROCESS_STARTUP_TASKS = (
   StartupTask("refresh pm-commit launcher", _refresh_commit_launcher),
   StartupTask("validate provider defaults", _validate_provider_defaults),
+  StartupTask("check Codex SDK pin", _check_codex_sdk_pin),
   StartupTask(
     "remove legacy global auto-resume setting",
     _remove_legacy_auto_resume_setting,
@@ -716,6 +799,7 @@ DATABASE_STARTUP_TASKS = (
   ),
   StartupTask("read restart authorization", _read_restart_authorization),
   StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
+  StartupTask("remove legacy app engine homes", _remove_legacy_app_engine_homes),
   StartupTask(
     "interrupt legacy read helpers",
     _interrupt_legacy_read_helpers,
@@ -729,6 +813,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("reconcile agent lifecycle", _reconcile_agent_lifecycle),
   StartupTask("reap staging bundles", _reap_staging_bundles),
   StartupTask("sweep app Git transfers", _sweep_git_transfers),
+  StartupTask("sweep contribution Git scratch", _sweep_contribution_git_scratch),
   StartupTask(
     "reconcile compiled bundles",
     _reconcile_compiled_bundles,
@@ -754,6 +839,7 @@ DATABASE_STARTUP_TASKS = (
     "reconcile unstarted delegations",
     _reconcile_unstarted_delegations,
   ),
+  StartupTask("announce owner setup code", _announce_setup_code),
   StartupTask(
     "reconcile app cron supervision",
     _reconcile_app_cron,

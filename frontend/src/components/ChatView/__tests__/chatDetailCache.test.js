@@ -131,6 +131,9 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     has_assistant_turns: true,
     auto_resume_on_limit: true,
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
+    branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
+    helper_delegation_id: 'helper-a',
+    helper_parent_chat_id: 'parent-a',
   }
 
   const cached = chatDetailCacheValue(source)
@@ -156,6 +159,9 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     has_assistant_turns: true,
     auto_resume_on_limit: true,
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
+    branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
+    helper_delegation_id: 'helper-a',
+    helper_parent_chat_id: 'parent-a',
   })
 })
 
@@ -288,6 +294,24 @@ test('an idle foreground runtime refetches only when it disproves the cache', ()
   }), false, 'a live run reconciles through its stream instead')
 })
 
+test('a lifecycle card that changed without a transcript write disproves the cache', () => {
+  const detail = {
+    updated_at: '2026-07-30T12:00:00Z', messages: [], total: 0, offset: 0,
+    lifecycle_projection_key: 'before-cancel',
+  }
+  const cached = chatDetailCacheValue(detail)
+  const runtime = { ...detail, running: false }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, runtime), false)
+  const cancelled = { ...runtime, lifecycle_projection_key: 'after-cancel' }
+  assert.equal(shouldRefetchTranscriptForRuntime(cached, cancelled), true,
+    'a cancelled Wait adds its card with the same updated_at')
+  assert.equal(shouldRefetchTranscriptForRuntime(
+    chatDetailCacheValue({ ...detail, lifecycle_projection_key: 'after-cancel' }), cancelled,
+  ), false)
+  assert.equal(shouldRefetchTranscriptForRuntime({ ...cached, lifecycleProjectionKey: null }, runtime), true,
+    'a cache saved before the key existed is read once to seed it')
+})
+
 test('pending question lookup requires the exact unanswered owner row', () => {
   const messages = [
     { role: 'user', content: 'choose' },
@@ -341,4 +365,15 @@ test('exact decision coordinate matches the saved card after answer, not another
   assert.equal(messageMatchesKey(pending, 2, 'question:choice'), false)
   assert.equal(chatCacheEntryState({ restorationWindowComplete: true, messages: [answered], offset: 1 }, 'question:choice'), 'paintable')
   assert.equal(chatCacheEntryState({ restorationWindowComplete: true, messages: [pending], offset: 2 }, 'question:choice'), 'missing')
+})
+
+test('helper retry identity survives detail caching and does not leak into an ordinary chat', () => {
+  const helper = chatDetailCacheValue({
+    messages: [], helper_delegation_id: 'delegation-a', helper_parent_chat_id: 'parent-a',
+  })
+  assert.equal(helper.chatInfo.helper_delegation_id, 'delegation-a')
+  assert.equal(helper.chatInfo.helper_parent_chat_id, 'parent-a')
+  const ordinary = chatDetailCacheValue({ messages: [] })
+  assert.equal(ordinary.chatInfo.helper_delegation_id, null)
+  assert.equal(ordinary.chatInfo.helper_parent_chat_id, null)
 })

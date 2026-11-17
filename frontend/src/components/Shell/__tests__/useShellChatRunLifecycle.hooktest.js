@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { renderHook } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
+import { renderHook, __setRerender } from '../../ChatView/hooks/__tests__/react-hook-shim.mjs'
 import useShellChatRunLifecycle from '../useShellChatRunLifecycle.js'
 
 
@@ -9,7 +9,18 @@ test('mounted and durable runs share one projected streaming set', () => {
     { id: 'durable', running: true },
   ])
 
-  result.current.markStreamingStart('local')
+  // Hold React's commit: placement can run in the same task as this callback.
+  __setRerender(() => {})
+  try {
+    result.current.markStreamingStart('local')
+    assert.equal(result.current.streamingChatIds.has('local'), false,
+      'the rendered projection is deliberately still the previous commit')
+    assert.equal(result.current.streamingChatIdsRef.current.has('local'), true,
+      'same-task placement must see the start before a render/effect can publish it')
+  } finally {
+    __setRerender(rerender)
+  }
+  rerender()
   assert.deepEqual(
     [...result.current.streamingChatIds].sort(),
     ['durable', 'local'],

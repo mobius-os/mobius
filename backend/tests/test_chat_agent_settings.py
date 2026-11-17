@@ -298,6 +298,25 @@ def test_patch_chat_clear_reverts_to_default(client, auth, chat):
   assert body["effective"]["model"] == "fallback-model"
 
 
+def test_clear_picker_settings_keeps_resolver_lifecycle(client, auth, chat, db):
+  batch = {"12": {"upstream_commit": "abc", "completed": None}}
+  chat.agent_settings_json = {
+    "model": "old-model", "_app_update_resolver_batch": batch,
+    "archive_on_goal_complete": True,
+  }
+  db.commit()
+  _write_global_settings({"model": "fallback-model"})
+  result = client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"clear_agent_settings": True},
+  )
+  assert result.status_code == 200, result.text
+  settings = result.json()["agent_settings_json"]
+  assert settings["model"] == "fallback-model"
+  assert settings["_app_update_resolver_batch"] == batch
+  assert settings["archive_on_goal_complete"] is True
+
+
 def test_auto_resume_is_per_chat_and_survives_runtime_clear(
   client, auth, chat, db,
 ):
@@ -391,6 +410,39 @@ def test_new_chat_inherits_last_auto_resume_selection(client, auth, chat):
   ).json()["auto_resume_on_limit"] is False
   assert client.get(
     f"/api/chats/{inherited_on['id']}", headers=auth,
+  ).json()["auto_resume_on_limit"] is True
+
+
+def test_agent_change_to_one_chat_does_not_become_the_owner_preference(
+  client, auth, chat, db,
+):
+  """Only the owner's own choice carries forward to new chats."""
+  from datetime import timedelta
+  from app import auth as auth_mod
+
+  client.patch(
+    f"/api/chats/{chat.id}", headers=auth,
+    json={"auto_resume_on_limit": True},
+  )
+  run_id = _start_provider_turn(chat)
+  owner = db.query(models.Owner).first()
+  agent_token = auth_mod.create_agent_token(
+    chat.id, owner.username, owner.token_epoch,
+    run_id=run_id, expires_delta=timedelta(minutes=5),
+  )
+  changed = client.patch(
+    f"/api/chats/{chat.id}",
+    headers={"Authorization": f"Bearer {agent_token}"},
+    json={"auto_resume_on_limit": False},
+  )
+  assert changed.status_code == 200, changed.text
+  assert changed.json()["auto_resume_on_limit"] is False
+
+  later = client.post(
+    "/api/chats", headers=auth, json={"title": "later"},
+  ).json()
+  assert client.get(
+    f"/api/chats/{later['id']}", headers=auth,
   ).json()["auto_resume_on_limit"] is True
 
 
@@ -624,6 +676,31 @@ def test_patch_chat_provider_and_model_in_same_request(
   assert body["provider"] == "codex"
   assert body["agent_settings_json"] == {"model": "gpt-5.4-codex"}
   assert _read_global_settings()["provider"] == "codex"
+  prefs = client.get("/api/owner/model-prefs", headers=auth).json()
+  assert prefs["recent_ids"] == ["gpt-5.4-codex"]
+
+
+def test_picker_recency_only_tracks_confirmed_model_choices(client, auth, chat):
+  """Effort saves and rejected provider changes cannot reorder owner picks."""
+  url = f"/api/chats/{chat.id}"
+  first = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"model": "claude-sonnet-4-6"},
+  })
+  assert first.status_code == 200, first.text
+  second = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"model": "claude-opus-4-7"},
+  })
+  assert second.status_code == 200, second.text
+  effort = client.patch(url, headers=auth, json={
+    "agent_settings_json": {"effort": "high"},
+  })
+  assert effort.status_code == 200, effort.text
+  rejected = client.patch(url, headers=auth, json={
+    "provider": "codex", "agent_settings_json": {"model": "claude-sonnet-4-6"},
+  })
+  assert rejected.status_code == 422
+  prefs = client.get("/api/owner/model-prefs", headers=auth).json()
+  assert prefs["recent_ids"] == ["claude-opus-4-7", "claude-sonnet-4-6"]
 
 
 def test_run_chat_passes_merged_settings_into_claude_sdk(

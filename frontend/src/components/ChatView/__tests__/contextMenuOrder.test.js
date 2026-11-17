@@ -73,7 +73,7 @@ test('chat summary window shows each note layer under its own name', () => {
 
   assert.match(viewer, /summary: data\.chat_summary \|\| ''/)
   assert.match(viewer, /digest: data\.chat_digest \|\| ''/)
-  assert.match(viewer, /<h3>Summary<\/h3>[\s\S]*?state\.layers\.summary[\s\S]*?<h3>Digest<\/h3>[\s\S]*?state\.layers\.digest/)
+  assert.match(viewer, /<h3>Chat summary<\/h3>[\s\S]*?state\.layers\.summary[\s\S]*?<h3>Full digest<\/h3>[\s\S]*?state\.layers\.digest/)
 })
 
 

@@ -614,3 +614,38 @@ def test_wt_npm_reuses_only_exact_lock_registered_sibling(tmp_path, matching_sib
     assert not observed.exists()
   assert not (review / 'frontend/node_modules').exists()
   assert (sibling / 'frontend/node_modules').is_dir()
+
+
+def test_wt_npm_keeps_tool_caches_in_command_scratch(tmp_path: Path):
+  _, review, fake_bin = _worktree_fixture(tmp_path)
+  fake_npm = fake_bin / "npm"
+  fake_npm.write_text(
+    "#!/bin/sh\n"
+    "printf '%s\\n' \"$TMPDIR\" \"$MOBIUS_VITE_CACHE\" \"$NODE_COMPILE_CACHE\""
+    " > \"$WT_NPM_OBSERVED\"\n"
+    "mkdir -p \"$MOBIUS_VITE_CACHE\"\n"
+  )
+  fake_npm.chmod(0o755)
+  observed = tmp_path / "observed"
+
+  result = subprocess.run(
+    ["bash", str(WT_NPM_SCRIPT), "test"],
+    cwd=review,
+    env={
+      **os.environ,
+      "PATH": f"{fake_bin}:{os.environ['PATH']}",
+      "MOBIUS_VITE_CACHE": str(tmp_path / "shared-cache"),
+      "WT_NPM_OBSERVED": str(observed),
+    },
+    text=True,
+    capture_output=True,
+    check=False,
+  )
+
+  assert result.returncode == 0, result.stderr
+  scratch, vite_cache, compile_cache = observed.read_text().splitlines()
+  assert scratch.startswith("/tmp/mobius-wt-npm.")
+  assert vite_cache == f"{scratch}/vite-cache"
+  assert compile_cache == f"{scratch}/node-compile-cache"
+  assert not Path(scratch).exists()
+  assert not (tmp_path / "shared-cache").exists()

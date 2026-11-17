@@ -16,6 +16,7 @@ import { test, expect } from '@playwright/test'
 import { installMockProviderUsage } from './_chatTestPrerequisites.mjs'
 import { attachCleanup } from './_chatTracker.mjs'
 import { createChat, sendMessage, waitForChatShell } from './_chatSession.mjs'
+import { paintedScrollGeometry } from './_paintedGeometry.mjs'
 
 attachCleanup()
 
@@ -299,7 +300,9 @@ test('Immediate tail-to-send follows output after the reader returns to the phys
     return !!scroll && !!spacer && spacer.offsetHeight <= 1
   })
 
-  const filled = await measure(page)
+  // The reveal may still be committing output here; judge the frame the reader
+  // sees, not geometry read between a commit and the follow that precedes paint.
+  const filled = await paintedScrollGeometry(page)
   expect(filled.spacerH).toBeLessThanOrEqual(1)
   expect(filled.scrollTop - followingReservedTail.scrollTop).toBeGreaterThan(50)
   expect(filled.scrollH - filled.scrollTop - filled.clientH).toBeLessThanOrEqual(8)

@@ -40,7 +40,7 @@ from app.deps import (
   Principal,
   get_principal,
   reject_cross_site,
-  require_nondelegated_owner_or_app_control,
+  require_account_owner_control,
 )
 from app.github_contribution_git import (
   _assert_clean_worktree,
@@ -48,6 +48,7 @@ from app.github_contribution_git import (
   _assert_fresh,
   _assert_merges_with_upstream,
   _git_env,
+  _scratch_home,
   _validate_branch,
   _validate_repo_slug,
 )
@@ -126,15 +127,16 @@ class RelayWithdrawIn(BaseModel):
 
 
 def _run_git_bytes(repo: Path, *args: str) -> bytes:
-  result = subprocess.run(
-    ["git", "-C", str(repo), *args],
-    cwd=str(repo),
-    env=_git_env(repo),
-    capture_output=True,
-    text=False,
-    timeout=60,
-    check=False,
-  )
+  with _scratch_home(_git_env(repo)) as env:
+    result = subprocess.run(
+      ["git", "-C", str(repo), *args],
+      cwd=str(repo),
+      env=env,
+      capture_output=True,
+      text=False,
+      timeout=60,
+      check=False,
+    )
   if result.returncode:
     detail = (result.stderr or result.stdout or b"Git command failed.")[:600]
     raise ContributionSubmitError(
@@ -1631,7 +1633,7 @@ async def _adopt_legacy_control_attempt_if_needed(
   "/{app_id}/{record_id}/submit",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("5/minute")
@@ -2365,7 +2367,7 @@ async def relay_contribution_status(
   "/{app_id}/{record_id}/withdraw",
   dependencies=[
     Depends(reject_cross_site),
-    Depends(require_nondelegated_owner_or_app_control),
+    Depends(require_account_owner_control),
   ],
 )
 @_limiter.limit("5/minute")

@@ -23,11 +23,13 @@ from pathlib import Path
 DATA_GITIGNORE = """\
 cli-auth/
 app-secrets/
+credits-client/
 push/*.pem
 push/*.json
 push/*.txt
 service-token.txt
 .secret-key
+setup-code
 # Legacy recovery credentials and chat fragments may remain after an update.
 # They are inert, but must never become safety-repository content.
 .recovery-secret

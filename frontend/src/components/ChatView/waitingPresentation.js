@@ -22,6 +22,34 @@ function dateTimeLabel(value) {
   return formatDateTime(apiDate(value)) || 'not set'
 }
 
+/**
+ * How far away a future moment is, in calm words ("in 3 min", "in 2 h 5 min").
+ * Minutes round up so "in 1 min" never shows for a moment already due; a
+ * moment that has passed is "now" because the checker owns it from then on.
+ */
+export function untilLabel(value, now = Date.now()) {
+  const date = apiDate(value)
+  if (!date) return null
+  const ms = date.getTime() - now
+  if (ms <= 0) return 'now'
+  if (ms < 60_000) return 'in under a minute'
+  const minutes = Math.ceil(ms / 60_000)
+  if (minutes < 60) return `in ${minutes} min`
+  if (minutes < 24 * 60) {
+    const hours = Math.floor(minutes / 60)
+    const rest = minutes % 60
+    return `in ${hours} h${rest ? ` ${rest} min` : ''}`
+  }
+  const days = Math.round(minutes / (24 * 60))
+  return `in ${days} ${days === 1 ? 'day' : 'days'}`
+}
+
+// "in 3 min · 15:20": the countdown first, the clock time beside it.
+function whenLabel(value, clock, now) {
+  const until = untilLabel(value, now)
+  return [until, clock].filter(Boolean).join(' · ') || null
+}
+
 function cadenceLabel(wait) {
   if (wait.kind === 'timer') return 'one-time timer'
   const seconds = Number(wait.interval_secs) || 300
@@ -31,7 +59,35 @@ function cadenceLabel(wait) {
   return `every ${hours} ${hours === 1 ? 'hour' : 'hours'}`
 }
 
-export const RESOURCE_PAUSE_KINDS = new Set(['memory', 'storage'])
+// The one owner-facing label table for platform-resource waits. A kind listed
+// here is an automatic resource wait on every surface: the live Waiting card,
+// the settled pause record and the continuation marker that resumed it. A
+// kind with `continueAnyway` copy also offers the owner's warned one-turn
+// override (the server's OWNER_OVERRIDABLE_RESOURCES); memory never does.
+export const RESOURCE_PAUSE_LABELS = {
+  memory: {
+    summary: 'Waiting for memory to settle',
+    pressure: 'Memory reached its measured critical boundary',
+    paused: 'Paused while memory was low',
+    resumed: 'Memory freed up — continuing automatically',
+  },
+  storage: {
+    summary: 'Waiting for storage headroom',
+    pressure: 'Storage reached its measured critical boundary',
+    paused: 'Paused while storage was low',
+    resumed: 'Storage freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite low storage—for example, to free space. If the disk fills completely, saving may fail.',
+  },
+  processes: {
+    summary: 'Waiting for process headroom',
+    pressure: 'Running processes and threads reached their measured critical boundary',
+    paused: 'Paused while processes and threads were near the limit',
+    resumed: 'Processes and threads freed up — continuing automatically',
+    continueAnyway: 'Continue this turn despite the process limit—for example, to find what is holding processes. If the limit is reached, tools may fail to start.',
+  },
+}
+
+export const RESOURCE_PAUSE_KINDS = new Set(Object.keys(RESOURCE_PAUSE_LABELS))
 
 export function isResourcePause(block) {
   return !!block && RESOURCE_PAUSE_KINDS.has(block.pause?.kind)
@@ -39,13 +95,10 @@ export function isResourcePause(block) {
 
 export function resourcePausePresentation(block, handoff = null) {
   const kind = block?.pause?.kind
-  // A memory/storage park keeps its one saved card while the server keeps
+  const resource = RESOURCE_PAUSE_KINDS.has(kind) ? RESOURCE_PAUSE_LABELS[kind] : null
+  // A platform-resource park keeps its one saved card while the server keeps
   // moving the next check later, so the time saved on the card goes stale.
-  const next = RESOURCE_PAUSE_KINDS.has(kind)
-    ? null
-    : clockLabel(pauseTiming(block?.pause).checkAt)
-  const storage = kind === 'storage'
-  const memory = kind === 'memory'
+  const next = resource ? null : clockLabel(pauseTiming(block?.pause).checkAt)
   const limit = ['rate_limit', 'usage_limit', 'limit'].includes(kind)
   const automatic = handoff?.kind === 'automatic' && handoff.reason === kind
   const restoring = handoff?.kind === 'automatic' && handoff.reason === 'restoring_edits'
@@ -54,22 +107,20 @@ export function resourcePausePresentation(block, handoff = null) {
   const manual = !restoring && (!!blocked || ((kind === 'model_capacity' || limit) && !automatic))
   return {
     manual,
-    summary: storage ? 'Waiting for storage headroom'
-      : memory ? 'Waiting for memory to settle'
-        : limit ? 'Provider usage limit' : 'Model capacity',
+    summary: resource ? resource.summary
+      : limit ? 'Provider usage limit' : 'Model capacity',
     next: restoring ? 'restoring local work'
       : restart ? 'server restart needed'
       : handoff?.kind === 'owner_input' ? 'answer needed'
       : manual
       ? 'manual recovery' : next ? `checks again ${next}` : 'checks again automatically',
-    owner: storage || memory ? 'Möbius resource monitor' : 'Provider availability',
-    pressure: storage ? 'Storage reached its measured critical boundary'
-      : memory ? 'Memory reached its measured critical boundary'
-        : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
+    owner: resource ? 'Möbius resource monitor' : 'Provider availability',
+    pressure: resource ? resource.pressure
+      : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
     wakeUp: restoring ? 'Möbius is restoring local work; this chat continues after that work is restored and loaded'
       : restart ? 'Waiting for a server restart to load restored work; use the saved Restart card'
       : blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'
-      : blocked && ['memory', 'storage'].includes(kind) ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
+      : blocked && resource ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
       : kind === 'model_capacity' && !automatic ? 'Automatic retries are unavailable; choose another model and Resume'
       : limit && !automatic ? handoff?.reason === 'manual_resume'
         ? 'Enable automatic continuation or choose another model and Resume'
@@ -94,11 +145,14 @@ const RESUME_BLOCKERS = {
   resume_failed: ['follow-up needs attention', 'The follow-up could not start successfully; resume this chat to inspect the saved result'],
 }
 
-export function waitPresentation(wait) {
+export function waitPresentation(wait, now = Date.now()) {
   const activation = wait.kind === 'platform_activation'
   const cadence = cadenceLabel(wait)
-  const next = clockLabel(wait.next_check_at)
-  const due = clockLabel(wait.due_at)
+  const next = whenLabel(wait.next_check_at, clockLabel(wait.next_check_at), now)
+  const due = whenLabel(wait.due_at, clockLabel(wait.due_at), now)
+  // The exact check Möbius runs, shown only on request (never its output,
+  // which a command wait keeps silent by contract).
+  const command = typeof wait.command === 'string' && wait.command.trim() ? wait.command.trim() : null
   const count = Number(wait.checks_count) || 0
   const last = clockLabel(wait.last_checked_at)
   const activity = count
@@ -116,6 +170,7 @@ export function waitPresentation(wait) {
     const [summary, wakeUp] = RESUME_BLOCKERS[wait.resume_blocker]
       || ['follow-up pending', 'The result is saved until this chat can resume']
     return {
+      command,
       condition: `${outcome}; ${summary}`,
       owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
       summary: 'result saved',
@@ -127,31 +182,20 @@ export function waitPresentation(wait) {
     }
   }
 
+  const deadline = untilLabel(wait.deadline_at, now)
   return {
+    command,
     condition: waitConditionLabel(wait.description) || 'External condition',
     owner: wait.condition_owner || (wait.kind === 'timer' ? 'Time' : 'External system'),
     summary,
-    checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next at ${next}` : ''}`,
+    checker: `Möbius · ${cadence}${wait.kind !== 'timer' && next ? ` · next ${next}` : ''}`,
     activity,
     timeoutLabel: activation ? 'Wake-up' : 'If it takes too long',
     timeout: activation
       ? 'A later ready restart wakes this chat; the Restart card has no time limit'
-      : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
+      : deadline
+        ? `This chat wakes to investigate ${deadline} · ${dateTimeLabel(wait.deadline_at)}`
+        : `This chat wakes to investigate at ${dateTimeLabel(wait.deadline_at)}`,
     usage: 'No model tokens while checking · one turn when it wakes',
-  }
-}
-
-export function helperPresentation(backgroundHelpers, handoff = null) {
-  const count = Number(backgroundHelpers?.count) || 0
-  const tasks = (backgroundHelpers?.items || [])
-    .map(item => item?.title || 'Helper work')
-    .filter(Boolean)
-  return {
-    count,
-    tasks,
-    summary: `Waiting on ${count} ${count === 1 ? 'helper' : 'helpers'}`,
-    owner: `${count} ${count === 1 ? 'helper agent' : 'helper agents'}`,
-    automatic: handoff?.kind === 'automatic',
-    usage: 'Usage unknown',
   }
 }

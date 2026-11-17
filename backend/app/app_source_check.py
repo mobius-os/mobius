@@ -242,6 +242,7 @@ def check_app_source(
   source_files: Iterable[str] = (),
   job: str | None = None,
   static_assets: Iterable[str] = (),
+  direct_hosts: Iterable[str] = (),
 ) -> SourceCheckResult:
   """Check a mini-app source tree against its manifest declarations.
 
@@ -258,6 +259,8 @@ def check_app_source(
       the import graph but is intentionally NOT part of ``source_files``.
     static_assets: Static assets' installed source-tree paths — allowed import
       targets that the installer writes separately from ``source_files``.
+    direct_hosts: Hosts the manifest's ``network.direct`` capability declares;
+      the app frame may reach them, so they are not reported.
 
   Returns:
     A ``SourceCheckResult``; ``.errors`` are install-breaking completeness
@@ -341,7 +344,7 @@ def check_app_source(
   # the entry — the code that ships to the browser under the CSP. Scanning the
   # whole tree would flag build scripts and test fixtures (localhost, x.test),
   # which never run under `connect-src 'self'`.
-  findings.extend(_external_host_findings(files, visited))
+  findings.extend(_external_host_findings(files, visited, frozenset(direct_hosts)))
   # Stable order: errors first, then by path, so CLI output and test
   # assertions are deterministic.
   findings.sort(key=lambda f: (f.severity != "error", f.path, f.code))
@@ -349,7 +352,7 @@ def check_app_source(
 
 
 def _external_host_findings(
-  files: Mapping[str, str], scope: Collection[str]
+  files: Mapping[str, str], scope: Collection[str], direct_hosts: frozenset[str] = frozenset(),
 ) -> list[Finding]:
   findings: list[Finding] = []
   for rel in sorted(scope):
@@ -359,7 +362,7 @@ def _external_host_findings(
     seen: set[str] = set()
     for match in _RE_URL.finditer(code):
       host = re.split(r"[/:?#]", match.group(1), maxsplit=1)[0].lower()
-      if not host or host in _NAMESPACE_HOSTS or host in seen:
+      if not host or host in _NAMESPACE_HOSTS or host in direct_hosts or host in seen:
         continue
       seen.add(host)
       findings.append(Finding(
@@ -388,4 +391,18 @@ def check_manifest_tree(
     source_files=manifest.get("source_files") or [],
     job=job,
     static_assets=_static_source_paths(manifest.get("static_assets")),
+    direct_hosts=direct_hosts_from_manifest(manifest),
   )
+
+
+def direct_hosts_from_manifest(manifest: Mapping) -> list[str]:
+  """Hosts a ``network.direct`` declaration names. Shape errors belong to the
+  manifest validator, so anything unreadable simply grants nothing here."""
+  capabilities = manifest.get("capabilities")
+  grant = capabilities.get("network.direct") if isinstance(capabilities, Mapping) else None
+  origins = grant.get("origins") if isinstance(grant, Mapping) else None
+  hosts = []
+  for origin in origins if isinstance(origins, list) else ():
+    if isinstance(origin, str) and origin.startswith("https://"):
+      hosts.append(re.split(r"[/:?#]", origin[len("https://"):], maxsplit=1)[0].lower())
+  return hosts

@@ -66,6 +66,7 @@ chats_router = _load("chats")
 app_chat_router = _load("chats", "app_chat_router")
 chats_stream_router = _load("chats_stream")
 secure_inputs_router = _load("secure_inputs")
+model_relay_router = _load("model_relay")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
 connectors_public_router = _load("connectors", "public_router")
@@ -73,6 +74,7 @@ proxy_router = _load("proxy")
 public_apps_router = _load("public_apps")
 public_storage_router = _load("public_storage")
 local_services_router = _load("local_services")
+location_router = _load("location")
 notify_router = _load("notify")
 screen_control_router = _load("screen_control")
 shared_folders_router = _load("shared_folders")
@@ -87,7 +89,9 @@ github_router = _load("github")
 github_access_router = _load("github_access")
 reviewer_router = _load("reviewer")
 contribution_reviews_router = _load("contribution_reviews")
+owner_grants_router = _load("contribution_owner_grants")
 identity_router = _load("identity")
+credits_router = _load("credits")
 push_router = _load("push")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
@@ -127,6 +131,7 @@ __all__ = [
   "app_chat_router",
   "chats_stream_router",
   "secure_inputs_router",
+  "model_relay_router",
   "chat_logs_router",
   "connectors_router",
   "connectors_public_router",
@@ -134,6 +139,7 @@ __all__ = [
   "public_apps_router",
   "public_storage_router",
   "local_services_router",
+  "location_router",
   "notify_router",
   "screen_control_router",
   "shared_folders_router",
@@ -146,7 +152,9 @@ __all__ = [
   "github_access_router",
   "reviewer_router",
   "contribution_reviews_router",
+  "owner_grants_router",
   "identity_router",
+  "credits_router",
   "push_router",
   "notifications_router",
   "debug_router",

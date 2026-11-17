@@ -1,11 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { resolveInitialNav } from '../resolveInitialNav.js'
+import { settingsDeepLink } from '../settingsSections.js'
 
 import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  previousPageDied,
   readRestoredCanvas,
   readStoredChatId,
 } from '../navigationPersistence.js'
@@ -57,6 +59,25 @@ test('a /shell/?settings deep link opens Settings at a known section only', () =
     { view: 'settings' })
   assert.equal(parseShellDeepLink({ pathname: '/shell/', search: '?chat=c&settings=github' }).view,
     'chat')
+})
+
+test('a standalone app\'s Settings request opens that section, not the plain workspace', () => {
+  // A standalone page answers moebius:open-settings by loading this link; the
+  // workspace must read back the section the in-shell request would focus.
+  const opened = section => {
+    const href = settingsDeepLink(section)
+    return { href, target: parseShellDeepLink(new URL(href, 'https://mobius.test')) }
+  }
+  assert.deepEqual(opened('mobius-account'), {
+    href: '/shell/?settings=mobius-account',
+    target: { view: 'settings', section: 'mobius-account' },
+  })
+  for (const unknown of ['retired-section', undefined]) {
+    assert.deepEqual(opened(unknown), {
+      href: '/shell/?settings=ai-providers',
+      target: { view: 'settings', section: 'ai-providers' },
+    }, 'an unknown section opens AI providers, as the in-shell request does')
+  }
 })
 
 test('legacy path deep links translate /app, /chat, and /settings', () => {
@@ -158,6 +179,63 @@ test('cold navigation ignores storage operations that are unavailable', () => {
   assert.equal(consumeReturnView(blocked), null)
 })
 
+function pageEvents(visibilityState = 'visible') {
+  const listeners = new Map()
+  const target = () => ({
+    addEventListener: (type, fn) => listeners.set(type, fn),
+  })
+  const win = target()
+  const doc = { ...target(), visibilityState }
+  const fire = (type) => listeners.get(type)?.()
+  return { win, doc, fire }
+}
+
+test('a page the browser killed on screen is detected on the next load', () => {
+  const session = storage()
+  const first = pageEvents()
+  assert.equal(previousPageDied(session, first.win, first.doc), false)
+  // No pagehide/hidden/freeze: the browser killed the page and reloaded it.
+  const reload = pageEvents()
+  assert.equal(previousPageDied(session, reload.win, reload.doc), true)
+})
+
+test('a page that ends or goes to the background normally is not a crash', () => {
+  for (const ending of ['pagehide', 'freeze', 'hidden']) {
+    const session = storage()
+    const page = pageEvents()
+    previousPageDied(session, page.win, page.doc)
+    if (ending === 'hidden') {
+      page.doc.visibilityState = 'hidden'
+      page.fire('visibilitychange')
+    } else {
+      page.fire(ending)
+    }
+    const next = pageEvents()
+    assert.equal(previousPageDied(session, next.win, next.doc), false, ending)
+  }
+})
+
+test('a page restored from the back-forward cache is watched again', () => {
+  const session = storage()
+  const page = pageEvents()
+  previousPageDied(session, page.win, page.doc)
+  page.fire('pagehide')
+  page.fire('pageshow')
+  const next = pageEvents()
+  assert.equal(previousPageDied(session, next.win, next.doc), true)
+})
+
+test('crash detection stays off when session storage is unavailable', () => {
+  const blocked = {
+    getItem() { throw new DOMException('Browser storage is blocked.', 'SecurityError') },
+    setItem() { throw new DOMException('Browser storage is blocked.', 'SecurityError') },
+    removeItem() { throw new DOMException('Browser storage is blocked.', 'SecurityError') },
+  }
+  const page = pageEvents()
+  assert.equal(previousPageDied(blocked, page.win, page.doc), false)
+  assert.doesNotThrow(() => page.fire('pagehide'))
+})
+
 test('active navigation mirrors cold state without retaining a stale app', () => {
   const store = storage({ moebius_active_app: '9' })
   persistActiveNavigation(store, {
@@ -176,4 +254,15 @@ test('active navigation mirrors cold state without retaining a stale app', () =>
 test('decision link retains the exact question identity, not just current input focus', () => {
   assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?chat=source&focus=question&question=saved-card' }),
     { view: 'chat', chatId: 'source', intent: null, focusQuestion: true, questionId: 'saved-card' })
+})
+
+test('result deep links identify only a project and artifact, without changing project links', () => {
+  assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?project=project-7&result=website_2' }),
+    { view: 'artifact', projectId: 'project-7', artifactId: 'website_2' })
+  for (const search of ['?project=p&result=', '?project=p&result=a%3Ab', '?project=p&result=..%2Fsecret', '?project=p&result=' + 'a'.repeat(65)]) {
+    assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search }), { view: 'project', projectId: 'p' })
+  }
+  assert.equal(parseShellDeepLink({ pathname: '/shell/', search: '?result=site' }), null)
+  assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?project=p%3Aother&result=site' }),
+    { view: 'project', projectId: 'p:other' })
 })

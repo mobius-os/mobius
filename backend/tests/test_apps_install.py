@@ -4005,6 +4005,8 @@ def test_conflict_resolver_batch_uses_one_chat_for_every_selected_app(
   apps = _prepare_conflict_resolver_apps(client, auth, ("one", "two"))
   app_ids = [app_id for app_id, _path, _name in apps]
 
+  from app import providers
+  monkeypatch.setattr(providers.CodexProvider, "check_auth", lambda self, data_dir: None)
   starts = []
 
   async def fake_start_turn(db, chat_id, title, content, provider):
@@ -4027,7 +4029,8 @@ def test_conflict_resolver_batch_uses_one_chat_for_every_selected_app(
   response = client.post(
     "/api/apps/conflict-resolver-batch",
     headers=auth,
-    json={"app_ids": app_ids, "resolution_policy": "preserve_local"},
+    json={"app_ids": app_ids, "resolution_policy": "preserve_local",
+          "agent": {"provider": "codex", "model": "gpt-5.5", "effort": "high"}},
   )
   assert response.status_code == 200, response.text
   body = response.json()
@@ -4055,13 +4058,16 @@ def test_conflict_resolver_batch_uses_one_chat_for_every_selected_app(
     }
     resolver = db.get(models.Chat, body["chat_id"])
     assert resolver.provider == "codex"
+    assert resolver.agent_settings_json["model"] == "gpt-5.5"
+    assert resolver.agent_settings_json["effort"] == "high"
   finally:
     db.close()
 
   repeated = client.post(
     "/api/apps/conflict-resolver-batch",
     headers=auth,
-    json={"app_ids": [*reversed(app_ids), app_ids[0]]},
+    json={"app_ids": [*reversed(app_ids), app_ids[0]],
+          "agent": {"provider": "codex", "model": "gpt-5.4", "effort": "low"}},
   )
   assert repeated.status_code == 200, repeated.text
   assert repeated.json() == {
@@ -4100,9 +4106,11 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
       db.get(models.Chat, chat_id).pending_question_id = "resolver-owner-question"
     db.commit()
   if running_check == "queued_owner":
-    from app.chat_writer import AppendPending, ClearPending, get_writer
+    from app.chat_writer import AppendPending, CancelPending, get_writer
     get_writer().submit(AppendPending(
-      chat_id=chat_id, user_msg={"role": "user", "content": "Please continue", "ts": 1},
+      chat_id=chat_id, user_msg={
+        "role": "user", "content": "Please continue", "ts": 1, "cid": "queued-owner",
+      },
     )).result(timeout=5)
   monkeypatch.setattr(
     "app.questions.is_waiting",
@@ -4163,7 +4171,7 @@ def test_conflict_resolver_cannot_displace_a_running_batch(
 
   running = False
   if running_check == "queued_owner":
-    get_writer().submit(ClearPending(chat_id=chat_id)).result(timeout=5)
+    get_writer().submit(CancelPending(chat_id=chat_id, cid="queued-owner")).result(timeout=5)
   with SessionLocal() as db:
     db.query(models.ChatRun).filter_by(chat_id=chat_id).one().status = "completed"
     db.get(models.Chat, chat_id).pending_question_id = None
@@ -4303,13 +4311,13 @@ def test_successful_install_is_not_failed_by_pending_cleanup(
   assert opened.status_code == 200, opened.text
   clear_pending = install.clear_pending_conflict_update
 
-  async def fail_cleanup(db, app):
+  async def fail_cleanup(db, app, *, completed=False):
     if failure == "commit":
       with patch.object(db, "commit", side_effect=SQLAlchemyError("cleanup commit failed")):
-        await clear_pending(db, app)
+        await clear_pending(db, app, completed=completed)
     else:
       with patch.object(pending_update, "_drop_pending_update_worktree", side_effect=OSError("cleanup failed")):
-        await clear_pending(db, app)
+        await clear_pending(db, app, completed=completed)
 
   monkeypatch.setattr(install, "clear_pending_conflict_update", fail_cleanup)
   updated = _update_v2(
@@ -4464,6 +4472,8 @@ def test_conflict_resolver_reuses_remaining_batch_after_app_leaves(
       app = db.get(models.App, app_ids[0])
       assert app.conflict_resolver_chat_id is None
       assert app.conflict_resolver_upstream_commit is None
+      # The other app still owns this batch: one successful finish cannot file it.
+      assert db.get(models.Chat, opened.json()["chat_id"]).archived_at is None
 
   retry = client.post(
     "/api/apps/conflict-resolver-batch", headers=auth,
@@ -4473,6 +4483,26 @@ def test_conflict_resolver_reuses_remaining_batch_after_app_leaves(
   assert retry.json() == {
     "chat_id": opened.json()["chat_id"], "created": False, "started": False,
   }
+  if completion == "finish":
+    second_dir = apps[1][1]
+    _resolve_in(pending_update.pending_update_worktree(second_dir), {
+      "index.jsx": JSX_MULTI.replace("ORIGINAL TITLE", "RESOLVED SECOND"),
+    })
+    base = "https://batch-conflict-two.test/repo/"
+    replay = {
+      base + "index.jsx": (200, JSX_MULTI.replace(
+        "ORIGINAL TITLE", "UPSTREAM TWO",
+      ).encode()),
+      base + "icon.png": (200, _png_bytes()),
+      base + "prompt.md": (200, b"v2 prompt"),
+      base + "fetch.sh": (200, b""),
+    }
+    finished = _finish(client, auth, second_dir, replay)
+    assert finished.status_code == 200, finished.text
+    with SessionLocal() as db:
+      archived = db.get(models.Chat, opened.json()["chat_id"])
+      assert archived.archived_at is not None
+      assert archived.deleted_at is None
 
 
 @pytest.mark.parametrize("selection", ["overlap", "subset"])
@@ -10600,7 +10630,7 @@ async def test_ancillary_bundle_comparison_uses_same_root_and_upstream_deletions
   tree = {"index.jsx": JSX.encode(), "README.md": b"owner", "bundle.js": b"source"}
   entries = []
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     entries.append(source_path)
     assert (source_path.parent / "bundle.js").read_bytes() == b"source"
     assert (source_path.parent / "README.md").exists() is (len(entries) == 1)
@@ -10938,7 +10968,7 @@ async def test_ancillary_source_check_and_tree_writes_leave_event_loop(monkeypat
       writes.append(threading.get_ident())
     return write_bytes(path, data)
 
-  async def compile_tree(source, *, source_path, out_path):
+  async def compile_tree(source, *, source_path, source_root, out_path):
     assert threading.get_ident() == event_loop_thread
     entries.append(source_path)
     expected = b"owner" if len(entries) == 1 else b"upstream"

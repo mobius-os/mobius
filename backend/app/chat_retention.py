@@ -159,6 +159,8 @@ def purge_expired_chat_tombstones(db: Session) -> list[str]:
     (models.AgentCoordinationMessage.from_chat_id.in_(chat_ids))
     | (models.AgentCoordinationMessage.to_chat_id.in_(chat_ids))
   ).delete(synchronize_session=False)
+  from app.agent_coordination import delete_unreferenced_bodies
+  delete_unreferenced_bodies(db)
   db.query(models.ProjectAgentMessage).filter(
     (models.ProjectAgentMessage.from_chat_id.in_(chat_ids))
     | (models.ProjectAgentMessage.to_chat_id.in_(chat_ids))

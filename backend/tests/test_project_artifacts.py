@@ -357,3 +357,180 @@ def test_malformed_artifacts_json_never_500s(client, auth, db):
   ).json()["artifacts"]
   assert [a["id"] for a in artifacts] == ["ok-one"]
   assert artifacts[0]["source_missing"] is True
+
+
+def test_a_source_edit_after_a_build_marks_the_result_out_of_date(
+  client, auth, monkeypatch,
+):
+  async def copy_builder(*, root, source, output_dir, log_path):
+    (output_dir / source).write_text((root / source).read_text())
+
+  monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>One</h1>")
+  _write_file(client, auth, project, "style.css", "h1 {}")
+  created = client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+  asyncio.run(project_builders.run_build(project["id"], "site"))
+  built = _artifact(client, auth, project["id"], "site")
+  assert (built["status"], built["out_of_date"]) == ("ok", False)
+
+  # A dependency, not just the entry file, makes the built output stale.
+  current = client.get(
+    f"/api/projects/{project['id']}/file?path=style.css", headers=auth,
+  ).json()["revision"]
+  edited = client.put(
+    f"/api/projects/{project['id']}/file?path=style.css", headers=auth,
+    json={"content": "h1 { color: red }", "expected_revision": current},
+  )
+  assert edited.status_code == 200, edited.text
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is True
+
+  asyncio.run(project_builders.run_build(project["id"], "site"))
+  assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+
+def test_source_fingerprint_ignores_build_outputs_and_git(tmp_path):
+  (tmp_path / "main.tex").write_text("x")
+  before = project_builders.source_fingerprint(tmp_path)
+  (tmp_path / "artifacts" / "doc" / "output").mkdir(parents=True)
+  (tmp_path / "artifacts" / "doc" / "output" / "main.pdf").write_text("pdf")
+  (tmp_path / ".git").mkdir()
+  (tmp_path / ".git" / "HEAD").write_text("ref")
+  assert project_builders.source_fingerprint(tmp_path) == before
+  (tmp_path / "chapter.tex").write_text("y")
+  assert project_builders.source_fingerprint(tmp_path) != before
+
+
+@pytest.mark.parametrize("interruption", ["cancel", "failure"])
+def test_interrupted_rebuild_keeps_last_good_output_and_allows_retry(
+  client, auth, db, monkeypatch, interruption,
+):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Last good</h1>")
+  created = client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+  events = []
+  monkeypatch.setattr(
+    project_builders, "_publish_build_event",
+    lambda project_id, artifact_id, status: events.append(status),
+  )
+
+  async def copy_builder(*, root, source, output_dir, log_path):
+    (output_dir / source).write_text((root / source).read_text())
+
+  async def scenario():
+    monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+    await project_builders.start_build(project["id"], "site")
+    row = db.get(models.Project, project["id"])
+    db.refresh(row)
+    fingerprint = row.artifacts_json[0]["built_fingerprint"]
+    root = Path(os.environ["DATA_DIR"]) / row.root_path
+    output = root / "artifacts" / "site" / "output" / "index.html"
+    (root / "index.html").write_text("<h1>New source</h1>")
+    started = asyncio.Event()
+    release = asyncio.Event()
+    staged_outputs = []
+
+    async def interrupted_builder(*, root, source, output_dir, log_path):
+      staged_outputs.append(output_dir)
+      (output_dir / source).write_text("unfinished replacement")
+      started.set()
+      await release.wait()
+      raise RuntimeError("synthetic builder failure")
+
+    monkeypatch.setitem(project_builders.BUILDERS, "website", interrupted_builder)
+    task = project_builders.start_build(project["id"], "site")
+    try:
+      await asyncio.wait_for(started.wait(), timeout=5)
+      assert project_builders.start_build(project["id"], "site") is task
+      assert project_builders.is_build_live(project["id"], "site")
+      assert output.read_text() == "<h1>Last good</h1>"
+      if interruption == "cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+          await task
+      else:
+        release.set()
+        await task
+    finally:
+      if not task.done():
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+          await task
+
+    assert not project_builders.is_build_live(project["id"], "site")
+    assert all(not path.exists() for path in staged_outputs)
+    assert output.read_text() == "<h1>Last good</h1>"
+    db.refresh(row)
+    assert row.artifacts_json[0]["status"] == "error"
+    assert row.artifacts_json[0]["built_fingerprint"] == fingerprint
+    assert events == ["building", "ok", "building", "error"]
+
+    monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+    retry = project_builders.start_build(project["id"], "site")
+    assert retry is not task
+    await retry
+    assert output.read_text() == "<h1>New source</h1>"
+    assert not list(output.parent.parent.glob(".build-*"))
+    assert events[-2:] == ["building", "ok"]
+
+  asyncio.run(scenario())
+  current = _artifact(client, auth, project["id"], "site")
+  assert (current["status"], current["has_output"], current["out_of_date"]) == (
+    "ok", True, False,
+  )
+
+
+def test_source_edit_during_build_leaves_successful_output_out_of_date(
+  client, auth, db, monkeypatch,
+):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Original</h1>")
+  created = client.post(
+    f"/api/projects/{project['id']}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+
+  async def scenario():
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_builder(*, root, source, output_dir, log_path):
+      original = (root / source).read_text()
+      started.set()
+      await release.wait()
+      (output_dir / source).write_text(original)
+
+    monkeypatch.setitem(project_builders.BUILDERS, "website", delayed_builder)
+    task = project_builders.start_build(project["id"], "site")
+    try:
+      await asyncio.wait_for(started.wait(), timeout=5)
+      row = db.get(models.Project, project["id"])
+      root = Path(os.environ["DATA_DIR"]) / row.root_path
+      # An agent can edit the source while the provider is building it.
+      (root / "index.html").write_text("<h1>Changed during build</h1>")
+      release.set()
+      await task
+      output = root / "artifacts" / "site" / "output" / "index.html"
+      assert output.read_text() == "<h1>Original</h1>"
+    finally:
+      if not task.done():
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+          await task
+
+  asyncio.run(scenario())
+  current = _artifact(client, auth, project["id"], "site")
+  assert (current["status"], current["has_output"], current["out_of_date"]) == (
+    "ok", True, True,
+  )

@@ -73,7 +73,7 @@ def test_cancellation_during_spawn_reaps_the_admitted_process(
   processes = []
 
   async def cancel_during_spawn(*args, **kwargs):
-    chat_waits.cancel_wait(db, command_wait)
+    await asyncio.to_thread(chat_waits.cancel_wait, db, command_wait)
     process = await real_spawn(*args, **kwargs)
     processes.append(process)
     return process
@@ -144,7 +144,9 @@ def test_timeout_reaps_children_after_the_shell_has_exited(tmp_path, monkeypatch
     try:
       with open(f"/proc/{child_pid}/stat") as stat:
         return stat.read().split()[2]
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+      # The child can be reaped between open() and read(); then read() fails
+      # with ESRCH instead of open() failing with ENOENT.
       return "gone"
 
   # An adopted zombie may await the container's init; it must not be running.

@@ -161,6 +161,36 @@ def real_end_orphaned_hosts(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def idle_storage_guard(monkeypatch):
+  """Keep the app lifespan's storage guard from acting on the real machine.
+
+  A real guard would allocate a 256 MiB recovery reserve in each test's data
+  directory and, on a low volume, stop agent commands outside the test. The
+  supervisor still owns a live task, so readiness is unchanged; the guard's
+  own tests drive ``tick`` directly.
+  """
+  import asyncio
+  from app import storage_guard
+
+  async def idle(self):
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr(storage_guard.StorageGuard, "run", idle)
+
+
+@pytest.fixture
+def allow_local_test_remotes(monkeypatch):
+  """For tests that stand in for GitHub with local bare repositories.
+
+  Production contribution Git allows only https. Only the test modules that
+  need local remotes opt in, so the rest of the suite would catch production
+  code that relied on local transport.
+  """
+  from app import github_contribution_git
+  monkeypatch.setattr(github_contribution_git, "_ALLOWED_PROTOCOLS", "https:file")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_git_env(monkeypatch, tmp_path, tmp_path_factory):
   """Keep the per-app-git tests' `git` subprocesses hermetic.
 
@@ -365,7 +395,7 @@ def fresh_db():
   restart_util_mod._RESTART_ADMITTED = False
   chat_mod._clear_after_terminal_generation.clear()
   chat_mod._clear_after_terminal_status.clear()
-  chat_mod._restart_draining_chats.clear()
+  chat_mod._park_handoffs.clear()
   chat_mod._next_limit_auto_resume_at = 0.0
   bc_mod._broadcasts.clear() if hasattr(bc_mod, "_broadcasts") else None
   # Activity log: clear the per-process debounce cache and delete any
@@ -487,7 +517,9 @@ def owner_token(client):
   with `sub='test'`; keeping the username aligned avoids 401s on
   download endpoints that look up the owner by sub.
   """
-  r = client.post("/api/auth/setup", json={
+  from app import setup_code
+
+  r = client.post("/api/auth/setup", json={"setup_code": setup_code.current(),
     "username": "test",
     "password": "testpassword123",
   })
@@ -615,3 +647,25 @@ def pytest_sessionfinish(session):
     return
   record = {path: round(seconds, 1) for path, seconds in sorted(_recorded_weights.items())}
   _SHARD_WEIGHTS.write_text(_json.dumps(record, indent=2) + "\n")
+
+
+@pytest.fixture(autouse=True)
+def service_catalogue_snapshot(monkeypatch):
+  """Tests start with known service metadata, never a real broker request.
+
+  Discovery tests instantiate a fresh provider to exercise cold/offline paths.
+  The fixture replaces the removed production static catalogue, not discovery.
+  """
+  import json
+  from app import providers
+  from app.mobius_catalogue import parse_catalogue
+  provider = providers.MobiusProvider()
+  declaration = parse_catalogue(json.loads(
+    (Path(__file__).parent / "fixtures" / "mobius_catalogue.json").read_text()
+  ))
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  monkeypatch.setitem(providers.DEFAULT_MODELS, "mobius", declaration["default_model"])
+  monkeypatch.setitem(providers.DEFAULT_BACKGROUND_MODELS, "mobius", declaration["default_model"])
+  provider._publish_catalogue(declaration)
+  yield
+  providers._model_registry_cache.pop("mobius", None)

@@ -65,6 +65,9 @@ test('precache versions match the package graph and the shell has one bitmap log
   assert.match(dockerfile, new RegExp(`pdfjs@${PDFJS_ASSET_VERSION}`))
   assert.match(dockerfile, new RegExp(`katex@${KATEX_ASSET_VERSION}`))
   assert.equal(publicLogo.toString('hex', 0, 8), '89504e470d0a1a0a')
+  // The logo is fetched during first boot (favicon, sign-in, empty chat). Keep
+  // it sized for its largest 96px use at 3x rather than a source-size export.
+  assert.ok(publicLogo.length < 40_000, `logo is ${publicLogo.length} bytes`)
   assert.equal(existsSync(publicSvgLogo), false)
   assert.equal(existsSync(bundledSvgLogo), false)
   assert.equal(existsSync(bundledPngLogo), false)

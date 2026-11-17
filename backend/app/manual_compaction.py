@@ -58,7 +58,9 @@ def evidence_reference(chat_id: str, count: int) -> str:
 
 def _matches_source(db, chat, state: dict) -> bool:
   from app.run_state import has_nonterminal_run
-  if (chat is None or chat.deleted_at is not None or chat.pending_messages
+  from app.continuations import has_runnable_pending
+  if (chat is None or chat.deleted_at is not None
+      or has_runnable_pending(chat.pending_messages)
       or chat.pending_question_id or has_nonterminal_run(db, chat.id)):
     return False
   return source_identity(chat, transcript_rows.read_all(db, chat), _note(chat.id)) == state["source"]
@@ -185,7 +187,9 @@ async def compact_batch(chat_id: str, body, db):
     existing = db.get(models.ChatCompactionDraft, recovery_id)
     if existing is not None and existing.chat_id == chat_id and body.batch_id in existing.state["batch_ids"]:
       return {"ok": existing.state["status"] == "complete", "progress": progress(existing, db, chat)}
-    if (chat.pending_messages or chat.pending_question_id or has_nonterminal_run(db, chat_id)
+    from app.continuations import has_runnable_pending
+    if (has_runnable_pending(chat.pending_messages) or chat.pending_question_id
+        or has_nonterminal_run(db, chat_id)
         or not registry.mark_starting(chat_id)):
       raise HTTPException(409, "Chat is busy — finish or stop the current turn before compacting.")
     generation = registry.current_generation(chat_id)

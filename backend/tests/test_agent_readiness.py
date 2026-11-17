@@ -9,11 +9,12 @@ from app.agent_readiness import agent_readiness
 from app.startup import DatabaseBootResult
 
 
-def _status(disk="normal", memory="normal"):
+def _status(disk="normal", memory="normal", processes="normal"):
   return {
     "pressure": {
       "disk": {"state": disk},
       "memory": {"state": memory},
+      "processes": {"state": processes},
     },
   }
 
@@ -22,6 +23,7 @@ def _readiness(
   *,
   disk="normal",
   memory="normal",
+  processes="normal",
   writable=None,
   writer=(True, None),
   providers=None,
@@ -33,7 +35,7 @@ def _readiness(
   return agent_readiness(
     "/data",
     boot_degraded=boot_degraded,
-    status_reader=lambda _data_dir: _status(disk, memory),
+    status_reader=lambda _data_dir: _status(disk, memory, processes),
     writer_readiness_reader=lambda: writer,
     provider_report_reader=lambda _data_dir: dict(providers),
     provenance_reader=lambda _data_dir: {"state": provenance},
@@ -95,6 +97,17 @@ def test_constrained_memory_warns_without_blocking():
   result = _readiness(memory="constrained")
   assert result["ready"] is True
   assert result["warning_codes"] == [ar.CODE_MEMORY_CONSTRAINED]
+
+
+def test_process_headroom_blocks_at_critical_and_warns_when_constrained():
+  """Admission holds new turns at the critical task count; report it here too."""
+  critical = _readiness(processes="critical")
+  assert critical["ready"] is False
+  assert critical["reason_codes"] == [ar.CODE_PROCESSES_CRITICAL]
+  constrained = _readiness(processes="constrained")
+  assert constrained["ready"] is True
+  assert constrained["warning_codes"] == [ar.CODE_PROCESSES_CONSTRAINED]
+  assert _readiness(processes="unknown")["warning_codes"] == []
 
 
 def test_provider_connection_state_is_advisory():
