@@ -27,6 +27,7 @@
   color: var(--text);
   box-shadow: 0 16px 44px rgba(0, 0, 0, 0.3);
 }
+.helper-convo:focus { outline: none; } /* focused only by a click inside, never by Tab */
 .helper-convo__head {
   display: flex;
   align-items: flex-start;

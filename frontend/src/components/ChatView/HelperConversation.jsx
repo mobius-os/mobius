@@ -98,6 +98,9 @@ export default function HelperConversation({
         ref={dialogRef}
         className="helper-convo"
         role="dialog"
+        // Focusable but not a tab stop: a click on the transcript keeps focus
+        // inside, so Escape still closes this non-modal preview.
+        tabIndex={-1}
         aria-modal={host ? undefined : true}
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}

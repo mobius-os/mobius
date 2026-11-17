@@ -184,6 +184,24 @@ test('narrowing the pane never blocks a chat panel opened over the docked previe
   assert.ok(document.activeElement === summaryClose, 'focus stays in the summary')
 })
 
+for (const width of [1200, 900]) {
+  test(`Escape closes a ${width >= 1000 ? 'docked' : 'narrow'} preview after a click inside its transcript`, async t => {
+    const listeners = new Set()
+    t.mock.method(document, 'addEventListener', (type, listener) => { if (type === 'keydown') listeners.add(listener) })
+    t.mock.method(document, 'removeEventListener', (type, listener) => { listeners.delete(listener) })
+    const { pane } = mountPane(width, { transcript: [helper('one', 'Survey')] })
+    click(rowNamed(pane, 'Survey'))
+    await flush()
+    const dialog = dialogs()[0]
+    // A click on non-interactive text focuses the nearest focusable ancestor.
+    assert.equal(dialog.getAttribute('tabindex'), '-1', 'the dialog itself can hold focus without being a tab stop')
+    dialog.focus()
+    const event = { key: 'Escape', target: document.activeElement, shiftKey: false, preventDefault() {} }
+    act(() => { for (const listener of [...listeners]) listener(event) })
+    assert.equal(dialogs().length, 0)
+  })
+}
+
 // A local dialog in another workspace pane, standing in for any pane-scoped
 // dialog (an update review, an image lightbox).
 function PaneDialog({ onClose }) {
