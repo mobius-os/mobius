@@ -285,9 +285,7 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
     return write_agent_settings(data_dir, settings)
 
 
-def _model_belongs_to_other_provider(
-  model: str, provider: str, *, include_discovered: bool = True,
-) -> bool:
+def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
   """True when another provider owns `model` and `provider` does not.
 
   Ownership is the (provider, model) pair: an id that two providers both list
@@ -295,12 +293,10 @@ def _model_belongs_to_other_provider(
   valid for each of them. Use this to reject cross-provider mismatches without
   blocking unknown / future model names — the SDK is the authority on what it
   accepts; we only intercept sending a Codex model to Claude or vice versa."""
-  if model in known_model_ids(provider, include_discovered=include_discovered):
+  if model in known_model_ids(provider):
     return False
   for p in PROVIDERS:
-    if p != provider and model in known_model_ids(
-      p, include_discovered=include_discovered,
-    ):
+    if p != provider and model in known_model_ids(p):
       return True
   return False
 
@@ -1244,9 +1240,11 @@ class MobiusProvider(BaseProvider):
     ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
     # Built-in and app-declared ids only: Claude or Codex later discovering
     # one of these ids shares it by (provider, model); it is not a collision
-    # that should discard the whole catalogue.
-    if any(_model_belongs_to_other_provider(mid, "mobius", include_discovered=False)
-           for mid in ids):
+    # that should discard the whole catalogue. The current Möbius declaration
+    # is what this replaces, so it grants no ownership here.
+    claimed = {mid for pid in PROVIDERS if pid != "mobius"
+               for mid in known_model_ids(pid, include_discovered=False)}
+    if any(mid in claimed for mid in ids):
       raise ValueError("Möbius catalogue collides with another provider")
     return declaration
 
