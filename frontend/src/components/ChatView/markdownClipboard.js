@@ -1,3 +1,4 @@
+import { replaceMarkdownSelection } from './textEditor.js'
 /** Clipboard contract for rendered chat prose: replies and owner messages.
  *
  * Copy keeps native selection, but replaces the clipboard payload with two
@@ -521,6 +522,7 @@ export function insertClipboardText(value, selectionStart, selectionEnd, text) {
  * Formatting shortcuts reuse the same edit; `onInserted` runs right after a
  * native insert so they can select the text the owner will type over. */
 export function queueClipboardTextUndoably(textarea, text, onRejected, onInserted) {
+  if (replaceMarkdownSelection(textarea, text)) { onInserted?.(); return true }
   const document = textarea?.ownerDocument
   const queueMicrotask = document?.defaultView?.queueMicrotask
   if (

@@ -207,6 +207,16 @@ def resolve_background_chat_choice(
     data_dir, db, prefer_provider=prefer_provider,
   )
   provider = str(choice["provider"])
+  if provider == "mobius" and not providers.PROVIDERS["mobius"].declaration["models"]:
+    # A scheduled run may precede the first picker read after a restart.
+    # This synchronous resolver already probes provider availability; hydrate
+    # only this cold service catalogue, never unrelated connected providers.
+    import httpx
+    try:
+      providers.PROVIDERS["mobius"]._refresh_catalogue(data_dir)
+    except (OSError, ValueError, httpx.HTTPError) as exc:
+      if not providers.PROVIDERS["mobius"].declaration["models"]:
+        raise RuntimeError("Möbius model catalogue is unavailable; no background model was selected") from exc
   # A background choice with no pinned model means the provider's background
   # default, not the interactive model currently stored in owner settings.
   model = choice.get("model") or providers.DEFAULT_BACKGROUND_MODELS.get(provider)

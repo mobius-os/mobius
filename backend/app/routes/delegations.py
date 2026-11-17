@@ -33,6 +33,7 @@ from app.delegations import (
   normalize_cwd,
   parent_root_run_id,
   delegation_source_work_id,
+  humanize_task_key,
   _parent_wake_continuation_root,
   parent_wake_blocker,
   publish_parent_waiting_changed,
@@ -64,6 +65,10 @@ class DelegationSubmit(BaseModel):
   # An older app may send this field. Reject read, never silently promote it.
   scope: Literal["write"] | None = None
   cwd: str | None = Field(default=None, max_length=1024)
+  # What the owner reads for this helper; task_key stays its identity. It is
+  # stored as the helper's chat title, so it is bounded by that column. The
+  # stored copy only collapses whitespace, so it never exceeds this bound.
+  title: str | None = Field(default=None, max_length=256)
   # The parent Goal plan task this helper works on; omitted means the plan's
   # single running task, if there is exactly one.
   plan_task: str | None = Field(default=None, min_length=1, max_length=128)
@@ -221,6 +226,8 @@ async def submit_or_attach(
     ).first()
     if app is None:
       raise HTTPException(status_code=404, detail="Delegation owner app not found.")
+  if body.provider == "mobius":
+    await providers._fetch_model_entries(get_settings().data_dir, "mobius")
   if body.model and providers._model_belongs_to_other_provider(
     body.model, body.provider,
   ):
@@ -320,6 +327,7 @@ async def submit_or_attach(
       cwd=cwd,
       notify_parent_on_complete=body.notify_parent_on_complete,
       browser_grant_id=principal.browser_grant_id,
+      title=body.title,
     )
     try:
       row, attached = create_or_attach_delegation(db, intent)
@@ -399,6 +407,9 @@ async def delegation_capabilities(
       "error": error,
     }
   registry = await providers.list_models(get_settings().data_dir)
+  snapshot = providers.PROVIDERS["mobius"].registry_snapshot()
+  if "mobius" in registry:
+    registry["mobius"] = snapshot["models"]
   models_by_provider = {
     provider_id: [
       {"id": entry["id"], "name": entry["label"]}
@@ -424,7 +435,8 @@ async def delegation_capabilities(
     "connections": connections,
     "models": models_by_provider,
     "aliases": aliases,
-    "defaults": providers.DEFAULT_MODELS,
+    "defaults": {**providers.DEFAULT_MODELS, "mobius": snapshot["default"]},
+    "replacements": {"mobius": snapshot["replacements"]},
   }
 
 
@@ -753,7 +765,7 @@ async def message_delegation(
       db.commit()
       started = await start_programmatic_chat_turn(
         chat_id=row.child_chat_id,
-        title=f"Delegation · {row.task_key}",
+        title=humanize_task_key(row.task_key),
         content=body.message,
         provider=row.provider,
         initiated_by_app_id=row.app_id,

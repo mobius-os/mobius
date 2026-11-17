@@ -355,7 +355,7 @@ def test_real_gh_graphql_nullable_mutation_refusal_is_definite(tmp_path, monkeyp
   fake = fake_bin / "gh"
   fake.write_text("#!/bin/sh\necho '{\"errors\":[{\"type\":\"UNPROCESSABLE\",\"path\":[\"enqueuePullRequest\"],\"message\":\"not queueable\"}],\"data\":{\"enqueuePullRequest\":null}}'\nexit 1\n")
   fake.chmod(0o755)
-  monkeypatch.setattr(transport, "_git_env", lambda _cwd: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
+  monkeypatch.setattr(transport, "_git_env", lambda _cwd, **_k: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
   with pytest.raises(NotDispatched):
     domain.enqueue(transport._gh, tmp_path, TARGET)
 
@@ -456,7 +456,7 @@ def test_real_gh_graphql_5xx_no_data_remains_unknown(tmp_path, monkeypatch):
   fake = fake_bin / "gh"
   fake.write_text("#!/bin/sh\necho '{\"errors\":[{\"type\":\"INTERNAL\",\"message\":\"may be timeout\"}],\"data\":null}'\necho 'gh: HTTP 503: unavailable' >&2\nexit 1\n")
   fake.chmod(0o755)
-  monkeypatch.setattr(transport, "_git_env", lambda _cwd: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
+  monkeypatch.setattr(transport, "_git_env", lambda _cwd, **_k: {"PATH": str(fake_bin) + ":/usr/bin:/bin"})
   with pytest.raises(ContributionSubmitError) as uncertain:
     domain.enqueue(transport._gh, tmp_path, TARGET)
   assert classify_dispatch_error(uncertain.value).state == "unknown"

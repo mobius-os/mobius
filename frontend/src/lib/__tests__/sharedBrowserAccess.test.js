@@ -154,6 +154,21 @@ test('account finalization is document-local, URL-stripped, and distinct from in
   }
 })
 
+test('leaving is its own admission, never a sign-in', () => {
+  const history = { replaceState: () => {} }
+  assert.deepEqual(
+    consumeSharedBrowserEntry({ hash: '#account-leave=flow-9', pathname: '/shell/shared', search: '' }, history),
+    { kind: 'leave', value: 'flow-9' },
+  )
+  assert.deepEqual(
+    consumeSharedBrowserEntry({ hash: '#account-left=flow-9', pathname: '/shell/shared', search: '' }, history),
+    { kind: 'left', value: 'flow-9' },
+  )
+  for (const hash of ['#account-leave', '#account-leave=x&account-finalize=y', '#account-leave=x&account-leave=y', '#account-leave=x&account-left=x']) {
+    assert.deepEqual(consumeSharedBrowserEntry({ hash, pathname: '/shell/shared', search: '' }, history), { kind: 'invalid' })
+  }
+})
+
 test('workspace storage is owner origin storage, or one grant store for a guest', () => {
   const oldLocation = globalThis.location
   const ownerLocal = { getItem: () => 'owner' }
