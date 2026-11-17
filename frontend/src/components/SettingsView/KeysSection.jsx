@@ -84,18 +84,19 @@ function QuietRow({ children }) {
 
 // -- overview row and the Keys page -----------------------------------------
 
-const SUMMARY_NAMES = 3
-
-/** The overview row's two lines, from the key list (null while it loads). */
+/**
+ * The overview row's two lines, from the key list (null while it loads).
+ * Key names stay on the Keys page: the overview row shows only a count, so
+ * opening Settings never reveals which services the owner holds keys for.
+ */
 function summaryOf(data) {
   if (!data) return { title: 'Checking…', detail: 'Apps borrow a key without ever seeing it' }
   if (!data.available) return { title: "The key vault isn't running", detail: 'A restart usually brings it back' }
   const keys = data.keys || []
   if (keys.length === 0) return { title: 'No keys yet', detail: 'Apps borrow a key without ever seeing it' }
-  const title = keys.length <= SUMMARY_NAMES ? keys.map(key => key.name).join(', ') : `${keys.length} keys`
+  const title = `${keys.length} ${keys.length === 1 ? 'key' : 'keys'}`
   const lastUsed = keys.map(key => key.last_used).filter(Boolean).sort().at(-1)
-  const count = `${keys.length} ${keys.length === 1 ? 'key' : 'keys'}`
-  return { title, detail: lastUsed ? `${count} · last used ${relativeTime(lastUsed)}` : `${count} · not used yet` }
+  return { title, detail: lastUsed ? `Last used ${relativeTime(lastUsed)}` : 'Not used yet' }
 }
 
 /** Settings › Keys as one row, like Notifications elsewhere; the row opens the Keys page. */
