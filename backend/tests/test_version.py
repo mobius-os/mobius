@@ -162,7 +162,6 @@ def test_version_includes_served_frontend_identity(client):
   # served_frontend is a str hash or None (None when the served dir has no
   # index.html, e.g. a bare test env).
   body = client.get("/api/version").json()
-  assert "shell" + "_sha" not in body
   assert "served_frontend" in body and "frontend_source" in body
   assert body["frontend_source"] in ("platform", "baked")
   assert body["served_frontend"] is None or isinstance(

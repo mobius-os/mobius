@@ -441,12 +441,9 @@ def _fork_claude(
 
 
 def _load_codex_sdk() -> tuple[Any, Any, Any, Any, Any]:
-  """Load Codex through the platform's pinned wire-compatibility boundary."""
-  # The platform runner owns compatibility between the pinned Python SDK and
-  # the matching app-server wire format. Reuse that exact provider boundary
-  # here: importing the generated types directly can reject valid persisted
-  # history before ``thread/fork`` returns (notably the app-server's
-  # ``subAgentActivity(kind=completed)`` lifecycle marker).
+  """Load Codex through the platform's pinned SDK import boundary."""
+  # Reuse the runner's single SDK import contract so a fork uses the same
+  # provider types as a live chat.
   backend = str(Path(__file__).resolve().parents[1])
   if backend not in sys.path:
     sys.path.insert(0, backend)
