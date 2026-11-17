@@ -983,7 +983,9 @@ def _chat_detail_response(
   # that already ran keeps its committed provider.
   _has_assistant_turns = any(m.get("role") == "assistant" for m in coordinates)
   provider = (
-    providers.provider_of_model((settings_obj or {}).get("model"))
+    providers.provider_of_model(
+      (settings_obj or {}).get("model"), preferred=chat.provider or "claude",
+    )
     or (
       chat.provider or "claude"
       if _has_assistant_turns

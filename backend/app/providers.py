@@ -188,6 +188,10 @@ DEFAULT_EFFORT = "medium"
 # behavior if a deployment rolled back to an older binary.
 _LEGACY_GLOBAL_AUTO_RESUME_KEY = "auto_resume_on_limit"
 _AGENT_SETTINGS_LOCK = threading.RLock()
+# A sequence counter bumped under the lock before and after every in-process
+# settings write: odd while a write is in flight. A reader that sees the same
+# even value before and after its reads saw one revision without the lock.
+_agent_settings_revision = 0
 
 
 
@@ -281,14 +285,22 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
     return write_agent_settings(data_dir, settings)
 
 
-def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when `model` is a discovered or offline model for another provider.
-  Use this to reject cross-provider mismatches without blocking
-  unknown / future model names — the SDK is the authority on what
-  it accepts; we only intercept the specific failure mode of
-  sending a Codex model to Claude or vice versa."""
+def _model_belongs_to_other_provider(
+  model: str, provider: str, *, include_discovered: bool = True,
+) -> bool:
+  """True when another provider owns `model` and `provider` does not.
+
+  Ownership is the (provider, model) pair: an id that two providers both list
+  (an app provider accepted before Codex discovery listed the same id) stays
+  valid for each of them. Use this to reject cross-provider mismatches without
+  blocking unknown / future model names — the SDK is the authority on what it
+  accepts; we only intercept sending a Codex model to Claude or vice versa."""
+  if model in known_model_ids(provider, include_discovered=include_discovered):
+    return False
   for p in PROVIDERS:
-    if p != provider and model in known_model_ids(p):
+    if p != provider and model in known_model_ids(
+      p, include_discovered=include_discovered,
+    ):
       return True
   return False
 
@@ -377,17 +389,26 @@ def remember_recent_model(model_prefs: Any, model_id: str) -> dict:
   return prefs
 
 
-def known_model_ids(provider_id: str) -> list[str]:
+def known_model_ids(
+  provider_id: str, *, include_discovered: bool = True,
+) -> list[str]:
   """Accepted identities, including newly discovered native-provider models.
 
-  Catalog expiry and availability govern discovery, not ownership. Reuse the
-  last served catalog without I/O and keep offline identities when a live
-  catalog is partial. App providers retain their declaration as authority.
+  Catalog expiry and availability govern discovery, not ownership: the last
+  served catalog is reused without I/O, and offline identities stay when a
+  live catalog is partial. App providers retain their declaration as
+  authority. Discovery lives only in this process's memory, so after a
+  restart a discovered id is unknown here until the model list is fetched
+  again; meanwhile the provider saved on the chat, and the provider the
+  picker sends with every pick, carry the pair. ``include_discovered=False``
+  gives only the built-in and declared ids, which do not depend on timing.
   """
   provider = PROVIDERS.get(provider_id)
   if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return ([model["id"] for model in provider.declaration["models"]]
             + list(provider.declaration.get("replacements", {})))
+  if not include_discovered:
+    return list(KNOWN_MODELS.get(provider_id, []))
   cached = _model_registry_cache.get(provider_id)
   discovered = [entry["id"] for entry in cached[1]] if cached else []
   return list(dict.fromkeys([*KNOWN_MODELS.get(provider_id, []), *discovered]))
@@ -418,13 +439,17 @@ def write_agent_settings(data_dir: str, settings: dict) -> bool:
   caller is responsible for retry / re-marking the source as dirty
   so the mirror isn't silently lost.
   """
+  global _agent_settings_revision
   path = Path(data_dir) / "shared" / "agent-settings.json"
   with _AGENT_SETTINGS_LOCK:
+    _agent_settings_revision += 1
     try:
       atomic_write(path, json.dumps(settings, indent=2) + "\n")
       return True
     except OSError:
       return False
+    finally:
+      _agent_settings_revision += 1
 
 
 def update_agent_settings(data_dir: str, updater) -> bool:
@@ -580,17 +605,32 @@ def snapshot_owner_chat_choice(
 ) -> tuple[str, dict | None]:
   """Freeze provider and model from one picker revision for a new owner chat.
 
-  Picker writes use this same lock. Without the shared read boundary, a pick
-  between provider resolution and model snapshot can split a valid pair,
-  especially for a future model absent from the offline catalog.
+  A pick landing between provider resolution and the model snapshot would
+  split a valid pair, especially for a future model absent from the offline
+  catalog. Both reads therefore come from one settings revision. The app
+  registry refresh (a database read) and the provider sign-in checks stay
+  outside ``_AGENT_SETTINGS_LOCK``, which the async ``update_chat`` takes on
+  the event loop: the reads run unlocked and repeat if a pick landed between
+  them. Only a pick storm falls back to resolving under the lock.
   """
-  with _AGENT_SETTINGS_LOCK:
+  sync_app_model_providers(data_dir)
+
+  def resolve() -> tuple[str, dict | None]:
     provider = owner_default_provider(data_dir, configured_provider)
-    selection = snapshot_chat_agent_settings(
+    return provider, snapshot_chat_agent_settings(
       data_dir, provider,
       fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
     )
-    return provider, selection
+
+  for _ in range(3):
+    revision = _agent_settings_revision
+    if revision % 2:
+      continue
+    choice = resolve()
+    if revision == _agent_settings_revision:
+      return choice
+  with _AGENT_SETTINGS_LOCK:
+    return resolve()
 
 
 def _background_default_choice(
@@ -1202,7 +1242,11 @@ class MobiusProvider(BaseProvider):
     from app.mobius_catalogue import parse_catalogue
     declaration = parse_catalogue(payload)
     ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
-    if any(_model_belongs_to_other_provider(mid, "mobius") for mid in ids):
+    # Built-in and app-declared ids only: Claude or Codex later discovering
+    # one of these ids shares it by (provider, model); it is not a collision
+    # that should discard the whole catalogue.
+    if any(_model_belongs_to_other_provider(mid, "mobius", include_discovered=False)
+           for mid in ids):
       raise ValueError("Möbius catalogue collides with another provider")
     return declaration
 
@@ -1815,9 +1859,16 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
+  # Collisions are checked when a declaration is accepted. Built-in, Möbius and
+  # earlier app ids always collide. Claude/Codex discovery only blocks ids an
+  # app had not already been accepted with: discovery that later lists the same
+  # id shares it by (provider, model) rather than evicting a live provider and
+  # orphaning its chats.
   claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
-  for provider_id in ("mobius", "claude", "codex"):
-    claimed_models.update(known_model_ids(provider_id))
+  claimed_models.update(known_model_ids("mobius"))
+  discovered_models: set[str] = set()
+  for provider_id in ("claude", "codex"):
+    discovered_models.update(known_model_ids(provider_id))
   for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
@@ -1829,12 +1880,20 @@ def _apply_app_model_declarations(
     if not isinstance(models, list) or not models:
       continue
     model_ids = [row.get("id") for row in models if isinstance(row, dict)]
-    if len(model_ids) != len(models) or any(mid in claimed_models for mid in model_ids):
+    current = PROVIDERS.get(provider_id)
+    accepted = (
+      set(known_model_ids(provider_id))
+      if provider_id in _app_provider_ids and isinstance(current, AppModelProvider)
+      else set()
+    )
+    if len(model_ids) != len(models) or any(
+      mid in claimed_models or (mid in discovered_models and mid not in accepted)
+      for mid in model_ids
+    ):
       _model_registry_log.warning("app model provider %s has colliding model ids", provider_id)
       continue
     next_ids.add(provider_id)
     claimed_models.update(model_ids)
-    current = PROVIDERS.get(provider_id)
     if (not isinstance(current, AppModelProvider) or current.declaration != declaration
         or current.consent_scope != consent_scope):
       PROVIDERS[provider_id] = AppModelProvider(app_id, declaration, consent_scope)
@@ -1942,12 +2001,20 @@ def resolve_default_provider(
   return provider_id
 
 
-def provider_of_model(model: str | None) -> str | None:
-  """The provider a model id belongs to, or None for unknown/blank ids."""
+def provider_of_model(
+  model: str | None, *, preferred: str | None = None,
+) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids.
+
+  ``preferred`` (a chat's saved provider or the picker's mirrored one) wins
+  when it also owns the id, so a shared id keeps its (provider, model) pair.
+  """
   from app.config import get_settings
   sync_app_model_providers(get_settings().data_dir)
   if not isinstance(model, str) or not model:
     return None
+  if isinstance(preferred, str) and preferred in PROVIDERS and model in known_model_ids(preferred):
+    return preferred
   for provider_id in PROVIDERS:
     if model in known_model_ids(provider_id):
       return provider_id
@@ -1990,7 +2057,7 @@ def owner_default_provider(
   """
   settings = _load_agent_settings(data_dir)
   model = settings.get("model")
-  prov = provider_of_model(model)
+  prov = provider_of_model(model, preferred=settings.get("provider"))
   if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")

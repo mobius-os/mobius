@@ -289,7 +289,7 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   # rejects the turn. Ordinary newly-created owner chats carry no per-chat
   # model, so they still follow the latest owner selection below.
   chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
-  explicit_provider = provider_of_model(chat_settings.get("model"))
+  explicit_provider = provider_of_model(chat_settings.get("model"), preferred=provider)
   if explicit_provider is not None:
     return explicit_provider
   # StartTurn alone re-reads the owner's latest provider for a pristine owner

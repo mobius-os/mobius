@@ -44,30 +44,69 @@ def test_unknown_models_still_belong_to_the_explicit_provider(tmp_path, monkeypa
   )["model"] == model
 
 
-def test_new_chat_choice_excludes_a_concurrent_picker_write(tmp_path, monkeypatch):
+def test_new_chat_choice_never_splits_a_concurrent_picker_write(tmp_path, monkeypatch):
+  data_dir = str(tmp_path)
   path = tmp_path / "shared" / "agent-settings.json"
   path.parent.mkdir()
-  path.write_text(json.dumps({"provider": "codex", "model": "new-undiscovered-id"}))
+  path.write_text(json.dumps({"provider": "claude", "model": "old-undiscovered-id"}))
   original = providers.owner_default_provider
-  lock_results = []
+  calls = []
 
-  def concurrent_writer():
-    acquired = providers._AGENT_SETTINGS_LOCK.acquire(blocking=False)
-    lock_results.append(acquired)
-    if acquired:
-      providers._AGENT_SETTINGS_LOCK.release()
-
-  def resolve_and_attempt_write(*args):
+  def resolve_then_pick(*args):
     provider = original(*args)
-    # The exact window between provider resolution and model snapshot.
-    with ThreadPoolExecutor(max_workers=1) as pool:
-      pool.submit(concurrent_writer).result()
+    calls.append(provider)
+    if len(calls) == 1:
+      # A real pick from another thread lands between provider resolution and
+      # the model snapshot; the first read pair is torn and must be retried.
+      with ThreadPoolExecutor(max_workers=1) as pool:
+        assert pool.submit(providers.write_agent_settings, data_dir, {
+          "provider": "codex", "model": "new-undiscovered-id",
+        }).result()
     return provider
 
-  monkeypatch.setattr(providers, "owner_default_provider", resolve_and_attempt_write)
-  provider, settings = providers.snapshot_owner_chat_choice(str(tmp_path), "claude")
-  assert lock_results == [False]
+  monkeypatch.setattr(providers, "owner_default_provider", resolve_then_pick)
+  provider, settings = providers.snapshot_owner_chat_choice(data_dir, "claude")
+  assert calls == ["claude", "codex"]
   assert (provider, settings["model"]) == ("codex", "new-undiscovered-id")
+
+
+def test_new_chat_choice_refreshes_apps_outside_the_settings_lock(tmp_path, monkeypatch):
+  held = []
+
+  def record_sync(*_args, **_kwargs):
+    acquired = providers._AGENT_SETTINGS_LOCK.acquire(blocking=False)
+    if acquired:
+      providers._AGENT_SETTINGS_LOCK.release()
+    # Acquired from another thread proves no thread holds the lock here.
+    held.append(not acquired)
+
+  def sync_from_other_thread(*args, **kwargs):
+    with ThreadPoolExecutor(max_workers=1) as pool:
+      pool.submit(record_sync, *args, **kwargs).result()
+
+  monkeypatch.setattr(providers, "sync_app_model_providers", sync_from_other_thread)
+  providers.snapshot_owner_chat_choice(str(tmp_path), "claude")
+  assert held and not any(held)
+
+
+def test_same_provider_pick_on_a_disconnected_provider_is_refused(
+  client, auth, chat, db, monkeypatch,
+):
+  # The picker now sends the provider with every pick, so a same-provider pick
+  # gets the same sign-in check as a switch instead of saving a dead choice.
+  monkeypatch.setattr(
+    providers.ClaudeProvider, "check_auth", lambda self, d: "not signed in",
+  )
+  before = dict(chat.agent_settings_json or {})
+  response = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "provider": "claude",
+    "agent_settings_json": {"model": providers.KNOWN_MODELS["claude"][0]},
+  })
+  assert response.status_code == 409, response.text
+  assert "not connected" in response.json()["detail"]
+  db.refresh(chat)
+  assert chat.provider == "claude"
+  assert dict(chat.agent_settings_json or {}) == before
 
 
 def test_explicit_picker_pair_routes_a_new_model_with_a_cold_catalog(
@@ -168,3 +207,93 @@ def test_discovered_model_pick_cannot_bypass_existing_handoff(
   db.refresh(chat)
   assert chat.provider == "claude"
   assert (chat.agent_settings_json or {}).get("model") != discovered_models["codex"]
+
+
+def test_accepted_app_keeps_its_models_when_discovery_later_lists_them(
+  client, auth, chat, db, tmp_path, monkeypatch,
+):
+  from app import models
+  from app.app_capabilities import contract_from_manifest
+  from app.config import get_settings
+
+  for name in ("PROVIDERS", "DEFAULT_MODELS", "DEFAULT_BACKGROUND_MODELS",
+               "_model_registry_locks"):
+    monkeypatch.setattr(providers, name, dict(getattr(providers, name)))
+  monkeypatch.setattr(providers, "_app_provider_ids", set())
+  monkeypatch.setattr(providers, "_model_registry_cache", {})
+  shared = "shared-opaque-model"
+  app = models.App(
+    name="Example Models", slug="example-models", description="",
+    source_dir=str(tmp_path), capability_contract=contract_from_manifest({
+      "id": "example-models", "name": "Example Models", "version": "1.0.0",
+      "description": "Example", "entry": "index.jsx",
+      "model_provider": {
+        "name": "Example", "base_url": "https://models.example.invalid",
+        "secret_name": "api_key", "default_model": shared,
+        "models": [{"id": shared, "label": "Shared", "effort_levels": ["low"]}],
+      },
+    }),
+  )
+  db.add(app)
+  db.commit()
+  provider_id = f"app-{app.id}"
+  data_dir = get_settings().data_dir
+  providers.sync_app_model_providers(data_dir, force=True)
+  assert provider_id in providers.PROVIDERS
+  chat.provider = provider_id
+  chat.agent_settings_json = {"model": shared}
+  db.commit()
+
+  # Codex discovery later lists the same id. The accepted app keeps it, and
+  # the id is shared by (provider, model) rather than moved to Codex.
+  providers._model_registry_cache["codex"] = (
+    time.monotonic(), [{"id": shared, "available": True}],
+  )
+  providers.sync_app_model_providers(data_dir, force=True)
+  assert provider_id in providers.PROVIDERS
+  assert not providers._model_belongs_to_other_provider(shared, provider_id)
+  assert not providers._model_belongs_to_other_provider(shared, "codex")
+  assert providers.provider_of_model(shared, preferred=provider_id) == provider_id
+  assert providers.effective_agent_settings(
+    data_dir, {"model": shared}, provider=provider_id,
+  )["model"] == shared
+
+  response = client.patch(f"/api/chats/{chat.id}", headers=auth, json={
+    "agent_settings_json": {"model": shared},
+  })
+  assert response.status_code == 200, response.text
+  assert response.json()["provider"] == provider_id
+  detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert detail["provider"] == provider_id
+  db.refresh(chat)
+  assert chat.provider == provider_id
+
+  # A different app accepted only now still cannot claim the discovered id.
+  providers._apply_app_model_declarations([
+    *providers._read_app_model_declarations(),
+    (987654, {"models": [{"id": shared}], "default_model": shared}, ""),
+  ])
+  assert provider_id in providers.PROVIDERS
+  assert "app-987654" not in providers.PROVIDERS
+
+
+def test_mobius_catalogue_is_not_rejected_over_a_discovered_shared_id(monkeypatch):
+  from app.mobius_catalogue import parse_catalogue
+
+  monkeypatch.setattr(providers, "_model_registry_cache", {
+    "codex": (time.monotonic(), [{"id": "flow", "available": True}]),
+  })
+  catalogue = _mobius_catalogue_payload()
+  declaration = providers.MobiusProvider._validate_catalogue(catalogue)
+  assert declaration == parse_catalogue(catalogue)
+  with pytest.raises(ValueError, match="collides"):
+    providers.MobiusProvider._validate_catalogue(
+      _mobius_catalogue_payload(model_id=providers.KNOWN_MODELS["codex"][0]),
+    )
+
+
+def _mobius_catalogue_payload(model_id="flow"):
+  return {"contract_version": 1, "default_model": model_id, "data": [{
+    "id": model_id, "name": "Flow", "owned_by": "mobius", "context_window": 1000,
+    "effort_levels": ["low"], "input_modalities": ["text"], "default_effort": "low",
+  }]}
