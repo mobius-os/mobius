@@ -6,10 +6,13 @@ from the drawer's Recents to its Archived section and out of the recent-chat
 continuity new sessions receive. That is the difference from deletion, which
 ends the chat's work and starts a recovery window.
 
-Only the owner's own actions change the flag: the explicit archive/restore
-routes, and the owner sending a message into an archived chat (which restores
+Ordinary archive state changes belong to the owner's explicit archive/restore
+actions, and to the owner sending a message into an archived chat (which restores
 it, the way replying to an archived conversation brings it back elsewhere).
-Agent, helper, wait, and app activity deliberately leave the chat archived.
+Narrow completion owners may also file a resolver after its authoritative
+update transaction succeeds, or a chat explicitly opted into one-shot filing
+after successful Goal completion. Ordinary turns, failed or held Goals, agents,
+helpers, waits, and app activity do not archive a chat.
 """
 
 from app import drawer_pins, models
@@ -58,3 +61,26 @@ def restore_on_accepted_input(chat: models.Chat, requested: bool) -> None:
   """
   if requested and chat.archived_at is not None:
     chat.archived_at = None
+
+
+def stage_archive_after_goal_completion(db: Session, chat_id: str) -> models.Chat | None:
+  """Consume a one-shot opt-in in the successful Goal transaction.
+
+  Caller holds the drawer pin lock through commit and publishes afterward.
+  Nothing here marks a turn, failed Goal, or stopped Goal as success.
+  """
+  from app.chat_visibility import coerce_agent_settings
+
+  chat = db.get(models.Chat, chat_id)
+  if chat is None or chat.deleted_at is not None:
+    return None
+  settings = coerce_agent_settings(chat.agent_settings_json)
+  if settings.get("archive_on_goal_complete") is not True:
+    return None
+  settings.pop("archive_on_goal_complete")
+  chat.agent_settings_json = settings or None
+  if chat.archived_at is not None:
+    return None
+  chat.archived_at = now_naive_utc()
+  chat.pinned_at = None
+  return chat

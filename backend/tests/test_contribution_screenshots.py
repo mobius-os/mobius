@@ -22,6 +22,8 @@ from app.github_contributions import (
 from app.routes import contribution_relay
 from tests.test_contribution_staging import staging  # noqa: F401  (fixture)
 
+pytestmark = pytest.mark.usefixtures("allow_local_test_remotes")
+
 
 def _png(seed: int) -> bytes:
   """A tiny valid PNG whose pixel differs per seed."""
@@ -752,7 +754,7 @@ def test_a_fork_send_resolves_the_fork_once(submit, monkeypatch):
   monkeypatch.setattr(git_ops + "_normalize_head_attribution", lambda *_a, **_k: {})
   monkeypatch.setattr(
     github_contributions, "_push_topic_branch",
-    lambda *_a: submit["events"].append(("push", "fork")),
+    lambda *_a, **_k: submit["events"].append(("push", "fork")),
   )
   submit["send"]("octo-org/project")
   assert submit["events"].count("fork") == 1

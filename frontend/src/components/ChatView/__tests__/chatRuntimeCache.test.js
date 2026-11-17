@@ -156,3 +156,11 @@ test('a missing chat cache accepts the first runtime snapshot', () => {
   assert.equal(cache.updates(), 1)
   assert.deepEqual(cache.value(), { running: true })
 })
+
+
+test('runtime normalization retains the bounded Goal union even without background wake ownership', () => {
+  const value = { count: 0, items: [], with_goal: {
+    goal_id: 'goal', count: 1, items: [{ id: 'foreground-helper', status: 'running' }],
+  } }
+  assert.deepEqual(normalizeBackgroundHelpers(value), value)
+})
