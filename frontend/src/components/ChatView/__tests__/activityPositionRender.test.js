@@ -349,6 +349,8 @@ for (const isStreaming of [true, false]) {
       replyGroup: group, activeRowIndex: isStreaming ? 1 : -1,
       activeMirrorMsg: tail, activitySourceBlocks: tail.blocks,
       useDbActivePayload: true, isStreaming, chatId: 'reply-fixture',
+      // As ChatView passes an answer end: References sit in its footer.
+      footer: isStreaming ? 'working' : 'settled', stretchSourceRows: isStreaming ? null : [],
     }, { tools: new Map(), positions: new Map() })
     assert.ok(html.includes(answer), 'the suffix belongs to the original paragraph')
     assert.equal((html.match(/<p\b[^>]*>/g) || []).length, 1)
@@ -373,7 +375,8 @@ test('one reply owns its final References, including a folded source row', () =>
   _resetDisclosureStateForTests()
   persistDisclosureOpen('reply-fixture', `${tail.id}:references`, true)
   const html = render(Active, { replyGroup: group, activeRowIndex: -1,
-    activeMirrorMsg: folded, useDbActivePayload: true, chatId: 'reply-fixture' },
+    activeMirrorMsg: folded, useDbActivePayload: true, chatId: 'reply-fixture',
+    footer: 'settled', stretchSourceRows: [] },
   { tools: new Map(), positions: new Map() })
   assert.equal((html.match(/class="chat__reply"/g) || []).length, 1)
   assert.equal((html.match(/class="chat__sources(?: |")/g) || []).length, 1)

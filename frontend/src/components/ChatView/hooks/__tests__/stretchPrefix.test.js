@@ -1,4 +1,4 @@
-/* The chat's one footer copies the agent's whole stretch, even when it began
+/* An answer's footer copies the agent's whole stretch, even when it began
    before the loaded history page: the missing start is read page by page and
    the whole stretch is projected as the transcript shows it. */
 import assert from 'node:assert/strict'
