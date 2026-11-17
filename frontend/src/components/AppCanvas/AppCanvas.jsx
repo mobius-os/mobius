@@ -2129,10 +2129,12 @@ const AppCanvas = forwardRef(function AppCanvas({
             // host clipboard broker. The motion sensors (accelerometer,
             // gyroscope, magnetometer) let `devicemotion` and
             // `deviceorientation` events reach the app; unlike camera and
-            // location they carry no shell-owned permission grant. Pointer
+            // location they carry no shell-owned permission grant. `web-share *`
+            // lets an app open the device share sheet from a tap; the browser
+            // still requires that user gesture and shows its own sheet. Pointer
             // lock is a sandbox flag in the frame's response CSP (backend
             // `app_frame_csp`), not a feature.
-            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"
+            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *; web-share *"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />

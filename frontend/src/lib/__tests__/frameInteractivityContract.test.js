@@ -62,6 +62,10 @@ test('frame suspension cancels compositor momentum without changing the resting 
   assert.match(frame, /suspendedScrollFrame = window\.__mobiusNativeFrame\(holdSuspendedScroll\)/)
 })
 
+test('ordinary app frames may open the device share sheet from a tap', () => {
+  assert.match(canvas, /allow="[^"]*\bweb-share \*[^"]*"/)
+})
+
 const SHELL_ORIGIN = 'https://mobius.test'
 const searchShortcut = [{ actionId: 'search.open', binding: { key: 'k', mod: true } }]
 
