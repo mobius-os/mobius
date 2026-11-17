@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session
 
 from app import app_consent, auth, models, runtime_identity, schemas, setup_code
 from app.broadcast import get_system_broadcast
-from app.config import get_settings
+from app.config import _validated_origin, get_settings
 from app.database import get_db
 from app.deps import (
   Principal,
@@ -1161,6 +1161,31 @@ async def mobius_login_callback(
 # created them from the root broker's verified first-boot identity.
 
 
+def _mobius_pinned_issuer() -> str:
+  """Return the only issuer that may receive a verifier or mint a receipt.
+
+  The environment cannot move this off the canonical issuer, with one
+  exception: an instance deployed by a launcher may be pointed at that same
+  launcher, whose validated origin already receives its managed credential.
+  """
+  settings = get_settings()
+  configured = os.environ.get("MOBIUS_IDENTITY_ISSUER", "").strip()
+  if settings.mobius_sso_enabled and secrets.compare_digest(configured.rstrip("/"), settings.mobius_sso_issuer):
+    return settings.mobius_sso_issuer
+  if configured:
+    try:
+      configured = _validated_origin(configured, "MOBIUS_IDENTITY_ISSUER")
+    except ValueError:
+      return _MOBIUS_IDENTITY_ISSUER
+  if (
+    settings.mobius_sso_enabled
+    and configured
+    and secrets.compare_digest(configured, settings.mobius_sso_issuer)
+  ):
+    return settings.mobius_sso_issuer
+  return _MOBIUS_IDENTITY_ISSUER
+
+
 def _mobius_authorization_issuer() -> str:
   """Return the browser-facing issuer, with an override for test redirects."""
   return os.environ.get(
@@ -1262,7 +1287,7 @@ def _validate_mobius_receipt_claims(receipt: str, pending: dict) -> dict:
       and isinstance(pending["instance_id"], str)
       and secrets.compare_digest(instance_id, pending["instance_id"])
       and isinstance(claims["iss"], str)
-      and secrets.compare_digest(claims["iss"], _MOBIUS_IDENTITY_ISSUER)
+      and secrets.compare_digest(claims["iss"], _mobius_pinned_issuer())
       and claims["aud"] == _MOBIUS_RECEIPT_AUDIENCE
       and float(claims["exp"]) > time.time()
     )
@@ -1279,11 +1304,11 @@ async def _exchange_mobius_receipt(
   """Exchange a one-use code at the pinned issuer and validate its receipt."""
   if not code:
     raise ValueError("authorization code is missing")
-  # The verifier is sent only to the canonical issuer, so an environment
+  # The verifier is sent only to the pinned issuer, so an environment
   # mistake cannot redirect this bearer-equivalent secret to another origin.
   async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
     exchange = await client.post(
-      _MOBIUS_IDENTITY_ISSUER + "/identity/token",
+      _mobius_pinned_issuer() + "/identity/token",
       json={
         "instance_id": pending["instance_id"],
         "code": code,

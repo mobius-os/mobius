@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /**
  * Locks in the "steer queued messages" (Codex-style fast-forward) feature.
  *
@@ -45,7 +46,7 @@ async function setupChat(page) {
 async function submitComposer(page, input, key = 'Enter') {
   await waitForComposerSendable(page.locator('[data-chat-surface="painted"]'))
   await page.keyboard.press(key)
-  await expect(input).toHaveValue('')
+  await expectComposerValue(input, '')
 }
 
 // A send into a live turn is queued, so it adds no transcript row to wait on.

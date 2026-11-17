@@ -25,6 +25,22 @@ function memoryStorage() {
   }
 }
 
+test('temporary update repair freezes its agent and starts a Goal, ordinary repairs do neither', async () => {
+  for (const temporary of [false, true]) {
+    const created = [], sent = []
+    const client = { chats: {
+      create: async body => { created.push(body); return { ok: true, json: async () => ({ id: 'repair' }) } },
+      send: async (_id, body) => { sent.push(body); return { ok: true } },
+    } }
+    const agent = { provider: 'codex', model: 'codex-test', effort: 'high' }
+    await runAgentRepair({ client, prompt: 'Finish the update.', surfaceKey: 'update', fingerprint: 'one',
+      storage: memoryStorage(), ...(temporary ? { agent, archiveOnGoalComplete: true } : {}) })
+    assert.deepEqual(created[0].agent, temporary ? agent : undefined)
+    assert.equal(created[0].archive_on_goal_complete, temporary ? true : undefined)
+    assert.equal(sent[0].content, temporary ? '/goal Finish the update.' : 'Finish the update.')
+  }
+})
+
 test('a matching refresh attempt advances the same surface to agent help', () => {
   const storage = memoryStorage()
   const surfaceKey = 'chat:one'
@@ -393,4 +409,30 @@ test('diagnostic redaction removes every authorization scheme without swallowing
   ]) assert.equal(redacted.includes(secret), false, `must redact ${secret}`)
   assert.match(redacted, /visible-field/)
   assert.match(redacted, /second-visible-field/)
+})
+
+
+test('an update repair retains its chosen agent across reload and deleted-chat replacement', async () => {
+  const storage = memoryStorage()
+  const surfaceKey = 'update-agent-retry', fingerprint = 'same-failure'
+  const agent = { provider: 'codex', model: 'chosen-model', effort: 'high' }
+  const requests = []
+  let deleted = false
+  const client = { chats: {
+    create: async body => {
+      requests.push(body)
+      if (deleted && body.recovery_request_id === requests[0].recovery_request_id) return { ok: false, status: 409 }
+      return { ok: true, json: async () => ({ id: deleted ? 'replacement' : 'first' }) }
+    },
+    send: async () => ({ ok: true }),
+  } }
+  await runAgentRepair({ client, prompt: 'Repair update', surfaceKey, fingerprint, storage, agent, archiveOnGoalComplete: true })
+  const previousAttempt = readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint })
+  assert.deepEqual(previousAttempt.agent, agent)
+  deleted = true
+  await runAgentRepair({ client, prompt: 'Repair update', surfaceKey, fingerprint, storage, previousAttempt, archiveOnGoalComplete: true })
+  assert.equal(requests.length, 3)
+  for (const request of requests) assert.deepEqual(request.agent, agent)
+  assert.notEqual(requests[2].recovery_request_id, requests[0].recovery_request_id)
+  assert.deepEqual(readErrorRecoveryAttempt({ storage, surfaceKey, fingerprint }).agent, agent)
 })

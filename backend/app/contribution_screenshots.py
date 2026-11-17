@@ -32,7 +32,7 @@ import httpx
 
 from app.config import get_settings
 from app.contribution_errors import ContributionSubmitError
-from app.github_contribution_git import _git, _git_env, _run_cmd
+from app.github_contribution_git import _git, _git_env, _run_cmd, _server_scratch
 from app.manifest_identity import RAW_GITHUB_HOST
 from app.storage_io import atomic_write
 
@@ -376,8 +376,18 @@ def _publish(
     return reuse_commit
   # A throwaway repository, so the review checkout never collects the
   # branch's history or other PRs' images.
-  repo = scratch / "assets.git"
-  _run_cmd(["git", "init", "-q", "--bare", str(repo)], cwd=scratch)
+  # It is server-owned, so its network Git runs in place.
+  with _server_scratch() as repo:
+    return _publish_from(repo, scratch, payloads, assets_repo=assets_repo,
+                         branch=branch, author=author, remote=remote,
+                         read_public=read_public)
+
+
+def _publish_from(
+  repo: Path, scratch: Path, payloads: list[tuple[dict, bytes]], *,
+  assets_repo: str, branch: str, author: tuple[str, str], remote: str,
+  read_public: PublicReader,
+) -> str:
   for _ in range(2):
     tip = _remote_tip(repo, remote, assets_repo)
     commit = _assets_commit(
@@ -386,10 +396,9 @@ def _publish(
     )
     if commit == tip:
       break
-    pushed = _git(
-      repo, "push", f"--force-with-lease=refs/heads/{ASSETS_BRANCH}:{tip or ''}",
-      remote, f"{commit}:refs/heads/{ASSETS_BRANCH}", check=False,
-    )
+    ref = f"refs/heads/{ASSETS_BRANCH}"
+    pushed = _git(repo, "push", f"--force-with-lease={ref}:{tip or ''}", remote,
+                  f"{commit}:{ref}", check=False)
     if pushed.returncode == 0:
       break
     # Another Send moved the branch between our read and push: rebuild on it.

@@ -14,6 +14,7 @@ from pydantic import (
 from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
 from app.manifest_identity import requested_manifest_source
 from app.providers import PROVIDERS, _model_belongs_to_other_provider
+from app.update_chat import UpdateAgentChoice
 
 
 class SetupRequest(BaseModel):
@@ -706,6 +707,7 @@ class AppConflictResolverChatOut(BaseModel):
 
 
 class AppConflictResolverChatRequest(BaseModel):
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 
@@ -716,6 +718,7 @@ class AppConflictResolverBatchChatRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   app_ids: list[int] = Field(min_length=1, max_length=50)
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 
@@ -869,7 +872,10 @@ class ChatProviderSwitch(BaseModel):
     if _model_belongs_to_other_provider(model, self.provider):
       raise ValueError("target model does not belong to target provider")
     self.agent_settings_json.model = model
-    if effort not in PROVIDERS[self.provider].switch_efforts:
+    if self.provider == "mobius":
+      if not PROVIDERS["mobius"].validate_model_effort(model, effort):
+        raise ValueError("target effort does not belong to target model")
+    elif effort not in PROVIDERS[self.provider].switch_efforts:
       raise ValueError("target effort does not belong to target provider")
     return self
 
@@ -1206,6 +1212,8 @@ class ModelRegistryResponse(BaseModel):
 
   # Map provider id → ordered list of models.
   providers: dict[str, list[ModelEntry]]
+  defaults: dict[str, str] = Field(default_factory=dict)
+  replacements: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class ModelPrefsUpdate(BaseModel):

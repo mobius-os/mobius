@@ -68,6 +68,9 @@ class _Provider:
   def build_env(self, **_kwargs):
     return {}
 
+  def resolve_selection(self, model, effort):
+    return model, effort
+
 
 @pytest.mark.asyncio
 async def test_agent_turn_closes_preflight_session_before_provider_wait(

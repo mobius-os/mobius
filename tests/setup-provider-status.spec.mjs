@@ -28,8 +28,8 @@ test('Codex copies the code before the owner separately opens ChatGPT and stays 
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            codex: { authenticated: false },
-            claude: { authenticated: false },
+            codex: { configured: false, authenticated: false },
+            claude: { configured: false, authenticated: false },
           }),
         })
   ))
@@ -82,9 +82,9 @@ test('Codex copies the code before the owner separately opens ChatGPT and stays 
   await page.getByRole('button', { name: 'OpenAI Codex provider settings', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'OpenAI Codex', exact: true })).toBeVisible()
 
-  const codexRow = page.locator('.provider-row').filter({ hasText: 'OpenAI Codex' })
-  await codexRow.getByRole('button', { name: 'Connect OpenAI Codex' }).click()
-  const setupSteps = codexRow.locator('.codex-auth__setup-steps')
+  const codexPage = page.locator('.settings-provider-page')
+  const connection = codexPage.getByRole('region', { name: 'Connection', exact: true })
+  const setupSteps = connection.locator('.codex-auth__setup-steps')
   await expect(setupSteps).toHaveCSS('list-style-type', 'decimal')
   await expect(setupSteps.locator('li')).toHaveText([
     'Open Settings → Security.',
@@ -92,49 +92,54 @@ test('Codex copies the code before the owner separately opens ChatGPT and stays 
     'Turn on Enable device code authorization for Codex.',
     '(Optional for privacy) Open Settings → Data Controls and turn off Improve the model for everyone.',
   ])
-  await expect(codexRow.getByRole('link', { name: 'Open ChatGPT settings' }))
+  await expect(connection.getByRole('link', { name: 'Open ChatGPT settings' }))
     .toHaveAttribute('href', 'https://chatgpt.com/#settings/Security')
-  await expect(codexRow.getByText(/Improve the model for everyone/)).toBeVisible()
+  await expect(connection.getByText(/Improve the model for everyone/)).toBeVisible()
 
   let popupCount = 0
   page.on('popup', () => { popupCount += 1 })
-  await codexRow.getByRole('button', { name: 'Get sign-in code' }).click()
-  await expect(codexRow.getByRole('button', { name: 'Getting code…' })).toBeDisabled()
+  await connection.getByRole('button', { name: 'Get sign-in code' }).click()
+  await expect(connection.getByRole('button', { name: 'Getting code…' })).toBeDisabled()
   await expect(setupSteps).toBeVisible()
   releaseLogin()
-  await expect(codexRow.getByText('TEST-CODE', { exact: true })).toBeVisible()
+  await expect(connection.getByText('TEST-CODE', { exact: true })).toBeVisible()
   await expect(setupSteps).toBeVisible()
 
   // Cancelling a code does not discard the account-setting guidance either.
-  await codexRow.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await connection.getByRole('button', { name: 'Cancel', exact: true }).click()
   await expect(setupSteps).toBeVisible()
-  await expect(codexRow.getByText('TEST-CODE', { exact: true })).toHaveCount(0)
-  await codexRow.getByRole('button', { name: 'Get sign-in code' }).click()
-  await expect(codexRow.getByText('TEST-CODE', { exact: true })).toBeVisible()
+  await expect(connection.getByText('TEST-CODE', { exact: true })).toHaveCount(0)
+  await connection.getByRole('button', { name: 'Get sign-in code' }).click()
+  await expect(connection.getByText('TEST-CODE', { exact: true })).toBeVisible()
   await expect(setupSteps).toBeVisible()
   expect(popupCount).toBe(0)
 
   await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], {
     origin: BASE,
   })
-  await codexRow.getByRole('button', { name: 'Copy code' }).click()
-  await expect(codexRow.getByText('Code copied. Open ChatGPT, then paste it to continue.')).toBeVisible()
+  await connection.getByRole('button', { name: 'Copy code' }).click()
+  await expect(connection.getByText('Code copied. Open ChatGPT, then paste it to continue.')).toBeVisible()
   expect(popupCount).toBe(0)
 
   const popupPromise = page.waitForEvent('popup')
-  await codexRow.getByRole('button', { name: 'Open ChatGPT' }).click()
+  await connection.getByRole('button', { name: 'Open ChatGPT' }).click()
   const signInPage = await popupPromise
   await expect(signInPage).toHaveURL(`${BASE}/codex-test-login`)
 
+  const failedOverview = page.waitForResponse(response =>
+    new URL(response.url()).pathname === '/api/auth/providers/status' && response.status() === 503)
   allowCompletion = true
   await page.evaluate(() => window.dispatchEvent(new Event('pageshow')))
 
+  await failedOverview
+
   // Native provider details show the plan inline rather than behind a usage
   // disclosure. A failed overview probe must not undo the completed sign-in.
-  await expect(codexRow.getByText('Plan: Test', { exact: true })).toBeVisible()
-  await expect(codexRow.getByRole('button', { name: 'Manage OpenAI Codex', exact: true })).toBeVisible()
+  await expect(page.locator('.settings').getByText('Test plan', { exact: true })).toBeVisible()
+  await expect(connection.getByRole('button', { name: 'Reconnect', exact: true })).toBeVisible()
+  await expect(connection.getByRole('button', { name: 'Disconnect…', exact: true })).toBeVisible()
   await expect.poll(() => settingsWrites).toBe(1)
   await expect(setupSteps).toHaveCount(0)
-  await expect(codexRow.getByText('TEST-CODE', { exact: true })).toHaveCount(0)
-  await expect(codexRow.getByRole('button', { name: 'Get sign-in code' })).toHaveCount(0)
+  await expect(connection.getByText('TEST-CODE', { exact: true })).toHaveCount(0)
+  await expect(connection.getByRole('button', { name: 'Get sign-in code' })).toHaveCount(0)
 })

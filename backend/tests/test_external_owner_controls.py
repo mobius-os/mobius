@@ -296,6 +296,12 @@ def test_delegated_bearer_cannot_create_paired_host(
     headers=auths["delegated"],
   )
   assert pairing.status_code == 403, pairing.text
+  renamed = client.patch(
+    "/api/connect/hosts/h_missing",
+    headers=auths["delegated"],
+    json={"name": "Production"},
+  )
+  assert renamed.status_code == 403, renamed.text
   assert calls == []
 
 

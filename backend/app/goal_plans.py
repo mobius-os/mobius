@@ -584,13 +584,12 @@ def _delegation_tree(
       children_by_parent.setdefault(child.parent_chat_id, []).append(child)
       frontier.append(child.child_chat_id)
 
-  statuses = delegation_statuses(db, roots + [
+  helpers = roots + [
     child for children in children_by_parent.values() for child in children
-  ])
-  from app.delegations import open_questions
-  waiting = [row for row in roots + [
-    child for children in children_by_parent.values() for child in children
-  ] if statuses[row.id] == "needs_input"]
+  ]
+  statuses = delegation_statuses(db, helpers)
+  from app.delegations import helper_titles, open_questions
+  waiting = [row for row in helpers if statuses[row.id] == "needs_input"]
   waiting_runs = []
   if waiting:
     ranked = db.query(
@@ -605,6 +604,7 @@ def _delegation_tree(
     ).filter(ranked.c.position == 1).all()}
     waiting_runs = [(row, latest.get(row.child_chat_id)) for row in waiting]
   questions = open_questions(db, waiting_runs)
+  helper_names = helper_titles(db, helpers)
   raw_plan = root.plan_json if isinstance(root.plan_json, dict) else {}
   titles = {task.get("id"): task.get("title") for task in
     (raw_plan.get("tasks") or []) if isinstance(task, dict)}
@@ -612,14 +612,17 @@ def _delegation_tree(
   def project(row: models.Delegation, seen: set[str]) -> dict[str, Any]:
     if row.id in seen:
       return {"id": row.id, "task_key": row.task_key, "plan_task": row.goal_task_id,
-              "title": titles.get(row.goal_task_id), "provider": row.provider,
+              "title": titles.get(row.goal_task_id),
+              "helper_title": helper_names[row.id], "provider": row.provider,
               "status": "failed", "question": None, "children": []}
     children = children_by_parent.get(row.child_chat_id, [])
     return {
       "id": row.id,
       "task_key": row.task_key,
       "plan_task": row.goal_task_id,
+      # "title" names the plan task; the helper's own name is helper_title.
       "title": titles.get(row.goal_task_id),
+      "helper_title": helper_names[row.id],
       "provider": row.provider,
       "status": statuses[row.id],
       "question": ({"id": questions[row.id].id, "text": questions[row.id].question,
