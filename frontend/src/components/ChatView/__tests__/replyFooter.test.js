@@ -455,12 +455,14 @@ test('whether Copy shows agrees with the displayed text for answers joined acros
     'a continuation that only repeats its error': [ownerRow, reply('a', tool), cardAnswer,
       reply('b', text(limit), { type: 'error', message: limit })],
     'a continuation adding prose after tools': [ownerRow, reply('a', tool), cardAnswer, reply('b', text('Done.'))],
+    'an error in a continuation repeating an earlier reply’s prose': [ownerRow, reply('a', text(limit)), cardAnswer,
+      reply('b', { type: 'error', message: limit })],
   }
   for (const [shape, messages] of Object.entries(answers)) {
     const replyGroups = assistantReplyGroups(messages)
     const { current } = replyFooters({ messages, replyGroups, lastVisibleIndex: messages.length - 1 })
     const parts = footerCopyParts(current, { messages }) || []
-    assert.equal(footerHasCopy(current), parts.length > 0, shape)
+    assert.equal(footerHasCopy(current, { messages }), parts.length > 0, shape)
   }
 })
 
@@ -474,10 +476,14 @@ test('Copy shows for a settled answer with prose, and only once an earlier start
   const [tools] = footersOf([ownerRow, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })])
   assert.equal(footerHasCopy(tools), false, 'tools only: nothing to copy')
   // An answer reaching the page's first row may have begun before it.
-  const [partial] = footersOf([cardAnswer, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })], { offset: 10 })
+  const page = [cardAnswer, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })]
+  const [partial] = footersOf(page, { offset: 10 })
   assert.equal(partial.truncated, true)
-  assert.equal(footerHasCopy(partial), false, 'unknown until its start is read')
-  assert.equal(footerHasCopy(partial, { startRows: [row('earlier')] }), true, 'the read start has prose')
+  assert.equal(footerHasCopy(partial, { messages: page }), false, 'unknown until its start is read')
+  const startRows = [row('earlier')]
+  assert.equal(footerHasCopy(partial, { startRows, messages: page }), true, 'the read start has prose')
+  assert.equal(footerHasCopy(partial, { startRows, messages: page }),
+    (footerCopyParts(partial, { startRows, messages: page, offset: 10 }) || []).length > 0)
   // Whether Copy shows agrees with the text it builds when pressed.
   for (const footer of [prose, tools]) {
     assert.equal(footerHasCopy(footer), (footerCopyParts(footer, { messages: [] }) || []).length > 0)
