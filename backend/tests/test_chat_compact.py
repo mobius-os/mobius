@@ -685,6 +685,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   markers = [m for m in list(transcript_rows.history(row)) if m.get("kind") == "compaction"]
   assert len(markers) == 1
   assert db.query(models.Owner).first().provider == "codex"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == ["gpt-5.4"]
 
   changed = _payload(switch_id="stable-retry")
   changed["agent_settings_json"]["model"] = "gpt-5.5"
@@ -1156,7 +1157,7 @@ async def test_claude_synthesis_rejects_partial_text_on_error_terminal(
 
   with pytest.raises(compaction.CompactionError, match="could not compact"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert client.disconnected is True
 
@@ -1192,7 +1193,7 @@ async def test_claude_synthesis_requires_terminal_result(monkeypatch, tmp_path):
 
   with pytest.raises(compaction.CompactionError, match="terminal result"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
 
 
@@ -1205,10 +1206,10 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
   class _Provider:
     def build_env(self, **_kwargs):
       captured["provider_env"] = True
-      return {"SELECTED_PROVIDER": "mobius"}
+      return {"SELECTED_PROVIDER": "codex"}
 
     def codex_config_overrides(self):
-      # The Möbius subscription turns web search on for its chats.
+      # Provider config may turn web search on for its chats.
       return ['model_provider="mobius_trial"', 'web_search="live"']
 
   class _Process:
@@ -1236,16 +1237,16 @@ async def test_codex_synthesis_disables_tools_and_isolates_cwd(
   monkeypatch.setattr("app.providers.get_provider", get_provider)
   monkeypatch.setattr(compaction.asyncio, "create_subprocess_exec", _spawn)
   result = await compaction._run_provider_summarize_turn(
-    "prompt", data_dir=str(tmp_path), provider_id="mobius",
+    "prompt", data_dir=str(tmp_path), provider_id="codex",
     model="gpt-5.4", effort="high",
   )
   assert result == "brief"
-  assert captured["provider_id"] == "mobius"
+  assert captured["provider_id"] == "codex"
   assert captured["provider_env"] is True
   assert captured["cwd"] != str(tmp_path)
   assert "--ignore-rules" in captured["cmd"]
   assert 'model_provider="mobius_trial"' in captured["cmd"]
-  assert captured["env"]["SELECTED_PROVIDER"] == "mobius"
+  assert captured["env"]["SELECTED_PROVIDER"] == "codex"
   configured = [
     captured["cmd"][index + 1]
     for index, value in enumerate(captured["cmd"][:-1])
@@ -1327,7 +1328,7 @@ async def test_failed_codex_compaction_discards_partial_text_and_redacts_logs(
   monkeypatch.setattr(compaction.asyncio, "create_subprocess_exec", spawn)
   with pytest.raises(compaction.CompactionError, match="request as too large"):
     await compaction._run_codex_summarize_turn(
-      "private prompt", data_dir=str(tmp_path), provider_id="mobius",
+      "private prompt", data_dir=str(tmp_path), provider_id="codex",
       model=None, effort=None,
     )
   assert "prompt_bytes=14" in caplog.text

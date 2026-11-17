@@ -53,7 +53,7 @@ import useRestartPending from '../../hooks/useRestartPending.js'
 import useDelayedConnectionNotice from '../../hooks/useDelayedConnectionNotice.js'
 import useOutboxDrain from '../../hooks/useOutboxDrain.js'
 import { useLocationBoot } from '../../hooks/useLocationTracking.js'
-import { ReachabilityPhase, getDeliveryReadySnapshot, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
+import { ReachabilityPhase, requireDeliveryReady, setRestartPending, verifyConnectivity } from '../../lib/connectivityStore.js'
 import {
   authQueries,
   notificationQueries,
@@ -256,6 +256,8 @@ function reconnectListTimeoutMs(failedAttempts = 0) {
 const CHAT_ROW_REFRESH_BATCH_MS = 250
 // Mode timing lives with the pure snapshot geometry in workspaceView.js; browser
 // transition completion owns its lifetime, so Shell has no animation timers.
+// Chat panes rendered before the boot destination is applied: none.
+const NO_CHAT_PANE_LAYERS = Object.freeze([])
 // Shown once per account, so it stays out of the main bundle.
 const WalkthroughOverlay = lazy(() => import('../Walkthrough/WalkthroughOverlay.jsx'))
 const SettingsView = lazy(() => import('../SettingsView/SettingsView.jsx'))
@@ -349,6 +351,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     activeChatId,
     activeProjectId,
     activeArtifactRef,
+    bootRouteApplied,
     drawerOpen, drawerOpening, settingsOverlayOpen, settingsOpenRaw, openDrawer, closeDrawer,
     navTo, recordChatNavigation, navigateBackward, navigateForward,
     tabRevealRevision, applyModeDestination, dismissSettings,
@@ -1562,6 +1565,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       { focusedBuilderPaneId: focusedPaneViewId },
     )
   }, [focusedPaneViewId, presentedChatBySurface, visibleChatPanes])
+  // A launch destination replaces the restored chat in the mount effect that
+  // follows the first commit. Mounting the restored ChatView for that commit
+  // would start its transcript, compaction and artifact reads, competing with
+  // the chat the owner actually opened.
+  const mountedChatPaneLayers = bootRouteApplied ? chatPaneLayers : NO_CHAT_PANE_LAYERS
   // Shell is the only layer that knows which retained workspace world is
   // actually painted. Publish one stable readiness contract for visual tools;
   // they must not learn private handoff classes or compositor attributes.
@@ -2061,6 +2069,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   async function setProjectColor(project, color) {
     return patchProject(project, { color })
+  }
+  // The Projects list pins through the shell's one pin owner, so its queue,
+  // stale-read cancellation and failure recovery cover projects too.
+  function pinProject(project, pinned) {
+    return pins.pin('project', project.id, pinned)
   }
   const openProjectRef = useRef(openProject)
   openProjectRef.current = openProject
@@ -3800,7 +3813,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
     // Creating a fresh chat needs the server (POST allocates the row, and a chat is
     // only useful once the server-side agent can run). The reuse branch already handled
     // the offline-friendly case, so reaching here offline means we truly need network.
-    if (!getDeliveryReadySnapshot()) return { chatId: null, reason: 'offline' }
+    if (!requireDeliveryReady()) return { chatId: null, reason: 'offline' }
     // Spam-click guard: when no empty exists, two rapid taps would race two POSTs and
     // leave an extra empty behind. The in-flight ref short-circuits until the first
     // resolves — the caller acknowledges the tap without a second create.
@@ -3854,7 +3867,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
    */
   async function createDraftFirstChat(chatId) {
     const id = String(chatId)
-    if (!getDeliveryReadySnapshot()) return { verdict: 'offline', chat: null }
+    if (!requireDeliveryReady()) return { verdict: 'offline', chat: null }
     const inFlight = newChatAllocationPromisesRef.current.get(id)
     if (inFlight) return inFlight
 
@@ -5093,31 +5106,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         activeView={activeView}
         activeAppId={activeAppId}
         projects={projects}
-        projectsStatus={projectsStatus}
-        onRetryProjects={() => projectsQuery.refetch()}
-        activeProjectId={activeProjectId}
         activeProjectChatProjectId={activeProjectChatProjectId}
-        activeArtifactRef={activeArtifactRef}
-        projectTemplates={projectTemplates}
         onProject={enterProject}
-        onProjectRename={(project, name) => {
-          if (typeof name === 'string') return renameProject(project, name)
-          setProjectRenameId(String(project.id))
-          openProject(project)
-          return undefined
-        }}
-        onProjectColor={setProjectColor}
-        onProjectDelete={deleteProject}
-        onArtifact={(artifactRef) => {
-          const parsed = tabModel.parseArtifactTabId(artifactRef)
-          if (!parsed) return
-          const project = projectById.get(parsed.projectId)
-          if (project) openArtifact(project, parsed.artifactId)
-        }}
         onProjectsOpen={() => navTo('projects')}
-        onProjectCreate={createProjectFromTemplate}
-        onProjectImportGithub={importProjectFromGithub}
-        onProjectImportSource={importProjectSource}
         chats={chats}
         chatsStatus={chatsStatus}
         onRetryChats={() => chatsQuery.refetch()}
@@ -5351,7 +5342,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
             their projected pane geometry even while hidden. During a chat change
             the last painted chat remains as an inert opaque same-world cover until
             the incoming chat reports a stable frame. */}
-        {chatPaneLayers.map(({
+        {mountedChatPaneLayers.map(({
           world, paneId, presentationPaneId, chatId, role, surfaceKey,
         }) => {
           const tabKey = `chat:${chatId}`
@@ -5569,7 +5560,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                   onPending={surfaceVisible ? holdLaunchCover : undefined}
                 >
                   <ProjectsDirectory
-                    projects={projects}
+                    projects={pins.projectedItems.projects}
                     templates={projectTemplates}
                     status={projectsStatus}
                     onRetry={() => Promise.all([
@@ -5582,6 +5573,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                     onImportSource={importProjectSource}
                     onRename={renameProject}
                     onColor={setProjectColor}
+                    onPin={pinProject}
                     onDelete={deleteProject}
                   />
                 </LazySurface>
