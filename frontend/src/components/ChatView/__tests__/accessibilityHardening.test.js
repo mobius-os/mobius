@@ -82,7 +82,8 @@ test('Chat Changes is a modeless panel whose outside press reaches its destinati
   assert.match(css, /\.chat-work__overlay\s*\{[\s\S]*?pointer-events:\s*none/)
   assert.match(css, /\.chat-work\s*\{[\s\S]*?pointer-events:\s*auto/)
   assert.match(outsideDismiss, /document\.addEventListener\('pointerdown', dismissFromOutsidePointer, true\)/)
-  assert.match(focus, /if \(modal\) \{[\s\S]*?holdInert\(element\)/)
+  assert.match(focus, /if \(modal\) return dialogSiblingElements\(container\)/)
+  assert.match(focus, /blocked\.elements\.forEach\(holdInert\)/)
   assert.match(focus, /event\.key !== 'Tab' \|\| !modal/)
   assert.doesNotMatch(changes, /elementFromPoint|dispatchEvent|\.click\(\)/,
     'outside activation must remain the browser’s real pointer sequence, not a replayed synthetic click')
