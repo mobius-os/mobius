@@ -1,6 +1,6 @@
-/** The server's name caps: chat titles and app names 500, projects 256. */
-export function drawerNameMaxLength(kind) {
-  return kind === 'project' ? 256 : 500
+/** The server's name cap for chat titles and app names. */
+export function drawerNameMaxLength() {
+  return 500
 }
 
 /**

@@ -82,12 +82,17 @@ export default function useItemMenuGestures(openMenuAt) {
     })
   }
 
+  // A held click is owned by the hold that opened the menu. Any new press or
+  // key is a new interaction and retires that claim first, so a hold whose
+  // release produced no click (pointercancel) cannot swallow a later tap.
   function openMenuFromKey(event) {
+    suppressHeldClickRef.current = false
     touchMenuPointerAtRef.current = 0
     if (isMenuKey(event)) openItemMenu(event)
   }
 
   function recordItemMenuPointer(event) {
+    suppressHeldClickRef.current = false
     touchMenuPointerAtRef.current = event.pointerType === 'mouse'
       ? 0
       : performance.now()

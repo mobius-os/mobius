@@ -996,6 +996,9 @@ def test_unsupported_provider_cleanup_clears_marker_and_holds_pending(monkeypatc
     def build_env(self, **kwargs):
       return {}
 
+    def resolve_selection(self, model, effort):
+      return model, effort
+
   monkeypatch.setattr(chat_mod, "registered_provider", lambda pid: _Unsupported())
 
   def runtime_kind(_provider):
@@ -1361,6 +1364,58 @@ def test_stale_dying_run_does_not_finalize_after_fresh_turn_claimed(monkeypatch)
     "the fresh turn's run marker must survive the dying run's bow-out"
   )
   assert "done" in published
+
+
+def _done_events(chat_id, run_token):
+  """Run `chat_id`'s turn for real and return its `done` events."""
+  chat_mod.mark_starting(chat_id)
+  gen = chat_mod.current_run_generation(chat_id)
+  bc = create_broadcast(chat_id)
+  events = []
+  orig = bc.publish
+  bc.publish = lambda event: (events.append(event), orig(event))[1]
+  asyncio.run(chat_mod.run_chat(
+    [chat_mod.schemas.ChatMessage(role="user", content="hi")],
+    chat_id=chat_id, session_id="sess", provider_id="claude",
+    run_gen=gen, run_token=run_token,
+  ))
+  _drain_actor()
+  return [event for event in events if event.get("type") == "done"]
+
+
+def test_done_carries_when_the_run_ended_as_chat_detail_reads_it(monkeypatch):
+  """The client promotes a finished reply from the stream without a refetch,
+  so the final `done` event carries the same run end time a chat detail read
+  later puts on the reply's rows."""
+  from app.run_end_times import run_ended_ts
+  from app.routes.chats import _chat_detail_response
+  _seed_owner_and_creds()
+  _seed_chat("t-ended", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], running="running", run_token="rt-ended")
+  _patch_claude_runner(monkeypatch)
+
+  done = _done_events("t-ended", "rt-ended")
+
+  assert len(done) == 1
+  with SessionLocal() as db:
+    ended = run_ended_ts(db, "t-ended", {"rt-ended"})["rt-ended"]
+    reply = _chat_detail_response(db.get(models.Chat, "t-ended"), db=db)["messages"][-1]
+  assert done[0]["run_ended_ts"] == ended
+  assert (reply["role"], reply["run_ended_ts"]) == ("assistant", ended)
+
+
+def test_a_setup_failure_done_carries_its_run_end_too():
+  """Error exits publish `done` through the same path as a normal end."""
+  from app.run_end_times import run_ended_ts
+  _seed_chat("t-setup", messages=[{"role": "user", "content": "hi", "ts": 1}],
+             pending=[], running="running", run_token="rt-setup")  # no owner
+
+  done = _done_events("t-setup", "rt-setup")
+
+  with SessionLocal() as db:
+    ended = run_ended_ts(db, "t-setup", {"rt-setup"}).get("rt-setup")
+  assert ended is not None, "the failed setup ended its run"
+  assert [event.get("run_ended_ts") for event in done] == [ended]
 
 
 # -- 11. no-owner setup cleanup: marker cleared, pending held ---------------

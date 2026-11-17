@@ -20,7 +20,10 @@ from app import transcript_rows
 from app import models
 from app.context_budget import PEER_NOTE_CHARS, excerpt
 from app.continuations import PEER_MESSAGE_WAKE_KIND
-from app.delegations import delegation_source_work_filter, delegation_source_work_id
+from app.delegations import (
+  delegation_source_work_filter, delegation_source_work_id, helper_chat_title,
+  humanize_task_key,
+)
 from app.goal_plans import paused_goal_run
 from app.timeutil import now_naive_utc
 
@@ -384,6 +387,7 @@ def scope_participants(
     if delegation is not None:
       status = _delegation_status(delegation, run)
       name = delegation.task_key
+      title = helper_chat_title(chat.title, delegation.task_key)
       role = "helper"
       provider = delegation.provider
       parent_chat_id = str(delegation.parent_chat_id)
@@ -392,12 +396,16 @@ def scope_participants(
       name = chat.title or (
         "Project agent" if scope.kind == "project" else "Lead agent"
       )
+      title = None
       role = "project_agent" if scope.kind == "project" else "lead"
       provider = run.provider if run is not None else chat.provider
       parent_chat_id = None
     result.append({
       "id": chat_id,
+      # A helper's name is the address agents use with message_agent; its
+      # title is what the owner reads.
       "name": name,
+      "title": title,
       "role": role,
       "provider": provider,
       "parent_chat_id": parent_chat_id,
@@ -503,6 +511,10 @@ def active_peers(
       "name": (
         delegation.task_key if delegation is not None
         else row.title or "Live agent"
+      ),
+      "title": (
+        helper_chat_title(row.title, delegation.task_key)
+        if delegation is not None else None
       ),
       "role": "helper" if delegation is not None else "agent",
       "provider": (
@@ -757,7 +769,8 @@ def _message_names(
 
 
 def _names_for(db: Session, chat_ids: list[str]) -> dict[str, str]:
-  names = {
+  """Reading names for note ends: a helper's title, else its chat's title."""
+  task_keys = {
     str(row.child_chat_id): str(row.task_key)
     for row in db.query(
       models.Delegation.child_chat_id, models.Delegation.task_key,
@@ -765,10 +778,15 @@ def _names_for(db: Session, chat_ids: list[str]) -> dict[str, str]:
       models.Delegation.child_chat_id.in_(chat_ids),
     ).all()
   }
+  names = {chat_id: humanize_task_key(key) for chat_id, key in task_keys.items()}
   for chat in db.query(models.Chat.id, models.Chat.title).filter(
     models.Chat.id.in_(chat_ids),
   ).all():
-    names.setdefault(str(chat.id), str(chat.title or "Agent"))
+    chat_id = str(chat.id)
+    names[chat_id] = (
+      helper_chat_title(chat.title, task_keys[chat_id]) if chat_id in task_keys
+      else str(chat.title or "Agent")
+    )
   return names
 
 
@@ -780,7 +798,7 @@ def serialize_messages(
 
 
 _MODEL_PEER_KEYS = (
-  "id", "name", "role", "provider", "parent_chat_id", "status", "online",
+  "id", "name", "title", "role", "provider", "parent_chat_id", "status", "online",
   "is_current", "scope_member", "goal",
 )
 _MODEL_MESSAGE_KEYS = (
