@@ -28,7 +28,7 @@ import NotificationChannelsPage, { NotificationChannelsSummary } from './Notific
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
-import KeysSection, { KeyPage } from './KeysSection.jsx'
+import KeysSummary, { KeyPage, KeysPage } from './KeysSection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import WalletSection, { WalletConnect } from './WalletSection.jsx'
 import { useWallet } from './useWallet.js'
@@ -50,6 +50,8 @@ const MobiusLogo = PROVIDER_INFO.mobius?.Logo
 // The detail pages that are not providers; every other detailPage value is a provider id.
 const SHARED_FOLDERS_PAGE = 'shared-folders'
 const NOTIFICATIONS_ELSEWHERE_PAGE = 'notifications-elsewhere'
+// The key list; each key's page (`key:<name>`, '' for a new key) returns here.
+const KEYS_PAGE = 'keys'
 const MOBIUS_ACCOUNT_PAGE = 'mobius-account'
 
 const PROVIDER_CHOICES = [
@@ -221,10 +223,10 @@ function BackgroundProviderRow({
   )
 }
 
-function SettingsSubhead({ title, mark, round = false, subtitle, onBack }) {
+function SettingsSubhead({ title, mark, round = false, subtitle, onBack, backLabel = 'Back to Settings' }) {
   return (
     <header className="settings-subhead">
-      <button type="button" className="settings-subhead__back" aria-label="Back to Settings" onClick={onBack}>
+      <button type="button" className="settings-subhead__back" aria-label={backLabel} onClick={onBack}>
         <ArrowLeft width={18} height={18} aria-hidden="true" />
       </button>
       {mark && <span className={`settings-subhead__mark${round ? ' settings-subhead__mark--round' : ''}`} aria-hidden="true">{mark}</span>}
@@ -280,7 +282,8 @@ export default function SettingsView({
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
   const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
   const notificationsElsewhereOpen = detailPage === NOTIFICATIONS_ELSEWHERE_PAGE
-  const selectedProvider = keyPage !== null || sharedFoldersOpen || mobiusAccountOpen || notificationsElsewhereOpen ? null : detailPage
+  const keysOpen = detailPage === KEYS_PAGE
+  const selectedProvider = keyPage !== null || keysOpen || sharedFoldersOpen || mobiusAccountOpen || notificationsElsewhereOpen ? null : detailPage
   const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
@@ -973,13 +976,21 @@ export default function SettingsView({
       />
     )
     detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+  } else if (keysOpen) {
+    subhead = <SettingsSubhead title="Keys" mark={<Key width={20} height={20} />} onBack={closeDetailPage} />
+    detailBody = (
+      <KeysPage
+        onOpenKey={(name) => openDetailPage(`key:${name}`)}
+        onAddKey={() => openDetailPage('key:')}
+      />
+    )
   } else if (keyPage !== null) {
-    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} onBack={closeDetailPage} />
+    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} backLabel="Back to Keys" onBack={() => openDetailPage(KEYS_PAGE)} />
     detailBody = (
       <KeyPage
         name={keyPage}
         onOpenKey={(name) => openDetailPage(`key:${name}`)}
-        onClose={closeDetailPage}
+        onClose={() => openDetailPage(KEYS_PAGE)}
       />
     )
   } else if (notificationsElsewhereOpen) {
@@ -1131,12 +1142,7 @@ export default function SettingsView({
           </div>
         </section>}
 
-        <KeysSection
-          focusRef={(node) => setSetupFocusRef('keys', node)}
-          attention={attentionSection === 'keys'}
-          onOpenKey={(name) => openDetailPage(`key:${name}`)}
-          onAddKey={() => openDetailPage('key:')}
-        />
+        <KeysSummary onOpen={() => openDetailPage(KEYS_PAGE)} />
 
         <section
           className={`settings-group settings-ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}

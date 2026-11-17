@@ -148,6 +148,10 @@
 .settings-group__title.settings-keys-page__heading { margin: 24px 2px 10px; }
 .settings-keys-page__note { margin: 2px 2px 12px; }
 .settings-keys-page__summary { margin: 0 2px 4px; }
+/* The Keys page: a lede, then requests, then "Your keys" with its Add button. */
+.settings-keys-page__lede { margin: 0 2px 14px; }
+.settings-keys-page > .settings-keys__request { margin-bottom: 10px; }
+.settings-group.settings-keys-page__group { margin-top: 8px; }
 
 /* A "Used by" row's mark: the app's initial, or the agents' sparkle. */
 .settings-item__icon.settings-keys-usedby__icon { width: 30px; height: 30px; font-size: 13px; font-weight: 600; }

@@ -11,6 +11,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'ai-providers',
   'background-agents',
   'github',
+  // A whole sub-page too: Settings › Keys.
   'keys',
   'models',
   // Whole sub-pages: Accounts › Möbius, and AI providers › Möbius (credit,
@@ -26,6 +27,7 @@ export function settingsSectionPage(section) {
   if (section === 'mobius-account') return 'mobius-account'
   if (section === 'mobius-models') return 'mobius'
   if (section === 'notifications-elsewhere') return 'notifications-elsewhere'
+  if (section === 'keys') return 'keys'
   return null
 }
 

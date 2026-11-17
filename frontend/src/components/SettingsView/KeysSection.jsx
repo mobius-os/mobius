@@ -1,4 +1,4 @@
-/* Settings › Keys: the overview list, the requests you said no to, and each key's own page. */
+/* Settings › Keys: the overview row, the Keys page (requests, your keys, the ones you said no to), and each key's own page. */
 import { useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
@@ -47,15 +47,71 @@ function injectFromDraft(draft) {
     : { type: 'header', name: draft.headerName.trim(), prefix: draft.prefix }
 }
 
-// -- overview ----------------------------------------------------------------
+// -- overview row and the Keys page -----------------------------------------
 
-export default function KeysSection({ focusRef, attention = false, onOpenKey, onAddKey }) {
+const SUMMARY_NAMES = 3
+
+/** The overview row's two lines, from the key list (null while it loads). */
+function summaryOf(data) {
+  if (!data) return { title: 'Checking…', detail: 'Apps borrow a key without ever seeing it' }
+  if (!data.available) return { title: "The key vault isn't running", detail: 'A restart usually brings it back' }
+  const keys = data.keys || []
+  if (keys.length === 0) return { title: 'No keys yet', detail: 'Apps borrow a key without ever seeing it' }
+  const title = keys.length <= SUMMARY_NAMES ? keys.map(key => key.name).join(', ') : `${keys.length} keys`
+  const lastUsed = keys.map(key => key.last_used).filter(Boolean).sort().at(-1)
+  const count = `${keys.length} ${keys.length === 1 ? 'key' : 'keys'}`
+  return { title, detail: lastUsed ? `${count} · last used ${relativeTime(lastUsed)}` : `${count} · not used yet` }
+}
+
+/** Settings › Keys as one row, like Notifications elsewhere; the row opens the Keys page. */
+export default function KeysSummary({ onOpen }) {
+  const keysQuery = useKeys()
+  const guest = isSharedBrowserAuth()
+  const data = guest ? null : keysQuery.data
+  const waiting = settingsKeyRequests(data).length
+  const { title, detail } = keysQuery.error && !guest
+    ? { title: "Keys couldn't load", detail: keysQuery.error.message }
+    : summaryOf(data)
+  return (
+    <section className="settings-group" aria-labelledby="settings-keys-title" id="settings-keys">
+      <div className="settings-group__head">
+        <div className="settings-group__heading">
+          <h2 className="settings-group__title" id="settings-keys-title">Keys</h2>
+          <p className="settings-group__desc">Apps borrow a key without ever seeing it. You and your agents can read them.</p>
+        </div>
+      </div>
+      <div className="settings-list">
+        {guest ? (
+          <div className="settings-item">
+            <span className="settings-item__icon" aria-hidden="true"><Key width={18} height={18} /></span>
+            <span className="settings-item__body">
+              <span className="settings-item__sub settings-item__sub--wrap">{GUEST_LINE}</span>
+            </span>
+          </div>
+        ) : (
+          // Opens its own page, so no arrow: arrows in Settings mean "expands here".
+          <button type="button" className="settings-item" onClick={onOpen} aria-label={`Keys: ${title}. ${detail}`}>
+            <span className="settings-item__icon" aria-hidden="true"><Key width={18} height={18} /></span>
+            <span className="settings-item__body">
+              <span className="settings-item__title">{title}</span>
+              <span className="settings-item__sub">{detail}</span>
+            </span>
+            {waiting > 0 && <span className="settings-badge settings-badge--accent">{waiting} need{waiting === 1 ? 's' : ''} you</span>}
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
+/** The Keys page: requests waiting here, your keys, and the ones you said no to. */
+export function KeysPage({ onOpenKey, onAddKey }) {
   const keysQuery = useKeys()
   const { names } = useAppNames()
   const queryClient = useQueryClient()
   const [showAll, setShowAll] = useState(false)
-  const guest = isSharedBrowserAuth()
-  const data = guest ? null : keysQuery.data
+  if (isSharedBrowserAuth()) return <div className="settings-keys-page"><p className="settings-keys__muted">{GUEST_LINE}</p></div>
+  const data = keysQuery.data
   const keys = data?.keys || []
   // Asks are answered where they were made; only an agent's with no chat lands here.
   const pending = settingsKeyRequests(data)
@@ -63,28 +119,10 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
   const refresh = () => queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
 
   return (
-    <section
-      className={`settings-group settings-keys${attention ? ' settings-setup-target' : ''}`}
-      aria-labelledby="settings-keys-title"
-      id="settings-keys"
-      ref={focusRef}
-      tabIndex={-1}
-    >
-      <div className="settings-group__head">
-        <div className="settings-group__heading">
-          <h2 className="settings-group__title" id="settings-keys-title">Keys</h2>
-          <p className="settings-group__desc">
-            Apps borrow a key without ever seeing it. You and your agents can read them.
-          </p>
-        </div>
-        {data?.available && (
-          <button type="button" className="settings__btn settings__btn--outline settings__btn--sm settings-keys__add" onClick={onAddKey}>
-            <Plus width={15} height={15} aria-hidden="true" /> Add
-          </button>
-        )}
-      </div>
-
-      {guest && <p className="settings-keys__muted">{GUEST_LINE}</p>}
+    <div className="settings-keys-page settings-keys">
+      <p className="settings-group__desc settings-keys-page__lede">
+        Apps borrow a key without ever seeing it, and only on websites you allow. You and your agents can read them.
+      </p>
       {keysQuery.error && <Alert color="danger" variant="soft" description={keysQuery.error.message} />}
       {data && !data.available && (
         <Alert color="warning" variant="soft" description="The key vault isn't running. It starts with Möbius; a restart usually brings it back." />
@@ -105,28 +143,38 @@ export default function KeysSection({ focusRef, attention = false, onOpenKey, on
       )}
 
       {data?.available && (
-        <div className="settings-list">
-          {keys.length === 0 && <p className="settings-keys__empty">No keys yet.</p>}
-          {keys.map(key => (
-            // Opens its own page, so no arrow: arrows in Settings mean "expands here".
-            <button key={key.name} type="button" className="settings-item" onClick={() => onOpenKey(key.name)}>
-              <span className="settings-item__icon" aria-hidden="true"><Key width={18} height={18} /></span>
-              <span className="settings-item__body">
-                <span className="settings-item__title">{key.name}</span>
-                <span className="settings-item__sub settings-item__sub--wrap">
-                  {savedByApp(key, names) ? `Saved by ${savedByApp(key, names)} · ` : ''}
-                  {usedByLine(key, names)}
-                  {key.last_used ? ` · used ${relativeTime(key.last_used)}` : ''}
-                </span>
-              </span>
+        <section className="settings-group settings-keys-page__group" aria-labelledby="settings-keys-list-title">
+          <div className="settings-group__head">
+            <div className="settings-group__heading">
+              <h2 className="settings-group__title" id="settings-keys-list-title">Your keys</h2>
+            </div>
+            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm settings-keys__add" onClick={onAddKey}>
+              <Plus width={15} height={15} aria-hidden="true" /> Add
             </button>
-          ))}
-          {denied.map(request => (
-            <DeniedRequest key={request.id} request={request} names={names} onAnswered={refresh} />
-          ))}
-        </div>
+          </div>
+          <div className="settings-list">
+            {keys.length === 0 && <p className="settings-keys__empty">No keys yet. Add one, or approve the first time an app or your agent asks.</p>}
+            {keys.map(key => (
+              // Opens its own page, so no arrow: arrows in Settings mean "expands here".
+              <button key={key.name} type="button" className="settings-item" onClick={() => onOpenKey(key.name)}>
+                <span className="settings-item__icon" aria-hidden="true"><Key width={18} height={18} /></span>
+                <span className="settings-item__body">
+                  <span className="settings-item__title">{key.name}</span>
+                  <span className="settings-item__sub settings-item__sub--wrap">
+                    {savedByApp(key, names) ? `Saved by ${savedByApp(key, names)} · ` : ''}
+                    {usedByLine(key, names)}
+                    {key.last_used ? ` · used ${relativeTime(key.last_used)}` : ''}
+                  </span>
+                </span>
+              </button>
+            ))}
+            {denied.map(request => (
+              <DeniedRequest key={request.id} request={request} names={names} onAnswered={refresh} />
+            ))}
+          </div>
+        </section>
       )}
-    </section>
+    </div>
   )
 }
 
@@ -162,7 +210,7 @@ export function KeyPage({ name, onOpenKey, onClose }) {
     return (
       <div className="settings-keys-page">
         <p className="settings-keys__muted">This key no longer exists.</p>
-        <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={onClose}>Back to Settings</button>
+        <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={onClose}>Back to Keys</button>
       </div>
     )
   }

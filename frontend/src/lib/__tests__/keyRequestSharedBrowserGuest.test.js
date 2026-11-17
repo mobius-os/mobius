@@ -11,7 +11,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beginSharedBrowserAuth } from '../../api/client.js'
 import AppKeyRequestCard from '../../components/AppCanvas/AppKeyRequestCard.jsx'
 import KeyRequestBlock from '../../components/ChatView/markdown/KeyRequestBlock.jsx'
-import KeysSection, { KeyPage } from '../../components/SettingsView/KeysSection.jsx'
+import KeysSummary, { KeyPage, KeysPage } from '../../components/SettingsView/KeysSection.jsx'
 import { KEYS_QUERY } from '../../components/SettingsView/keysQueries.js'
 import { appQueries } from '../../hooks/queries.js'
 
@@ -43,10 +43,13 @@ test("a guest's chat card says who asked and that only the owner answers", () =>
   assert.match(agent, /Your agent asked for a key\. Only the owner of this Möbius can answer\./)
 })
 
-test('Settings › Keys and a key page tell a guest only the owner manages keys, instead of showing nothing', () => {
-  const section = render(createElement(KeysSection, { onOpenKey() {}, onAddKey() {} }))
-  assert.match(section, /Only the owner of this Möbius can see and manage keys\./)
-  assert.doesNotMatch(section, /<strong>maps<\/strong>|settings-item__title/)
+test('Settings › Keys, its page and a key page tell a guest only the owner manages keys, instead of showing nothing', () => {
+  const summary = render(createElement(KeysSummary, { onOpen() {} }))
+  assert.match(summary, /Only the owner of this Möbius can see and manage keys\./)
+  assert.doesNotMatch(summary, /maps|<button/)
+  const list = render(createElement(KeysPage, { onOpenKey() {}, onAddKey() {} }))
+  assert.match(list, /Only the owner of this Möbius can see and manage keys\./)
+  assert.doesNotMatch(list, /maps|settings-item__title/)
   const page = render(createElement(KeyPage, { name: 'maps', onOpenKey() {}, onClose() {} }))
   assert.match(page, /Only the owner of this Möbius can see and manage keys\./)
 })
