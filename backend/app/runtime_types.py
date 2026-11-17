@@ -31,6 +31,13 @@ class RunnerResult(TypedDict):
   # False when the turn ended before its provider received the prompt, so
   # nothing the turn carried (peer notes, Wait results) was delivered.
   prompt_sent: NotRequired[bool]
+  # True only when the runner observed output the remote model produced for
+  # this turn (streamed text or reasoning, a model message, or a model tool
+  # call). Submitted input alone, a Stop before any output, usage accounting,
+  # a replayed earlier turn, keepalive or unknown stream frames and CLI-local
+  # messages leave it absent, so they never prove an older quota observation
+  # stale.
+  provider_responded: NotRequired[bool]
   # Only unexpected main-process death correlated with an OOM increase during
   # this attempt, observed before runner teardown. Never a provider API error.
   oom_killed: NotRequired[bool]

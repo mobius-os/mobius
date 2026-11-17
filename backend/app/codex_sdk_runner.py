@@ -1912,6 +1912,9 @@ async def _run_codex_sdk_turn(
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
   call_token_usages: list[Any] = []
+  # Set only from this turn's own model output (see RunnerResult). The turn
+  # stream is routed to this turn, so a resumed thread's history is not it.
+  provider_responded = False
   process_group_id: int | None = None
   task_host_open = False
   task_host_tool_use_id: str | None = None
@@ -1973,7 +1976,10 @@ async def _run_codex_sdk_turn(
     )
 
   def with_usage(result: RunnerResult) -> RunnerResult:
-    """Attaches whatever the turn spent before it ended, however it ended."""
+    """Attaches what the turn spent, and whether the provider answered it,
+    however it ended."""
+    if provider_responded:
+      result["provider_responded"] = True
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
       metrics = normalize_codex_usage(
@@ -2327,6 +2333,7 @@ async def _run_codex_sdk_turn(
           if item_id and item_id in abandoned_agent_message_item_ids:
             continue
           if payload.delta:
+            provider_responded = True
             event = {"type": "text", "content": payload.delta}
             if item_id:
               event["text_item_id"] = item_id
@@ -2349,6 +2356,7 @@ async def _run_codex_sdk_turn(
           ),
         ):
           if payload.delta:
+            provider_responded = True
             bc.publish(_thinking_event(
               payload.delta,
               _codex_thinking_segment_id(payload),
@@ -2373,6 +2381,7 @@ async def _run_codex_sdk_turn(
         if isinstance(payload, sdk["ItemStartedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["AgentMessageThreadItem"]):
+            provider_responded = True
             item_id = str(getattr(item, "id", None) or "")
             event = {"type": "text_boundary"}
             if (
@@ -2396,10 +2405,15 @@ async def _run_codex_sdk_turn(
             # this turn. Codex may announce ThreadStarted before or after its
             # collab item, so opening it here is a fallback while the lifecycle
             # path below can also open it on demand.
+            provider_responded = True
             ensure_task_host()
           else:
             event = _tool_start_event(item, sdk)
             if event is not None:
+              # Every tool item classified here is a call the model requested
+              # (an owner card's request_question included); user messages,
+              # hook prompts and compaction markers are not.
+              provider_responded = True
               _stamp_tool_use_id(event, item)
               bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)

@@ -237,6 +237,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   supersedeResumedPauseBlocks,
+  combineRecoveryHistory,
   serverSnapshotBehindLocal,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
@@ -5906,12 +5907,19 @@ export default function ChatView({
     () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
     [settledMessages, activeSteerPrefix],
   )
-  const peerTimeline = usePeerTimeline(
+  const projectedTimeline = usePeerTimeline(
     chatId,
     displayedMessages,
     !hidden && transcriptPaintable,
     streamItems,
   )
+  // Settled pause history joins its resume notice only where the projected
+  // timeline draws nothing between them.
+  const peerTimeline = useMemo(() => {
+    const combined = combineRecoveryHistory(projectedTimeline.messages, projectedTimeline)
+    return combined === projectedTimeline.messages
+      ? projectedTimeline : { ...projectedTimeline, messages: combined }
+  }, [projectedTimeline])
   const committedReplyGroupsRef = useRef(null)
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0
