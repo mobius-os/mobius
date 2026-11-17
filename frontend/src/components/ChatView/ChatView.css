@@ -485,6 +485,9 @@
   box-sizing: border-box;
   width: 100%;
   grid-template-columns: minmax(0, max-content) repeat(2, max-content) minmax(max-content, 1fr);
+  /* The action line stays 28px whether References are open or not; an open
+     list only adds its own row below. */
+  grid-template-rows: 28px auto;
   height: auto;
   min-height: 28px;
 }
@@ -494,9 +497,9 @@
   text-overflow: ellipsis;
 }
 .chat__msg-meta--start > .chat__sources { display: contents; }
-/* In the footer the toggle fits the reserved line like Copy and Branch (24px
-   under the row's 4px top padding), so a settling answer that gains its
-   References fills the line instead of growing it. Touch keeps a 44px target
+/* In the footer the toggle fits the reserved 28px line like Copy and Branch
+   (24px, centred), so a settling answer that gains its References fills the
+   line instead of growing it. Touch keeps a 44px target
    through ::after (below), not through the toggle's own height. */
 .chat__msg-meta--start .chat__sources-toggle {
   position: relative;

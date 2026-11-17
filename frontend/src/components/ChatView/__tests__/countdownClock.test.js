@@ -92,6 +92,12 @@ test('reply footers share one minute clock that also refreshes when the tab is s
   document.visibilityState = 'visible'
   act(() => shown[0]())
   assert.equal(footers[0].container.textContent, '500000', 'a shown tab reads the time at once')
+  // A footer joining the running clock reads the time now, not the last tick
+  // up to a minute ago, and the footers already shown move with it.
+  time = 530000
+  footers.push(mount(h(Footer)))
+  assert.equal(starts, 1, 'still one timer')
+  assert.deepEqual(footers.map(view => view.container.textContent), ['530000', '530000', '530000', '530000'])
   footers.forEach(view => view.unmount())
   assert.equal(clock._minuteListenerCount(), 0)
   assert.equal(shown.length, 0, 'the last footer leaving removes the listener')

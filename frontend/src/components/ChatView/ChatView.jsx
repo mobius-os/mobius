@@ -5996,8 +5996,10 @@ export default function ChatView({
     chatId, truncatedFooter ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
   )
   // Copy shows when an answer settled with prose to copy (footerHasCopy) and
-  // builds its text only when pressed, from the transcript as it is then. The
-  // handler is stable, so streaming frames re-render no settled answer.
+  // builds its text only when pressed, from the transcript as it is then.
+  // The handler is stable and each answer's References rows keep their
+  // identity, so the footer gives an unchanged settled answer no new props on
+  // a streamed frame.
   const copyReadRef = useRef(null)
   useLayoutEffect(() => {
     copyReadRef.current = {
