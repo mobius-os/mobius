@@ -17,6 +17,10 @@ import { KEY_ALLOW, KEY_DENY, keyAnswerAlreadyGiven, keyRequestCardState } from 
 export { KEY_ALLOW, KEY_DENY }
 
 const BEARER = { type: 'header', name: 'Authorization', prefix: 'Bearer ' }
+// Why an answer can't be given on a card in this state.
+const KEY_STATE_ERRORS = {
+  denied: 'You already said Not now to this request.',
+}
 
 /** Null for an ordinary card; else the key card's live state and answer. */
 export default function useKeyRequestCard(keyRequest, { live }) {
@@ -28,7 +32,8 @@ export default function useKeyRequestCard(keyRequest, { live }) {
   const [value, setValue] = useState('')
   const [settled, setSettled] = useState(null)
   const view = keyRequestCardState({
-    id: keyRequest?.id, owner, live, keys: { data: keysQuery.data, error: keysQuery.error },
+    id: keyRequest?.id, sites: keyRequest?.sites ?? null,
+    owner, live, keys: { data: keysQuery.data, error: keysQuery.error },
   })
   const guard = useKeyAnswerGuard({ enabled: enabled && view.state === 'pending' })
   if (!keyRequest) return null
@@ -53,11 +58,7 @@ export default function useKeyRequestCard(keyRequest, { live }) {
       if (settled === kind) return
       const given = keyAnswerAlreadyGiven(view.state, kind)
       if (given === null) {
-        throw new Error(view.state === 'denied'
-          ? 'You already said Not now to this request.'
-          : view.state === 'gone'
-            ? 'This request was already allowed.'
-            : 'Couldn’t reach the key vault. Try again in a moment.')
+        throw new Error(KEY_STATE_ERRORS[view.state] || 'Couldn’t reach the key vault. Try again in a moment.')
       }
       if (!given) {
         const response = kind === KEY_ALLOW

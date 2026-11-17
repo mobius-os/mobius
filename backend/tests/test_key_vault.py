@@ -1377,6 +1377,30 @@ def test_an_answer_that_stops_short_of_its_length_ends_as_an_error(vault):
   assert entry["outcome"] == "failed" and "broke off" in entry["reason"]
 
 
+def test_a_use_is_logged_even_when_the_caller_stopped_waiting_before_the_answer(vault):
+  """The key went to the site, so the use happened: a caller that hung up
+  before the site answered still leaves it in the log."""
+  import time
+
+  def reply(conn):
+    time.sleep(0.5)
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+
+  def uses():
+    return [e for e in vault.usage(key="echo") if e["outcome"] in ("used", "failed")]
+  with _raw_site(reply) as (connect, _), _vault_server(vault, connect) as path:
+    with socket.socket(socket.AF_UNIX) as gone:
+      gone.connect(str(path))
+      gone.sendall(_borrow())
+    for _ in range(50):
+      if uses():
+        break
+      time.sleep(0.1)
+  [entry] = uses()
+  assert entry["outcome"] == "failed" and entry["status"] == 200
+  assert entry["reason"] == "The caller stopped waiting before the answer arrived"
+
+
 def test_a_borrow_ends_at_its_deadline_however_steadily_the_site_trickles(vault, monkeypatch):
   import time
   monkeypatch.setattr(kv, "BORROW_DEADLINE_SECS", 1)
@@ -1789,10 +1813,11 @@ def _agent_ask(**overrides):
 def test_agents_ask_once_per_key_and_approval_adds_the_owners_sites_and_switches_agents_on(vault):
   vault.put_key("echo", {"grants": _grants(agents=False)})
   first = vault.request_for_agents(_agent_ask(), actor="agent:c1")
-  assert first == {"status": "pending", "key": "echo", "id": "agent-echo", "created": True}
-  # Another chat asking for the same key joins the same card.
+  asked = {"sites": [TILES], "reason": "Fetch map tiles"}
+  assert first == {"status": "pending", "key": "echo", "id": "agent-echo", **asked, "created": True}
+  # Another chat asking the same joins the same card.
   assert vault.request_for_agents(_agent_ask(), actor="agent:c2") == {
-    "status": "pending", "key": "echo", "id": "agent-echo",
+    "status": "pending", "key": "echo", "id": "agent-echo", **asked,
   }
   [card] = vault.list_requests()
   assert card["requester"] == "agent" and card["app"] is None and card["app_name"] == "Your agent"
@@ -1825,7 +1850,8 @@ def test_approving_an_agents_ask_for_a_new_key_creates_it_for_the_owner_and_agen
 def test_an_agent_partly_covered_keeps_its_sites_and_hears_which_are_missing(vault):
   answer = vault.request_for_agents(_agent_ask(sites=[ECHO_SITE, TILES]), actor="agent:c1")
   assert answer == {"status": "granted", "key": "echo", "id": "agent-echo",
-                    "sites_not_allowed": [TILES], "sites_request": "pending", "created": True}
+                    "sites_not_allowed": [TILES], "sites_request": "pending",
+                    "sites": [TILES], "reason": "Fetch map tiles", "created": True}
   [card] = vault.list_requests()
   assert card["granted"] is True and card["sites"] == [TILES]
   # The owner adding the site on the key's page settles the card too.
@@ -1840,6 +1866,25 @@ def test_denying_an_agents_ask_answers_denied_until_the_owner_forgets_it(vault):
   assert vault.request_for_agents(_agent_ask(), actor="agent:c1")["sites_request"] == "denied"
   assert vault.forget_request("agent-echo")
   assert [e["outcome"] for e in vault.usage(key="echo")][:2] == ["forgot request agents", "denied agents"]
+
+
+def test_a_waiting_request_answers_for_later_asks_and_says_what_approving_grants(vault):
+  """Whatever shows a request (a card, the dialog over an app) shows the
+  stored request, so every answer about it names what it stores. A later ask
+  for the same key, with other sites or words, changes nothing: no rewrite,
+  no new ticket and no audit line, however often it comes."""
+  collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
+  first = vault.request_for_agents(_agent_ask(key="fresh", sites=[collect], reason="Upload"), actor="agent:c1")
+  assert first["created"] is True
+  ticket = _ticket(vault, "agent-fresh")
+  audit_lines = len(vault.usage(key="fresh"))
+  for _ in range(20):
+    later = vault.request_for_agents(_agent_ask(key="fresh"), actor="agent:c2")
+    assert later == {"status": "pending", "key": "fresh", "id": "agent-fresh",
+                     "sites": [collect], "reason": "Upload"}
+  [stored] = vault.list_requests()
+  assert (stored["ticket"], stored["chat_id"], stored["sites"]) == (ticket, "c1", [collect])
+  assert len(vault.usage(key="fresh")) == audit_lines
 
 
 def test_the_owners_agents_together_hold_at_most_ten_open_requests(vault):

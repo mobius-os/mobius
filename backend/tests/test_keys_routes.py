@@ -1262,6 +1262,67 @@ def test_a_borrow_the_vault_may_still_act_on_keeps_the_app_unpurged(
   assert allowed is purge_allowed
 
 
+def test_a_borrow_the_vault_may_still_act_on_frees_the_app_once_the_vaults_deadline_passed(
+  client, auth, db, monkeypatch,
+):
+  """The vault authorizes a borrow when it takes it and ends every borrow by
+  its own deadline, so a borrow that may still be with the vault holds the
+  app back from a purge only until then, never for the rest of the process."""
+  import asyncio
+  from fastapi import HTTPException
+  from app.deps import Principal
+  from app.routes import keys as keys_routes
+  monkeypatch.setattr(key_vault, "_borrows_in_flight", {})
+  monkeypatch.setattr(key_vault, "_borrow_wait_secs", lambda: 0.2)
+  app = _app(db, "slow")
+  principal = Principal(owner=db.query(models.Owner).first(), app_id=app.id,
+                        app_instance_id=app.token_nonce, scope="app")
+
+  async def the_site_is_slow(*args, **kwargs):
+    raise key_vault.VaultTimeout("The site took too long to answer through the key vault.")
+  monkeypatch.setattr(key_vault, "vault_use", the_site_is_slow)
+
+  async def borrow_then_wait():
+    with pytest.raises(HTTPException):
+      await keys_routes.use_key(
+        "shared", "api.example.com", "v1/x",
+        _paused_use_request("/api/keys/use/shared/api.example.com/v1/x"),
+        principal=principal,
+      )
+    with pytest.raises(RuntimeError):
+      key_vault.refuse_purge_while_borrowing(app.id)
+    await asyncio.sleep(0.4)
+    key_vault.refuse_purge_while_borrowing(app.id)
+
+  asyncio.run(borrow_then_wait())
+  assert key_vault._borrows_in_flight == {}
+
+
+def test_the_server_waits_longer_for_a_borrow_than_the_vault_can_take(monkeypatch):
+  """The vault ends every borrow by its own deadline and answers by then, so
+  the relay's read timeout outlasts that deadline: the server never gives up
+  on a borrow the vault is still working on."""
+  import asyncio
+  timeouts = []
+
+  class Stop(Exception):
+    pass
+
+  class Client(key_vault.httpx.AsyncClient):
+    def __init__(self, *args, timeout=None, **kwargs):
+      timeouts.append(timeout)
+      super().__init__(*args, timeout=timeout, **kwargs)
+
+    async def send(self, *args, **kwargs):
+      raise Stop()
+  monkeypatch.setattr(key_vault.httpx, "AsyncClient", Client)
+  with pytest.raises(key_vault.VaultUnavailable):
+    asyncio.run(key_vault.vault_use("GET", "/use/k/api.example.com/x", caller="app:1", headers=[], body=None))
+  [timeout] = timeouts
+  assert timeout.read > key_vault._vault_rules().BORROW_DEADLINE_SECS
+  assert timeout.connect <= 10
+
+
 def test_a_header_the_relay_cannot_carry_is_a_bad_request_and_never_pins_the_app(
   client, auth, db, vault, monkeypatch,
 ):
@@ -1952,7 +2013,8 @@ def test_a_top_level_agent_asks_by_card_in_its_chat(client, auth, db, vault, pus
   assert refused.status_code == 403 and refused.json()["ask"] == "the request_key tool"
   ask = {"key": "maps", "reason": "Fetch map tiles", "sites": [TILES]}
   first = client.post("/api/keys/requests", headers=agent, json=ask)
-  assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps"}, first.text
+  assert first.json() == {"status": "pending", "key": "maps", "id": "agent-maps",
+                          "sites": [TILES], "reason": "Fetch map tiles"}, first.text
   assert client.post("/api/keys/requests", headers=agent, json=ask).json()["status"] == "pending"
   # The card waits in the agent's chat; nothing notifies the owner.
   assert pushes == [] and nudges == [{"type": "key_requests_changed"}]

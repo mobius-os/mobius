@@ -59,11 +59,12 @@ def test_a_new_key_ask_saves_a_waiting_key_card_in_the_agents_chat(client, chat,
   assert asked.status_code == 200, asked.text
   receipt = asked.json()
   assert receipt["state"] == "waiting_for_owner"
-  assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa"}
+  assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa",
+                               "sites": [APOD], "reason": ASK["reason"]}
   marker, [card] = _card(chat.id)
   # The same waiting marker every saved card sets, so the chat waits for the owner.
   assert marker == receipt["question_id"] == card["question_id"]
-  assert card["key_request"] == {"id": "agent-nasa", "key": "nasa", "reason": ASK["reason"]}
+  assert card["key_request"] == {"id": "agent-nasa", "key": "nasa", "reason": ASK["reason"], "sites": [APOD]}
   assert card["message"] == ASK["message"]
   [question] = card["questions"]
   assert question["question"] == "Let your agent send **nasa** to **api.nasa.gov**?"
@@ -115,3 +116,54 @@ def test_a_key_the_agent_may_already_use_there_answers_without_a_card(client, ch
 def test_only_the_current_agent_run_asks_by_card(client, chat, auth, vault):
   refused = client.post(f"/api/chats/{chat.id}/key-request", headers=auth, json=ASK)
   assert refused.status_code == 403
+
+
+def test_another_chats_waiting_request_never_shows_as_this_agents_card(client, chat, auth, agent_run, vault):
+  """A request already waiting answers for later asks for its key, so an ask
+  that joins another chat's request saves no card here, where it would read
+  as this agent's own; the agent hears what is waiting and asks again later."""
+  collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
+  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor="agent:other-chat")
+  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK)
+  assert asked.status_code == 200, asked.text
+  receipt = asked.json()
+  assert receipt["state"] == "answered_without_card" and "another chat" in receipt["note"]
+  assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa",
+                               "sites": [collect], "reason": "Upload"}
+  marker, cards = _card(chat.id)
+  assert marker is None and cards == []
+
+
+def test_asking_again_in_the_same_chat_shows_the_stored_request(client, chat, auth, agent_run, vault):
+  """The card is written from the request the vault stored, never from the new ask."""
+  client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK)
+  other = {**ASK, "reason": "Something else", "sites": [{"host": "images-api.nasa.gov", "methods": ["GET"], "paths": ["/*"]}]}
+  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=other).json()
+  [card] = [c for c in _card(chat.id)[1] if c["question_id"] == receipt["question_id"]]
+  assert card["questions"][0]["question"] == "Let your agent send **nasa** to **api.nasa.gov**?"
+  assert card["key_request"] == {"id": "agent-nasa", "key": "nasa", "reason": ASK["reason"], "sites": [APOD]}
+
+
+def test_a_request_removed_without_allowing_it_takes_not_now_and_refuses_allow(client, chat, auth, agent_run, vault):
+  """Removing a request in Settings grants nothing: the card can still be
+  answered, but only truthfully."""
+  qid = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK).json()["question_id"]
+  assert client.delete("/api/keys/requests/agent-nasa", headers=auth).status_code in (200, 204)
+  refused = _answer(client, chat, auth, qid, "allow")
+  assert refused.status_code == 409 and "Nothing was allowed for this request" in refused.text
+  assert _answer(client, chat, auth, qid, "deny").status_code == 202
+
+
+def test_a_key_allowed_elsewhere_takes_allow_and_refuses_not_now(client, chat, auth, agent_run, vault):
+  """The owner may allow the key on its page instead of on the card."""
+  qid = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK).json()["question_id"]
+  vault.put_key("nasa", {"value": DUMMY, "inject": {"type": "query", "name": "api_key"},
+                         "grants": {"apps": [], "agents": True, "sites": [APOD]}})
+  refused = _answer(client, chat, auth, qid, "deny")
+  assert refused.status_code == 409 and "Choose Allow" in refused.text
+  assert _answer(client, chat, auth, qid, "allow").status_code == 202
+
+
+def test_a_reason_longer_than_the_vault_keeps_is_refused_rather_than_cut(client, chat, agent_run, vault):
+  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json={**ASK, "reason": "x" * 301})
+  assert asked.status_code == 422

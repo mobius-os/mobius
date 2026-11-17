@@ -112,7 +112,8 @@ class KeyRequest(BaseModel):
 
   model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
   key: str = Field(min_length=1, max_length=64)
-  reason: str = Field(min_length=1, max_length=500)
+  # The vault keeps at most this much of a reason (MAX_REASON).
+  reason: str = Field(min_length=1, max_length=300)
   sites: list[dict] = Field(default_factory=list, max_length=20)
   inject: dict | None = None
   message: ClosingMessage = None
@@ -204,9 +205,11 @@ async def request_key(
   answer = await agent_asks(ask, principal)
   if not key_request_cards.needs_owner(answer):
     return {"state": "answered_without_card", "answer": answer}
+  if await key_request_cards.asked_elsewhere(answer, chat_id):
+    return {"state": "answered_without_card", "answer": answer, "note": key_request_cards.ELSEWHERE_NOTE}
   return {
     **await save_owner_question(
-      chat_id, key_request_cards.card_payload(answer, body.reason, answer.get("sites_not_allowed") or body.sites),
+      chat_id, key_request_cards.card_payload(answer),
       principal, db, closing_message=body.message,
     ),
     "answer": answer,

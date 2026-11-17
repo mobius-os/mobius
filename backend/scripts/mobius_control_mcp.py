@@ -1697,7 +1697,10 @@ _TOOL_DEFINITIONS = {
       "to provide a key you need that is not saved yet). If you may already "
       "use the key there, or the owner already said no, it answers at once "
       "with no card: state answered_without_card and the vault's answer "
-      "(granted, paused or denied), and your turn continues. Otherwise it "
+      "(granted, paused or denied), and your turn continues. The same happens, "
+      "with a note and status pending, when a request for that key from another "
+      "chat is already waiting: answer.sites is what it asks; tell the owner and "
+      "ask again after they answer it. Otherwise it "
       "saves a key card in this chat and returns a receipt, NOT an answer. "
       f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
       "The owner answers on the card (and pastes a new key there, never into "
@@ -1709,7 +1712,7 @@ _TOOL_DEFINITIONS = {
       "properties": {
         "key": {"type": "string", "minLength": 1, "maxLength": 64,
                 "description": "The key's name in Settings › Keys, e.g. nasa."},
-        "reason": {"type": "string", "minLength": 1, "maxLength": 500,
+        "reason": {"type": "string", "minLength": 1, "maxLength": 300,
                    "description": "One plain sentence the owner reads: what you will do with it."},
         "sites": {
           "type": "array", "maxItems": 20,

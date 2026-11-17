@@ -7,7 +7,7 @@ const STATE_LINES = {
   error: 'Couldn’t load this key request. Reload to try again.',
   guest: 'Only the owner of this Möbius can answer a key request.',
   denied: 'You said Not now to this request.',
-  gone: 'This request was already allowed.',
+  gone: 'This request isn’t waiting any more. Choose Allow if your agent may now use the key, or Not now.',
 }
 
 /** What the agent says it needs the key for, and where it goes. */

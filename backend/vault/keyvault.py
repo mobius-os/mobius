@@ -1251,7 +1251,9 @@ class Vault:
 
     Asking is idempotent, so an app checks its status by asking again. The
     first ask for a key returns ``created`` so the server tells the owner
-    once, never on every retry. A granted app that asks for sites its grant
+    once, never on every retry. A stored request answers for every later ask
+    for the same key until the owner answers it, and every answer about it
+    carries the ``sites`` and ``reason`` it stores: what approving it grants. A granted app that asks for sites its grant
     does not cover keeps using what it has, is told which sites are missing
     (``sites_not_allowed``), and its ask for them waits for the owner like
     any request (``sites_request``). An app the owner paused on the key
@@ -1273,7 +1275,7 @@ class Vault:
     key, as for an app). ``actor`` is the agent that asked, for the audit log;
     its chat (``agent:<chat>``) is kept as the request's ``chat``, so the
     card can be answered in the chat that asked (another chat asking for the
-    same key joins this card and does not move it).
+    same key joins it and does not move it).
     """
     kind, _, chat = actor.partition(":")
     asker = {"requester": "agent", "app": None, "app_name": "Your agent",
@@ -1311,11 +1313,14 @@ class Vault:
           self._requests.pop(request_id, None)
           return {"status": status, "key": name}
         answer = {"status": status, "key": name, "id": request_id, "sites_not_allowed": missing}
+        # A request already stored answers for any later ask until the owner
+        # answers it, and the answer names what it stores: whatever shows the
+        # request (a card, the dialog over an app) shows what approving grants.
         if existing is not None:
-          return {**answer, "sites_request": existing["status"]}
+          return {**answer, "sites_request": existing["status"], **_asked(existing)}
         sites, inject = missing, None
       elif existing is not None:
-        return {"status": existing["status"], "key": name, "id": request_id}
+        return {"status": existing["status"], "key": name, "id": request_id, **_asked(existing)}
       if sum(1 for item in self._requests.values() if _asked_by(item, asker)) >= MAX_REQUESTS_PER_APP:
         who = "This app has" if asker["requester"] == "app" else "Your agents have"
         raise VaultError(429, f"{who} too many open key requests; ask the owner to review them.")
@@ -1327,9 +1332,10 @@ class Vault:
         "status": "pending", "created_at": _now(), "ticket": secrets.token_hex(8),
       }
       self._audit_change(name, caller, "requested")
+    asked = {"sites": sites, "reason": reason, "created": True}
     if grant is not None:
-      return {**answer, "sites_request": "pending", "created": True}
-    return {"status": "pending", "key": name, "id": request_id, "created": True}
+      return {**answer, "sites_request": "pending", **asked}
+    return {"status": "pending", "key": name, "id": request_id, **asked}
 
   def list_requests(self) -> list[dict]:
     """Open requests; ``granted`` marks an asker wanting more sites on a key it may use.
@@ -1581,6 +1587,11 @@ def asker_grant(grants: dict, asker: dict) -> dict | None:
   if asker["requester"] == "agent":
     return {"sites": grants.get("sites") or []} if grants.get("agents") else None
   return app_grant(grants, asker["app"])
+
+
+def _asked(request: dict) -> dict:
+  """What a stored request asks: what approving it would grant."""
+  return {"sites": request["sites"], "reason": request["reason"]}
 
 
 def _asked_by(item: dict, asker: dict) -> bool:
@@ -2005,21 +2016,26 @@ class VaultHandler(BaseHTTPRequestHandler):
     has_body = self.command != "HEAD" and response.status not in (204, 304) and response.status >= 200
     self._answer_started = True
     self.connection.settimeout(CALLER_SEND_TIMEOUT_SECS)
-    self.send_response(response.status)
-    for header, header_value in inflater.headers:
-      lowered = header.lower()
-      if lowered in HOP_BY_HOP or lowered == "content-length" or lowered.startswith("x-vault-"):
-        continue
-      cleaned = redact(header_value.encode("latin-1", "replace"), echoes).decode("latin-1")
-      self.send_header(header, cleaned)
-    self.send_header("Transfer-Encoding" if has_body else "Content-Length", "chunked" if has_body else "0")
-    self.send_header("Connection", "close")
-    self.send_header("X-Vault-Key", name)
+    try:
+      self.send_response(response.status)
+      for header, header_value in inflater.headers:
+        lowered = header.lower()
+        if lowered in HOP_BY_HOP or lowered == "content-length" or lowered.startswith("x-vault-"):
+          continue
+        cleaned = redact(header_value.encode("latin-1", "replace"), echoes).decode("latin-1")
+        self.send_header(header, cleaned)
+      self.send_header("Transfer-Encoding" if has_body else "Content-Length", "chunked" if has_body else "0")
+      self.send_header("Connection", "close")
+      self.send_header("X-Vault-Key", name)
+      self.end_headers()
+    except OSError:
+      # The key was sent and the site answered: the use happened even though
+      # the caller no longer takes the answer, so it is still logged.
+      record("The caller stopped waiting before the answer arrived")
+      return
     if not has_body:
       record(None)
-      self.end_headers()
       return
-    self.end_headers()
     redactor = StreamRedactor(echoes)
 
     def send(data: bytes) -> None:

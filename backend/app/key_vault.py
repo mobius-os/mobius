@@ -44,8 +44,12 @@ _RESTART_BACKOFF_SECS = (1, 2, 5, 10, 30, 60)
 # A vault that ran this long before exiting counts as healthy again.
 _HEALTHY_RUN_SECS = 120
 _STOP_GRACE_SECS = 5
-# Matches the vault's own upstream timeout plus room for its answer.
-_USE_TIMEOUT_SECS = 75
+# The vault ends every borrow by its own deadline (BORROW_DEADLINE_SECS, from
+# when its handler starts) and answers by then, so the server waits that long
+# plus this margin: it never gives up on a borrow the vault is still working
+# on. The same margin bounds how long a borrow that may still be with the vault
+# keeps its app from being purged.
+_BORROW_GRACE_SECS = 30
 
 
 class VaultUnavailable(RuntimeError):
@@ -154,7 +158,7 @@ async def vault_use(
   """
   client = httpx.AsyncClient(
     transport=httpx.AsyncHTTPTransport(uds=str(vault_socket())),
-    base_url="http://vault", timeout=_USE_TIMEOUT_SECS,
+    base_url="http://vault", timeout=httpx.Timeout(_borrow_wait_secs(), connect=10),
   )
   try:
     request = client.build_request(
@@ -256,6 +260,11 @@ class GrantWidening:
   apps: tuple[int, ...] = ()  # apps that may newly use the key, reach more or are unpaused
   agents: bool = False        # the Agents switch turned on
   sites: bool = False         # the owner's and agents' own sites reach more
+
+
+def sites_outside(sites: list[dict], requested: list[dict]) -> list[dict]:
+  """The part of ``requested`` that ``sites`` do not allow, by the vault's own rules."""
+  return _vault_rules().sites_outside(sites, requested)
 
 
 def stored_slot(inject):
@@ -426,6 +435,17 @@ async def for_live_app(app_id: int, expected_nonce: str | None = None):
 _borrows_in_flight: dict[int, int] = {}
 
 
+def _borrow_wait_secs() -> int:
+  """How long the vault can still act on a borrow it has taken, and then some."""
+  return _vault_rules().BORROW_DEADLINE_SECS + _BORROW_GRACE_SECS
+
+
+def _release_borrow(app_id: int) -> None:
+  left = _borrows_in_flight.pop(app_id, 0) - 1
+  if left > 0:
+    _borrows_in_flight[app_id] = left
+
+
 def _may_still_be_with_vault(error: BaseException) -> bool:
   """Whether a relay that failed with ``error`` may have left its request
   with the vault: only a failure after sending began (``vault_use``) does."""
@@ -452,10 +472,11 @@ async def borrow(
   A borrow is out until the vault has answered. A cancelled caller does not
   end it: the relay is settled first. When the relay fails after the request
   may have reached the vault, the vault could still act on it, so the borrow
-  stays out for the rest of this process. The vault process ends with the
-  server, and a new one cannot start until it has, so the next process starts
-  with no such request left. Any failure before the request was sent
-  releases the borrow at once.
+  stays out until the vault's own deadline for it has surely passed
+  (``_borrow_wait_secs`` from now): the vault authorizes a borrow only when
+  its handler starts and ends every borrow by that deadline. The vault process
+  also ends with the server, so a restart ends any such borrow sooner. Any
+  failure before the request was sent releases the borrow at once.
   """
   if not installation:
     raise AppGone(app_id)
@@ -494,14 +515,14 @@ async def borrow(
     return answer
   finally:
     if released:
-      left = _borrows_in_flight.pop(app_id) - 1
-      if left:
-        _borrows_in_flight[app_id] = left
+      _release_borrow(app_id)
     else:
+      wait = _borrow_wait_secs()
       log.warning(
         "app %s: a key borrow may still be with the vault; "
-        "its purge waits for this server process to end", app_id,
+        "its purge waits %s seconds for the vault's deadline", app_id, wait,
       )
+      asyncio.get_running_loop().call_later(wait, _release_borrow, app_id)
 
 
 class BorrowInFlight(RuntimeError):

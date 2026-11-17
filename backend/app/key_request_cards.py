@@ -33,13 +33,18 @@ def _host_list(sites: list[dict]) -> str:
   return f"{', '.join(hosts[:-1])} and {hosts[-1]}"
 
 
-def card_payload(answer: dict, reason: str, sites: list[dict]) -> dict:
+def card_payload(answer: dict) -> dict:
   """The saved card for the vault request ``answer`` names.
 
-  Its text reads well in the transcript and to the resumed agent; the card
-  shows the live request (reason, sites, how a new key is sent) from the vault.
+  Every word comes from the request as the vault stored it (``answer``'s
+  ``sites`` and ``reason``), never from the ask that led here: a request
+  already waiting may be one another chat made, and the card must name exactly
+  what its Allow grants. Its text reads well in the transcript and to the
+  resumed agent; the card shows the live request from the vault and keeps
+  the sites it names, against which its answer is checked.
   """
   key = answer["key"]
+  sites = answer.get("sites") or []
   hosts = _host_list(sites)
   question = (
     f"Let your agent send **{key}** to **{hosts}**?" if hosts
@@ -58,12 +63,35 @@ def card_payload(answer: dict, reason: str, sites: list[dict]) -> dict:
         },
         {
           "id": DENY, "label": "Not now",
-          "description": "Nothing is saved or changed; your agent carries on without it.",
+          "description": "Your agent carries on without it, and can't ask for this key again "
+          "until you let it in Settings › Keys.",
         },
       ],
     }],
-    "key_request": {"id": answer["id"], "key": key, "reason": reason},
+    "key_request": {"id": answer["id"], "key": key, "reason": answer.get("reason") or "", "sites": sites},
   }
+
+
+async def asked_elsewhere(answer: dict, chat_id: str) -> bool:
+  """Whether the request ``answer`` names was made outside ``chat_id``.
+
+  A request already waiting answers for every later ask for its key, so a
+  card for it belongs only in the chat whose agent asked: shown here, another
+  chat's (or a chatless agent's) ask would read as this agent's own.
+  """
+  try:
+    requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
+  except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
+    raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
+  request = next((item for item in requests if item.get("id") == answer.get("id")), None)
+  return request is not None and request.get("chat_id") != chat_id
+
+
+ELSEWHERE_NOTE = (
+  "A request for this key from another chat (or one the owner answers in Settings › Keys) "
+  "is already waiting, so no card was saved here; answer.sites is what it asks. Tell the "
+  "owner, and ask again after they answer it."
+)
 
 
 def needs_owner(answer: dict) -> bool:
@@ -74,20 +102,39 @@ def needs_owner(answer: dict) -> bool:
 async def check_answer(card: dict, selections: dict | None) -> None:
   """Admit an answer to a key card only when the vault already agrees.
 
-  Allow: the request has left the vault's pending list (an allowed request
-  is removed). Not now: the vault records it as denied. Anything else, a
-  typed reply included, is refused: the owner answers on the card itself.
+  The vault is read for exactly what the card asked (its ``sites``):
+  Allow needs the key to exist with your agents allowed on every one of them.
+  Not now needs the card's request refused, or no longer waiting without the
+  key being allowed there (removed in Settings, say), so a card always has an
+  honest answer and the agent is never told Allow for nothing. A card saved
+  before cards kept their sites is judged by its request alone. Anything
+  else, a typed reply included, is refused: the owner answers on the card.
   """
-  request_id = (card.get("key_request") or {}).get("id")
+  key_request = card.get("key_request") or {}
+  request_id = key_request.get("id")
   chosen = (selections or {}).get(QUESTION_ID)
   if not isinstance(request_id, str) or chosen not in ([ALLOW], [DENY]):
     raise HTTPException(409, detail="Answer this key request with Allow or Not now on its card.")
+  sites = key_request.get("sites")
   try:
     requests = (await key_vault.vault_call("GET", "/requests"))["requests"]
+    keys = (await key_vault.vault_call("GET", "/keys"))["keys"] if isinstance(sites, list) else []
   except (key_vault.VaultUnavailable, key_vault.VaultTimeout) as exc:
     raise HTTPException(503, detail="The key vault isn't running. Try again in a moment.") from exc
   request = next((item for item in requests if item.get("id") == request_id), None)
-  status = request.get("status") if request else None
-  agrees = status == "denied" if chosen == [DENY] else status != "pending" and status != "denied"
-  if not agrees:
+  # The request this card shows, if it still waits or was refused as asked.
+  own = request if request is not None and (not isinstance(sites, list) or request.get("sites") == sites) else None
+  if not isinstance(sites, list):
+    status = own.get("status") if own else None
+    covered = status not in ("pending", "denied")
+  else:
+    record = next((item for item in keys if item.get("name") == key_request.get("key")), None)
+    covered = record is not None and bool(record["grants"].get("agents")) and not (
+      key_vault.sites_outside(record["grants"].get("sites") or [], sites)
+    )
+  if own is not None and own.get("status") == "pending":
     raise HTTPException(409, detail="Your key vault hasn't recorded this answer. Reload Möbius and answer the card again.")
+  if chosen == [ALLOW] and not covered:
+    raise HTTPException(409, detail="Nothing was allowed for this request. Choose Not now, or allow the key in Settings › Keys.")
+  if chosen == [DENY] and covered and not (own is not None and own.get("status") == "denied"):
+    raise HTTPException(409, detail="Your agents may already use this key there. Choose Allow.")

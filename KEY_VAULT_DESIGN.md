@@ -71,15 +71,21 @@ Status: draft for review.
    most ten open requests. A granted app that asks for sites its grant lacks
    keeps using what it has, is told which are missing (`sites_not_allowed`),
    and its ask for them waits for the owner like any request
-   (`sites_request`).
+   (`sites_request`). A waiting request answers for every later ask for the
+   same key until the owner answers it, and every answer about it carries
+   the `sites` and `reason` it stores, so whatever shows a request (an
+   agent's card, the dialog over an app) shows exactly what approving it
+   grants. A refused request stands until the owner lets the asker ask again.
 2. **Approve.** The owner sees the app's name, reason, requested sites,
    methods and paths and, for a new key, how it would be sent, and approves
    or denies; only the owner's own input can approve. The card asks where
    the request was made, answered through the owner-only routes: an agent's
-   in the chat that asked (the vault keeps that chat, the agent ends its turn
-   with a `mobius-key-request` block naming the request, and the owner's
-   answer there is posted to that chat as their own message, which resumes
-   the agent), and an app's in a dialog over the app's window while the
+   in the chat that asked (the vault keeps that chat; the agent's
+   `request_key` control saves an ordinary owner card, and the card records
+   the owner's answer only once the vault agrees with it, which resumes the
+   agent; the older `mobius-key-request` block is still rendered only so
+   chats that used it read as they did, and agents are no longer told to
+   write it), and an app's in a dialog over the app's window while the
    owner has it open, straight away or when they next open it (the app list
    marks the app as needing them until then). Not now is the dialog's only
    way out. Settings › Keys answers only an agent's request that names no
@@ -195,7 +201,11 @@ connects, sets up TLS or sends its answer (the vault shuts the site's
 connection then), and a caller that takes
 60 seconds to accept the next piece is cut off. At most 32 borrows run at
 once, and at most 8 for one caller (an app, one agent's chat); beyond either
-the vault answers 429. Headers
+the vault answers 429. The server waits 30 seconds longer than a borrow can
+take, so it never gives up on one the vault is still working on; a borrow
+that may still be with the vault keeps its app from being purged only until
+that time has passed. A use whose caller hung up before the answer is still
+logged. Headers
 sites log as metadata (`User-Agent`, `Referer` and similar) cannot carry a
 key. An app without a grant gets the same refusal whether or not a key
 exists. A site slower than the relay is reported as a timeout (504), not as a
