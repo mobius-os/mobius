@@ -10740,6 +10740,36 @@ def test_overlay_finish_check_reports_a_replaced_record_as_broken(finish_env, ca
   assert "no longer names this finish operation" in capsys.readouterr().out
 
 
+def test_overlay_finish_check_rereads_a_finish_that_ended_during_its_probe(
+  finish_env, monkeypatch, capsys,
+):
+  _origin, platform = finish_env
+  operation, target = "e" * 64, _served_sha(platform)
+  pu._set_update_progress(
+    pu.PlatformUpdatePhase.TESTING, plan_id=operation, target_sha=target,
+    active=True, operation="overlay_finish",
+  )
+  probes = []
+
+  def finish_ends_then_releases() -> bool:
+    # The finish writes its terminal record, then releases the lock, between
+    # the check's first read and its lock probe.
+    if not probes:
+      pu._set_update_progress(
+        pu.PlatformUpdatePhase.COMPLETE, plan_id=operation, target_sha=target,
+        active=False, operation="overlay_finish", result="prepared",
+      )
+    probes.append(True)
+    return False
+
+  monkeypatch.setattr(pu, "_reconcile_lock_held", finish_ends_then_releases)
+  assert pu.overlay_finish_check(operation) == 0
+  out = capsys.readouterr().out
+  assert "stopped before" not in out
+  assert json.loads(out)["phase"] == "complete"
+  assert probes == [True]
+
+
 def test_resolver_instructions_finish_through_the_update_owner(parked_resolution):
   target = "a" * 40
   for overlay in (parked_resolution, {**parked_resolution, "replay": True}):

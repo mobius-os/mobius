@@ -710,13 +710,16 @@ def _finish_interrupted_update_progress() -> None:
   _retire_dead_progress()
 
 
-def _retire_dead_progress() -> None:
-  """Mark an active record failed; the caller proved its owner is gone."""
+def _retire_dead_progress() -> str | None:
+  """Mark an active record failed; the caller proved its owner is gone.
+
+  Returns the retired record's id, whose leftover test runners were ended.
+  """
   if not UPDATE_PROGRESS_PATH.exists():
-    return
+    return None
   progress = platform_update_progress()
   if not progress["active"]:
-    return
+    return None
   finish = progress.get("operation") == _OVERLAY_FINISH
   # Its local tests lead their own sessions and outlive it; end exactly them.
   _end_finish_test_processes(progress["plan_id"])
@@ -740,6 +743,7 @@ def _retire_dead_progress() -> None:
       "before retrying."
     ),
   )
+  return progress["plan_id"]
 
 
 def _finish_test_marker(operation_id: str) -> str:
@@ -3519,9 +3523,10 @@ def _park_for_repair(
   """Open the reviewed release in the isolated candidate for an agent.
 
   The agent works on this frozen copy of the merged update instead of the
-  live checkout. Finishing goes through ``continue_platform_overlay_update``,
-  which merges any live edits made meanwhile in one short locked step just
-  before the switch.
+  live checkout. Finishing goes through ``finish_platform_overlay_update``
+  (``POST /api/platform/overlay-finish``), which the backend owns; it merges
+  any live edits made meanwhile in one short locked step just before the
+  switch.
   """
   source = _rev(repo, _local_branch(repo))
   carried = _Carried(served=source, pre=source, working=None)
@@ -3767,6 +3772,24 @@ def _prepare(
   return record
 
 
+def _prepare_committed(
+  repo: Path, *, snapshot: str, prepared: str, target: str,
+  image_digest: str | None,
+  progress: Callable[[PlatformUpdatePhase], None] | None = None,
+) -> PreparedUpdate:
+  """``_prepare`` the committed ``prepared`` in a temporary worktree."""
+  with tempfile.TemporaryDirectory(prefix="mobius-prepared-") as tmp:
+    checkout = Path(tmp) / "platform"
+    _git("worktree", "add", "--detach", "-q", str(checkout), prepared, repo=repo)
+    try:
+      return _prepare(
+        repo, snapshot=snapshot, prepared=prepared, target=target,
+        image_digest=image_digest, checkout=checkout, progress=progress,
+      )
+    finally:
+      app_git.remove_overlay_worktree(repo, checkout)
+
+
 def prepare_reviewed_update(
   *,
   plan_id: str,
@@ -3799,16 +3822,10 @@ def prepare_reviewed_update(
       overlay = {**(flag.get("overlay") or {}), "image_digest": image_digest}
       _write_conflict_flag(target_sha, list(flag.get("paths") or []), overlay=overlay)
       return outcome
-    with tempfile.TemporaryDirectory(prefix="mobius-prepared-") as tmp:
-      checkout = Path(tmp) / "platform"
-      _git("worktree", "add", "--detach", "-q", str(checkout), outcome.tip, repo=repo)
-      try:
-        record = _prepare(
-          repo, snapshot=current_sha, prepared=outcome.tip, target=target_sha,
-          image_digest=image_digest, checkout=checkout,
-        )
-      finally:
-        app_git.remove_overlay_worktree(repo, checkout)
+    record = _prepare_committed(
+      repo, snapshot=current_sha, prepared=outcome.tip, target=target_sha,
+      image_digest=image_digest,
+    )
     _pin_if_retired(repo, target_sha, current_sha, outcome.reconciliation)
     return record
 
@@ -5206,17 +5223,10 @@ def _continue_parked_resolution(
   if not parked.get("replay") and parked.get("stage") != "working":
     # Check the committed bytes, as prepare_reviewed_update does, never the
     # candidate's working files, which its resolver can still edit.
-    with tempfile.TemporaryDirectory(prefix="mobius-prepared-") as tmp:
-      checkout = Path(tmp) / "platform"
-      _git("worktree", "add", "--detach", "-q", str(checkout), committed, repo=repo)
-      try:
-        _prepare(
-          repo, snapshot=source, prepared=committed, target=target,
-          image_digest=parked.get("image_digest"), checkout=checkout,
-          progress=progress,
-        )
-      finally:
-        app_git.remove_overlay_worktree(repo, checkout)
+    _prepare_committed(
+      repo, snapshot=source, prepared=committed, target=target,
+      image_digest=parked.get("image_digest"), progress=progress,
+    )
     keep_candidate()
     app_git.remove_overlay_worktree(repo, worktree)
     if flag.get("chat_id"):
@@ -6734,12 +6744,14 @@ def _finish_overlay_operation_sync(
     # This process holds the Apply lock, so taking the reconcile lock did not
     # retire a record a dead process left active. Nothing else owns it now;
     # retire it so a crashed finish is never silently run again.
-    _retire_dead_progress()
+    retired = _retire_dead_progress()
     latest = platform_update_progress()
     # Whatever finish the record names is proven gone (this process owns the
     # only finish, and holds both locks): end test runners it left behind,
     # even when an older updater's retirement dropped its ``operation``.
-    _end_finish_test_processes(latest["plan_id"])
+    # Retiring it just ended them; nothing could start more since.
+    if latest["plan_id"] != retired:
+      _end_finish_test_processes(latest["plan_id"])
     flag = _read_conflict_flag() or {}
     parked = flag.get("overlay") or {}
     if parked.get("mode") != "net":
@@ -6779,7 +6791,8 @@ def _finish_overlay_operation_sync(
         return latest  # It did not fail; there is nothing to run again.
     elif recorded:
       return latest
-    _end_finish_test_processes(operation_id)
+    if operation_id != latest["plan_id"]:  # Its runners were ended above.
+      _end_finish_test_processes(operation_id)
     # A re-parked late-edit flag can lack the digest its Apply recorded; keep
     # that reviewed image for the same release (applied_release_digest).
     image_digest = parked.get("image_digest") or (
@@ -6947,6 +6960,21 @@ def overlay_finish_check(operation_id: str) -> int:
   which retires a dead record); 2 when the record no longer names it.
   """
   progress = platform_update_progress()
+
+  def running() -> bool:
+    return (
+      progress["active"] and progress["plan_id"] == operation_id
+      and _reconcile_lock_held()
+    )
+
+  if running():
+    return 1
+  if progress["active"]:
+    # It may have ended between the read and the probe: a finish writes its
+    # terminal record before it releases the lock, so read it again.
+    progress = platform_update_progress()
+    if running():
+      return 1  # A retry of it started meanwhile.
   # The id alone: an older image's boot retires the record without its
   # ``operation`` field.
   if progress["plan_id"] != operation_id:
@@ -6955,8 +6983,6 @@ def overlay_finish_check(operation_id: str) -> int:
       "read /api/platform/update-progress and /api/platform/status."
     )
     return 2
-  if progress["active"] and _reconcile_lock_held():
-    return 1
   if progress["active"]:
     print("Möbius stopped before this finish operation ended.")
   print(json.dumps(progress, sort_keys=True))
