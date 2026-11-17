@@ -275,6 +275,8 @@ class HelperTurn:
   # The helper's last provider call ended in a safety refusal (its own
   # stop reason); a later successful call clears it.
   refused: bool = False
+  # This turn's own agent produced remote model output (RunnerResult).
+  provider_responded: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   # goals.CompactionBriefRefresh for a helper with a Goal assignment.
@@ -622,7 +624,7 @@ class ClaudeHelperHost(Host):
       ToolUseBlock,
       UserMessage,
     )
-    from app.claude_events import dispatch_sdk_message
+    from app.claude_events import dispatch_sdk_message, is_provider_response
     try:
       async for message in self._client.receive_messages():
         if isinstance(message, TaskStartedMessage):
@@ -656,6 +658,8 @@ class ClaudeHelperHost(Host):
         turn = self._turn_for_parent(parent)
         if turn is None or turn.done.is_set():
           continue
+        if is_provider_response(message):
+          turn.provider_responded = True
         if isinstance(message, AssistantMessage):
           # Claude repeats one model call's message per content block; the
           # latest copy carries that call's most complete usage.
@@ -1285,6 +1289,8 @@ async def run_claude_host_turn(
         "cost_usd": None,
         "error": None,
       }
+      if turn.provider_responded:
+        result["provider_responded"] = True
       if turn.status == "failed" or (
         turn.status == "stopped" and not handle.stop_requested
       ):

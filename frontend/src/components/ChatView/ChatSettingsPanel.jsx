@@ -95,6 +95,7 @@ import { detailToMessage } from '../../lib/errorDetail.js'
 import { orderPickerModels, withRecentModel } from '../../lib/modelPickerOrder.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
 import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
+import ModelPickerRow, { providerSetupLink } from './ModelPickerRow.jsx'
 import './ChatSettingsPanel.css'
 
 /** Resolves the displayed model list for `providerId` from the live
@@ -136,6 +137,10 @@ export default function ChatSettingsPanel({
   autoResumeError = '',
   onAutoResumeChange,
   onChange,
+  // Provider logo links (absent where the host cannot navigate, as in an
+  // embedded chat): a built-in's Settings page, or an app provider's app.
+  onOpenProviderSettings,
+  onOpenProviderApp,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
   // Per-chat external state survives the popover and ChatView itself. This is
@@ -657,36 +662,27 @@ export default function ChatSettingsPanel({
         const isSelected = selectedCatalogModel(registry, pid, selectedModel) === m.id && selectedProvider === pid
         return (
             <div key={`${pid}-${m.id}`}>
-              <button
-                type="button"
-                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
-                onClick={() => {
-                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
-                }}
+              <ModelPickerRow
+                Logo={info.Logo}
+                modelLabel={m.label}
+                subtitle={!providerConfigured
+                  ? `${info.label} · Not connected`
+                  : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
+                    ? `${info.label} · No credit`
+                    : info.label}
+                setup={providerSetupLink(pid, info.label, { onOpenProviderSettings, onOpenProviderApp })}
+                selected={isSelected}
                 disabled={switchBusy || appCrossProvider || !providerConfigured}
-                aria-pressed={isSelected}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
                   : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
-              >
-                <span className="csp-row__icon"><info.Logo /></span>
-                <span className="csp-row__main">
-                  <span className="csp-row__title">
-                    <span>{m.label}</span>
-                  </span>
-                  <span className="csp-row__sub">
-                    {!providerConfigured
-                      ? `${info.label} · Not connected`
-                      : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
-                        ? `${info.label} · No credit`
-                        : info.label}
-                  </span>
-                </span>
-                <span className="csp-row__dot" />
-              </button>
+                onSelect={() => {
+                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
+                }}
+              />
               {isSelected && !isPendingRow && (
-                // Indent aligns the stepper under the row title (icon 30 +
-                // gap 12 + row pad 10 = 52).
+                // Indent aligns the stepper under the model title: logo
+                // padding 10 + icon 30 + model button padding 12 = 52.
                 <div className="csp-effort-indent">
                   <EffortStepper
                     efforts={rowEfforts}
