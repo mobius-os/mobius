@@ -13,6 +13,8 @@ import * as paneModel from '../frontend/src/components/Shell/paneModel.js'
 import { emptyChatPage, installMockProviderUsage, runtimeSnapshot, testChatAgentSettings } from './_chatTestPrerequisites.mjs'
 
 const BASE = process.env.MOBIUS_URL || 'http://localhost:8001'
+const SAVED_AGENT = { provider: 'claude', model: 'saved-update-model', effort: 'medium' }
+const UPDATE_AGENT = { provider: 'claude', model: 'chosen-update-model', effort: 'high' }
 
 test.use({ serviceWorkers: 'block' })
 attachCleanup()
@@ -68,6 +70,30 @@ function deferred() {
 }
 
 async function mockPlatform(page, stateRef) {
+  // The chooser reads all three boundaries; no live provider or saved owner
+  // preference determines which agent this reviewed job will use.
+  await page.route('**/api/auth/providers/status', route => route.fulfill({ json: {
+    claude: { configured: true, authenticated: true, name: 'Claude Code' },
+  } }))
+  await page.route('**/api/models', route => route.fulfill({ json: {
+    providers: { claude: [
+      { id: SAVED_AGENT.model, label: 'Saved update model', effort_levels: ['medium'] },
+      { id: UPDATE_AGENT.model, label: 'Chosen update model', effort_levels: ['high'] },
+    ] }, defaults: { claude: SAVED_AGENT.model },
+  } }))
+  await page.route('**/api/owner/model-prefs', route => {
+    // A per-job choice must not overwrite the owner's saved chat preference.
+    expect(route.request().method()).toBe('GET')
+    return route.fulfill({ json: {
+      hidden_ids: [], recent_ids: [SAVED_AGENT.model], selected_agent: SAVED_AGENT,
+    } })
+  })
+  stateRef.agentRequests = []
+  page.on('request', request => {
+    if (request.method() === 'POST' && /\/api\/platform\/(park-for-agent|conflict-resolver-chat)$/.test(new URL(request.url()).pathname)) {
+      stateRef.agentRequests.push({ path: new URL(request.url()).pathname, body: request.postDataJSON() })
+    }
+  })
   // Safety net registered before specific handlers (Playwright routes are LIFO).
   // An unmocked updater request must fail in the test, never reach the instance.
   stateRef.unexpectedMutations = []
@@ -135,6 +161,26 @@ async function openSettings(page, width = 900) {
   await page.getByRole('button', { name: 'Settings', exact: true }).click()
   await expect(page.locator('.settings')).toBeVisible()
   return page.locator('.platform-updates')
+}
+
+async function stageUpdateAgent(page, state) {
+  const picker = page.getByRole('dialog', { name: 'Choose update agent', exact: true })
+  await expect(picker).toBeVisible()
+  const change = picker.getByRole('button', { name: 'Change update agent', exact: true })
+  await expect(change).toContainText('Saved update model')
+  await expect(picker.getByRole('button', { name: 'Start update agent', exact: true })).toBeEnabled()
+  expect(state.agentRequests).toEqual([])
+  await change.click()
+  await picker.getByRole('button', { name: /Chosen update model/ }).click()
+  await expect(change).toContainText('Chosen update model')
+  expect(state.agentRequests).toEqual([]) // Picking a row only stages a choice.
+  return picker
+}
+
+async function confirmUpdateAgent(page, state) {
+  const picker = await stageUpdateAgent(page, state)
+  await picker.getByRole('button', { name: 'Start update agent', exact: true }).click()
+  await expect(picker).toHaveCount(0)
 }
 
 async function openUpdateReview(page) {
@@ -363,6 +409,7 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
 
   const resolver = deferred()
   await page.route('**/api/platform/conflict-resolver-chat', async route => {
+    expect(route.request().postDataJSON()).toEqual({ agent: UPDATE_AGENT })
     await resolver.promise
     return route.fulfill({
       status: 409,
@@ -386,6 +433,12 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
   await expect(resolveButton).toBeFocused()
 
   await resolveButton.click()
+  const cancelledPicker = await stageUpdateAgent(page, state)
+  await cancelledPicker.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(cancelledPicker).toHaveCount(0)
+  expect(state.agentRequests).toEqual([])
+  await resolveButton.click()
+  await confirmUpdateAgent(page, state)
   await expect(blocked.getByRole('button', { name: 'Opening…' })).toBeDisabled()
   // The review is a local, non-modal dialog (#1279): it does not trap Tab, and
   // its Escape handler only answers events from inside it. Put focus on the
@@ -402,6 +455,7 @@ test('a blocked apply stays open, focuses its result, and shows resolver failure
     'The recorded conflict is no longer resolvable.',
   )
   await expect(blocked.getByRole('alert')).toHaveCount(1)
+  expect(state.agentRequests).toEqual([{ path: '/api/platform/conflict-resolver-chat', body: { agent: UPDATE_AGENT } }])
   await expect(blocked.getByRole('button', { name: 'Resolve in chat' })).toBeEnabled()
 
   await page.locator('.urm__overlay').click({ position: { x: 2, y: 2 } })
@@ -424,6 +478,7 @@ test('a predicted overlap goes straight to an agent without applying', async ({ 
   })
   let opened = false
   await page.route('**/api/platform/conflict-resolver-chat', route => {
+    expect(route.request().postDataJSON()).toEqual({ agent: UPDATE_AGENT })
     opened = true
     return route.fulfill({ status: 200, contentType: 'application/json',
       body: JSON.stringify({ chat_id: 'resolver-chat', created: true, started: true }) })
@@ -435,14 +490,15 @@ test('a predicted overlap goes straight to an agent without applying', async ({ 
   await expect(dialog.getByText('Some of your local changes overlap this update.')).toBeVisible()
   await expect(dialog.getByRole('button', { name: 'Apply update' })).toHaveCount(0)
   await dialog.getByRole('button', { name: 'Fix with an agent' }).click()
+  await confirmUpdateAgent(page, state)
 
   await expect.poll(() => opened).toBe(true)
-  expect(parked).toMatchObject({ plan_id: preview.plan_id, current_sha: preview.current_sha,
+  expect(parked).toEqual({ plan_id: preview.plan_id, current_sha: preview.current_sha,
     target_sha: preview.target_sha })
   expect(state.unexpectedMutations).toEqual([])
 })
 
-test('agent handoff immediately shows pending state and sends only one reviewed plan', async ({ page }) => {
+test('confirmed agent handoff shows pending state and sends only one reviewed plan', async ({ page }) => {
   const state = { current: 'available', preview: { ...preview, conflict_paths: ['frontend/src/example.js'] } }
   await mockPlatform(page, state)
   // This response represents a real newly created chat. Without its matching
@@ -462,7 +518,7 @@ test('agent handoff immediately shows pending state and sends only one reviewed 
   let resolverCount = 0
   await page.route('**/api/platform/park-for-agent', async route => {
     parkCount += 1
-    expect(route.request().postDataJSON()).toMatchObject({
+    expect(route.request().postDataJSON()).toEqual({
       plan_id: preview.plan_id, current_sha: preview.current_sha, target_sha: preview.target_sha,
     })
     await park.promise
@@ -473,6 +529,7 @@ test('agent handoff immediately shows pending state and sends only one reviewed 
   })
   await page.route('**/api/platform/conflict-resolver-chat', route => {
     resolverCount += 1
+    expect(route.request().postDataJSON()).toEqual({ agent: UPDATE_AGENT })
     return route.fulfill({ status: 200, contentType: 'application/json',
       body: JSON.stringify({ chat_id: 'resolver-chat', created: true, started: true }) })
   })
@@ -484,13 +541,19 @@ test('agent handoff immediately shows pending state and sends only one reviewed 
   await expect(fix).toBeEnabled()
   // Both events run before React has a chance to commit the disabled button.
   await fix.evaluate(button => { button.click(); button.click() })
+  const picker = await stageUpdateAgent(page, state)
+  // Confirming twice in the same task still resolves one choice and one plan.
+  await picker.getByRole('button', { name: 'Start update agent', exact: true })
+    .evaluate(button => { button.click(); button.click() })
+  await expect(picker).toHaveCount(0)
   await expect(dialog.getByRole('status')).toContainText('Preparing the reviewed update for an agent')
   await expect(dialog.getByRole('button', { name: 'Preparing…' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Not now' })).toBeDisabled()
   await expect(dialog.getByRole('button', { name: 'Close' })).toBeDisabled()
   await page.keyboard.press('Escape')
   await expect(dialog).toBeVisible()
-  expect(parkCount).toBe(1)
+  await expect.poll(() => parkCount).toBe(1)
+  expect(resolverCount).toBe(0)
 
   // The resolver's confirmed chat must open even if the follow-up status read stalls.
   await page.route('**/api/platform/status', async route => {
@@ -503,7 +566,35 @@ test('agent handoff immediately shows pending state and sends only one reviewed 
   // Internal shell navigation is workspace-owned, not a URL change.
   await expect(page.locator('[data-chat-id="resolver-chat"]')).toBeVisible()
   status.resolve()
+  expect(state.agentRequests).toEqual([
+    { path: '/api/platform/park-for-agent', body: {
+      plan_id: preview.plan_id, current_sha: preview.current_sha, target_sha: preview.target_sha,
+    } },
+    { path: '/api/platform/conflict-resolver-chat', body: { agent: UPDATE_AGENT } },
+  ])
   expect(state.unexpectedMutations).toEqual([])
+})
+
+for (const dismiss of ['Close', 'Escape']) test(`cancelling the agent picker with ${dismiss} does not park a plan or open a chat`, async ({ page }) => {
+  const state = { current: 'available', preview: { ...preview, conflict_paths: ['frontend/src/example.js'] } }
+  await mockPlatform(page, state)
+  await openSettings(page)
+  await page.getByRole('button', { name: 'Review update', exact: true }).click()
+  const review = page.getByRole('dialog', { name: 'Review update' })
+  await review.getByRole('button', { name: 'Fix with an agent' }).click()
+  const picker = await stageUpdateAgent(page, state)
+  if (dismiss === 'Escape') await page.keyboard.press('Escape')
+  else await picker.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveCount(0)
+  await expect(review.getByRole('button', { name: 'Fix with an agent' })).toBeEnabled()
+  expect(state.agentRequests).toEqual([])
+  expect(state.unexpectedMutations).toEqual([])
+  // Reopening recovers the saved agent, not the cancelled draft.
+  await review.getByRole('button', { name: 'Fix with an agent' }).click()
+  await expect(picker.getByRole('button', { name: 'Change update agent' })).toContainText('Saved update model')
+  await picker.getByRole('button', { name: 'Close', exact: true }).click()
+  await expect(picker).toHaveCount(0)
+  expect(state.agentRequests).toEqual([])
 })
 
 for (const failure of ['http', 'network']) test(`agent handoff reports ${failure} park failure without opening a chat`, async ({ page }) => {
@@ -527,12 +618,16 @@ for (const failure of ['http', 'network']) test(`agent handoff reports ${failure
   await page.getByRole('button', { name: 'Review update', exact: true }).click()
   const dialog = page.getByRole('dialog', { name: 'Review update' })
   await dialog.getByRole('button', { name: 'Fix with an agent' }).click()
+  await confirmUpdateAgent(page, state)
   await expect(dialog.getByRole('alert')).toContainText(failure === 'network'
     ? 'Couldn’t reach Möbius. Check the update status before trying again.'
     : 'The reviewed plan is stale.')
   await expect(dialog.getByRole('button', { name: 'Fix with an agent' })).toBeEnabled()
   expect(parkCount).toBe(1)
   expect(resolverCount).toBe(0)
+  expect(state.agentRequests).toEqual([{ path: '/api/platform/park-for-agent', body: {
+    plan_id: preview.plan_id, current_sha: preview.current_sha, target_sha: preview.target_sha,
+  } }])
   expect(state.unexpectedMutations).toEqual([])
 })
 

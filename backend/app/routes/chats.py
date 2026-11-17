@@ -43,6 +43,8 @@ from app.chat_visibility import (
   visible_in_owner_drawer,
 )
 from app.chat_event_sink import active_sink_assistant_message_id
+from app.chat_message_identity import assistant_message_run_id
+from app.run_end_times import run_ended_ts
 from app.chat_activity import chat_activity_page
 from app.chat_waits import (
   outstanding_wait_chat_ids,
@@ -413,6 +415,9 @@ class ChatCreate(ChatUpdate):
   # recovery_request_id. Validated as a real UUID below so it matches the shape
   # the server otherwise mints and cannot be an arbitrary primary key.
   id: str | None = Field(default=None, min_length=1, max_length=64)
+  agent: schemas.UpdateAgentChoice | None = None
+  # One-shot filing only after this chat explicitly completes a Goal.
+  archive_on_goal_complete: bool = False
 
 
 def _project_ref_for_chat(db: Session, chat) -> dict | None:
@@ -502,6 +507,24 @@ def _mirror_agent_defaults(
   if owner is not None and owner.provider != provider_id:
     owner.provider = provider_id
     db.commit()
+
+
+def _remember_owner_model_choice(db: Session, model_id: str | None, provider_id: str) -> None:
+  """Mirror only a confirmed owner pick, serialized with visibility edits."""
+  if not model_id:
+    return
+  from sqlalchemy import text
+
+  db.commit()
+  db.execute(text("BEGIN IMMEDIATE"))
+  owner = db.query(models.Owner).first()
+  if owner is not None:
+    db.refresh(owner)
+    owner.model_prefs_json = providers.remember_recent_model(
+      owner.model_prefs_json, model_id,
+    )
+    owner.provider = provider_id
+  db.commit()
 
 
 def _switch_request_fingerprint(provider_id: str, settings_patch: dict) -> str:
@@ -759,6 +782,19 @@ def _branch_origin_ref(db: Session, chat: models.Chat) -> dict | None:
   }
 
 
+def _project_run_ended_times(db: Session, chat_id: str, page: list) -> list:
+  """Give each assistant row of an ended run that run's end, `run_ended_ts`
+  (see app.run_end_times), without touching the stored row."""
+  def run_of(message):
+    return (assistant_message_run_id(message.get("id"))
+            if isinstance(message, dict) and message.get("role") == "assistant" else None)
+  ended = run_ended_ts(db, chat_id, {run_of(message) for message in page})
+  if not ended:
+    return page
+  return [{**message, "run_ended_ts": ended[run_of(message)]}
+          if run_of(message) in ended else message for message in page]
+
+
 def _chat_detail_response(
   chat: models.Chat,
   *,
@@ -931,6 +967,8 @@ def _chat_detail_response(
       next_page[relative_index] = {**message, "continuation_reason": reason}
     page = next_page
 
+  page = _project_run_ended_times(db, chat.id, page)
+
   from app.platform_restart import project_restart_observations
   page = project_restart_observations(db, chat.id, page)
 
@@ -1014,7 +1052,7 @@ def _chat_detail_response(
       serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)
     ] if expose_session else [],
     "background_helpers": (
-      serialize_background_helpers(db, chat.id)
+      serialize_background_helpers(db, chat.id, goal=goal)
       if expose_session else {"count": 0, "items": []}
     ),
   }
@@ -1432,11 +1470,19 @@ def create_chat(
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
   with _OWNER_CHAT_CREATE_LOCK:
-    provider, agent_settings = providers.snapshot_owner_chat_choice(
-      data_dir,
-      owner.provider if owner else None,
-      allow_unselected=db.query(models.Chat.id).first() is None,
-    )
+    if body.agent is not None:
+      from app.update_chat import resolve_update_chat_choice
+      choice = resolve_update_chat_choice(db, body.agent)
+      provider = choice["provider"]
+      agent_settings = choice["agent_settings"]
+    else:
+      provider, agent_settings = providers.snapshot_owner_chat_choice(
+        data_dir,
+        owner.provider if owner else None,
+        allow_unselected=db.query(models.Chat.id).first() is None,
+      )
+    if body.archive_on_goal_complete:
+      agent_settings = {**(agent_settings or {}), "archive_on_goal_complete": True}
 
     chat = chat_writer.create_chat(
       id=chat_id,
@@ -1748,11 +1794,18 @@ async def patch_chat(
         )
 
     if body.clear_agent_settings:
-      chat.agent_settings_json = providers.snapshot_chat_agent_settings(
+      # Clearing picker overrides must not erase independent lifecycle state
+      # attached to an update resolver or an auto-filed Goal chat.
+      existing = _coerce_agent_settings(chat.agent_settings_json)
+      lifecycle = {key: existing[key] for key in (
+        "_app_update_resolver_batch", "archive_on_goal_complete",
+      ) if key in existing}
+      snapshot = providers.snapshot_chat_agent_settings(
         data_dir,
         chat.provider or "claude",
         fallback_model=providers.DEFAULT_MODELS.get(chat.provider or "claude"),
       )
+      chat.agent_settings_json = {**(snapshot or {}), **lifecycle} or None
     elif body.agent_settings_json is not None:
       existing = _coerce_agent_settings(chat.agent_settings_json)
       for k, v in agent_settings_patch.items():
@@ -1937,15 +1990,14 @@ async def patch_chat(
     # PATCH actually represents a picker/provider choice. A title, pin, or
     # auto-resume-only PATCH on a historical chat must not change which
     # provider the next new chat inherits.
-    if (
-      principal.scope != "chat_embed"
-      and chat.provider
-      and (target_provider is not None or picker_settings_changed)
-    ):
-      owner = db.query(models.Owner).first()
-      if owner is not None:
-        owner.provider = chat.provider
-        db.commit()
+    if is_owner_input_principal(principal) and not body.by_agent and chat.provider:
+      if "model" in agent_settings_patch:
+        _remember_owner_model_choice(db, settings_obj.get("model"), chat.provider)
+      elif target_provider is not None or picker_settings_changed:
+        owner = db.query(models.Owner).first()
+        if owner is not None:
+          owner.provider = chat.provider
+          db.commit()
 
     return {
       "ok": True,
@@ -2115,6 +2167,7 @@ def get_chat_runtime(
   )
   running = is_chat_running(chat.id)
   run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
+  goal = presented_goal(db, chat.id, include_foreign_context=principal.scope != "chat_embed")
   response = {
     "running": running,
     "compacting": compaction_kind(chat.id),
@@ -2129,7 +2182,7 @@ def get_chat_runtime(
     "recovery_run_id": _recovery_run_id(db, chat.id),
     "continuation_wait": continuation_wait_for_chat(db, chat.id),
     "active_goal_objective": running_goal_objective(db, chat.id),
-    "goal": presented_goal(db, chat.id, include_foreign_context=principal.scope != "chat_embed"),
+    "goal": goal,
     "pending_messages": list(chat.pending_messages or []),
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
@@ -2137,7 +2190,7 @@ def get_chat_runtime(
       serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)
     ] if principal.scope != "chat_embed" else [],
     "background_helpers": (
-      serialize_background_helpers(db, chat.id)
+      serialize_background_helpers(db, chat.id, goal=goal)
       if principal.scope != "chat_embed" else {"count": 0, "items": []}
     ),
   }
@@ -3173,6 +3226,7 @@ async def _compact_chat_locked(
       settings_obj=settings_obj,
     )
     if result.get("status") == "committed":
+      _remember_owner_model_choice(db, settings_obj.get("model"), body.provider)
       activity.log_event(
         "provider_switch",
         chat_id=chat_id,
@@ -3497,6 +3551,7 @@ class AppChatCreate(BaseModel):
   scope: AppChatScope = None
   scope_label: str | None = Field(default=None, max_length=_CHAT_SCOPE_LABEL_MAX)
   owner_visible: bool = False
+  archive_on_goal_complete: bool = False
 
   @field_validator("project_id")
   @classmethod
@@ -3581,6 +3636,7 @@ def _merge_app_chat_settings(
   scope: str | None = None,
   scope_label: str | None = None,
   owner_visible: bool | None = None,
+  archive_on_goal_complete: bool = False,
 ) -> None:
   """Merge app-supplied runtime metadata into Chat.agent_settings_json."""
   from sqlalchemy.orm.attributes import flag_modified
@@ -3634,6 +3690,8 @@ def _merge_app_chat_settings(
     value = scope_label.strip()
     if value:
       settings["chat_scope_label"] = value
+  if archive_on_goal_complete:
+    settings["archive_on_goal_complete"] = True
   if owner_visible is not None:
     if owner_visible:
       settings["owner_visible"] = True
@@ -3890,6 +3948,7 @@ def _add_app_chat(
     scope=body.scope,
     scope_label=body.scope_label,
     owner_visible=body.owner_visible,
+    archive_on_goal_complete=body.archive_on_goal_complete,
   )
   db.add(chat)
   return chat

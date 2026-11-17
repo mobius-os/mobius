@@ -120,7 +120,7 @@ def test_app_cannot_claim_a_discovered_native_model(discovered_models, monkeypat
   model = discovered_models["claude"]
   providers._apply_app_model_declarations([(987654, {
     "models": [{"id": model}], "default_model": model,
-  })])
+  }, "")])
   assert "app-987654" not in providers.PROVIDERS
 
 
