@@ -37,7 +37,6 @@
 .helper-convo__open {
   flex: none;
   align-self: center;
-  color: var(--accent-text, var(--accent)); /* CONTRACT: link-coloured action in the dialog head */
   font-size: 13px;
   text-underline-offset: 3px;
 }
@@ -107,6 +106,17 @@
 .helper-convo__task > :last-child > :last-child,
 .helper-convo__text > :first-child > :last-child { margin-bottom: 0; }
 .helper-convo__text { font-size: 14px; }
+
+/* Preview links, in its markdown and its Open chat action, use the text
+   colour with an always-visible underline instead of the accent, so a second
+   column of purple links does not compete with the chat. Scoping through
+   .md-blocks outranks the markdown link rule (.md-blocks a) by specificity,
+   not stylesheet order. */
+.helper-convo .md-blocks a,
+.helper-convo__open {
+  color: var(--text);
+  text-decoration: underline;
+}
 
 /* Dock only when this chat has room for two readable columns
    (useHelperPreviewDocked). Narrow workspace panes keep the overlay even when
