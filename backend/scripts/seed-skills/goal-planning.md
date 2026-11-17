@@ -99,13 +99,8 @@ A blocked task or a promise to resume is not registration. `update_goal(defer)`
 means a manual hold with **no automatic continuation** until a later owner
 request; do not use it to mean “continue after this dependency is ready.”
 
-- **Platform restart:** use `request_restart` after the activation preflight in
-  `platform-maintenance.md`. Each chat owing activation verification registers
-  its own Restart card, even when another chat will execute the restart. One
-  later ready boot can resume every registered chat; a peer's card or promise
-  does not register this Goal. Do not substitute a generic question or hold.
-- **Helper result:** keep the Goal open for the helper's existing automatic
-  result continuation; do not add a Wait or manual hold on top.
+- **Platform restart:** use `request_restart` as `platform-maintenance.md`
+  describes; do not substitute a generic question or hold.
 - **Owner action:** give concrete instructions, explain the dependency, then
   save a question or approval card as your last action. Its answer resumes
   the same work. For a task the owner must perform elsewhere, choices such as
@@ -115,7 +110,8 @@ request; do not use it to mean “continue after this dependency is ready.”
   pauses the card's Goal by owner choice, rather than continuing its work.
 - **External work:** a durable Wait (read `waiting.md`) or a wake-enabled helper
   owns automatic continuation only when its actual condition/result can wake
-  this chat. Never promise a wake for an unarmed condition or manual hold.
+  this chat; keep the Goal open for it and add no second Wait or hold on top.
+  Never promise a wake for an unarmed condition or manual hold.
 - **Another chat's decision:** finish independent work, then use
   `wait_for_decision(chat_id: "SOURCE_CHAT", question_id: "EXACT_CARD")` on its
   already-saved Q&A or approval. This is a real handoff for your exact open
@@ -133,10 +129,10 @@ request; do not use it to mean “continue after this dependency is ready.”
   that healthy work is under way.
 - **Deferred work:** an answered **Not now** defers that step, not every other
   authorized task. Record its reason, then continue independent work without
-  retrying the declined action. Only when the owner chose to pause the remaining
-  work, rather than wait for an event or decision above, call
-  `update_goal(defer: 'What the owner put on manual hold and why', tasks: [...])`
-  and end normally after finishing independent authorized work.
+  retrying the declined action. When nothing independent remains, that Not now
+  is the owner's choice of a manual hold, not a wait for an event above: call
+  `update_goal(defer: 'What is on manual hold and why', tasks: [...])`
+  and end normally, without asking again.
   This records **On hold**, preserves the original outcome and checklist, and
   releases this Goal's claims without calling them completed. It does not stop
   your reply or require another question. Resolve existing helpers, questions

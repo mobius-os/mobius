@@ -144,8 +144,10 @@ def resume_context(db, run_id):
     "and status with has_result/has_note flags. update_goal with no arguments "
     "shows the full plan; read_goal(task=<id>) shows one task in full. Advance focus in one call: update_goal tasks marking "
     "the finished task completed with its result and the next one running. "
-    "Follow the outcome_contract below for completion, exact waiting handoffs "
-    "and deliberate manual holds.\n"
+    "When an outcome_contract is shown, follow it for completion, exact waiting "
+    "handoffs and manual holds. If the owner answered Not now and no independent "
+    "work remains, that is the owner's choice of a manual hold: call "
+    "update_goal(defer='reason') without asking again or retrying.\n"
     "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal, brief=True))
     + "</mobius_goal>"
   )

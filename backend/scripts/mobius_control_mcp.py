@@ -109,9 +109,9 @@ UPDATE_GOAL_DESCRIPTION = (
   "later owner request. Waiting for an event is not a hold: keep the Goal open "
   "and register its exact handoff (request_restart for this chat's activation, "
   "a saved owner card, a peer dependency, declare_wait, or a helper result). "
-  "Another chat's Restart card does not register this chat. Finish independent "
-  "authorized work first. Use defer only when the owner chose to pause the "
-  "remaining work; resolve existing helpers, cards and Waits first. It preserves "
+  "Finish independent authorized work first. Use defer only on the owner's "
+  "choice to pause the remaining work; resolve existing helpers, cards and "
+  "Waits first. It preserves "
   "the original Goal and releases its claims without claiming success or failure. "
   "Only a genuinely unreachable outcome uses cannot_complete with reason, "
   "efforts/partial results, and unmet_outcome; cancel means the owner called it "
@@ -1947,7 +1947,7 @@ _TOOL_DEFINITIONS = {
         "cancel": {"type": "string", "minLength": 1,
                    "description": "Owner-called-off reason, not an unreachable-work shortcut."},
         "defer": {"type": "string", "minLength": 1,
-                  "description": "Reason the owner chose a manual hold after independent authorized work is done. Disables automatic continuation until a later owner request; not for waiting on a restart, decision, dependency or helper. Register that exact handoff instead. Tasks may share this atomic call; do not combine with next_action or outcomes."},
+                  "description": "Reason for a manual hold on the owner's choice, after independent authorized work is done. Disables automatic continuation until a later owner request; not for waiting on a restart, decision, dependency or helper. Register that exact handoff instead. Tasks may share this atomic call; do not combine with next_action or outcomes."},
         "finished_claims": {
           "type": "array", "items": {"type": "string"},
           "description": (
