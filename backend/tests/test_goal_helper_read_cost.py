@@ -148,9 +148,9 @@ def test_goal_tree_read_count_is_independent_of_helper_width(db, chat, width):
       tree = goal_plans._delegation_tree(cold, physical, root)
     assert len(tree) == width
     assert {node["status"] for node in tree} == {"running"}
-    # Direct children, descendant frontier, then statuses: immutable Goal
-    # ownership no longer needs a run-root lookup.
-    assert len(statements) == 3
+    # Direct children, descendant frontier, statuses, then helper names:
+    # immutable Goal ownership no longer needs a run-root lookup.
+    assert len(statements) == 4
     assert not any("chats.messages" in sql for sql in statements)
 
 

@@ -164,6 +164,7 @@ export function commitAssistantPromotion({
   promotedItems,
   assistantMessageId,
   bridgeTs,
+  runEndedTs = null,
   followingMessages = [],
   commitMessages,
 }) {
@@ -173,6 +174,7 @@ export function commitAssistantPromotion({
       items: promotedItems,
       assistantMessageId,
       bridgeTs,
+      runEndedTs,
       followingMessages,
     }),
     undefined,

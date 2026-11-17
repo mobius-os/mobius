@@ -29,9 +29,11 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from app import auth, deployment_control, models, platform_activation, platform_update
+from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  get_current_owner_for_full_access_control,
   reject_cross_site,
 )
 from app.platform_update import (
@@ -274,7 +276,7 @@ async def get_platform_update_progress(
 async def apply_platform_update(
   request: PlatformApplyIn,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> PlatformApplyResult:
   """Apply exactly the release represented by the reviewed immutable plan."""
   try:
@@ -366,7 +368,7 @@ async def park_platform_update_for_agent(
   status_code=204,
 )
 async def cancel_unfinished_platform_update(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> None:
   """Drop an update that has not been swapped in; the live checkout never changed."""
   try:
@@ -446,6 +448,7 @@ async def finish_platform_overlay_update(
 class ConflictResolverChatIn(BaseModel):
   # Resume a stalled resolver: start its bound chat again, or open a new one.
   resume: bool = False
+  agent: UpdateAgentChoice | None = None
 
 
 @router.post("/conflict-resolver-chat", dependencies=[Depends(reject_cross_site)])
@@ -457,7 +460,15 @@ async def create_platform_conflict_resolver_chat(
   """Create or return the resolver chat for a recorded platform update conflict."""
   try:
     if request is not None and request.resume:
+      if request.agent is not None:
+        return await platform_update.resume_platform_conflict_resolver(
+          db, agent=request.agent,
+        )
       return await platform_update.resume_platform_conflict_resolver(db)
+    if request is not None and request.agent is not None:
+      return await platform_update.create_platform_conflict_resolver_chat(
+        db, agent=request.agent,
+      )
     return await platform_update.create_platform_conflict_resolver_chat(db)
   except PlatformUpdateError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -465,7 +476,7 @@ async def create_platform_conflict_resolver_chat(
 
 @router.post("/restart", dependencies=[Depends(reject_cross_site)])
 def restart_platform(
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ) -> JSONResponse:
   """Owner-confirmed restart to finish an update. Sends the response, then
   drains and asks the container supervisor to rerun the boot in place, so it

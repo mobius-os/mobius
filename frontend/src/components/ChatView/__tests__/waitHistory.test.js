@@ -249,7 +249,9 @@ test('owed ordinary results expose Stop follow-up even behind a recovery hold', 
           wait: { id: 'owed-result', kind: 'timer', status, delivery_pending: true, resume_blocker, can_withdraw: true },
           expanded, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
         }))
-        assert.match(html, /Stop follow-up/, `${status}: ${resume_blocker}`)
+        // Stopping is chosen from the details; the collapsed line stays one row.
+        if (expanded) assert.match(html, /Stop follow-up/, `${status}: ${resume_blocker}`)
+        else assert.doesNotMatch(html, /Stop follow-up/, `${status}: ${resume_blocker}`)
         assert.doesNotMatch(html, /Stop waiting/)
         if (['manual_resume', 'resume_failed', 'restart'].includes(resume_blocker)) {
           assert.match(html, /View recovery/, 'withdrawal must not replace recovery access')
@@ -289,7 +291,7 @@ test('an unresolved admitting run hides Stop follow-up without hiding recovery',
   const html = renderToStaticMarkup(createElement(WaitCard, {
     wait: { id: 'unresolved-attempt', kind: 'timer', status: 'met', delivery_pending: true,
       can_withdraw: false, resume_blocker: 'manual_resume' },
-    expanded: false, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
+    expanded: true, onToggle: () => {}, onCancel: () => {}, onRevealRecovery: () => {},
   }))
   assert.doesNotMatch(html, /Stop follow-up|Stop waiting/)
   assert.match(html, /View recovery/)

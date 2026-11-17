@@ -1,5 +1,6 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { ChevronDown } from '@openai/apps-sdk-ui/components/Icon'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import EffortStepper from './EffortStepper.jsx'
 import { modelEfforts } from './modelEfforts.js'
@@ -44,7 +45,13 @@ export default function ModelSheet({
   efforts,
   effort,
   onEffortChange,
+  notice,
+  onConfirm,
+  confirmLabel = 'Use agent',
+  confirmDisabled = false,
+  collapsible = false,
 }) {
+  const [expanded, setExpanded] = useState(false)
   const supportsEffort = (
     Array.isArray(efforts)
     && efforts.length > 0
@@ -62,6 +69,9 @@ export default function ModelSheet({
   if (!open) return null
 
   const noneSelected = !provider
+  const selectedGroup = groups?.find(group => group.key === provider && group.models.some(row => row.id === model))
+  const selectedModel = selectedGroup?.models.find(row => row.id === model)
+  const SelectedLogo = selectedGroup?.Logo
   return createPortal(
     <div
       className="model-sheet__backdrop"
@@ -90,6 +100,20 @@ export default function ModelSheet({
           </button>
         </div>
         <div className="model-sheet__body">
+          {notice && <p className="model-sheet__empty" role="status">{notice}</p>}
+          {collapsible && <button type="button" className="model-trigger model-sheet__trigger"
+            aria-expanded={expanded} aria-label="Change update agent"
+            disabled={!groups?.length}
+            onClick={() => setExpanded(value => !value)}>
+            {SelectedLogo && <span className="model-trigger__icon"><SelectedLogo /></span>}
+            <span className="model-trigger__main">
+              <span className="model-trigger__name">{selectedModel?.name || selectedModel?.label || 'Choose an agent'}</span>
+              <span className="model-trigger__id">{selectedGroup?.label || 'No agent selected'}</span>
+            </span>
+            {selectedModel && effort && <span className="model-trigger__effort">{effort}</span>}
+            <ChevronDown width={18} height={18} aria-hidden="true" />
+          </button>}
+          {(!collapsible || expanded) && <div className={collapsible ? 'model-sheet__choices' : undefined}>
           {allowNone && (
             <button
               type="button"
@@ -106,11 +130,11 @@ export default function ModelSheet({
           {(!groups || groups.length === 0) && (
             <div className="model-sheet__empty">No models available.</div>
           )}
-          {groups && groups.map((group) => {
+          {groups && groups.map((group, index) => {
             const connected = !configuredProviders || configuredProviders.has(group.key)
             const Logo = group.Logo
             return (
-              <div key={group.key} className="model-sheet__group">
+              <div key={`${group.key}-${index}`} className="model-sheet__group">
                 <div className="model-sheet__group-head">
                   {Logo && <span className="model-sheet__group-icon"><Logo /></span>}
                   <span>{group.label}</span>
@@ -128,7 +152,7 @@ export default function ModelSheet({
                         disabled={disabled}
                         onClick={() => {
                           onPick(group.key, m.id, m)
-                          if (rowEfforts.length === 0) onClose()
+                          if (rowEfforts.length === 0 && !onConfirm) onClose()
                         }}
                       >
                         <span className="model-sheet__row-icon">{Logo && <Logo />}</span>
@@ -155,7 +179,13 @@ export default function ModelSheet({
               </div>
             )
           })}
+          </div>}
         </div>
+        {onConfirm && <div className="model-sheet__footer">
+          <button type="button" className="model-sheet__confirm" disabled={confirmDisabled} onClick={onConfirm}>
+            {confirmLabel}
+          </button>
+        </div>}
       </div>
     </div>,
     document.body,

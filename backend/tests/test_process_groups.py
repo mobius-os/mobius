@@ -174,14 +174,49 @@ def test_an_exited_member_is_skipped_not_reported(caplog):
     leader.wait()
 
 
+def _environ(pid):
+  """``pid``'s environment entries as a /proc scan reads them.
+
+  ``Popen`` returns as soon as the child's exec closes its descriptors, before
+  the kernel has set up the new image's environment. Until then
+  /proc/<pid>/environ reads empty, so a scan cannot see what the process
+  carries.
+  """
+  try:
+    with open(f"/proc/{pid}/environ", "rb") as handle:
+      return [entry for entry in handle.read().split(b"\0") if entry]
+  except OSError:
+    return []
+
+
+def _await_exec(pid, marker=None, timeout=5.0):
+  """Wait until a /proc scan sees ``pid``'s environment, with ``marker`` if given."""
+  import time
+  needle = f"{process_groups.RUN_MARKER_ENV}={marker}".encode() if marker else None
+  deadline = time.monotonic() + timeout
+  while True:
+    entries = _environ(pid)
+    if (needle in entries) if needle else entries:
+      return
+    assert time.monotonic() < deadline, f"process {pid} never showed its environment"
+    time.sleep(0.005)
+
+
 def _command_in_own_session(run_token):
   """A tool command as providers start it: its own session, the run's env."""
   import os
   import subprocess
   env = dict(os.environ, **{process_groups.RUN_MARKER_ENV: run_token})
-  return subprocess.Popen(
+  command = subprocess.Popen(
     ["sleep", "60"], env=env, start_new_session=True,
   )
+  try:
+    _await_exec(command.pid, run_token)
+  except BaseException:
+    command.kill()
+    command.wait()
+    raise
+  return command
 
 
 def _gone(proc, timeout=2.0):
@@ -264,6 +299,7 @@ def test_the_chats_browser_is_left_to_its_own_graceful_owner(tmp_path):
     [str(chrome), "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
   )
   try:
+    _await_exec(browser.pid, marker)
     assert process_groups.terminate_run_processes(
       marker, logger=logging.getLogger(__name__), label="test",
     ) == 0
@@ -339,6 +375,12 @@ class _Turn:
       stdout=subprocess.PIPE, text=True,
     )
     self.mcp, self.command = map(int, self.runtime.stdout.readline().split())
+    try:
+      for pid in self.pids:
+        _await_exec(pid, marker)
+    except BaseException:
+      self.close()
+      raise
 
   @property
   def pids(self):
@@ -350,12 +392,11 @@ class _Turn:
     # while it still carries this turn's marker.
     needle = f"{process_groups.RUN_MARKER_ENV}={self.marker}".encode()
     for pid in (self.command, self.mcp):
-      try:
-        with open(f"/proc/{pid}/environ", "rb") as handle:
-          if needle in handle.read().split(b"\0"):
-            os.kill(pid, signal.SIGKILL)
-      except (OSError, ProcessLookupError):
-        pass
+      if needle in _environ(pid):
+        try:
+          os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+          pass
     self.runtime.kill()
     self.runtime.wait()
     self.runtime.stdout.close()
@@ -479,6 +520,8 @@ def test_unmarked_processes_are_never_scanned_as_agent_commands(tmp_path):
     [shutil.which("sleep"), "60"], env=env, start_new_session=True,
   )
   try:
+    # Until exec finishes every process reads as unmarked; scan a real one.
+    _await_exec(plain.pid)
     assert plain.pid not in process_groups._marked_processes()
   finally:
     plain.kill()

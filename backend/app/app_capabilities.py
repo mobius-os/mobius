@@ -1000,6 +1000,9 @@ def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:
       for key in ("base_url", "transport", "secret_name")
       if key in provider
     }
+    if "secret_name" in provider:
+      # An app-secret provider that omits its protocol has always meant Responses.
+      normalized["model_provider"]["protocol"] = provider.get("protocol", "responses")
 
   public = normalized.get("public")
   if isinstance(public, dict) and "storage" in public:

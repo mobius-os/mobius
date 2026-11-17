@@ -783,22 +783,11 @@ async def handshake(
 
 
 def _broker_url(connector_id: int) -> str:
+  from app.config import loopback_listener_url
   try:
-    parsed = urlparse(get_settings().api_base_url)
-    _ = parsed.hostname
-    configured_port = parsed.port
+    return loopback_listener_url(f"/api/connectors/{connector_id}/broker")
   except ValueError as exc:
-    raise ConnectorError("The configured Möbius API port is invalid.") from exc
-  env_port = os.environ.get("PORT")
-  if parsed.hostname in {"127.0.0.1", "localhost", "::1"}:
-    port = configured_port or (443 if parsed.scheme == "https" else 80)
-  elif env_port and env_port.isdigit():
-    port = int(env_port)
-  else:
-    port = configured_port or 8000
-  if not 1 <= port <= 65535:
-    raise ConnectorError("The configured Möbius API port is invalid.")
-  return f"http://127.0.0.1:{port}/api/connectors/{connector_id}/broker"
+    raise ConnectorError(str(exc)) from exc
 
 
 def build_turn_plan(

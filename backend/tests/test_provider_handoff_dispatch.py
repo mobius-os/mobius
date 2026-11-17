@@ -39,10 +39,8 @@ def test_dispatch_routes_by_runtime_kind(monkeypatch, provider_id):
   assert out == "a portable briefing"
   expected_runtime = "claude" if provider_id == "claude" else "codex"
   assert seen["runtime"] == expected_runtime
-  if expected_runtime == "codex":
-    assert seen["kwargs"]["provider_id"] == provider_id
-  else:
-    assert "provider_id" not in seen["kwargs"]
+  # Both runtimes build credentials from the chat's own provider.
+  assert seen["kwargs"]["provider_id"] == provider_id
 
 
 def test_an_unregistered_provider_stays_unknown():

@@ -924,3 +924,33 @@ test('streamItemsHaveRenderableContent: any non-text block is renderable', () =>
     true,
   )
 })
+
+test('a reply promoted at the end of its stream carries when its run ended', async () => {
+  // The stream's final `done` names when the run ended; without it the
+  // footer would read the reply's start until the chat is read again.
+  const { commitAssistantPromotion } = await import('../activeAssistantSelection.js')
+  const ended = Date.UTC(2026, 10, 14, 9, 30)
+  let messages = [
+    { role: 'user', ts: 1, content: 'hi' },
+    { role: 'assistant', id: 'run', ts: 2, blocks: [{ type: 'text', content: 'partial' }] },
+  ]
+  commitAssistantPromotion({
+    retiredItemsRef: { current: null },
+    paintedItems: [],
+    promotedItems: [{ type: 'text', content: 'final answer' }],
+    assistantMessageId: 'run',
+    runEndedTs: ended,
+    followingMessages: [{ role: 'user', ts: 9, content: 'next' }],
+    commitMessages: update => { messages = update(messages) },
+  })
+  assert.deepEqual(messages.map(message => [message.role, message.run_ended_ts]),
+    [['user', undefined], ['assistant', ended], ['user', undefined]])
+  assert.equal(messages[1].ts, 2, 'the row keeps its identity')
+  const appended = promoteAssistantStream([{ role: 'user', ts: 1 }], {
+    items: [{ type: 'text', content: 'hello' }], assistantMessageId: 'next', runEndedTs: ended,
+  })
+  assert.equal(appended[1].run_ended_ts, ended, 'a reply with no saved partial too')
+  assert.equal(promoteAssistantStream([{ role: 'user', ts: 1 }], {
+    items: [{ type: 'text', content: 'hello' }],
+  })[1].run_ended_ts, undefined, 'an older server without the field leaves it unset')
+})

@@ -257,6 +257,21 @@ def _configure_claude_settings_defaults(context: StartupContext) -> None:
     context.logger.info("set Claude settings defaults: %s", ", ".join(added))
 
 
+def _remove_legacy_app_engine_homes(context: StartupContext) -> None:
+  """Drop app model engine homes older versions kept in app storage."""
+  from app import models
+  from app.providers import remove_legacy_app_engine_homes
+
+  with SessionLocal() as db:
+    app_ids = [
+      app_id for app_id, contract in db.query(models.App.id, models.App.capability_contract)
+      if isinstance(contract, dict) and isinstance(contract.get("model_provider"), dict)
+    ]
+  removed = remove_legacy_app_engine_homes(context.settings.data_dir, app_ids)
+  if removed:
+    context.logger.info("removed legacy app engine homes: %s", ", ".join(removed))
+
+
 def _migrate_theme_surface_token(context: StartupContext) -> None:
   """Rewrite a saved theme.css's legacy --surface2 token to --surface-2.
 
@@ -507,6 +522,13 @@ def _sweep_git_transfers(_context: StartupContext) -> None:
   from app.git_transfers import git_transfer_root
 
   shutil.rmtree(git_transfer_root(), ignore_errors=True)
+
+
+def _sweep_contribution_git_scratch(_context: StartupContext) -> None:
+  """Discard contribution Git scratch an earlier process left behind."""
+  from app.github_contribution_git import sweep_scratch_root
+
+  sweep_scratch_root()
 
 
 async def _reconcile_compiled_bundles(context: StartupContext) -> None:
@@ -777,6 +799,7 @@ DATABASE_STARTUP_TASKS = (
   ),
   StartupTask("read restart authorization", _read_restart_authorization),
   StartupTask("freeze legacy app runtimes", _freeze_legacy_app_runtimes),
+  StartupTask("remove legacy app engine homes", _remove_legacy_app_engine_homes),
   StartupTask(
     "interrupt legacy read helpers",
     _interrupt_legacy_read_helpers,
@@ -790,6 +813,7 @@ DATABASE_STARTUP_TASKS = (
   StartupTask("reconcile agent lifecycle", _reconcile_agent_lifecycle),
   StartupTask("reap staging bundles", _reap_staging_bundles),
   StartupTask("sweep app Git transfers", _sweep_git_transfers),
+  StartupTask("sweep contribution Git scratch", _sweep_contribution_git_scratch),
   StartupTask(
     "reconcile compiled bundles",
     _reconcile_compiled_bundles,
