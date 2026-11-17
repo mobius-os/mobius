@@ -196,6 +196,9 @@ class _Provider:
   def build_env(self, **_kwargs):
     return {}
 
+  def resolve_selection(self, model, effort):
+    return model, effort
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("owner_input", "attribution"), [

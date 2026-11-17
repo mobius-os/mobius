@@ -64,12 +64,12 @@ test('a new owner can move through the guide and finish it', async ({ page }) =>
   await expect(guide.getByRole('heading', { name: /Welcome to Möbius/ })).toBeFocused()
   await expect(guide.getByRole('button', { name: /^Go to / })).toHaveCount(SCREEN_COUNT)
 
-  await guide.getByRole('button', { name: 'Continue' }).click()
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(guide.getByRole('heading', { name: /Say what you need/ })).toBeFocused()
   await guide.getByRole('button', { name: 'Back' }).click()
   await expect(guide.getByRole('heading', { name: /Welcome to Möbius/ })).toBeVisible()
 
-  for (let step = 1; step < SCREEN_COUNT; step += 1) await guide.getByRole('button', { name: 'Continue' }).click()
+  for (let step = 1; step < SCREEN_COUNT; step += 1) await guide.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(guide.getByRole('heading', { name: /Good luck/ })).toBeVisible()
   await guide.getByRole('button', { name: 'Finish guide' }).click()
   await expect(guide).toHaveCount(0)
@@ -98,16 +98,16 @@ test('mobile guide fills the screen and keeps Continue reachable', async ({ page
   const { guide } = await openGuide(page)
   await goToScreen(guide, 'Meet your agent')
   await goToScreen(guide, 'App Store')
-  await expect(guide.getByRole('button', { name: 'Continue' })).toBeInViewport()
+  await expect(guide.getByRole('button', { name: 'Continue', exact: true })).toBeInViewport()
   await expect(guide.getByRole('button', { name: 'Dismiss welcome' })).toBeInViewport()
-  await guide.getByRole('button', { name: 'Continue' }).click()
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click()
   await expect(guide.getByRole('heading', { name: /Collaboration apps/ })).toBeVisible()
 })
 
 test('short landscape keeps guide actions and dismissal reachable', async ({ page }) => {
   await page.setViewportSize({ width: 700, height: 360 })
   const { guide, completionCount } = await openGuide(page)
-  await expect(guide.getByRole('button', { name: 'Continue' })).toBeInViewport()
+  await expect(guide.getByRole('button', { name: 'Continue', exact: true })).toBeInViewport()
   await expect(guide.getByRole('button', { name: 'Dismiss welcome' })).toBeInViewport()
   await guide.getByRole('button', { name: 'Dismiss welcome' }).click()
   await expect(guide).toHaveCount(0)
@@ -178,7 +178,7 @@ test('claiming a handle in the guide does not turn a new owner into a returning 
   await expect(guide.getByRole('note')).toHaveCount(0)
   await expect(guide.getByRole('button', { name: 'Skip to agent setup' })).toHaveCount(0)
   // Leaving the screen and coming back keeps it that way.
-  await guide.getByRole('button', { name: 'Continue' }).click()
+  await guide.getByRole('button', { name: 'Continue', exact: true }).click()
   await guide.getByRole('button', { name: 'Back' }).click()
   await expect(guide.getByRole('note')).toHaveCount(0)
 })

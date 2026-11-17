@@ -685,6 +685,7 @@ def test_retry_with_same_switch_id_is_idempotent(
   markers = [m for m in list(transcript_rows.history(row)) if m.get("kind") == "compaction"]
   assert len(markers) == 1
   assert db.query(models.Owner).first().provider == "codex"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == ["gpt-5.4"]
 
   changed = _payload(switch_id="stable-retry")
   changed["agent_settings_json"]["model"] = "gpt-5.5"
@@ -1156,7 +1157,7 @@ async def test_claude_synthesis_rejects_partial_text_on_error_terminal(
 
   with pytest.raises(compaction.CompactionError, match="could not compact"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
   assert client.disconnected is True
 
@@ -1192,7 +1193,7 @@ async def test_claude_synthesis_requires_terminal_result(monkeypatch, tmp_path):
 
   with pytest.raises(compaction.CompactionError, match="terminal result"):
     await compaction._run_claude_summarize_turn(
-      "prompt", data_dir=str(tmp_path), model=None, effort=None,
+      "prompt", data_dir=str(tmp_path), provider_id="claude", model=None, effort=None,
     )
 
 

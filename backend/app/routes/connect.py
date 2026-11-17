@@ -23,7 +23,7 @@ Owner/app surface:
   GET    /api/connect/outbound            list people this Möbius joined
   POST   /api/connect/outbound            paste another Connect command
   PATCH  /api/connect/outbound/{id}       turn agent access on or off
-  DELETE /api/connect/outbound/{id}       revoke that outbound access
+  DELETE /api/connect/outbound/{id}       revoke that outbound access here
   POST   /api/connect/hosts               create a host + pairing code
   GET    /api/connect/hosts               list hosts + live status
   PATCH  /api/connect/hosts/{id}          rename a host
@@ -782,13 +782,12 @@ async def revoke_outbound_access(
   profile_id: str,
   _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
 ) -> dict:
+  # Access ends here whether or not the other Möbius can be told.
   try:
-    await connect_outbound.revoke_profile(profile_id)
+    notified = await connect_outbound.revoke_profile(profile_id)
   except LookupError as exc:
     raise HTTPException(status_code=404, detail="No such shared access.") from exc
-  except connect_outbound.OutboundConnectError as exc:
-    raise HTTPException(status_code=409, detail=str(exc)) from exc
-  return {"ok": True}
+  return {"ok": True, "remote_notified": notified}
 
 
 def _base_url() -> str:
@@ -990,7 +989,11 @@ async def list_hosts(
   return {"hosts": [_public_host(h) for h in _list_hosts()]}
 
 
-@router.patch("/hosts/{host_id}")
+@router.patch(
+  "/hosts/{host_id}",
+  # A name is how agents pick a machine, so renaming is an owner control too.
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
 async def rename_host(
   host_id: str,
   body: RenameHostBody,

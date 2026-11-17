@@ -1332,10 +1332,10 @@ def test_plan_projects_recursive_delegation_ownership_without_transcripts(
   # while it works, b does not count as complete.
   assert plan["delegations"] == [{
     "id": "delegation-b", "task_key": "review-b", "plan_task": "b",
-    "title": "Do B", "question": None,
+    "title": "Do B", "helper_title": "B", "question": None,
     "provider": "codex", "status": "running", "children": [{
       "id": "delegation-x", "task_key": "x", "plan_task": None,
-      "title": None, "question": None,
+      "title": None, "helper_title": "X", "question": None,
       "provider": "codex", "status": "running", "children": [],
     }],
   }]
