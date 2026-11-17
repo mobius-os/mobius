@@ -67,7 +67,8 @@ VERDICT_INSTRUCTIONS = (
 
 AGENT_VERDICT_INSTRUCTIONS = (
   " The owner chose up front to let this review's verdict go out without another tap: after publish:true the "
-  "server itself submits the saved proposal under this grant, never on the owner's own pull request."
+  "server itself submits the saved proposal under this grant, never on the owner's own pull request. That "
+  "choice is the owner's approval of the verdict: do not ask again in chat before sending it."
 )
 
 PROMPT_KEYS = ("review_prompt", "merge_prompt")

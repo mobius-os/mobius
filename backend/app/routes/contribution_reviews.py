@@ -143,6 +143,14 @@ class ReviewOutcome(PullIdentity):
   tests_passed: bool | None = None
   reviewed_base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
   independent_receipt_id: str | None = Field(default=None, max_length=64)
+  # False when no finding should hold the PR up: a verdict proposal is then a plain comment.
+  blocking: bool = Field(default=True, strict=True)
+
+  @model_validator(mode="after")
+  def only_findings_can_be_non_blocking(self):
+    if not self.blocking and self.state != "needs_you":
+      raise ValueError("blocking:false describes findings (needs_you); an all_clear result has none.")
+    return self
 
 
 def _row(db, app_id, run_id, principal):
@@ -239,6 +247,8 @@ def _saved_options_input(row):
 
 
 def _snapshot(db, body, principal):
+  """The options and model one preview or new grant freezes, for this caller."""
+  _refuse_agent_enabled_auto_send(body.options, principal)
   choice = resolve_round_choice(db)
   requested = getattr(body, "agent", None)
   if requested:
@@ -269,8 +279,32 @@ def _snapshot(db, body, principal):
     raise HTTPException(422, str(exc)) from exc
 
 
+AGENT_ENABLED_AUTO_SEND = (
+  "Only the owner can let a review send its verdict by itself, by choosing \"Agent posts\" when starting it "
+  "in Contribute. Start this review without agent_submits_verdict: its verdict then waits for the owner's Send.")
+
+
+def _is_agent(principal) -> bool:
+  return principal.chat_id is not None or principal.run_id is not None
+
+
+def _refuse_agent_enabled_auto_send(options, principal) -> None:
+  """Sending a verdict unseen is the owner's own choice in the review window.
+
+  A chat approval is the agent's attestation, so it never grants this: the owner
+  would learn what was posted in their name only after it was public. An app
+  token an agent minted carries the same provenance (``via_agent_chat``) even
+  though it drops the agent's chat/run identity, so it is refused too; the
+  owner's own browser mints an app token with no such provenance and keeps its
+  legitimate access.
+  """
+  agent_backed = _is_agent(principal) or principal.via_agent_chat is not None
+  if options is not None and options.agent_submits_verdict is True and agent_backed:
+    raise HTTPException(403, AGENT_ENABLED_AUTO_SEND)
+
+
 def _chat_approval(db, body, principal):
-  is_agent = principal.chat_id is not None or principal.run_id is not None
+  is_agent = _is_agent(principal)
   if body.source_chat_id is not None and (not is_agent or body.source_chat_id != principal.chat_id):
     raise HTTPException(403, "A source chat may only name the current authenticated owning conversation.")
   if principal.delegation_id is not None:
@@ -580,7 +614,7 @@ def _reported_outcome(previous, body, row, principal):
   """Build private review evidence once; callers add only transition facts."""
   return {**previous, "state": body.state, "summary": body.summary, "scope": body.scope,
     "tests": body.tests, "tests_passed": body.tests_passed,
-    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha,
+    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha, "blocking": body.blocking,
     "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
 
 
