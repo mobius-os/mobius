@@ -144,12 +144,10 @@ def resume_context(db, run_id):
     "and status with has_result/has_note flags. update_goal with no arguments "
     "shows the full plan; read_goal(task=<id>) shows one task in full. Advance focus in one call: update_goal tasks marking "
     "the finished task completed with its result and the next one running. "
-    "Complete only after verifying the entire Goal. An owner-action or approval "
-    "gate leaves the Goal open with a saved card; a genuinely unreachable "
-    "outcome first needs an actionable owner decision on a saved card, then a "
-    "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
-    "If the owner defers a step, continue other authorized work. When none can proceed, "
-    "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
+    "When an outcome_contract is shown, follow it for completion, exact waiting "
+    "handoffs and manual holds. If the owner answered Not now and no independent "
+    "work remains, that is the owner's choice of a manual hold: call "
+    "update_goal(defer='reason') without asking again or retrying.\n"
     "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal, brief=True))
     + "</mobius_goal>"
   )

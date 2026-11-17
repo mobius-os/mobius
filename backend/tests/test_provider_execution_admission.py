@@ -96,10 +96,19 @@ def test_terminal_finish_never_stands_in_for_provider_success(
   assert db.get(ProviderAvailability, "claude") is not None
 
 
-def test_provider_success_ack_heals_older_provider_limit(chat, db):
+@pytest.mark.parametrize("provider_responded", [True, False])
+def test_provider_success_ack_heals_older_limit_only_with_a_response(
+  chat, db, provider_responded,
+):
+  """Receipt of submitted input and quota healing are separate facts.
+
+  A Stop after submission but before any provider output still delivered the
+  carried peer note; only an observed provider response proves the older
+  quota observation stale.
+  """
   from app.models import ProviderAvailability
 
-  token = "availability-provider-success"
+  token = f"availability-provider-success-{provider_responded}"
   chat.provider = "claude"
   db.commit()
   _start(chat.id, token)
@@ -113,15 +122,22 @@ def test_provider_success_ack_heals_older_provider_limit(chat, db):
   ))
   db.commit()
   get_writer().submit(AdmitProviderExecution(
-    chat_id=chat.id, run_token=token,
+    chat_id=chat.id, run_token=token, has_peer_context_delivery=True,
   )).result(timeout=5)
+  delivered_at = datetime.now(UTC).replace(tzinfo=None)
 
   get_writer().submit(AcknowledgeProviderSuccess(
     chat_id=chat.id, run_token=token,
+    provider_responded=provider_responded,
+    peer_message_through_created_at=delivered_at,
+    peer_message_through_id="peer-note-carried",
   )).result(timeout=5)
 
   db.expire_all()
-  assert db.get(ProviderAvailability, "claude") is None
+  run = db.get(models.ChatRun, token)
+  assert run.peer_message_through_id == "peer-note-carried"
+  assert run.peer_message_delivery_pending is False
+  assert (db.get(ProviderAvailability, "claude") is None) is provider_responded
 
 
 def test_older_success_cannot_clear_a_newer_overlapping_limit(chat, db):
@@ -144,7 +160,7 @@ def test_older_success_cannot_clear_a_newer_overlapping_limit(chat, db):
     chat_id=chat.id, run_token=token,
   )).result(timeout=5)
   get_writer().submit(AcknowledgeProviderSuccess(
-    chat_id=chat.id, run_token=token,
+    chat_id=chat.id, run_token=token, provider_responded=True,
   )).result(timeout=5)
 
   db.expire_all()
