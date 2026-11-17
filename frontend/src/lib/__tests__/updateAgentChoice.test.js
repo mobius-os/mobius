@@ -73,7 +73,7 @@ test('an unavailable preference read cannot silently launch a different choice',
   hook.unmount()
 })
 
-test('a retired saved selection confirms its live replacement', t => {
+test('a removed saved selection requires an explicit listed-model choice', t => {
   mockCatalog(t, { hidden_ids: [], recent_ids: [] })
   t.mock.method(modelQueries.prefs, 'useQuery', () => ({
     data: { hidden_ids: [], recent_ids: [], selected_agent: {
@@ -82,7 +82,15 @@ test('a retired saved selection confirms its live replacement', t => {
   }))
   const choices = []
   const hook = renderHook(() => UpdateAgentPicker({ onChoice: choice => choices.push(choice) }))
-  assert.equal(hook.result.current.props.model, 'codex-test')
+  const props = hook.result.current.props
+  assert.equal(props.model, 'retired', 'legacy replacement metadata must not substitute the saved choice')
+  assert.equal(props.confirmDisabled, true, 'an unavailable saved model cannot start an update')
+  assert.deepEqual(choices, [], 'loading the catalogue does not choose another model')
+  assert.equal(props.groups.some(group => group.models.some(model => model.id === 'retired')), false)
+  const listed = props.groups.find(group => group.key === 'codex').models.find(model => model.id === 'codex-test')
+  props.onPick('codex', 'codex-test', listed)
+  assert.equal(hook.result.current.props.confirmDisabled, false)
+  assert.deepEqual(choices, [], 'an explicit pick still requires confirmation')
   hook.result.current.props.onConfirm()
   assert.deepEqual(choices, [{ provider: 'codex', model: 'codex-test', effort: 'high' }])
   hook.unmount()
