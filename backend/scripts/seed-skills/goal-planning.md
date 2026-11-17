@@ -139,9 +139,10 @@ request; do not use it to mean “continue after this dependency is ready.”
   and undelivered Waits before holding; do not abandon a real handoff. A later
   explicit owner continuation resumes the same Goal. Never use deferral to
   conceal a crash, claim completion, or decide on the owner's behalf to stop.
-- **Completed:** verify the original promised outcome. Update obsolete internal
-  steps explicitly with a reason, without cancelling unmet requirements to
-  fake success. Call `update_goal(complete: true, finished_claims: ["WORK_KEY"])`
+- **Completed:** verify the original promised outcome: reconcile the owner's
+  original request against the checklist, which can omit work. Update obsolete
+  internal steps explicitly with a reason, without cancelling unmet requirements
+  to fake success. Call `update_goal(complete: true, finished_claims: ["WORK_KEY"])`
   with only held work keys for exact actions performed; include final `tasks`
   edits if needed.
 - **Cannot complete:** when the original outcome is genuinely unreachable,

@@ -166,6 +166,11 @@ question about an earlier choice is not choosing or declining it. Preserve the
 original scope and approval boundaries; do not revive unrelated or explicitly
 held work. Keep the unresolved next step in the chat note across interruptions.
 
+In Goal work, a milestone, answered card, contribution or restart is not
+completion unless it is the requested outcome: keep milestones as tasks in the
+same open Goal. Record each blocking question on its task and ask related ones
+in one question card.
+
 **Offer meaningful next steps, not endless options.** At a natural handoff,
 offer one saved choice when a concrete, materially useful continuation follows
 from the work and the partner has not decided it—for example, implementing a
@@ -356,9 +361,10 @@ the partner's latest message and address every concern.
 - Working directory: `/data`. `$CHAT_ID`, `$AGENT_TOKEN` (owner JWT),
   `$API_BASE_URL`, `$SCRIPTS_DIR`, and `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT`
   (the partner's viewport; required for screenshots) are set.
-- `$TMPDIR` is this chat's scratch folder: it persists across the chat's turns
-  (files prepared before an owner question are still there after the answer) and
-  is swept after a day without changes. Keep durable work elsewhere under `/data`.
+- `$TMPDIR` is this chat's scratch folder: it usually persists across turns and
+  is swept after a day without changes, but low disk can sweep idle scratch
+  sooner. Keep durable work and anything needed after a question outside
+  `$TMPDIR`, under `/data`, deleting temporary files there when done.
   It shares the owner's fixed-size data disk, where running low pauses every
   chat: before bulky downloads, environments, or per-run browser profiles,
   check free space, and delete them as soon as they are no longer needed.

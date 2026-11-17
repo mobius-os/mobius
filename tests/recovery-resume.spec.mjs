@@ -52,7 +52,7 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false, successorBeforeAck = false } = {}) {
+async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false, successorBeforeAck = false, helperRetry = null } = {}) {
   await page.setViewportSize({
     width: Number(process.env.MOBIUS_RECOVERY_WIDTH || 1512),
     height: Number(process.env.MOBIUS_RECOVERY_HEIGHT || 911),
@@ -75,10 +75,17 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
       type: 'error', message: 'Your workspace is out of credits. Add credits to continue.',
       resumable: true, pause: { kind: 'credits', provider: 'codex' },
     }],
+  } : helperRetry ? {
+    ...partial,
+    blocks: [partial.blocks[0], {
+      type: 'error', message: 'Provider limit reached.', resumable: true,
+      pause: { kind: 'usage_limit', check_at: '2099-11-20T01:19:00Z' },
+    }],
   } : partial
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, initialAnswer]
   const detail = () => ({
     id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
+    helper_delegation_id: helperRetry ? 'helper-recovery-fixture' : null,
     total: messages.length, offset: 0,
     ...runtimeSnapshot({ running: resumed, pending_messages: [queued] }),
     active_goal_objective: null,
@@ -91,7 +98,21 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
   await page.route('**/api/**', async route => {
     const req = route.request()
     const url = new URL(req.url())
+    if (helperRetry && url.pathname === '/api/delegations/helper-recovery-fixture/retry' && req.method() === 'POST') {
+      attempts.push(req.postDataJSON())
+      requested.resolve()
+      await accepted.promise
+      resumed = helperRetry === 'running'
+      return route.fulfill({ json: {
+        retry_started: resumed, status: helperRetry,
+        physical_run_id: resumed ? 'resumed-a' : 'interrupted-a',
+      } })
+    }
     if (url.pathname === `${path}/messages` && req.method() === 'POST') {
+      if (helperRetry) {
+        unexpected.push('manual helper chat send')
+        return route.fulfill({ status: 409, json: { detail: { code: 'delegation_managed' } } })
+      }
       attempts.push(req.postDataJSON())
       requested.resolve()
       if (rejectFirst && attempts.length === 1) return route.fulfill({ status: 409, json: { detail: 'Recovery state changed; retry with current details.' } })
@@ -175,7 +196,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
   await page.bringToFront()
   const surface = page.locator('[data-chat-surface="painted"]')
-  await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
+  await expect(surface.getByRole('button', { name: helperRetry ? 'Try now' : 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)
   await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
@@ -461,3 +482,26 @@ test('foreground and active-queue refreshes share one bounded runtime read', asy
     expect(fixture.attempts).toHaveLength(0)
   } finally { gate.accepted.resolve() }
 })
+
+
+for (const helperRetry of ['running', 'cancelled']) {
+  test(`helper Try now uses delegation retry and handles ${helperRetry} without sending the draft`, async ({ page }) => {
+    const state = await mount(page, { helperRetry })
+    const retry = state.surface.getByRole('button', { name: 'Try now', exact: true })
+    await retry.click()
+    await state.requested.promise
+    expect(state.attempts).toEqual([{ run_token: 'interrupted-a' }])
+    await expect(state.surface.getByRole('button', { name: 'Resuming…', exact: true })).toBeDisabled()
+    state.accepted.resolve()
+    if (helperRetry === 'cancelled') {
+      await expect(state.surface.getByText('This helper is no longer waiting for a retry. Open its parent chat to continue.', { exact: true })).toBeVisible()
+      await expect(retry).toBeEnabled()
+    } else {
+      await expect(retry).toHaveCount(0)
+    }
+    await expectComposerValue(state.composer, draft)
+    await expect(state.attachment).toBeVisible()
+    await expect(state.surface.getByText(queued.content, { exact: true })).toBeVisible()
+    expect(state.unexpected).toEqual([])
+  })
+}
