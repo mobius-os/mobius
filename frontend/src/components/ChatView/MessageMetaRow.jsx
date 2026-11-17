@@ -36,6 +36,7 @@ export default function MessageMetaRow({
   branch,
   side = 'end',
   visible,
+  children,
 }) {
   const footer = side === 'start'
   const now = useMinuteClock(footer && !!timestamp)
@@ -60,6 +61,7 @@ export default function MessageMetaRow({
       {time}
       {copy && <MessageCopyButton read={copy} />}
       {branch && <MessageBranchButton branch={branch} />}
+      {children}
     </div>
   )
 }

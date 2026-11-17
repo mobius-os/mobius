@@ -1,8 +1,4 @@
-/* The chat has one footer, on the reply at its very end: its time, Copy of
- * everything the agent said since the owner last spoke, and Branch. Replies
- * above it have no row at all, so there is no gap between them. While the
- * agent works the footer's line is reserved but empty.
- * #1290 attached copy to every assistant row and #1342 reverted that. */
+/* One footer per completed answer stretch; internal runs add none. */
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -21,7 +17,7 @@ const vite = await createSsrRenderServer({
 })
 after(() => vite.close())
 const { default: Reply } = await vite.ssrLoadModule('/src/components/ChatView/AssistantReply.jsx')
-const { agentStretches, footerCopyParts, replyFooter, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
+const { agentStretches, footerCopyCache, footerCopyParts, replyFooters, stretchProse } = await vite.ssrLoadModule('/src/components/ChatView/replyFooter.js')
 const { assistantReplyGroups } = await vite.ssrLoadModule('/src/components/ChatView/assistantReplies.js')
 const { PeerTimelineContext } = await vite.ssrLoadModule('/src/components/ChatView/peerTimelineContext.js')
 const { default: MetaRow } = await vite.ssrLoadModule('/src/components/ChatView/MessageMetaRow.jsx')
@@ -67,7 +63,7 @@ test('the footer reply ends with exactly one start-edge action row holding Copy'
     'the action row sits after the reply’s last text, not beside any earlier part')
 })
 
-test('a reply above the end of the chat has no action row, so no gap', () => {
+test('an internal reply before the stretch end has no action row, so no gap', () => {
   assert.equal(metaRows(renderReply([turn], { footer: null })).length, 0)
 })
 
@@ -104,6 +100,28 @@ test('a stretch lists its References once, after its last reply', () => {
   assert.match(renderReply([sourced]), /References/, 'its own sources too')
   assert.doesNotMatch(renderReply([sourced], { isStreaming: true }), /chat__sources/,
     'only once the reply has settled')
+})
+
+test('References sit after time, Copy and Branch inside the same autohiding footer', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  const row = actionRow(renderReply([sourced], { onBranch: () => {} }))
+  assert.ok(row.indexOf('chat__sources-label') > row.indexOf('aria-label="Branch in new chat"'))
+  assert.match(row, /chat__sources-body[\s\S]*<\/section><\/div>/,
+    'the disclosure body belongs to the same footer, so expanding holds all its controls')
+})
+
+test('without sources the footer does not add a disclosure or change its row', () => {
+  const row = actionRow(renderReply([turn], { onBranch: () => {} }))
+  assert.doesNotMatch(row, /chat__sources/)
+  assert.match(row, /aria-label="Copy message"/)
+  assert.match(row, /aria-label="Branch in new chat"/)
+})
+
+test('an internal reply cannot create another action footer or References', () => {
+  const sourced = { ...turn, source_ref: { message_index: 4, count: 3 } }
+  const html = renderReply([sourced], { footer: null, stretchSourceRows: null })
+  assert.equal(metaRows(html).length, 0)
+  assert.doesNotMatch(html, /References/)
 })
 
 test('while the agent works the footer line is reserved but empty', () => {
@@ -298,9 +316,7 @@ const cardAnswer = { role: 'user', content: 'Answer', hidden: true, kind: 'conti
 function footerOf(messages, options = {}) {
   const replyGroups = assistantReplyGroups(messages)
   const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
-  return replyFooter({
-    messages, replyGroups, stretches: agentStretches(messages, replyGroups), lastVisibleIndex, ...options,
-  })
+  return replyFooters({ messages, replyGroups, lastVisibleIndex, ...options }).current
 }
 const firstIds = (messages, footer) => footer.groups.map(group => messages[group.start].id)
 
@@ -315,10 +331,29 @@ test('the footer sits on the chat’s last reply and spans its stretch', () => {
   assert.equal(footerOf([row('a'), ownerRow]), null, 'no footer once the owner has spoken')
 })
 
+test('earlier completed answers retain one footer each while a newer answer runs', () => {
+  const messages = [ownerRow, row('a'), cardAnswer, row('b'), ownerRow, row('c'), ownerRow, row('live')]
+  const replyGroups = assistantReplyGroups(messages)
+  const options = { messages, replyGroups,
+    lastVisibleIndex: 7, liveIndex: 7, turnStarting: true, settledEnd: 5 }
+  const footers = [...replyFooters(options).byGroup.values()]
+  assert.deepEqual(footers.map(footer => [footer.group.start, footer.state,
+    firstIds(messages, footer)]), [
+    [3, 'settled', ['a', 'b']], [5, 'settled', ['c']], [7, 'working', ['live']],
+  ])
+  assert.deepEqual(stretchProse(footers[0].groups).map(part => part.markdown), ['a', 'b'])
+  assert.deepEqual(stretchProse(footers[1].groups).map(part => part.markdown), ['c'])
+  assert.deepEqual(footers[0].sourceRows.map(message => message.id), ['a'],
+    'an answer lists the References of its earlier replies with its last one')
+  assert.deepEqual([...replyFooters({ ...options, liveIndex: -1, lastVisibleIndex: 6 }).byGroup.values()]
+    .map(footer => footer.state), ['settled', 'settled', 'settled'],
+    'a submitted owner row cannot remove earlier complete footers')
+})
+
 test('a stretch that reaches the loaded page’s first row may have begun earlier', () => {
   const messages = [cardAnswer, row('a'), cardAnswer, row('b')]
-  assert.deepEqual({ ...footerOf(messages, { offset: 40 }), group: undefined, groups: undefined },
-    { group: undefined, groups: undefined, state: 'settled', end: 43, start: 0, truncated: true })
+  assert.deepEqual({ ...footerOf(messages, { offset: 40 }), group: undefined, groups: undefined, sourceRows: undefined },
+    { group: undefined, groups: undefined, sourceRows: undefined, state: 'settled', end: 43, start: 0, truncated: true })
   assert.equal(footerOf(messages).truncated, false, 'the whole chat is loaded')
 })
 
@@ -361,6 +396,58 @@ test('a turn continuing the reply that held the footer keeps its line reserved',
   assert.equal(footer.state, 'working', 'its line stays, so settling again never moves the transcript')
 })
 
+test('the answer before a visible steer stays working until its run settles', () => {
+  // A visible steer ends the answer before it, but the run that wrote it
+  // continues below the steer: no time, Copy or Branch on an unfinished run.
+  const steer = { role: 'user', id: 'steer', content: 'Also do this', steered: true, kind: 'steer', ts: turn.ts }
+  const messages = [ownerRow, row('run'), steer, row('run:assistant:1')]
+  const replyGroups = assistantReplyGroups(messages, { activeIndex: 3 })
+  const options = { messages, replyGroups, liveIndex: 3, lastVisibleIndex: 3, turnStarting: true, settledEnd: 1 }
+  const states = footers => [...footers.byGroup.values()].map(footer => [messages[footer.group.start].id, footer.state])
+  assert.deepEqual(states(replyFooters({ ...options, runningRoot: 'run' })),
+    [['run', 'working'], ['run:assistant:1', 'working']])
+  assert.deepEqual(states(replyFooters({ ...options, liveIndex: -1, turnStarting: false })),
+    [['run', 'settled'], ['run:assistant:1', 'settled']], 'both settle with the run')
+  assert.deepEqual(states(replyFooters({ ...options, runningRoot: 'other-run' })),
+    [['run', 'settled'], ['run:assistant:1', 'working']], 'another run leaves a complete answer complete')
+  const working = [...replyFooters({ ...options, runningRoot: 'run' }).byGroup.values()][0]
+  assert.equal(footerCopyParts(working, { messages }), null, 'nothing to copy until it settles')
+})
+
+test('Copy is rebuilt only for the answer whose inputs changed', () => {
+  const built = []
+  const copyOf = footerCopyCache(parts => {
+    built.push(parts.map(part => part.markdown))
+    return () => parts
+  })
+  const earlier = row('a')
+  let previousGroups = null
+  const frame = text => {
+    const messages = [ownerRow, earlier, ownerRow, row('b', { blocks: [{ type: 'text', content: text }] })]
+    // As ChatView does, each frame regroups from the last committed groups.
+    const replyGroups = assistantReplyGroups(messages, { previousGroups })
+    previousGroups = replyGroups
+    return { messages, footers: [...replyFooters({ messages, replyGroups, lastVisibleIndex: 3 }).byGroup.values()] }
+  }
+  const first = frame('b1')
+  const copies = first.footers.map(footer => copyOf(footer, { messages: first.messages }))
+  assert.deepEqual(built, [['a'], ['b1']])
+  // The next frame regroups everything; the earlier answer's rows keep their
+  // identity, so it keeps its Copy.
+  const next = frame('b2')
+  const again = next.footers.map(footer => copyOf(footer, { messages: next.messages }))
+  assert.equal(again[0], copies[0], 'the unchanged answer keeps its Copy handler')
+  assert.notEqual(again[1], copies[1])
+  assert.deepEqual(built, [['a'], ['b1'], ['b2']])
+  assert.notEqual(copyOf(next.footers[0], { messages: next.messages, chatId: 'another' }), copies[0],
+    'another chat in the same view does not reuse this chat’s Copy')
+  assert.equal(copyOf({ ...next.footers[0], state: 'working' }, { messages: next.messages }), undefined,
+    'no Copy while an answer is not settled')
+  const toolsOnly = [ownerRow, row('t', { blocks: [{ type: 'tool', name: 'Bash' }] })]
+  const [quiet] = replyFooters({ messages: toolsOnly, replyGroups: assistantReplyGroups(toolsOnly), lastVisibleIndex: 1 }).byGroup.values()
+  assert.equal(copyOf(quiet, { messages: toolsOnly }), undefined, 'nothing to copy, so no Copy')
+})
+
 test('Copy’s parts come from the stretch’s replies as they render, each naming its row', () => {
   const messages = [ownerRow, row('a'), cardAnswer, failedReply(
     { type: 'text', content: 'Usage limit reached' }, { type: 'error', message: 'Usage limit reached' })]
@@ -400,10 +487,8 @@ test('a stretch whose start was read copies as the same stretch wholly loaded, p
   const note = [{ id: 'note', type: 'peer_message' }]
   const partsOf = (messages, { slots = new Map(), offset = 0, startRows } = {}) => {
     const replyGroups = assistantReplyGroups(messages, { slots, offset })
-    const footer = replyFooter({
-      messages, replyGroups, stretches: agentStretches(messages, replyGroups),
-      lastVisibleIndex: messages.findLastIndex(message => !message.hidden), offset,
-    })
+    const lastVisibleIndex = messages.findLastIndex(message => !message.hidden)
+    const footer = replyFooters({ messages, replyGroups, lastVisibleIndex, offset }).current
     return footerCopyParts(footer, { startRows, messages, offset, slots })
   }
   const loaded = [ownerRow, sealed, steer, continuation]

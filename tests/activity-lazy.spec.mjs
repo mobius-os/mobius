@@ -306,15 +306,18 @@ test('a lone activity is direct and sources render as safe compact pills', async
   await toolToggle.click()
   await expect(tools.getByText('/workspace/mobius')).toBeVisible()
 
+  // References sit in the reply's auto-hiding footer; a tap on the reply's
+  // prose reveals it (a tap on a control does not).
   const sources = page.locator('[data-chat-surface="painted"] .chat__sources')
-  await expect(sources).toBeVisible()
-  await expect(sources.getByRole('button', { name: /References/ }))
-    .toHaveAttribute('aria-expanded', 'false')
+  const referencesToggle = sources.getByRole('button', { name: /References/ })
+  await page.locator('[data-chat-surface="painted"]').getByText('One command should not create two disclosures.').click()
+  await expect(referencesToggle).toBeVisible()
+  await expect(referencesToggle).toHaveAttribute('aria-expanded', 'false')
   await expect(sources.getByRole('listitem')).toHaveCount(0)
   expect(sourceIconProxyRequests).toEqual([])
   expect(requestedSourceHosts).toEqual([])
 
-  await sources.getByRole('button', { name: /References/ }).click()
+  await referencesToggle.click()
   await expect(sources.getByRole('listitem')).toHaveCount(2)
   await expect(sources.locator('.chat__source-icon')).toHaveText(['C', 'D'])
   for (const chip of await sources.locator('.chat__source-chip').all()) {

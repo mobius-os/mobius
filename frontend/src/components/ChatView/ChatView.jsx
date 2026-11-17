@@ -201,7 +201,7 @@ import {
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
 import { stretchClipboard } from './messageCopy.js'
-import { agentStretches, footerCopyParts, replyFooter } from './replyFooter.js'
+import { footerCopyCache, replyFooters } from './replyFooter.js'
 import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
@@ -5943,44 +5943,53 @@ export default function ChatView({
     }
   }
 
-  const stretches = useMemo(
-    () => agentStretches(peerTimeline.messages, replyGroups),
-    [peerTimeline.messages, replyGroups],
-  )
-  // Each stretch's earlier replies' rows, for the References its last reply
-  // lists; replies inside a stretch list none.
-  const stretchSourceRows = useMemo(() => new Map([...stretches].map(([end, groups]) => [
-    end, groups.slice(0, -1).flatMap(group => group.rows.map(row => row.message)),
-  ])), [stretches])
   // Answering a card starts the turn the moment it is submitted, before the
-  // server acknowledges it; failure restores controls in the reserved line.
+  // server acknowledges it; a failed answer clears this and the footer returns.
   const turnStarting = turnActive || questionFollowHandoff != null
-  // Keep the final reply's line during continuation. A new visible owner
-  // message ends that reply's ownership; hidden answer carriers do not.
+  // The settled footer reply's end (see replyFooters). It is state set from a
+  // committed render's layout effect, so a discarded render cannot name a
+  // reply, and it updates before paint. Kept with its chat, so switching
+  // chats never carries one chat's settled reply into another.
+  const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
+  const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
+  // One footer per complete answer. Only the current answer follows the live
+  // surface; an answer a still-running run wrote (before a visible steer)
+  // stays working until that run settles.
   const footerLiveIndex = showActiveAssistantSurface
     ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
-  const footer = useMemo(() => replyFooter({
-    messages: peerTimeline.messages, replyGroups, stretches, liveIndex: footerLiveIndex,
-    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting,
-  }), [peerTimeline.messages, replyGroups, stretches, footerLiveIndex,
-    lastVisibleMessageIndex, offset, turnStarting])
-  const footerGroup = footer?.group ?? null
-  // A stretch that began before the loaded page reads its start only when
-  // the footer is about to be used.
+  const runningRoot = turnActive
+    ? assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId })
+    : null
+  const footers = useMemo(() => replyFooters({
+    messages: peerTimeline.messages, replyGroups, liveIndex: footerLiveIndex,
+    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot,
+  }), [peerTimeline.messages, replyGroups, footerLiveIndex,
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot])
+  const footerEnd = footers.current?.end ?? null
+  useLayoutEffect(() => {
+    if (!turnStarting) {
+      setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
+        ? prev : { chatId, end: footerEnd }))
+    }
+  }, [chatId, turnStarting, footerEnd])
+  // At most the first loaded answer can begin before the history page. Its
+  // start is read lazily (abortable, retryable), whether it is historical or
+  // the current answer.
+  const truncatedFooter = [...footers.byGroup.values()].some(item => item.truncated)
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(
-    chatId, footer?.truncated ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+    chatId, truncatedFooter ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
   )
-  const footerParts = useMemo(() => footerCopyParts(footer, {
-    startRows: stretchStartRows, messages: peerTimeline.messages, offset,
+  // Copy shows exactly when an answer's parts are known and say something;
+  // pressing it builds the clipboard from those same parts. Cached per answer
+  // so a streamed frame does not project every settled answer again.
+  const [footerCopy] = useState(() => footerCopyCache(
+    parts => button => stretchClipboard(parts, button.closest('.chat__list')),
+  ))
+  const copyContext = {
+    chatId, startRows: stretchStartRows, messages: peerTimeline.messages, offset,
     slots: peerTimeline.slots, positions: peerTimeline.positions, displayKeys: assistantDisplayKeys,
     liveQuestionId: answerableQuestionId,
-  }), [footer, stretchStartRows, peerTimeline.messages, peerTimeline.slots,
-    peerTimeline.positions, offset, assistantDisplayKeys, answerableQuestionId])
-  // Copy shows exactly when the stretch's parts are known and say something;
-  // pressing it builds the clipboard from those same parts.
-  const footerCopy = useMemo(() => (footerParts?.length
-    ? button => stretchClipboard(footerParts, button.closest('.chat__list'))
-    : undefined), [footerParts])
+  }
 
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
@@ -6005,6 +6014,7 @@ export default function ChatView({
     const continuingRun = !!(turnActive && replyRoot && replyRoot
       === assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId }))
     const tail = group.rows.at(-1)
+    const groupFooter = footers.byGroup.get(group)
     const last = active || group.lastVisibleIndex === lastVisibleMessageIndex
     return <AssistantReply
       key={group.rows[0].key}
@@ -6040,15 +6050,15 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      // Controls clear while the final reply continues; its line stays.
-      footer={group === footerGroup ? footer.state : null}
-      copy={group === footerGroup ? footerCopy : undefined}
-      metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={group === footerGroup ? showMessageMeta : undefined}
-      onFooterIntent={group === footerGroup && footer.truncated ? requestStretchStart : undefined}
-      // References of the latest stretch leave with its footer while the
-      // agent works, and return, whole, where it next stops.
-      stretchSourceRows={group === footerGroup && turnStarting ? null : stretchSourceRows.get(group) || null}
+      // Each complete answer keeps its own footer; only one the running turn
+      // is still writing, or briefly the one it is leaving, has no controls.
+      footer={groupFooter?.state ?? null}
+      copy={footerCopy(groupFooter, copyContext)}
+      metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={groupFooter ? showMessageMeta : undefined}
+      onFooterIntent={groupFooter?.truncated ? requestStretchStart : undefined}
+      // References sit in the answer footer, so they show once it settles.
+      stretchSourceRows={groupFooter?.state === 'settled' ? groupFooter.sourceRows : null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}

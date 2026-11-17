@@ -1,7 +1,5 @@
-/* One reply owns live/saved source rows and continuous prose. The reply that
-   ends an agent stretch also holds the stretch's References, and the one at
-   the very end of the chat holds the one footer: its time, Copy of everything
-   the agent said since the owner last spoke, and Branch (see replyFooter.js). */
+/* A reply owns continuous prose and saved/live sources. The reply ending a
+   complete answer stretch holds its time, Copy, Branch and References. */
 import { Fragment, memo, useContext, useMemo } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
@@ -82,9 +80,17 @@ function AssistantReply({
   const metaKey = presentationRows[0].key
   const settled = footer === 'settled' && !isStreaming
   const endedAt = presentationRows.at(-1).message.run_ended_ts
-  // A stretch lists its References once, after its last reply.
+  // A stretch lists its References once, in its last reply's footer, after
+  // time, Copy and Branch. ChatView passes source rows only to a settled
+  // footer, so References never show without one.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
+  const references = footer && !isStreaming && referenceRows && <MessageSources
+    chatId={chatId}
+    groups={referenceRows.map(message => message.blocks)}
+    refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
+    disclosureKey={`${rows[lastVisibleRow].key}:references`}
+  />
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.
@@ -141,15 +147,8 @@ function AssistantReply({
         </Fragment>
       })}
     </ul>
-    {!isStreaming && referenceRows && <MessageSources
-      chatId={chatId}
-      groups={referenceRows.map(message => message.blocks)}
-      refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
-      disclosureKey={`${rows[lastVisibleRow].key}:references`}
-    />}
-    {/* Only the chat's last reply has a footer; replies above it leave no
-        gap. It is mounted while the agent works too, empty: settling fills
-        the reserved line instead of adding one under a followed transcript. */}
+    {/* One footer per complete answer stretch, never per internal run. A
+        working stretch reserves its line so settling does not jump. */}
     {footer && <MessageMetaRow
       // When the reply settled: when the run that wrote its last row ended.
       // Until the server reports that, its start, and the row says so (a
@@ -163,7 +162,9 @@ function AssistantReply({
         ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
       visible={metaVisible}
-    />}
+    >
+      {references}
+    </MessageMetaRow>}
   </li></PeerTimelineContext.Provider>
 }
 

@@ -106,15 +106,14 @@ test('owner rows copy their own text; a reply copies only from its one end row',
   assert.doesNotMatch(chatView, /stopChatSpeech/)
 })
 
-test('the chat has one reply footer, on the reply at its very end', () => {
+test('each complete answer keeps its own footer reveal', () => {
   const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
-  // Only the chat's last reply has a footer row at all (replyFooter.test),
-  // so hovering an earlier reply has nothing to reveal.
+  // Complete answers own one footer each; internal runs add none.
   assert.doesNotMatch(css, /\.chat__msg:hover > \.chat__msg-meta/,
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  // Which reply holds the footer and in what state is replyFooter's,
+  // Which replies hold a footer and in what state is replyFooters',
   // behaviour-tested in replyFooter.test.js.
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
@@ -130,7 +129,7 @@ test('every row reads time, then Copy, then Branch; the reply footer appears on 
   const hover = '.chat__reply:hover > .chat__msg-meta--start'
   assert.equal(declared(hover, '(pointer: fine)').opacity, '1', 'a fine pointer hovering the reply reveals it')
   assert.deepEqual(declared(hover), {}, 'hover alone, as on touch, does not')
-  assert.match(chatView, /metaVisible=\{group === footerGroup && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
+  assert.match(chatView, /metaVisible=\{!!groupFooter && visibleMessageMetaKey === group\.rows\[0\]\.key\}/,
     'a tap reveals the footer for a moment, as on owner rows')
   const button = declared('.chat__msg-meta--start > :is(.chat__msg-copy, .chat__msg-branch):not(.chat__msg-copy--failed)')
   assert.deepEqual([button.width, button.height, button.padding], ['24px', '24px', '0'],
