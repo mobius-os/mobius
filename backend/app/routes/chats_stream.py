@@ -196,17 +196,26 @@ async def _send_queue(
   })
 
 
-def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
-  """The parent chat whose delegation owns this chat's send lifecycle, if any.
+def _managing_delegation(db: Session, chat_id: str):
+  """The delegation (``id``, ``parent_chat_id``) that owns this chat, if any.
 
   Keep the send gate beside the route that enforces it. Delegation policy
   loading is intentionally a separate concern and may evolve independently;
   this guard only needs the durable ownership row already available through
-  the request session.
+  the request session. The chat detail reads the same row, so a helper's
+  recovery card and its send refusal can never disagree about ownership.
   """
-  return db.query(models.Delegation.parent_chat_id).filter(
+  return db.query(
+    models.Delegation.id, models.Delegation.parent_chat_id,
+  ).filter(
     models.Delegation.child_chat_id == chat_id,
-  ).limit(1).scalar()
+  ).limit(1).first()
+
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
+  """The parent chat whose delegation owns this chat's send lifecycle, if any."""
+  row = _managing_delegation(db, chat_id)
+  return row.parent_chat_id if row is not None else None
 
 
 def _owner_chat_above(db: Session, chat_id: str, parent_chat_id: str) -> str | None:
@@ -228,6 +237,21 @@ def _owner_chat_above(db: Session, chat_id: str, parent_chat_id: str) -> str | N
       return parent_chat_id if live is not None else None
     parent_chat_id = above
   return None
+
+
+def helper_chat_ref(db: Session, chat_id: str) -> dict | None:
+  """A helper chat's delegation and the nearest chat the owner can write in.
+
+  Recovery retries that exact delegation; every other action belongs to the
+  parent, which the card links exactly as the send refusal does.
+  """
+  row = _managing_delegation(db, chat_id)
+  if row is None:
+    return None
+  return {
+    "delegation_id": row.id,
+    "parent_chat_id": _owner_chat_above(db, chat_id, row.parent_chat_id),
+  }
 
 
 def _delegation_managed_conflict(

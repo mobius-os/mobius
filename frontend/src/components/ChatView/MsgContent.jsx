@@ -37,6 +37,9 @@ import {
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction } from './recoveryCard.js'
+import { helperCanRetry } from './helperRecovery.js'
+import { ParentChatLink } from './HelperChatSendNotice.jsx'
+import { HELPER_CHAT_SEND_LINK_TEXT } from './sendFailure.js'
 import { RESOURCE_PAUSE_LABELS } from './waitingPresentation.js'
 import ContextCompactionMarker from './ContextCompactionMarker.jsx'
 import { assistantBlockKey } from './streamPromotion.js'
@@ -231,6 +234,10 @@ function MsgContentInner({
   // Only the installation owner may bypass the storage or process floor; the
   // server refuses Continue anyway from anyone else, who keeps plain Resume.
   canContinueAnyway = false,
+  // A helper's chat retries only its own usage-limit park through its
+  // delegation; every other recovery action is the parent chat's.
+  helperChat = false,
+  helperParentChatId = null,
   resumeState,
   continuationWait = null,
   handoff = null,
@@ -620,7 +627,7 @@ function MsgContentInner({
         // remains. Not while an update restores edits or awaits a restart: the
         // server reports those for a resource wait as the handoff's reason.
         const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
-        const continueAnywayAvailable = recoveryOwner && canContinueAnyway
+        const continueAnywayAvailable = recoveryOwner && canContinueAnyway && !helperChat
           && !!continueAnywayCopy
           && ['automatic', 'recovery'].includes(handoff?.kind)
           && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
@@ -629,6 +636,9 @@ function MsgContentInner({
         const manualResumeAvailable = recoveryOwner
           && !continueAnywayAvailable
           && ((!resourceWait && !modelCapacity) || handoff?.kind === 'recovery')
+          && (!helperChat || helperCanRetry(block))
+        // The server would refuse these actions here, so name where they live.
+        const parentOwnsRecovery = recoveryOwner && helperChat && !manualResumeAvailable
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
@@ -693,6 +703,13 @@ function MsgContentInner({
             )}
             {continueAnywayAvailable && (
               <span className="chat__recovery-copy">{continueAnywayCopy}</span>
+            )}
+            {parentOwnsRecovery && (
+              <span className="chat__recovery-copy">
+                This helper continues from its {helperParentChatId
+                  ? <ParentChatLink parentChatId={helperParentChatId} onInternalNav={onInternalNav} />
+                  : HELPER_CHAT_SEND_LINK_TEXT}.
+              </span>
             )}
             {(manualResumeAvailable || continueAnywayAvailable) && (
               <button
@@ -889,6 +906,8 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onRefusalModelChoice === next.onRefusalModelChoice
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
     && prev.canContinueAnyway === next.canContinueAnyway
+    && prev.helperChat === next.helperChat
+    && prev.helperParentChatId === next.helperParentChatId
     && prev.resumeState === next.resumeState
     && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff

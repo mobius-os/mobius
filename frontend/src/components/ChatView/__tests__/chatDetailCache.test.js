@@ -133,6 +133,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
     branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
     helper_delegation_id: 'helper-a',
+    helper_parent_chat_id: 'parent-a',
   }
 
   const cached = chatDetailCacheValue(source)
@@ -160,6 +161,7 @@ test('prefetched chat detail matches the synchronous ChatView cache contract', (
     project: { id: 'p1', name: 'Site', root_path: 'projects/p1' },
     branch_origin: { chat_id: 'source', title: 'Trip plan', through_count: 2, available: true },
     helper_delegation_id: 'helper-a',
+    helper_parent_chat_id: 'parent-a',
   })
 })
 
@@ -366,8 +368,12 @@ test('exact decision coordinate matches the saved card after answer, not another
 })
 
 test('helper retry identity survives detail caching and does not leak into an ordinary chat', () => {
-  const helper = chatDetailCacheValue({ messages: [], helper_delegation_id: 'delegation-a' })
+  const helper = chatDetailCacheValue({
+    messages: [], helper_delegation_id: 'delegation-a', helper_parent_chat_id: 'parent-a',
+  })
   assert.equal(helper.chatInfo.helper_delegation_id, 'delegation-a')
+  assert.equal(helper.chatInfo.helper_parent_chat_id, 'parent-a')
   const ordinary = chatDetailCacheValue({ messages: [] })
   assert.equal(ordinary.chatInfo.helper_delegation_id, null)
+  assert.equal(ordinary.chatInfo.helper_parent_chat_id, null)
 })

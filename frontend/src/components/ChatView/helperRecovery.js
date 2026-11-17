@@ -1,4 +1,32 @@
 /* Retry a helper's exact parked attempt without creating a separate chat run. */
+
+// The delegation retry admits only the latest usage-limit park
+// (retry_limit_park). Every other recovery action belongs to the parent.
+export function helperCanRetry(block) {
+  return block?.pause?.kind === 'usage_limit'
+}
+
+const HELPER_PARENT_ONLY = 'This helper is controlled by its parent chat. Open the parent chat to continue.'
+
+/**
+ * Resume a recovery card through its owner. An ordinary chat sends a
+ * continuation (which waits for settings itself); a helper retries its exact
+ * delegated park, after the same settings-save boundary, so a model or effort
+ * change made just before Try now is what the retry resumes on.
+ */
+export async function sendRecoveryResume({
+  helperDelegationId, settingsSaved, request, send,
+}, text, attachments, options = {}) {
+  if (!helperDelegationId) return send(text, attachments, options)
+  // A token-less resume (the Goal rail) has no park to compare against.
+  if (!options.resumeRunId) {
+    throw Object.assign(new Error(HELPER_PARENT_ONLY), {
+      code: 'helper_recovery_unavailable', status: 409,
+    })
+  }
+  await settingsSaved()
+  return retryHelperRecovery(request, helperDelegationId, options.resumeRunId)
+}
 export async function retryHelperRecovery(request, delegationId, runId) {
   const response = await request(`/delegations/${encodeURIComponent(delegationId)}/retry`, {
     method: 'POST',
@@ -14,8 +42,6 @@ export async function retryHelperRecovery(request, delegationId, runId) {
     ), { status: response.status, code: 'helper_recovery_unavailable' })
   }
   const running = ['running', 'resuming'].includes(body.status)
-    || (['accepted', 'retrying', 'starting'].includes(body.status)
-      && !!body.physical_run_id && body.physical_run_id !== runId)
   if (body.retry_started || running) {
     // A replacement may already have finished or parked again before the
     // acknowledgement. Never leave the composer busy on that settled result.

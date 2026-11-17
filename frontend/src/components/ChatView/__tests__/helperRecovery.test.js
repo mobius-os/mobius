@@ -1,7 +1,7 @@
 /* Helper recovery uses delegation admission and never sends composer content. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { retryHelperRecovery } from '../helperRecovery.js'
+import { helperCanRetry, retryHelperRecovery, sendRecoveryResume } from '../helperRecovery.js'
 
 function fixture(body, status = 200) {
   const requests = []
@@ -67,15 +67,76 @@ test('ambiguous network failure never falls back to an ordinary send', async () 
   assert.equal(count, 1)
 })
 
-for (const status of ['accepted', 'retrying', 'starting']) {
-  test(`a no-op ${status} response needs a physical replacement before showing running`, async () => {
-    for (const physical_run_id of [null, 'park']) {
-      const h = fixture({ retry_started: false, status, physical_run_id })
-      await assert.rejects(retryHelperRecovery(h.request, 'helper', 'park'), {
-        code: 'helper_recovery_unavailable',
-      })
-    }
-    const replacement = fixture({ retry_started: false, status, physical_run_id: 'replacement' })
-    assert.equal((await retryHelperRecovery(replacement.request, 'helper', 'park')).running, true)
-  })
+function resumeFixture({ helperDelegationId = 'helper', saved = Promise.resolve() } = {}) {
+  const events = []
+  const h = fixture({ retry_started: true, status: 'resuming' })
+  const owner = {
+    helperDelegationId,
+    settingsSaved: async () => {
+      events.push('settings-wait')
+      await saved
+      events.push('settings-saved')
+    },
+    request: async (...args) => {
+      events.push('retry')
+      return h.request(...args)
+    },
+    send: async (...args) => {
+      events.push(['send', ...args])
+      return { sent: true }
+    },
+  }
+  return { owner, events, requests: h.requests }
 }
+
+test('a helper retry waits for a pending model or effort save before resuming', async () => {
+  let finishSave
+  const saved = new Promise(resolve => { finishSave = resolve })
+  const h = resumeFixture({ saved })
+  const resuming = sendRecoveryResume(h.owner, '', undefined, { resumeRunId: 'park' })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  assert.deepEqual(h.events, ['settings-wait'])
+  finishSave()
+  assert.equal((await resuming).running, true)
+  assert.deepEqual(h.events, ['settings-wait', 'settings-saved', 'retry'])
+})
+
+test('a helper retry from a chat closed during the settings save never reaches the server', async () => {
+  const h = resumeFixture()
+  h.owner.settingsSaved = async () => { throw new Error('This chat is no longer open.') }
+  await assert.rejects(
+    sendRecoveryResume(h.owner, '', undefined, { resumeRunId: 'park' }),
+    /no longer open/,
+  )
+  assert.deepEqual(h.requests, [])
+})
+
+test('a token-less helper resume (the Goal rail) is refused before any request', async () => {
+  const h = resumeFixture()
+  await assert.rejects(
+    sendRecoveryResume(h.owner, '', undefined, { resumeGoalId: 'goal', resumeGoalRevision: 2 }),
+    error => {
+      assert.equal(error.code, 'helper_recovery_unavailable')
+      assert.match(error.message, /parent chat/)
+      return true
+    },
+  )
+  assert.deepEqual(h.events, [])
+})
+
+test('an ordinary chat resume keeps its settings-aware send unchanged', async () => {
+  const h = resumeFixture({ helperDelegationId: null })
+  const options = { cid: 'c', continuation: 'manual', resumeRunId: 'park' }
+  assert.deepEqual(await sendRecoveryResume(h.owner, '', undefined, options), { sent: true })
+  assert.deepEqual(h.events, [['send', '', undefined, options]])
+})
+
+test('a helper can retry only the usage-limit park the delegation route admits', () => {
+  assert.equal(helperCanRetry({ pause: { kind: 'usage_limit' } }), true)
+  for (const pause of [
+    { kind: 'rate_limit' }, { kind: 'limit' }, { kind: 'credits' }, { kind: 'restart' },
+    { kind: 'storage' }, { kind: 'processes' }, { kind: 'model_capacity' }, undefined,
+  ]) {
+    assert.equal(helperCanRetry({ pause }), false, pause?.kind)
+  }
+})

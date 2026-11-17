@@ -226,6 +226,7 @@ export function chatDetailCacheValue(data = {}) {
       // copied history ends and which chat it came from (BranchOrigin).
       branch_origin: data.branch_origin || null,
       helper_delegation_id: data.helper_delegation_id || null,
+      helper_parent_chat_id: data.helper_parent_chat_id || null,
     },
   }
 }

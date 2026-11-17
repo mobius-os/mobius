@@ -4306,10 +4306,29 @@ def test_helper_retry_identity_is_owner_detail_only(client, owner_token, db):
   detail = client.get(f"/api/chats/{child.id}", headers=headers)
   assert detail.status_code == 200, detail.text
   assert detail.json()["helper_delegation_id"] == "retry-identity-delegation"
+  assert detail.json()["helper_parent_chat_id"] == parent.id
   ordinary = client.get(f"/api/chats/{parent.id}", headers=headers)
   assert ordinary.status_code == 200, ordinary.text
   assert ordinary.json()["helper_delegation_id"] is None
-  assert _chat_detail_response(child, db=db, expose_session=False)["helper_delegation_id"] is None
+  assert ordinary.json()["helper_parent_chat_id"] is None
+  embedded = _chat_detail_response(child, db=db, expose_session=False)
+  assert embedded["helper_delegation_id"] is None
+  assert embedded["helper_parent_chat_id"] is None
+
+
+def test_nested_helper_detail_links_the_chat_its_refusal_names(
+  client, owner_token, db,
+):
+  """The recovery card's parent link is the send refusal's, not the raw parent."""
+  top_id, middle_id, _ = _seed_delegation(db, suffix="detail-link-top")
+  _, leaf_id, leaf_delegation = _seed_delegation(
+    db, suffix="detail-link-leaf", parent_id=middle_id,
+  )
+  headers = {"Authorization": f"Bearer {owner_token}"}
+  detail = client.get(f"/api/chats/{leaf_id}", headers=headers).json()
+  refusal = _direct_send(client, owner_token, leaf_id).json()["detail"]
+  assert detail["helper_delegation_id"] == leaf_delegation
+  assert detail["helper_parent_chat_id"] == top_id == refusal["parent_chat_id"]
 
 
 @pytest.mark.parametrize("overlap", [True, False])
