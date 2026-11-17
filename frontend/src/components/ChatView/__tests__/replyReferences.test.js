@@ -43,6 +43,9 @@ function renderReply(messages, isStreaming = false) {
     streamItems: null,
     chatId: 'chat-references',
     isStreaming,
+    // A settled answer end: References sit in its footer.
+    footer: 'settled',
+    stretchSourceRows: [],
   }))
 }
 

@@ -106,7 +106,10 @@ test.describe('reply footer', () => {
     const f = await mountReplyFooter(page, BASE)
     await f.composer.fill('A new question')
     await waitForComposerSendable(f.surface)
-    const copy = f.replies.last().getByRole('button', { name: 'Copy message' })
+    // Named by their text: Send adds a live reply, so last() would move to it.
+    const latest = f.replies.filter({ hasText: 'Latest completed answer.' })
+    const earlier = f.replies.filter({ hasText: 'Earlier completed answer.' })
+    const copy = latest.getByRole('button', { name: 'Copy message' })
     let release
     const responseGate = new Promise(resolve => { release = resolve })
     await page.route(`**${f.path}/messages`, async route => {
@@ -116,9 +119,10 @@ test.describe('reply footer', () => {
     try {
       await expect(copy).toHaveCount(1)
       await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
+      await expect(f.surface.locator('.chat__msg--user').filter({ hasText: 'A new question' })).toHaveCount(1)
       // The newly sent owner row does not change completed answers.
-      await expect(copy).toHaveCount(1, { timeout: 1000 })
-      await expect(f.replies.first().getByRole('button', { name: 'Copy message' })).toHaveCount(1)
+      await expect(copy).toHaveCount(1)
+      await expect(earlier.getByRole('button', { name: 'Copy message' })).toHaveCount(1)
     } finally { release() }
   })
 

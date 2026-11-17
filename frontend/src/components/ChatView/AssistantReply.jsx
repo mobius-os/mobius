@@ -80,10 +80,12 @@ function AssistantReply({
   const metaKey = presentationRows[0].key
   const settled = footer === 'settled' && !isStreaming
   const endedAt = presentationRows.at(-1).message.run_ended_ts
-  // A stretch lists its References once, after its last reply.
+  // A stretch lists its References once, in its last reply's footer, after
+  // time, Copy and Branch. ChatView passes source rows only to a settled
+  // footer, so References never show without one.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
-  const references = !isStreaming && referenceRows && <MessageSources
+  const references = footer && !isStreaming && referenceRows && <MessageSources
     chatId={chatId}
     groups={referenceRows.map(message => message.blocks)}
     refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
@@ -163,7 +165,6 @@ function AssistantReply({
     >
       {references}
     </MessageMetaRow>}
-    {!footer && references}
   </li></PeerTimelineContext.Provider>
 }
 

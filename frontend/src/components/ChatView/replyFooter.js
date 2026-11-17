@@ -1,7 +1,10 @@
-/* One footer per complete answer stretch, with no footer on internal runs.
-   Each copies what the agent said since the preceding visible owner row. */
+/* One footer per complete answer stretch, with no footer on internal runs:
+   which replies hold one, in what state, and what each copies (everything the
+   agent said since the preceding visible owner row). Pure, so ChatView only
+   wires its result. */
 import { assistantReplyGroups, presentAssistantActivity, presentAssistantReply } from './assistantReplies.js'
 import { replyProse } from './messageCopy.js'
+import { assistantReplyRoot } from './steerContinuity.js'
 
 /** The agent's stretches: each reply that ends one, mapped to the replies in
  * it, oldest first. A stretch runs until the next visible row that is not a
@@ -22,27 +25,48 @@ export function agentStretches(messages, replyGroups) {
   return stretches
 }
 
-/** Footer state for every answer stretch on the loaded page. Only the current
- *  stretch can be working or briefly cleared during an answered-card handoff;
- *  older answers remain complete while a later owner turn runs. */
+/** Every complete answer's footer on the loaded page, and the current one.
+ *
+ *  The current answer is the live reply's group at `liveIndex` while one is
+ *  shown (-1 otherwise), else the one holding the last visible row. `state`
+ *  is 'settled' while no turn is starting or running. While one is, the
+ *  current answer is 'working' (an empty, reserved line) when the turn writes
+ *  it, and null when it is the answer that held the footer as the turn
+ *  started, which the live surface can briefly reselect before the turn's
+ *  reply exists. `settledEnd` (the absolute index of the settled footer
+ *  reply's last row) tells them apart: a turn continuing that same reply adds
+ *  a row after it. An earlier answer is settled unless the running run
+ *  (`runningRoot`, its reply root) wrote part of it: a visible steer ends the
+ *  answer before it while that run continues, so it stays working until the
+ *  run settles.
+ *
+ *  Each footer also lists `sourceRows`, the rows of its earlier replies whose
+ *  References its last reply shows; `start` is the index of its first row
+ *  after the owner's, so a hidden carrier opening it stays with it; and
+ *  `truncated` says it may have begun before the loaded page (whose first row
+ *  is at `offset`). */
 export function replyFooters({
-  messages, replyGroups, stretches, liveIndex = -1, lastVisibleIndex, offset = 0,
-  turnStarting = false, settledEnd = null,
+  messages, replyGroups, liveIndex = -1, lastVisibleIndex, offset = 0,
+  turnStarting = false, settledEnd = null, runningRoot = null,
 }) {
-  const current = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
-  const footers = new Map()
-  for (const [group, groups] of stretches) {
+  const currentGroup = replyGroups.get(liveIndex >= 0 ? liveIndex : lastVisibleIndex)
+  const byGroup = new Map()
+  for (const [group, groups] of agentStretches(messages, replyGroups)) {
     let before = groups[0].start - 1
     while (before >= 0 && messages[before]?.hidden) before -= 1
     const end = offset + group.end
-    const state = !turnStarting || group !== current ? 'settled'
-      : liveIndex >= 0 && end !== settledEnd ? 'working' : null
-    footers.set(group, {
+    const runContinues = !!runningRoot && groups.some(item => item.rows.some(
+      row => assistantReplyRoot(row.message) === runningRoot))
+    const state = group !== currentGroup ? (runContinues ? 'working' : 'settled')
+      : !turnStarting ? 'settled'
+        : liveIndex >= 0 && end !== settledEnd ? 'working' : null
+    byGroup.set(group, {
       group, groups, state, end, start: before + 1,
       truncated: before < 0 && offset > 0,
+      sourceRows: groups.slice(0, -1).flatMap(item => item.rows.map(row => row.message)),
     })
   }
-  return footers
+  return { byGroup, current: byGroup.get(currentGroup) || null }
 }
 
 /** What the stretch's replies say, in order, as each settled reply renders:
@@ -59,7 +83,7 @@ export function stretchProse(groups, positions = new Map(), liveQuestionId = nul
   })
 }
 
-/** Copy's parts for `footer` (see replyFooter), or null while they are not
+/** Copy's parts for `footer` (see replyFooters), or null while they are not
  *  known: the footer has not settled, or its stretch began before the loaded
  *  page and `startRows` (that start, see useStretchPrefix) is not read yet.
  *  `messages`, `slots` and `positions` are the transcript's peer timeline,
@@ -82,4 +106,50 @@ export function footerCopyParts(footer, {
     slots: new Map([...slots].map(([index, notes]) => [index + shift, notes])),
   })
   return stretchProse([...new Set(groups.values())], positions, liveQuestionId)
+}
+
+/** Copy for each settled answer, rebuilt only when that answer's inputs
+ *  change. ChatView renders on every streamed frame, while an earlier answer's
+ *  reply rows, positioned notes and read start keep their identity, so it
+ *  keeps its parts and its `toCopy(parts)` result (the Copy handler) instead
+ *  of projecting every answer on the page again. A view reused for another
+ *  chat (`context.chatId`) starts the cache afresh. */
+export function footerCopyCache(toCopy) {
+  const cache = new Map()
+  let chatId
+  return (footer, context) => {
+    if (context.chatId !== chatId) {
+      cache.clear()
+      chatId = context.chatId
+    }
+    if (footer?.state !== 'settled') return undefined
+    const inputs = copyInputs(footer, context)
+    const key = footer.group.rows[0].key
+    const prior = cache.get(key)
+    if (prior && prior.inputs.length === inputs.length
+      && prior.inputs.every((input, index) => input === inputs[index])) return prior.copy
+    const parts = footerCopyParts(footer, context)
+    const copy = parts?.length ? toCopy(parts) : undefined
+    cache.set(key, { inputs, copy })
+    return copy
+  }
+}
+
+// Everything footerCopyParts reads for `footer`, as values compared by identity.
+function copyInputs(footer, { startRows, messages, offset = 0, slots = new Map(), positions = new Map(), displayKeys, liveQuestionId }) {
+  const inputs = [footer.truncated, liveQuestionId, displayKeys]
+  for (const group of footer.groups) {
+    inputs.push(group.presentationRows)
+    for (const row of group.presentationRows) inputs.push(...(positions.get(row.message.id) || []))
+  }
+  if (footer.truncated) {
+    // Regrouped with its read start: the loaded rows and note slots before
+    // its end decide how a reply split across the page's edge reads.
+    inputs.push(startRows, offset, ...messages.slice(0, footer.group.end + 1))
+    // Slot notes are copied per projection; their id and delivery are the note.
+    for (const [index, notes] of slots) {
+      if (index <= footer.group.end) inputs.push(index, ...notes.flatMap(note => [note.id ?? note, note.observedDelivery]))
+    }
+  }
+  return inputs
 }

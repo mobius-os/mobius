@@ -213,8 +213,10 @@ test('message references use a bounded responsive two-column grid', () => {
   assert.match(chipRule, /width:\s*100%/,
     'each source card should fill its grid column')
   assert.match(css,
-    /@media\s*\(max-width:\s*600px\)\s*\{\s*\.chat__sources-list\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap/s,
-    'phones should wrap compact reference pills instead of using grid columns')
+    /@container\s+chat-sources\s*\(max-width:\s*560px\)\s*\{\s*\.chat__sources-list\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap/s,
+    'narrow panes should wrap compact reference pills instead of using grid columns')
+  assert.match(css.match(/(?:^|\})\s*(\.chat__sources-body\s*\{[^}]*\})/)?.[1] || '', /container:\s*chat-sources\s*\/\s*inline-size/,
+    'the pill layout follows the references body width, not the screen')
   assert.match(css,
     /\.chat__source-item--web\s*\{\s*width:\s*auto;\s*max-width:\s*min\(100%,\s*220px\)/,
     'long reference labels should cap their pill width on phones')

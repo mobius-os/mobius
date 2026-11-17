@@ -113,7 +113,7 @@ test('each complete answer keeps its own footer reveal', () => {
     'owner messages keep their tap-only reveal')
   assert.doesNotMatch(metaRow, /alwaysVisible|pinned/,
     'the row only renders the visibility its owner decides')
-  // Which reply holds the footer and in what state is replyFooter's,
+  // Which replies hold a footer and in what state is replyFooters',
   // behaviour-tested in replyFooter.test.js.
   assert.match(chatView, /useLayoutEffect\(\(\) => \{\s*if \(messageMetaTimerRef\.current\) clearTimeout\(messageMetaTimerRef\.current\)\s*messageMetaTimerRef\.current = null\s*setVisibleMessageMetaKey\(null\)\s*\}, \[chatId, turnActive, activeAssistantMessageId, streamAssistantMessageId\]\)/,
     'a new turn or assistant message clears an old tap reveal before paint')
