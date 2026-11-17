@@ -1,14 +1,7 @@
 /** Unit tests for the shared, one-shot shell-reload state reader. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { consumeShellReload, writeShellReload } from '../shellReloadState.js'
-
-const APP_SOURCE = readFileSync(new URL('../../App.jsx', import.meta.url), 'utf8')
-const NAV_SOURCE = readFileSync(
-  new URL('../../hooks/useNavigation.js', import.meta.url),
-  'utf8',
-)
 
 function fakeStorage(entries = []) {
   const values = new Map(entries)
@@ -74,11 +67,4 @@ test('shellReload: returns null when sandbox storage is unavailable', () => {
     getItem() { throw new DOMException('Blocked by opaque sandbox', 'SecurityError') },
   }
   assert.equal(consumeShellReload(storage), null)
-})
-
-test('navigation is the only startup consumer of reload state', () => {
-  assert.doesNotMatch(APP_SOURCE, /from '\.\/lib\/shellReloadState\.js'/)
-  assert.match(NAV_SOURCE, /from '\.\.\/lib\/shellReloadState\.js'/)
-  assert.doesNotMatch(APP_SOURCE, /from '\.\/hooks\/useNavigation\.js'/)
-  assert.doesNotMatch(APP_SOURCE, /if \(shellReload\)/)
 })

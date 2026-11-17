@@ -511,15 +511,13 @@ def test_codex_fork_reads_every_page_of_tool_switches():
 
 
 def test_codex_default_loader_accepts_persisted_completed_subagent_activity():
-  # Coaching must cross the same provider-compatibility boundary as live chat.
-  # The pinned app-server persists this lifecycle marker even though its
-  # generated Python enum omits it until the boundary installs the exact shim.
+  # Coaching uses the same SDK import contract as live chat, and the native
+  # enum accepts the completion marker in persisted activity.
   pytest.importorskip("openai_codex")
   from openai_codex.generated.v2_all import SubAgentActivityKind
 
-  loaded = _load_codex_sdk()
-
   assert SubAgentActivityKind("completed").value == "completed"
+  loaded = _load_codex_sdk()
   assert all(loaded)
 
 

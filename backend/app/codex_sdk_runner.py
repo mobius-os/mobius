@@ -81,9 +81,6 @@ from app.codex_events import (
   _agent_message_phase,
   _codex_terminal_error,
   _codex_size_failure,
-  # Compatibility import for existing internal callers; implementation lives
-  # beside the Codex event/observability code it supports.
-  _skill_names_in_command,
   _observe_skill_reads,
   _file_change_patch_summary,
   _file_change_edit_preview,
@@ -1294,7 +1291,6 @@ def _sdk_imports() -> dict[str, Any]:
     AccountRateLimitsUpdatedNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
-    SubAgentActivityKind,
     SubAgentActivityThreadItem,
     ThreadStartedNotification,
     ThreadStatusChangedNotification,
@@ -1305,14 +1301,11 @@ def _sdk_imports() -> dict[str, Any]:
     TurnStatus,
     WebSearchThreadItem,
   )
-  # The exact rust-v0.153.3 SDK pin includes the complete collab, sub-agent,
-  # status, and rate-limit surface above. Import it as one contract: accepting
+  # The pinned SDK includes the complete collab, sub-agent, status, and
+  # rate-limit surface above. Import it as one contract: accepting
   # an older partial SDK here would only defer an image mismatch into missing
   # lifecycle events at runtime. test_codex_sdk_contract locks the symbols and
   # fields that this runner consumes.
-  _enable_completed_subagent_activity(
-    activity_kind_type=SubAgentActivityKind,
-  )
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
@@ -1370,39 +1363,6 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
-
-
-def _enable_completed_subagent_activity(*, activity_kind_type: Any) -> None:
-  """Accept the completion marker emitted by the matching Codex app-server.
-
-  Codex 0.153.3 persists ``subAgentActivity(kind=completed)`` but the Python
-  models generated from that same tag omit ``completed`` from the enum. That
-  makes ``thread/resume`` fail while parsing otherwise valid history. Keep the
-  compatibility seam at the provider boundary and limited to this known wire
-  value; arbitrary future values must still fail loudly. Once the generated
-  enum includes ``completed`` natively this becomes a no-op.
-  """
-  if activity_kind_type is None:
-    return
-  try:
-    activity_kind_type("completed")
-    return
-  except ValueError:
-    pass
-
-  previous_missing = getattr(activity_kind_type, "_missing_", None)
-
-  def _missing(cls: Any, value: Any) -> Any | None:
-    if value == "completed":
-      member = object.__new__(cls)
-      member._name_ = "completed"
-      member._value_ = value
-      return member
-    if previous_missing is not None:
-      return previous_missing(value)
-    return None
-
-  activity_kind_type._missing_ = classmethod(_missing)
 
 
 # Owner-facing wording for an unexpected session death. The exception's
