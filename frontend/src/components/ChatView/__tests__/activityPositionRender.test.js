@@ -466,3 +466,36 @@ test('reasoning that a routine save joined keeps its reasoning line', () => {
   assert.match(html, /data-activity-kind="reasoning"/)
   assert.match(html, /Thought for 3 seconds/)
 })
+
+test('folded app pages leave one command disclosure between real prose boundaries', () => {
+  const command = id => ({ type: 'tool', tool: 'Bash', tool_use_id: id, status: 'done' })
+  const page = id => ({
+    type: 'tool', tool: 'mobius_control:memory_read', tool_use_id: id, status: 'done',
+    app_activity: { app_slug: 'memory', app_name: 'Memory', operation_key: 'lookup:read',
+      status: 'succeeded', label: 'Read notes', resources: [] },
+  })
+  const compact = (id, start) => ({
+    type: 'activity', activity_id: id, message_index: 0, start, end: start + 2,
+    tool_count: 1, entries: [{ idx: start, item: command(id) }],
+  })
+  for (const isStreaming of [false, true]) {
+    const msg = { id: 'paged-work', role: 'assistant', blocks: [
+      page('first'),
+      { type: 'text', content: 'Starting checks' },
+      compact('one', 2), page('second'),
+      compact('two', 5), page('third'), command('three'),
+      { type: 'text', content: 'Checks complete' },
+      compact('four', 9),
+    ] }
+    const html = render(Message, { msg, chatId: 'chat', messageKey: msg.id, isStreaming },
+      { tools: new Map(), positions: new Map() })
+    const start = html.indexOf('Starting checks')
+    const end = html.indexOf('Checks complete')
+    assert.ok(start >= 0 && end > start)
+    const work = html.slice(start, end)
+    assert.equal((work.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
+    assert.match(work, /Ran commands/)
+    assert.equal((html.match(/chat__app-activity-tool /g) || []).length, 1)
+    assert.match(html.slice(end), /Ran a command/)
+  }
+})
