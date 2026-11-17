@@ -418,6 +418,7 @@ export default function ChatView({
   builtAppsReady = false,
   onOpenApp,
   onInternalNav,
+  onOpenProviderSettings,
   onMessageStart,
   onOwnerActivity,
   // True while this chat is filed under Archived; the notice offers Restore.
@@ -6639,6 +6640,7 @@ export default function ChatView({
                   embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={mergeChatInfo}
+                onOpenProviderSettings={onOpenProviderSettings}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
