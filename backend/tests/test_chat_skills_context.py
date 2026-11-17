@@ -286,7 +286,7 @@ def test_goal_outcome_survives_milestones():
 
   assert "answered card, contribution or restart is not completion" in core
   assert "keep milestones as tasks in the same open Goal" in core
-  assert "Record each blocking question on its task and ask them together" in core
+  assert "Record each blocking question on its task and ask related ones" in core
   assert "reconcile the owner's original request against the checklist" in planning
   assert "low disk can sweep idle scratch sooner" in core
   assert "still there after the answer" not in core
