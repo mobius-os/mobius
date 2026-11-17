@@ -1043,35 +1043,96 @@ def test_recency_write_failure_rejects_uncommitted_fresh_send(
   assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == []
 
 
-def test_fresh_owner_send_credits_resolved_retired_model_without_changing_selection(
-  client, auth, chat, db, monkeypatch,
+@pytest.mark.parametrize("selected,offline,accepted", [
+  ("new-vision", False, True),
+  ("removed-vision", False, False),
+  ("new-vision", True, False),
+])
+def test_cold_mobius_catalogue_validates_before_owner_send_admission(
+  client, auth, chat, db, monkeypatch, selected, offline, accepted,
 ):
-  """The admitted run uses the catalogue successor, not the saved retired ID."""
+  """Cold discovery admits only listed models, without a speculative write."""
   from app import providers
   from app.mobius_catalogue import parse_catalogue
   from app.routes import chats_stream
   from tests.test_mobius_catalogue import contract
 
   provider = providers.MobiusProvider()
-  provider.declaration = parse_catalogue(contract())
   monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
   monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
+  providers.invalidate_model_cache()
+  catalogue = contract()
+  catalogue["replacements"] = {}
+  discovered = []
+
+  async def discover(_data_dir):
+    discovered.append(True)
+    if offline:
+      raise OSError("catalogue unavailable")
+    provider.declaration = parse_catalogue(catalogue)
+    return provider.declaration["models"]
+
+  monkeypatch.setattr(provider, "fetch_models", discover)
 
   async def no_paid_turn(*_args, **_kwargs):
     return None
 
   monkeypatch.setattr(chats_stream, "run_chat", no_paid_turn)
   chat.provider = "mobius"
-  chat.agent_settings_json = {"model": "retired-vision", "effort": "low"}
+  chat.agent_settings_json = {"model": selected, "effort": "low"}
   db.commit()
 
   sent = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
-    "content": "use my selected model", "cid": "retired-owner-send",
+    "content": "use my selected model", "cid": "cold-mobius-send",
   })
-  assert sent.status_code == 202, sent.text
+  assert discovered
+  assert sent.status_code == (202 if accepted else 409), sent.text
   db.refresh(chat)
-  assert chat.agent_settings_json == {"model": "retired-vision", "effort": "low"}
-  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"][0] == "new-vision"
+  assert chat.agent_settings_json == {"model": selected, "effort": "low"}
+  history = transcript_rows.history(chat)
+  assert any(row.get("cid") == "cold-mobius-send" for row in history) is accepted
+  assert chat.pending_messages in (None, [])
+  assert db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat.id).count() == int(accepted)
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == (
+    [selected] if accepted else []
+  )
+
+
+def test_cold_removed_mobius_model_cannot_enter_owner_queue(
+  client, auth, chat, db, monkeypatch,
+):
+  from app import providers
+  from app.mobius_catalogue import parse_catalogue
+  from app.routes import chats_stream
+  from tests.test_mobius_catalogue import contract
+
+  provider = providers.MobiusProvider()
+  monkeypatch.setitem(providers.PROVIDERS, "mobius", provider)
+  monkeypatch.setattr(provider, "check_auth", lambda _data_dir: None)
+  providers.invalidate_model_cache()
+  catalogue = contract()
+  catalogue["replacements"] = {}
+
+  async def discover(_data_dir):
+    provider.declaration = parse_catalogue(catalogue)
+    return provider.declaration["models"]
+
+  monkeypatch.setattr(provider, "fetch_models", discover)
+  monkeypatch.setattr(chats_stream, "_input_must_queue", lambda *_a, **_k: True)
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "removed-vision"}
+  db.commit()
+
+  sent = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
+    "content": "queue this", "cid": "removed-model-queue",
+  })
+  assert sent.status_code == 409, sent.text
+  db.refresh(chat)
+  assert chat.agent_settings_json == {"model": "removed-vision"}
+  assert not transcript_rows.history(chat)
+  assert not chat.pending_messages
+  assert db.query(models.ChatRun).filter(models.ChatRun.chat_id == chat.id).count() == 0
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == []
 
 
 def test_human_send_in_app_created_chat_counts_model_use(

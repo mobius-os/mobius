@@ -53,6 +53,8 @@ from app.chat_steering import (
 )
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
+  PROVIDERS,
+  _fetch_model_entries,
   _load_agent_settings,
   effective_agent_settings,
   owner_default_provider,
@@ -96,7 +98,7 @@ async def start_queued_owner_continuation(
     return None
   chat = db.get(models.Chat, chat_id)
   db.refresh(chat)
-  if _selected_model_for_chat(chat) is None:
+  if not await _model_available_for_queued_start(chat):
     raise _model_selection_required_conflict()
   if not mark_starting(chat_id):
     raise HTTPException(409, detail="The chat is starting another turn; please try again.")
@@ -279,6 +281,41 @@ def _selected_model_for_chat(
   return model.strip() if isinstance(model, str) and model.strip() else None
 
 
+async def _selected_settings_for_send(
+  chat: models.Chat, provider: str,
+) -> dict | None:
+  """Validate the current catalogue before accepting an owner send.
+
+  Möbius starts with an empty catalogue. Its ordinary settings resolver cannot
+  reject a saved removed ID until discovery has populated the service list.
+  Keep that async read outside the single writer and ahead of transcript,
+  pending, and model-recency admission.
+  """
+  if provider == "mobius":
+    await _fetch_model_entries(get_settings().data_dir, provider)
+  selected = effective_agent_settings(
+    get_settings().data_dir,
+    coerce_agent_settings(chat.agent_settings_json) or None,
+    provider=provider,
+  )
+  model = selected.get("model")
+  if not isinstance(model, str) or not model.strip():
+    return None
+  if provider == "mobius" and model not in {
+    row["id"] for row in PROVIDERS[provider].declaration["models"]
+  }:
+    return None
+  return selected
+
+
+async def _model_available_for_queued_start(chat: models.Chat) -> bool:
+  # Native-provider checks keep their existing side-effect-free contract;
+  # only a cold service catalogue needs discovery before queue promotion.
+  if chat.provider != "mobius":
+    return _selected_model_for_chat(chat) is not None
+  return (await _selected_settings_for_send(chat, "mobius")) is not None
+
+
 def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
   provider = chat.provider or "claude"
@@ -292,6 +329,10 @@ def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   explicit_provider = provider_of_model(chat_settings.get("model"))
   if explicit_provider is not None:
     return explicit_provider
+  if chat_settings.get("model"):
+    # A cold catalogue cannot classify a saved service model yet. Its chat's
+    # explicit provider still outranks an unrelated mutable owner default.
+    return provider
   # StartTurn alone re-reads the owner's latest provider for a pristine owner
   # chat. Queued, draining, app-owned, and already-started chats keep their
   # durable provider, so the model check must evaluate against that same value.
@@ -1422,7 +1463,7 @@ async def _send_message_impl(
           detail="The question is no longer accepting answers.",
         )
 
-      if _selected_model_for_chat(chat) is None:
+      if not await _model_available_for_queued_start(chat):
         raise _model_selection_required_conflict()
 
       started_message = None
@@ -1546,13 +1587,8 @@ async def _send_message_locked(
       detail="Only the owner can resume a paused chat.",
     )
   next_execution_provider = _next_execution_provider(db, chat)
-  selected_settings = effective_agent_settings(
-    get_settings().data_dir,
-    coerce_agent_settings(chat.agent_settings_json) or None,
-    provider=next_execution_provider,
-  )
-  selected_model = selected_settings.get("model")
-  if not isinstance(selected_model, str) or not selected_model.strip():
+  selected_settings = await _selected_settings_for_send(chat, next_execution_provider)
+  if selected_settings is None:
     raise _model_selection_required_conflict()
   if body.continuation == "queue":
     return await _send_queue(chat_id, db, principal, restore_archived)
