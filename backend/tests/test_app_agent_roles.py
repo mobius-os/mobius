@@ -507,6 +507,7 @@ def test_the_room_refuses_everything_outside_its_walls_and_door(tmp_path):
     "      attempt(lambda: socket.create_connection(('127.0.0.1', int(p)), 2).close()),\n"
     "      attempt(lambda: socket.create_connection(('127.0.0.1', int(q)), 2).close()),\n"
     "      attempt(lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM)),\n"
+    "      attempt(lambda: os.listdir('/opt')),\n"
     "      os.environ.get('LEAKED', 'absent'))\n" + _FAST_OPEN_PROBE
   )
   result = subprocess.run(
@@ -547,6 +548,7 @@ def test_the_room_refuses_everything_outside_its_walls_and_door(tmp_path):
     "PermissionError",
     "PermissionError",
     "ok",
+    "PermissionError",
     "PermissionError",
     "PermissionError",
     "absent",
