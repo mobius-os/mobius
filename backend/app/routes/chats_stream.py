@@ -306,16 +306,17 @@ def _selected_model_for_chat(
 def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
   provider = chat.provider or "claude"
-  # A model selected on this exact pristine chat is more specific than the
-  # owner's latest global pick. This occurs when an app/test/API client creates
-  # an empty chat and then chooses its model before the first send. Re-routing
-  # it to an unrelated global provider makes the explicit model invalid and
-  # rejects the turn. Ordinary newly-created owner chats carry no per-chat
-  # model, so they still follow the latest owner selection below.
+  # A model saved on the chat is more specific than the owner's latest global
+  # pick. New owner chats snapshot their model at creation, and an app, test or
+  # API client may choose one before the first send. Re-routing it to an
+  # unrelated global provider makes the model invalid and rejects the turn. A
+  # saved model this process does not know yet (a discovered id after a
+  # restart) stays with the provider saved beside it. Only a chat with no model
+  # of its own follows the latest owner selection below.
   chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
-  explicit_provider = provider_of_model(chat_settings.get("model"))
-  if explicit_provider is not None:
-    return explicit_provider
+  model = chat_settings.get("model")
+  if isinstance(model, str) and model.strip():
+    return provider_of_model(model, preferred=provider) or provider
   # StartTurn alone re-reads the owner's latest provider for a pristine owner
   # chat. Queued, draining, app-owned, and already-started chats keep their
   # durable provider, so the model check must evaluate against that same value.

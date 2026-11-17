@@ -108,6 +108,7 @@ import useFootReveal from './hooks/useFootReveal.js'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
+import { HelperPreviewProvider } from './helperPreviewSlot.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
 import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
@@ -6117,7 +6118,7 @@ export default function ChatView({
     ? renderAssistantReply(appendedReply) : null
 
 
-  return (
+  const pane = (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
@@ -6696,4 +6697,6 @@ export default function ChatView({
       </div>
     </div>
   )
+  // One helper preview per pane: opening another helper replaces the open one.
+  return <HelperPreviewProvider>{pane}</HelperPreviewProvider>
 }
