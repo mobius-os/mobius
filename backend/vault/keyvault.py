@@ -19,9 +19,10 @@ platform-issued token and passes the attested identity in ``X-Vault-Caller``
     GET    /keys/<key>/value                   reveal (never for app callers)
     POST   /requests                           an app or an agent asks to use a key
     POST   /requests/<id>/approve | /deny      the owner answers
-    DELETE /chats/<chat-id>/requests           a deleted chat's waiting asks go
-                                               (?deletion=<stamp>: unless undone)
-    POST   /chats/<chat-id>/undeleted          that deletion was undone
+    DELETE /requests/<id>                      the owner (or the platform) removes one
+    DELETE /chats/<chat-id>/requests?before=<time>
+                                               a deleted chat's waiting asks go, those
+                                               it made up to its deletion
 
 For a use, the vault checks the caller and the destination against the key's
 grants (default deny), injects the key into its one configured slot (a header
@@ -61,6 +62,7 @@ import time
 import urllib.parse
 import zlib
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -775,6 +777,18 @@ def _now() -> str:
   return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def _now_precise() -> str:
+  """Now to the microsecond, for when a request was asked: a deletion stamp
+  is compared against it (``Vault.forget_chat``)."""
+  return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _instant(text: str) -> datetime:
+  """A stored or given ISO time as an aware UTC datetime (naive means UTC)."""
+  moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
+  return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
   fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
   try:
@@ -826,11 +840,6 @@ class Vault:
     self._records = records
     self._refuse_a_master_key_that_opens_nothing()
     self._requests = self._load_requests()
-    # Chat deletions the platform has since undone, as (chat, deletion stamp)
-    # with when they were undone: a withdrawal for one that reaches the vault
-    # late is ignored (``forget_chat``). Seconds matter here, so an hour is
-    # plenty and nothing needs to survive a restart.
-    self._undone_deletions: dict[tuple[str, str], float] = {}
     self._stats = self._load_stats()
     if not self.stats_path.exists():
       self._write_stats(self._stats)
@@ -1318,38 +1327,54 @@ class Vault:
         status = "paused" if grant.get("paused") else "granted"
         missing = sites_outside(grant["sites"], sites)
         if not missing:
-          # The asker may already do this. Its stored request goes only once
-          # the grant covers that request's own sites: one for other sites
-          # still waits for the owner, and a refusal stands until the owner
-          # lets it ask again.
-          if existing is not None and not sites_outside(grant["sites"], existing["sites"]):
-            self._requests.pop(request_id, None)
+          # The asker may already do this. A stored request of its own is
+          # left alone: ``put_key`` settled it if the grant covers it, and
+          # otherwise it still waits for the owner or stands refused.
           return {"status": status, "key": name}
         answer = {"status": status, "key": name, "id": request_id, "sites_not_allowed": missing}
         # A request already stored answers for any later ask until the owner
         # answers it, and the answer names what it stores: whatever shows the
         # request (a card, the dialog over an app) shows what approving grants.
         if existing is not None:
+          self._asked_again(existing, asker)
           return {**answer, "sites_request": existing["status"], **_asked(existing)}
         # A key nothing sends yet may still take the slot the asker needs.
         sites, inject = missing, inject if sent_nowhere(record["grants"]) else None
       elif existing is not None:
+        self._asked_again(existing, asker)
         return {"status": existing["status"], "key": name, "id": request_id, **_asked(existing)}
-      if sum(1 for item in self._requests.values() if _asked_by(item, asker)) >= MAX_REQUESTS_PER_APP:
+      # Only waiting requests count: a refusal is the owner's answer, kept
+      # until they let the asker ask again, and blocks nothing else.
+      waiting = [item for item in self._requests.values() if item["status"] == "pending"]
+      if sum(1 for item in waiting if _asked_by(item, asker)) >= MAX_REQUESTS_PER_APP:
         who = "This app has" if asker["requester"] == "app" else "Your agents have"
-        raise VaultError(429, f"{who} too many open key requests; ask the owner to review them.")
-      if len(self._requests) >= MAX_REQUESTS:
-        raise VaultError(429, "Too many open key requests; ask the owner to review them.")
+        raise VaultError(
+          429, f"{who} {MAX_REQUESTS_PER_APP} key requests waiting for an answer; "
+          "ask the owner to answer or remove them in Settings › Keys.",
+        )
+      if len(waiting) >= MAX_REQUESTS:
+        raise VaultError(429, "Too many key requests are waiting; ask the owner to answer or remove "
+                         "them in Settings › Keys.")
+      now = _now_precise()
       self._requests[request_id] = {
         "id": request_id, **asker,
         "key": name, "reason": reason, "sites": sites, "inject": inject,
-        "status": "pending", "created_at": _now(), "ticket": secrets.token_hex(8),
+        "status": "pending", "created_at": now, "asked_at": now, "ticket": secrets.token_hex(8),
       }
       self._audit_change(name, caller, "requested")
     asked = {"sites": sites, "reason": reason, "created": True}
     if grant is not None:
       return {**answer, "sites_request": "pending", **asked}
     return {"status": "pending", "key": name, "id": request_id, **asked}
+
+  def _asked_again(self, request: dict, asker: dict) -> None:
+    """The chat that made waiting agent request ``request`` asked for it again:
+    note when (``asked_at``), so a withdrawal for an earlier deletion of that
+    chat (``forget_chat``) leaves it for the card the chat shows now. The
+    caller holds a change open."""
+    if (request["requester"] == "agent" and request["status"] == "pending"
+        and asker.get("chat") and request.get("chat") == asker["chat"]):
+      request["asked_at"] = _now_precise()
 
   def list_requests(self) -> list[dict]:
     """Open requests; ``granted`` marks an asker wanting more sites on a key it may use.
@@ -1446,7 +1471,13 @@ class Vault:
 
   def deny_request(self, request_id: str, body: dict | None = None, *, actor: str = "owner") -> dict:
     """Refuse an ask. A ``ticket`` in ``body`` must be the request's, as when
-    approving, so a card left open across an id reuse can't deny the new ask."""
+    approving, so a card left open across an id reuse can't deny the new ask.
+
+    A refusal is the owner's answer about the key, so only the owner refuses
+    (``actor`` ``owner``), as only the owner approves.
+    """
+    if actor != "owner":
+      raise VaultError(403, "Only the owner can answer a key request, from Settings › Keys.")
     ticket = (body or {}).get("ticket")
     with self._change():
       request = self._requests.get(request_id)
@@ -1467,52 +1498,73 @@ class Vault:
     """
     with self._change():
       deleted = self.erase_owned(app_id)
-      keys = [n for n, r in self._records.items() if app_grant(r["grants"], app_id)]
-      for name in keys:
-        grants = self._records[name]["grants"]
-        grants["apps"] = without_app(grants, app_id)
-        self._drop_orphaned_origin(self._records[name])
-        self._touch(self._records[name])
-      requests = [rid for rid, item in self._requests.items() if item["app"] == app_id]
+      withdrawn = self.withdraw_apps([app_id], actor=actor, why="app purged")
+    return {"keys": withdrawn["keys"], "deleted": deleted, "requests": withdrawn["requests"]}
+
+  def withdraw_apps(self, apps, *, actor: str = "platform", why: str) -> dict:
+    """Drop the app ids ``apps`` from every grant and request, in one change.
+
+    Nothing is erased: a key one of them saved for itself stays, with its
+    value, as the owner's (its origin goes with its app's grant), so the owner
+    can let an app use it again. Whatever fails part way can therefore only
+    leave grants withdrawn, which the owner can allow again. A restore that
+    can't prove an id still names the same app uses this; ``why`` says so in
+    the audit log.
+    """
+    ids = set()
+    for app_id in apps:
+      if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
+        raise VaultError(400, "Invalid app id.")
+      ids.add(app_id)
+    with self._change():
+      keys = []
+      for name, record in self._records.items():
+        gone = sorted(ids.intersection(app_ids(record["grants"])))
+        if not gone:
+          continue
+        record["grants"]["apps"] = [g for g in record["grants"]["apps"] if g["id"] not in ids]
+        self._drop_orphaned_origin(record)
+        self._touch(record)
+        keys.append(name)
+        for app_id in gone:
+          self._audit_change(name, actor, f"revoked app:{app_id} ({why})")
+      requests = [rid for rid, item in self._requests.items() if item["app"] in ids]
       for rid in requests:
         del self._requests[rid]
-      for name in keys:
-        self._audit_change(name, actor, f"revoked app:{app_id} (app purged)")
-    return {"keys": keys, "deleted": deleted, "requests": len(requests)}
+    return {"keys": keys, "requests": len(requests)}
 
-  def forget_chat(self, chat: str, *, deletion: str | None = None, actor: str = "platform") -> int:
-    """Withdraw the waiting requests the agent of deleted chat ``chat`` made.
+  def forget_chat(self, chat: str, *, before: str, actor: str = "platform") -> int:
+    """Withdraw the waiting requests the agent of deleted chat ``chat`` made
+    up to its deletion at ``before``.
 
-    Such a request is answered only on that chat's card, and it answers for
-    every later ask for its key, so left waiting it could never be answered
-    and no other chat could ask. A refusal stays: it is the owner's answer
-    about the key, not the chat's. ``deletion`` names the deletion this
-    withdrawal is for; one the platform has since undone
-    (``undo_chat_deletion``) withdraws nothing, so arriving late it never
-    removes what the recovered chat asked for.
+    Deleting the chat settled its card for good, so nothing could answer them
+    there. A refusal stays: it is the owner's answer about the key, not the
+    chat's. A request the chat asked for after ``before`` (``asked_at``: it
+    was recovered and asked again) stays for the card it shows now, so a
+    withdrawal that reaches the vault late never removes it.
     """
+    if actor != "owner" and actor.split(":", 1)[0] != "platform":
+      raise VaultError(403, "Only the platform withdraws a deleted chat's key requests.")
+    cutoff = _instant(before)
     with self._change():
-      if deletion is not None and (chat, deletion) in self._undone_deletions:
-        return 0
       waiting = [rid for rid, item in self._requests.items() if item["requester"] == "agent"
-                 and item.get("chat") == chat and item["status"] == "pending"]
+                 and item.get("chat") == chat and item["status"] == "pending"
+                 and _instant(item.get("asked_at") or item["created_at"]) <= cutoff]
       for rid in waiting:
         request = self._requests.pop(rid)
         self._audit_change(request["key"], actor, f"forgot request {_asker_label(request)} (chat deleted)")
     return len(waiting)
 
-  def undo_chat_deletion(self, chat: str, deletion: str) -> None:
-    """Record that deletion ``deletion`` of ``chat`` was undone (see ``forget_chat``)."""
-    with self._lock:
-      now = time.monotonic()
-      self._undone_deletions = {
-        undone: at for undone, at in self._undone_deletions.items() if now - at < 3600
-      }
-      self._undone_deletions[(chat, deletion)] = now
-
   def forget_request(self, request_id: str, *, ticket: str | None = None, actor: str = "owner") -> bool:
     """Withdraw one request. With ``ticket``, only while it is still that
-    exact ask: a later ask under the same id has its own ticket and stays."""
+    exact ask: a later ask under the same id has its own ticket and stays.
+
+    Removing a request, a refusal included, is the owner's choice or the
+    platform's tidying, never an agent's: an agent could otherwise close
+    another chat's request or undo the owner's refusal of an app.
+    """
+    if actor != "owner" and actor.split(":", 1)[0] != "platform":
+      raise VaultError(403, "Only the owner can remove a key request, from Settings › Keys.")
     with self._change():
       request = self._requests.get(request_id)
       if request is None or (ticket is not None and request.get("ticket") != ticket):
@@ -1989,16 +2041,11 @@ class VaultHandler(BaseHTTPRequestHandler):
     elif method == "DELETE" and len(parts) == 3 and parts[0] == "apps" and parts[1].isdigit() and parts[2] == "owned":
       self._send_json(200, {"deleted": vault.erase_owned(int(parts[1]))})
     elif method == "DELETE" and len(parts) == 3 and parts[0] == "chats" and parts[2] == "requests":
+      if not query.get("before"):
+        raise VaultError(400, "Name when the chat was deleted (before=).")
       self._send_json(200, {"forgotten": vault.forget_chat(
-        parts[1], deletion=query.get("deletion") or None, actor=self._manager(),
+        parts[1], before=query["before"], actor=self._manager(),
       )})
-    elif method == "POST" and len(parts) == 3 and parts[0] == "chats" and parts[2] == "undeleted":
-      self._manager()
-      deletion = self._json_body().get("deletion")
-      if not isinstance(deletion, str) or not deletion:
-        raise VaultError(400, "Name the deletion that was undone.")
-      vault.undo_chat_deletion(parts[1], deletion)
-      self._send_json(200, {"undone": deletion})
     elif method == "DELETE" and len(parts) == 2 and parts[0] == "requests":
       if not vault.forget_request(parts[1], ticket=query.get("ticket") or None, actor=self._manager()):
         raise VaultError(404, "That request is gone.")

@@ -21,10 +21,11 @@ Status: draft for review.
   agents, and sent nowhere. Where it may go is decided the first time
   something needs it, on a request card: an app's, or the owner's agent's.
 - **Agents ask for sites like apps do.** A top-level agent that needs a key
-  on a site the key does not list asks with `POST /api/keys/requests` (the
-  refusal of its borrow says so); the owner answers on a card, and approving
-  adds the sites to the key's own list and lets agents use it. An agent
-  cannot add sites itself.
+  on a site the key does not list asks with its `request_key` tool (the
+  refusal of its borrow says so), which saves a card in its chat; the owner
+  answers there or in Settings › Keys, and approving adds the sites to the
+  key's own list and lets agents use it. An agent cannot add sites itself,
+  nor refuse or remove a request.
 - **Switching an app off pauses it.** A paused grant keeps its sites but the
   app cannot borrow the key (nor its model provider use it) until the owner
   switches it back on, which needs no new request. Pausing holds for keys
@@ -58,8 +59,9 @@ Status: draft for review.
 ## The handshake
 
 1. **Ask.** An app sends `POST /api/keys/requests` with its own app token
-   (a top-level agent sends the same request with its own token, for a key
-   on a site the key does not list yet; see Contract):
+   (a top-level agent asks through its `request_key` tool instead, for a
+   key on a site the key does not list yet, so its ask is always a card;
+   see Contract):
    the key name, a reason, the sites it needs and how the key is sent. The
    sites are exact hosts: a wildcard (`*.workers.dev`) is refused, because on
    a shared domain the app's author can own a subdomain, and that host reads
@@ -71,13 +73,15 @@ Status: draft for review.
    switched off on that key) `paused`; asking again is how the app
    checks. No request notifies the owner: a new one only nudges an open
    shell (a content-free `key_requests_changed` system event) to re-read
-   the requests, and the owner is asked in the moment. One app may hold at
-   most ten open requests. A granted app that asks for sites its grant lacks
+   the requests, and the owner is asked in the moment. One app, and the
+   owner's agents together, may each have at most ten requests waiting for
+   an answer; a refusal doesn't count. A granted app that asks for sites its grant lacks
    keeps using what it has, is told which are missing (`sites_not_allowed`),
    and its ask for them waits for the owner like any request
    (`sites_request`). Asking again only for what it may already do answers
-   `granted` and leaves that request alone: it goes once the grant covers
-   its own sites, so a refusal stands until the owner lets it ask again. A waiting request answers for every later ask for the
+   `granted` and leaves any request of its own alone: the change that widens
+   a grant settles every request it then covers, and a refusal stands until
+   the owner lets the asker ask again. A waiting request answers for every later ask for the
    same key until the owner answers it, and every answer about it carries
    the `sites` and `reason` it stores, so whatever shows a request (an
    agent's card, the dialog over an app) shows exactly what approving it
@@ -94,22 +98,16 @@ Status: draft for review.
    write it), and an app's in a dialog over the app's window while the
    owner has it open, straight away or when they next open it (the app list
    marks the app as needing them until then). Not now is the dialog's only
-   way out. Settings › Keys answers only an agent's request that names no
-   chat. Deleting a chat withdraws its agent's waiting requests: their card
-   is the only place they could be answered, and a waiting request answers
-   for every later ask for its key. If the vault can't be reached then,
-   the next agent ask for that key withdraws the leftover request and gets
-   its own card. The same holds for a request whose card was never saved
-   (the vault records the ask first, and the turn can stop before its card
-   is saved): a failed save withdraws it, and an ask that finds another
-   live chat's request with no open card there withdraws that exact request
-   (by its ticket) and asks again. Asks for one key run one at a time
-   through to their card, so a request is never taken for cardless while
-   its card is still being saved. Recovering the chat (or its project) first waits for a
-   withdrawal still on its way, then tells the vault that deletion was undone:
-   each withdrawal names its deletion, and the vault ignores one for an undone
-   deletion that reaches it late, so it never removes a request the recovered
-   chat makes. The card asks one thing at a time: whether to allow, then, for a
+   way out. Settings › Keys lists every waiting request an agent made, with
+   the chat that asked, so none is ever stranded: its card settled when the
+   turn was stopped, its chat was deleted while the vault was unreachable,
+   or its card was never saved. A waiting request answers for every later
+   ask for its key, and an agent whose ask joins another chat's is told
+   where the owner answers it. Deleting a chat withdraws the requests its
+   agent made up to the deletion (the vault keeps when the chat last asked
+   for each, `asked_at`), so a withdrawal that reaches the vault late never
+   removes what the chat asks for once recovered, and recovery calls nothing.
+   A card that can't be saved withdraws the request its ask just made. The card asks one thing at a time: whether to allow, then, for a
    key the owner has no value for yet, the value. A chat only answers its own agent's request; an
    app's shown in a chat is read-only. Every card's answers wake only after
    the card has been still and untouched for about a second (since it
@@ -131,9 +129,11 @@ Status: draft for review.
    (the vault lists the key's `key_origin`): allowing would send this app's
    requests with that app's value, which that app can still change. Approve
    and deny both carry the request's ticket, so a card left open never answers
-   a newer request under the same id. The vault also refuses an approval not
-   made as `owner`, which keeps the server's agent callers out, but not a
-   local process on its socket (see *Contract*).
+   a newer request under the same id. Only the owner answers or removes a
+   request: the server's routes require the owner's own input, and the vault
+   refuses an approval or refusal not made as `owner` and a removal made by
+   neither the owner nor the platform, which keeps the server's agent callers
+   out, but not a local process on its socket (see *Contract*).
 3. **Borrow.** The app sends an ordinary request to
    `/api/keys/use/<key>/<host>/<path>?<query>` with its app token. The server
    attests the caller as `app:<id>`, drops Möbius credentials and routing
@@ -304,19 +304,24 @@ owner's own input. They use Settings › Keys or `PUT /api/keys/<name>`. These r
 keys the app itself created and still holds: a key the owner made, or merely
 lets the app borrow, can never be replaced through them.
 
-**Restore.** Backups carry the vault only in the encrypted secrets archive.
+**Restore.** Backups carry the vault in the secrets archive: encrypted by
+default, or readable by anyone holding a `--plaintext-secrets` backup, which
+then holds every key (`.vault/master.key` beside `.vault/keys.json`).
 A restore that brings no vault (a backup without secrets, or with secrets from
 before the vault) keeps the current vault, whose grants name this install's
 app ids. `restore-data.py` warns and keeps a grant only when the databases
 from before and after the restore both give its id to the same installation
-(slug and token nonce): every other app grant and request is withdrawn with
-the vault's own purge step, all of them when either database can't be read.
-It fails closed: it opens the vault, under its lock, before the swap, and
-refuses the restore with `/data` unchanged when it can't (a vault still
-running, say); if withdrawing fails after the swap, it undoes the restore.
-It runs as root from `/app/scripts`, so the image ships
-the vault program beside it (`/app/vault/keyvault.py`), never loading it from
-the editable checkout.
+(slug and token nonce): every other app grant and request is withdrawn, all
+of them when either database can't be read (`Vault.withdraw_apps`). Values
+are never erased: a key an app saved for itself stays, as the owner's, and
+the owner can let an app use it again. It withdraws before the swap, reading
+the restored database from staging, so a vault that can't be opened (a vault
+still running, or a store newer than the restore's vault program) or
+updated stops the restore with `/data` unchanged, and a swap that fails
+afterwards leaves only grants withdrawn. It runs as root from `/app/scripts`,
+so the image ships the vault program beside it (`/app/vault/keyvault.py`),
+never loading it from the editable checkout; `--vault-program` names another
+trusted copy deliberately.
 
 ## Future work: sandbox for app server code
 

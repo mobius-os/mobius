@@ -139,13 +139,14 @@ export function appsWaitingForKeys(data) {
 }
 
 /**
- * The pending requests Settings › Keys answers: only an agent's that names
- * no chat (one asked before requests kept their chat), since every other
- * ask is answered where it was made.
+ * The pending requests Settings › Keys answers: every one your agents made,
+ * so none is ever stranded, whether its chat still shows its card, its turn
+ * was stopped before the owner answered, or its chat was deleted. An app's is
+ * answered over its window, which shows it whenever the owner opens the app.
  */
 export function settingsKeyRequests(data) {
   return (data?.requests || []).filter(request => request.status === 'pending'
-    && request.requester === 'agent' && !request.chat_id)
+    && request.requester === 'agent')
 }
 
 /**

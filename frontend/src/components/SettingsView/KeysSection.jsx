@@ -131,8 +131,26 @@ export default function KeysSummary({ onOpen }) {
   )
 }
 
+/** Where an agent's request was made: its chat, which may since be deleted. */
+export function RequestChat({ request, onOpenChat }) {
+  if (!request.chat_id) return null
+  if (request.chat_title == null) {
+    return <p className="settings-keys-request__chat">Asked in a chat that has since been deleted.</p>
+  }
+  return (
+    <p className="settings-keys-request__chat">
+      Asked in “{request.chat_title}”.{' '}
+      {onOpenChat && (
+        <button type="button" className="settings-keys-request__open" onClick={() => onOpenChat(request.chat_id)}>
+          Open the chat
+        </button>
+      )}
+    </p>
+  )
+}
+
 /** The Keys page: requests waiting here, your keys, and the ones you said no to. */
-export function KeysPage({ onOpenKey, onAddKey }) {
+export function KeysPage({ onOpenKey, onAddKey, onOpenChat }) {
   const keysQuery = useKeys()
   const { names } = useAppNames()
   const queryClient = useQueryClient()
@@ -140,7 +158,7 @@ export function KeysPage({ onOpenKey, onAddKey }) {
   if (isSharedBrowserAuth()) return <div className="settings-keys-page"><p className="settings-group__desc">{GUEST_LINE}</p></div>
   const data = keysQuery.data
   const keys = data?.keys || []
-  // Asks are answered where they were made; only an agent's with no chat lands here.
+  // Every request your agents made waits here too, whatever became of its card.
   const pending = settingsKeyRequests(data)
   const denied = (data?.requests || []).filter(request => request.status === 'denied')
   const refresh = () => queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
@@ -156,15 +174,17 @@ export function KeysPage({ onOpenKey, onAddKey }) {
       )}
 
       {pending.length > 0 && (
-        <Group title="Waiting for you" desc="Your agent asked for these outside a chat.">
+        <Group title="Waiting for you" desc="Your agents asked for these. Answer here, or on the card in the chat that asked.">
           <div className="settings-keys-requests">
             {shownRequests(pending, showAll).map(request => (
-              <KeyRequest
-                key={requestFormKey(request)}
-                request={{ ...request, app_paused: requestAppPaused(keys, request) }}
-                names={names}
-                onAnswered={refresh}
-              />
+              <div key={requestFormKey(request)} className="settings-keys-request">
+                <KeyRequest
+                  request={{ ...request, app_paused: requestAppPaused(keys, request) }}
+                  names={names}
+                  onAnswered={refresh}
+                />
+                <RequestChat request={request} onOpenChat={onOpenChat} />
+              </div>
             ))}
           </div>
           {!showAll && pending.length > REQUESTS_SHOWN && (

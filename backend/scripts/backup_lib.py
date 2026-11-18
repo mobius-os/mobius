@@ -325,15 +325,6 @@ def swap_entries_transactional(staging, data_dir, rollback_dir):
     raise
 
 
-def undo_swap(data_dir, rollback_dir, moved, cause):
-  """Puts data_dir back as it was before a successful
-  swap_entries_transactional that returned ``moved``, for a step that must
-  commit together with the swap and failed (``cause``). Raises RollbackError
-  as the swap's own rollback does when an original can't be put back."""
-  stashed = set(os.listdir(rollback_dir))
-  _put_originals_back(data_dir, rollback_dir, [n for n in moved if n not in stashed], cause)
-
-
 def _put_originals_back(data_dir, rollback_dir, added, cause):
   # Undo entries we added where nothing existed before (removing an
   # added entry never loses an original).

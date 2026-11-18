@@ -126,10 +126,10 @@ test('the app list marks every app with a pending request, and no agent or answe
   assert.deepEqual([...appsWaitingForKeys(undefined)], [])
 })
 
-test("Settings › Keys answers only an agent's request that names no chat; every other ask is answered where it was made", () => {
+test("Settings › Keys answers every waiting agent request, whatever became of its chat's card", () => {
   const chatless = { ...agentAsk, id: 'agent-old', chat_id: null }
   const data = { requests: [appAsk(7, 'maps'), { ...agentAsk, chat_id: 'chat-1' }, chatless, { ...chatless, id: 'agent-no', status: 'denied' }] }
-  assert.deepEqual(settingsKeyRequests(data).map(r => r.id), ['agent-old'])
+  assert.deepEqual(settingsKeyRequests(data).map(r => r.id), [agentAsk.id, 'agent-old'])
   assert.deepEqual(settingsKeyRequests(undefined), [])
 })
 

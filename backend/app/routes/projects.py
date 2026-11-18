@@ -2195,13 +2195,12 @@ async def delete_project(
       "chatIds": chat_ids,
     })
     publish_recovery_notification(recovery_notification_id)
-    # Their agents' waiting key requests could only be answered on their cards.
-    # Started under the lifecycle gate, so a recovery waiting on it settles
-    # them first; awaited together after it, so a vault that hangs delays this
-    # response by one vault timeout, never one per chat, and never the gate.
-    from app import key_vault
-    withdrawals = key_vault.start_withdrawing_chat_requests(chat_ids, key_vault.deletion_stamp(deleted_at))
-  await withdrawals
+  # Their agents' waiting key requests could only be answered on their cards.
+  # Withdrawn together after the lifecycle gate, so a vault that hangs delays
+  # this response by one vault timeout, never one per chat, and never holds
+  # the gate; only requests made up to the deletion go (``forget_chat``).
+  from app import key_vault
+  await key_vault.forget_chats(chat_ids, deleted_at)
   return Response(status_code=204, headers={
     "X-Recovery-Notification-Id": recovery_notification_id,
   })
@@ -2215,16 +2214,6 @@ async def recover_project(
   db: Session = Depends(get_db),
 ):
   async with serialize_project_lifecycle(project_id):
-    # A deletion's key-request withdrawal still on its way would remove the
-    # requests the recovered chats make next.
-    from app import key_vault
-    deletion = db.query(models.Project.deleted_at).filter(models.Project.id == project_id).scalar()
-    await key_vault.settle_chat_withdrawals([
-      chat_id for (chat_id,) in db.query(models.Chat.id).filter(
-        models.Chat.project_id == project_id, models.Chat.deleted_at == deletion,
-      )
-    ] if deletion is not None else [], key_vault.deletion_stamp(deletion))
-    db.rollback()
     completed_at = None
     already_completed = False
     with PROJECT_LIFECYCLE_LOCK:

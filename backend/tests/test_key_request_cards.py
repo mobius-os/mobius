@@ -27,7 +27,7 @@ def start_agent_run(db):
   sinks = []
 
   def start(chat):
-    run_id = f"key-{chat.id}"
+    run_id = f"key-{chat.id}-{len(sinks)}"
     get_writer().submit(StartTurn(
       chat_id=chat.id, run_token=run_id,
       user_msg={"role": "user", "content": "Try my key", "ts": 1},
@@ -168,7 +168,8 @@ def test_another_chats_waiting_request_never_shows_as_this_agents_card(
 
 
 def test_the_agent_hears_which_chat_holds_the_waiting_card(client, chat, other_chat, start_agent_run, vault):
-  """The note names where the owner answers: that chat's card, never Settings."""
+  """The note names where the owner answers: that chat's card, and Settings ›
+  Keys, which lists every waiting request."""
   client.post(f"/api/chats/{other_chat.id}/key-request", headers=start_agent_run(other_chat), json=ASK)
   with SessionLocal() as db:
     db.get(models.Chat, other_chat.id).title = "Weather"
@@ -176,7 +177,7 @@ def test_the_agent_hears_which_chat_holds_the_waiting_card(client, chat, other_c
   receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
   assert receipt["state"] == "answered_without_card"
   assert receipt["waiting_chat_id"] == other_chat.id
-  assert 'the chat "Weather"' in receipt["note"] and "Settings" not in receipt["note"]
+  assert 'the chat "Weather"' in receipt["note"] and "Settings › Keys" in receipt["note"]
 
 
 def _delete_while_the_vault_was_unreachable(chat_id):
@@ -187,35 +188,41 @@ def _delete_while_the_vault_was_unreachable(chat_id):
     db.commit()
 
 
-def test_the_next_ask_withdraws_a_request_a_deleted_chat_left_behind(
-  client, chat, other_chat, start_agent_run, vault,
+def test_a_request_a_deleted_chat_left_behind_waits_in_settings(
+  client, chat, other_chat, auth, start_agent_run, vault,
 ):
-  """No card can answer a deleted chat's request, and nowhere else lists it,
-  so the next ask for its key withdraws it and gets its own card."""
+  """A deleted chat's request the vault never heard about is never stranded:
+  Settings › Keys lists it, saying its chat is gone, and the next ask for its
+  key is sent there."""
   collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
   vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
   _delete_while_the_vault_was_unreachable(other_chat.id)
   receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
-  assert receipt["state"] == "waiting_for_owner"
-  [card] = _card(chat.id)[1]
-  assert card["key_request"]["sites"] == [APOD]
-  assert [(r["chat_id"], r["sites"]) for r in vault.list_requests()] == [(chat.id, [APOD])]
+  assert receipt["state"] == "answered_without_card" and receipt["waiting_chat_id"] is None
+  assert "in Settings › Keys" in receipt["note"] and "the chat" not in receipt["note"]
+  assert _card(chat.id) == (None, [])
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert request["chat_id"] == other_chat.id and request["chat_title"] is None
 
 
-def test_a_leftover_request_that_could_not_be_withdrawn_says_to_ask_again(
-  client, chat, other_chat, agent_run, monkeypatch, vault,
+def test_a_request_whose_turn_was_stopped_waits_in_settings_and_its_chat_can_ask_again(
+  client, chat, other_chat, auth, start_agent_run, vault,
 ):
-  """Never a dead end: the note sends the agent back to ask, which retries."""
-  from app import key_vault
-
-  async def unreachable(chat_id):
-    return None
-  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [APOD]}, actor=f"agent:{other_chat.id}")
-  _delete_while_the_vault_was_unreachable(other_chat.id)
-  monkeypatch.setattr(key_vault, "forget_chat", unreachable)
-  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ASK).json()
-  assert receipt["state"] == "answered_without_card" and receipt["waiting_chat_id"] == other_chat.id
-  assert "Ask again in a moment" in receipt["note"] and "Settings" not in receipt["note"]
+  """Stopping the turn settles its card but not the request: Settings › Keys
+  still lists it, under its chat, and an ask from that chat shows it again."""
+  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK)
+  assert asked.json()["state"] == "waiting_for_owner"
+  assert client.post("/api/chat/stop", headers=auth, json={"chat_id": chat.id}).status_code == 200
+  assert _card(chat.id)[0] is None
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  with SessionLocal() as db:
+    title = db.get(models.Chat, chat.id).title or "Untitled chat"
+  assert (request["id"], request["status"], request["chat_title"]) == ("agent-nasa", "pending", title)
+  elsewhere = client.post(f"/api/chats/{other_chat.id}/key-request", headers=start_agent_run(other_chat), json=ASK).json()
+  assert elsewhere["state"] == "answered_without_card" and "in Settings › Keys" in elsewhere["note"]
+  again = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
+  assert again["state"] == "waiting_for_owner"
+  assert _card(chat.id)[1][-1]["key_request"]["id"] == "agent-nasa"
 
 
 def test_a_request_that_names_no_chat_is_answered_in_settings(client, chat, agent_run, vault):
@@ -330,81 +337,19 @@ def test_a_project_withdraws_its_chats_requests_together_after_its_lifecycle_loc
   assert set(released) == chat_ids
 
 
-def test_recovery_waits_for_a_deletion_withdrawal_still_on_its_way(monkeypatch):
-  """A withdrawal that landed after recovery would remove the requests the
-  recovered chat makes next, including a new ask that joins its old request,
-  so its card could never Allow. Only that chat's recovery waits."""
-  import asyncio
-
-  from app import key_vault
-
-  async def scenario():
-    release = asyncio.Event()
-    order = []
-
-    async def slow_forget(chat_id, deletion=None):
-      await release.wait()
-      order.append(f"withdrew {chat_id}")
-    monkeypatch.setattr(key_vault, "forget_chat", slow_forget)
-    deletion = key_vault.start_withdrawing_chat_requests(["deleted"], None)
-
-    async def recover():
-      await key_vault.settle_chat_withdrawals(["deleted"], None)
-      order.append("recovered")
-    recovery = asyncio.create_task(recover())
-    await asyncio.wait_for(key_vault.settle_chat_withdrawals(["another"], None), timeout=1)
-    await asyncio.sleep(0.05)
-    assert order == [] and not recovery.done()
-    release.set()
-    await asyncio.wait_for(asyncio.gather(deletion, recovery), timeout=2)
-    assert order == ["withdrew deleted", "recovered"]
-    assert key_vault._withdrawals == {}
-  asyncio.run(scenario())
-
-
-def _settled_while_deleted(monkeypatch):
-  """Record each recovery's settle call, and whether its chats were still
-  deleted when it was made."""
-  from app import key_vault
-  settled = []
-
-  async def settle(chat_ids, deletion):
-    assert deletion is not None
-    with SessionLocal() as db:
-      settled.append({str(chat_id): db.get(models.Chat, chat_id).deleted_at is not None for chat_id in chat_ids})
-  monkeypatch.setattr(key_vault, "settle_chat_withdrawals", settle)
-  return settled
-
-
-def test_recovering_a_chat_settles_its_withdrawal_before_restoring_it(client, chat, auth, monkeypatch, vault):
-  settled = _settled_while_deleted(monkeypatch)
-  assert client.delete(f"/api/chats/{chat.id}", headers=auth).status_code == 204
-  assert client.post(f"/api/chats/{chat.id}/recover", headers=auth).status_code == 200
-  assert settled == [{chat.id: True}]
-
-
-def test_recovering_a_project_settles_its_chats_withdrawals_before_restoring_them(client, auth, monkeypatch, vault):
-  project = client.post("/api/projects", headers=auth, json={"name": "Site", "template_id": "blank"}).json()
-  project_chat = client.post(f"/api/projects/{project['id']}/chats", headers=auth, json={
-    "title": "Site plan", "recovery_request_id": f"{project['id']}:Site plan",
-  }).json()
-  settled = _settled_while_deleted(monkeypatch)
-  assert client.delete(f"/api/projects/{project['id']}", headers=auth).status_code == 204
-  assert client.post(f"/api/projects/{project['id']}/recover", headers=auth).status_code == 200
-  assert settled == [{project_chat["id"]: True}]
-
-
 @pytest.mark.parametrize("deleted", ["chat", "project"])
-def test_a_withdrawal_reaching_the_vault_after_recovery_withdraws_nothing(client, auth, chat, monkeypatch, vault, deleted):
-  """Our wait for a withdrawal ends with the vault timeout, not when the vault
-  acts on it. Recovery tells the vault that deletion was undone, so a
-  withdrawal it processes later leaves the recovered chat's request alone."""
+def test_a_withdrawal_reaching_the_vault_after_recovery_leaves_what_the_chat_asks_again(
+  client, auth, chat, monkeypatch, start_agent_run, vault, deleted,
+):
+  """A withdrawal names the deletion's time, and recovery calls nothing. When
+  it reaches the vault after the chat is back and has asked again, joining
+  its own request, that request stays, and its new card can Allow."""
   from app import key_vault
   late = []
 
-  async def gave_up(chat_id, deletion=None):
-    late.append((chat_id, deletion))
-  monkeypatch.setattr(key_vault, "forget_chat", gave_up)
+  async def delayed(chat_id, deleted_at):
+    late.append((chat_id, deleted_at))
+  monkeypatch.setattr(key_vault, "forget_chat", delayed)
   if deleted == "project":
     project = client.post("/api/projects", headers=auth, json={"name": "Site", "template_id": "blank"}).json()
     asker = client.post(f"/api/projects/{project['id']}/chats", headers=auth, json={
@@ -415,15 +360,26 @@ def test_a_withdrawal_reaching_the_vault_after_recovery_withdraws_nothing(client
     asker, target = chat.id, f"/api/chats/{chat.id}"
   vault.request_for_agents({"key": "nasa", "reason": "x", "sites": [APOD]}, actor=f"agent:{asker}")
   assert client.delete(target, headers=auth).status_code == 204
-  assert client.post(f"{target}/recover", headers=auth).status_code == 200
-  [(chat_id, deletion)] = late
-  assert chat_id == asker and deletion
-  # The withdrawal lands now, after the chat is back.
-  assert vault.forget_chat(chat_id, deletion=deletion) == 0
-  assert [r["id"] for r in vault.list_requests()] == ["agent-nasa"]
-  # A later deletion of the same chat still withdraws its requests.
-  assert vault.forget_chat(chat_id, deletion="a later deletion") == 1
 
+  async def no_vault_on_recovery(*args, **kwargs):
+    raise AssertionError("recovery called the vault")
+  with monkeypatch.context() as quiet:
+    quiet.setattr(key_vault, "vault_call", no_vault_on_recovery)
+    assert client.post(f"{target}/recover", headers=auth).status_code == 200
+  with SessionLocal() as db:
+    recovered = db.get(models.Chat, asker)
+  qid = client.post(f"/api/chats/{asker}/key-request", headers=start_agent_run(recovered),
+                    json={**ASK, "sites": [APOD], "reason": "x"}).json()["question_id"]
+  [(chat_id, deleted_at)] = late
+  # The withdrawal lands now, after the chat is back and asked again.
+  assert vault.forget_chat(chat_id, before=deleted_at.isoformat()) == 0
+  assert [r["id"] for r in vault.list_requests()] == ["agent-nasa"]
+  assert client.post("/api/keys/requests/agent-nasa/approve", headers=auth, json={
+    "value": DUMMY, "sites": [APOD], "ticket": vault.list_requests()[0]["ticket"],
+  }).status_code == 200
+  with SessionLocal() as db:
+    owner_chat = db.get(models.Chat, asker)
+  assert _answer(client, owner_chat, auth, qid, "allow").status_code == 202
 
 
 def test_a_card_that_could_not_be_saved_leaves_no_request_behind(client, chat, other_chat, start_agent_run, vault):
@@ -453,16 +409,3 @@ def test_a_card_whose_save_failed_midway_leaves_no_request_behind(client, chat, 
   failed = client.post(f"/api/chats/{chat.id}/key-request", headers=headers, json=ASK)
   assert failed.status_code == 503, failed.text
   assert vault.list_requests() == []
-
-
-def test_a_live_chats_request_with_no_card_is_withdrawn_by_the_next_ask(client, chat, other_chat, start_agent_run, vault):
-  """A request whose card was never saved (left by an older server, or a
-  save the vault never heard about) is answerable nowhere; the next ask
-  withdraws exactly that request and gets its own card."""
-  collect = {"host": "collect.example.net", "methods": ["POST"], "paths": ["/*"]}
-  vault.request_for_agents({"key": "nasa", "reason": "Upload", "sites": [collect]}, actor=f"agent:{other_chat.id}")
-  receipt = client.post(f"/api/chats/{chat.id}/key-request", headers=start_agent_run(chat), json=ASK).json()
-  assert receipt["state"] == "waiting_for_owner"
-  [card] = _card(chat.id)[1]
-  assert card["key_request"]["sites"] == [APOD]
-  assert [(r["chat_id"], r["sites"]) for r in vault.list_requests()] == [(chat.id, [APOD])]

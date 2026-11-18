@@ -982,6 +982,7 @@ export default function SettingsView({
       <KeysPage
         onOpenKey={(name) => openDetailPage(`key:${name}`)}
         onAddKey={() => openDetailPage('key:')}
+        onOpenChat={onOpenChat}
       />
     )
   } else if (keyPage !== null) {
