@@ -221,42 +221,22 @@ export function shownRequests(pending, showAll) {
   return showAll ? pending : pending.slice(0, REQUESTS_SHOWN)
 }
 
+/** What every place a key request shows says while the vault is down. */
+export const VAULT_DOWN = 'The key vault isn’t running. It starts with Möbius; a restart usually brings it back.'
+
 /** Who asked: the owner's agent, or the installed app (told apart from a namesake). */
 export function requestAppName(request, names) {
   if (request.requester === 'agent') return 'Your agent'
   return names[request.app] || request.app_name || `App ${request.app}`
 }
 
-/** A switched-off app asking for more websites stays off after Allow; its card says so. */
+/**
+ * A switched-off app asking for more websites stays off after Allow; its card
+ * says so. Only an app's request can be: an agent's names no app.
+ */
 export function requestAppPaused(keys, request) {
   return Boolean(((keys || []).find(key => key.name === request.key)?.grants?.apps || [])
     .find(grant => grant.id === request.app)?.paused)
-}
-
-/** Who a request speaks for, mid-sentence: "your agent" or the app's name. */
-function askerInSentence(request, names) {
-  return request.requester === 'agent' ? 'your agent' : requestAppName(request, names)
-}
-
-/**
- * The owner's answer as one sentence: ``kind`` is ``'approve'`` or
- * ``'deny'``. ``message`` is what the chat card posts as the owner's own
- * message so the asking agent resumes ("Allowed: your agent may send maps to
- * tiles.example.com."); ``line`` is what the answered card then says. Both
- * name the key and its websites, never a value.
- */
-export function keyAnswerWords(request, kind, names) {
-  const who = askerInSentence(request, names)
-  const hosts = hostList((request.sites || []).map(site => site.host))
-  const key = request.key
-  if (kind === 'approve') {
-    return hosts
-      ? { message: `Allowed: ${who} may send ${key} to ${hosts}.`, line: `You allowed ${who} to send ${key} to ${hosts}.` }
-      : { message: `Allowed: ${who} may use ${key}.`, line: `You allowed ${who} to use ${key}.` }
-  }
-  return hosts
-    ? { message: `Not now: ${who} may not send ${key} to ${hosts}.`, line: `You said no to ${who} sending ${key} to ${hosts}.` }
-    : { message: `Not now: ${who} may not use ${key}.`, line: `You said no to ${who} using ${key}.` }
 }
 
 /**
@@ -282,35 +262,37 @@ const strong = text => ({ text, strong: true })
 /**
  * The card's words for one request. ``lead`` is the question it asks, as a
  * list of segments (bold ones name who, which key and where); ``says``
- * labels the requester's own reason; ``note`` says where the key may go. A
- * new key is asked in two steps: first the question, then ``pasteTitle``
- * and ``pasteNote`` over the paste field. ``warning`` with ``allowHidden``
- * keep another app's key behind an explicit "anyway" so the safe answer is
- * the default.
+ * labels the requester's own reason; ``note`` says where the key may go, and
+ * for an app, that the question is whether to trust that website with it;
+ * ``denyNote`` that Not now is a no that stays. A new key is asked in two
+ * steps: first the question, then ``pasteTitle`` and ``pasteNote`` over the
+ * paste field. ``warning`` with ``allowHidden`` keep another app's key behind
+ * an explicit "anyway" (``anyway``) so the safe answer is the default. How
+ * the key is sent (``slot``, or ``keptSlot`` when the key keeps its own
+ * although asked otherwise) is a detail, shown under Details.
  */
 export function requestWording(request, names) {
   const subject = requestSubject(request, names)
   const who = requestAppName(request, names)
-  const hosts = hostList((request.sites || []).map(site => site.host))
+  const hostNames = (request.sites || []).map(site => site.host)
+  const hosts = hostList(hostNames)
   const key = request.key
   const needsValue = !request.key_exists
   // "Let your agent …", but "Your agent says:".
   const asked = subject.kind === 'agent' ? 'your agent' : who
   const on = hosts ? [' on ', strong(hosts)] : []
-  const appNote = hosts
-    ? `It will only ever be sent to ${hosts}. ${who} never sees the key itself.`
-    : `It names no websites, so ${who} can't send this key anywhere until you add one on the key's page.`
+  // The app never holds the key, but the website it names may be its
+  // author's own: whether to trust that website is the whole question.
+  const trust = `Allow only if you trust ${new Set(hostNames).size === 1 ? 'that website' : 'those websites'} with it.`
+  const appNote = (sent, too = '') => (hosts
+    ? `${who} wants ${sent} sent to ${hosts}${too}. ${trust}`
+    : `It names no websites, so ${who} can't send this key anywhere until you add one on the key's page.`)
   const slot = slotShown(request)
-  // Visible beside the question, not only under Details: Allow changes how
-  // an existing key is sent, or leaves it as it is although asked otherwise.
-  const slotNote = request.key_exists && slot
-    ? ` Allowing also sets how ${key} is sent: ${sentAs(slot)}.`
-    : request.inject_kept
-      ? ` Something already uses ${key}, so it stays sent as ${sentAs(request.key_inject)}, not ${sentAs(request.inject)} as asked.`
-      : ''
   const base = {
     kind: subject.kind, who, needsValue, slot, savedBy: subject.savedBy || null, allowHidden: false, warning: null,
+    keptSlot: !slot && request.inject_kept ? { kept: request.key_inject, asked: request.inject } : null,
     says: `${who} says:`,
+    denyNote: `Not now is a no: ${asked} can't ask for ${key} again until you let it in Settings › Keys.`,
     pasteTitle: hosts ? `Paste your ${hosts} key` : 'Paste the key',
     pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
   }
@@ -318,8 +300,12 @@ export function requestWording(request, names) {
     allowHidden: true,
     warning: `This key belongs to ${subject.savedBy}, not you: ${subject.savedBy} saved it for itself and can change it at any time. `
       + (subject.kind === 'agent'
-        ? `Allowing lets your agents send ${subject.savedBy}'s key. To use your own, choose Not now and add a key of yours.`
-        : `Allowing sends ${who}'s requests with ${subject.savedBy}'s key. To use your own, choose Not now and add a key of yours.`),
+        ? `Allowing lets your agents read ${subject.savedBy}'s key and send it. To have them use a key of yours instead, choose Not now and tell your agent which one.`
+        : `Allowing sends ${who}'s requests with ${subject.savedBy}'s key.`),
+    anyway: {
+      label: `Use ${subject.savedBy}'s key anyway`,
+      note: `${who}'s requests would be signed with ${subject.savedBy}'s account, and ${subject.savedBy} can change that key at any time.`,
+    },
   }
   // A switched-off app stays off: allowing only adds the websites it asked for.
   const stillOff = request.app_paused
@@ -332,12 +318,12 @@ export function requestWording(request, names) {
         lead: hosts
           ? ['Let ', strong(asked), ' send ', strong(key), ' to ', strong(hosts), '?']
           : ['Let ', strong(asked), ' use ', strong(key), '?'],
-        note: (needsValue
+        note: needsValue
           ? 'You have no key by that name yet. Your agents will be able to read it, and send it only to websites you allow.'
-          : hosts ? `Allowing lets your agents read it and send it to ${hosts}.` : 'Allowing lets your agents read and use it.') + slotNote,
+          : hosts ? `Allowing lets your agents read it and send it to ${hosts}.` : 'Allowing lets your agents read and use it.',
       }
     case 'new':
-      return { ...base, lead: ['Let ', strong(who), ' use a key', ...on, '?'], note: appNote + slotNote }
+      return { ...base, lead: ['Let ', strong(who), ' use a key', ...on, '?'], note: appNote('a key') }
     case 'more-sites':
       return {
         ...base,
@@ -345,17 +331,17 @@ export function requestWording(request, names) {
         lead: hosts
           ? ['Let ', strong(who), ' use ', strong(key), ' on more websites: ', strong(hosts), '?']
           : ['Let ', strong(who), ' use ', strong(key), ' on more websites?'],
-        note: `${who} never sees the key itself.${stillOff}${slotNote}`,
+        note: appNote(key, ' too') + stillOff,
       }
     case 'saved-by-other':
       return {
         ...base,
         ...otherApp,
         lead: ['Let ', strong(who), ' use ', strong(key), ', a key ', strong(subject.savedBy), ' saved?'],
-        note: appNote + slotNote,
+        note: appNote(key),
       }
     default:
-      return { ...base, lead: ['Let ', strong(who), ' use your ', strong(key), ' key', ...on, '?'], note: appNote + slotNote }
+      return { ...base, lead: ['Let ', strong(who), ' use your ', strong(key), ' key', ...on, '?'], note: appNote(`your ${key} key`) }
   }
 }
 

@@ -5,7 +5,7 @@
 // aimed at what was there before, and steady clicking must not wear the wait
 // down. The card's handlers are driven in
 // SettingsView/__tests__/useKeyAnswerGuard.hooktest.js, and its asleep first
-// render is checked in ChatView/__tests__/keyRequestBlock.test.js.
+// render is checked in Shell/__tests__/appKeyRequestCard.test.js.
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSsrRenderServer } from './ssrRenderServer.mjs'
@@ -72,11 +72,21 @@ test('a card that moved under the pointer waits again, and a press already down 
   assert.equal(keyAnswerActiveAt(keyAnswerMoved(moved, SHOWN + 100)), SHOWN + 7000)
 })
 
-test('a keyboard answer is held to the same wait', () => {
+test('a keyboard answer needs an awake key press on that answer, so Tab then Enter in a hurry never answers', () => {
+  // Each key down on the card is a press: Tab to reach Allow, then Enter on it.
+  const tabbed = keyAnswerPressed(keyAnswerShown(SHOWN), press(SHOWN + 2000, field))
+  const entered = keyAnswerPressed(tabbed, press(SHOWN + 2300))
+  assert.equal(keyAnswerClickCounts(entered, key(SHOWN + 2300)), false)
+  // Enter after a quiet second answers.
+  const later = keyAnswerPressed(entered, press(SHOWN + 3400))
+  assert.equal(keyAnswerClickCounts(later, key(SHOWN + 3400)), true)
+  // A key pressed on something else never answers Allow.
+  assert.equal(keyAnswerClickCounts(keyAnswerPressed(keyAnswerShown(SHOWN), press(SHOWN + 5000, field)), key(SHOWN + 5000)), false)
+})
+
+test('assistive technology, which clicks with no press, is held to the wait alone', () => {
   assert.equal(keyAnswerClickCounts(keyAnswerShown(SHOWN), key(SHOWN + 300)), false)
   assert.equal(keyAnswerClickCounts(keyAnswerShown(SHOWN), key(SHOWN + 1000)), true)
-  const pressed = keyAnswerPressed(keyAnswerShown(SHOWN), press(SHOWN + 3000, field))
-  assert.equal(keyAnswerClickCounts(pressed, key(SHOWN + 3400)), false)
   assert.equal(keyAnswerClickCounts(keyAnswerMoved(keyAnswerShown(SHOWN), SHOWN + 3000), key(SHOWN + 3400)), false)
 })
 

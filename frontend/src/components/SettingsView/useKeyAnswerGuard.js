@@ -1,4 +1,4 @@
-/* A key request card's answer guard as a hook: KeyRequest.jsx puts it on every card (Settings › Keys, a chat, over an app). */
+/* The answer guard as a hook: every key request card wears it (KeyRequest.jsx, KeyQuestionCard.jsx), and so does the shell's confirmation over an app (OwnerConfirmSheet.jsx). */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   keyAnswerActiveAt, keyAnswerClickCounts, keyAnswerMoved, keyAnswerPlace, keyAnswerPlaceChanged, keyAnswerPressed,
@@ -6,14 +6,18 @@ import {
 } from '../../lib/keyAnswerGuard.js'
 
 /**
- * Keeps the answers asleep until the card has been still and untouched for a
- * moment (keyAnswerGuard.js). ``cardRef`` goes on the card; ``onPressCapture``
- * hears every press on it, before any of its controls. The card's place is
- * checked when it or anything around it changes size, on any scroll and at
- * each press, so a card pushed or slid into place under the pointer waits
- * again; scrolling the card yourself does too. Callers key each card by
- * ``requestFormKey``, so a replacement request is a new card and waits again.
- * ``early`` names the button of a click the guard just ignored (null
+ * Keeps the answers asleep until the card has been seen, still and untouched
+ * for a moment (keyAnswerGuard.js). ``cardProps`` go on the card: its ref,
+ * and capture-phase handlers that hear every press and key on it before any
+ * of its controls. The wait starts again whenever ``enabled`` turns on (the
+ * answers appear), the card moves (checked when it or anything around it
+ * changes size, on any scroll and at each press, so a card pushed or slid
+ * into place under the pointer waits again; scrolling the card yourself does
+ * too), and whenever the page may have shown something else in its place: a
+ * tab or window coming back into view, entering or leaving fullscreen, or a
+ * page restored from the back-forward cache. Callers key each card by what it
+ * asks (``requestFormKey``), so a replacement request is a new card and waits
+ * again. ``early`` names the button of a click the guard just ignored (null
  * otherwise), so for a moment the card can say why nothing happened and which
  * button to tap (earlyAnswerHint) instead of looking broken.
  */
@@ -43,16 +47,32 @@ export default function useKeyAnswerGuard({ enabled }) {
     return () => clearTimeout(timer)
   }, [activeAt])
 
+  const restart = useCallback(() => {
+    state.current = keyAnswerMoved(state.current, performance.now())
+    setActiveAt(keyAnswerActiveAt(state.current))
+  }, [])
+
   const noteMove = useCallback(() => {
     const node = cardRef.current
     if (!node) return
     const now = keyAnswerPlace(node.getBoundingClientRect())
-    if (keyAnswerPlaceChanged(place.current, now)) {
-      state.current = keyAnswerMoved(state.current, performance.now())
-      setActiveAt(keyAnswerActiveAt(state.current))
-    }
+    if (keyAnswerPlaceChanged(place.current, now)) restart()
     place.current = now
-  }, [])
+  }, [restart])
+
+  useEffect(() => {
+    if (!enabled) return undefined
+    restart()
+    const revealed = () => { if (document.visibilityState === 'visible') restart() }
+    document.addEventListener('visibilitychange', revealed)
+    document.addEventListener('fullscreenchange', restart)
+    window.addEventListener('pageshow', restart)
+    return () => {
+      document.removeEventListener('visibilitychange', revealed)
+      document.removeEventListener('fullscreenchange', restart)
+      window.removeEventListener('pageshow', restart)
+    }
+  }, [enabled, restart])
 
   useEffect(() => {
     const node = cardRef.current
@@ -70,15 +90,18 @@ export default function useKeyAnswerGuard({ enabled }) {
     }
   }, [enabled, noteMove])
 
+  const onPress = event => {
+    // A held key's repeats are one press, not many.
+    if (event.repeat) return
+    // A move nothing reported yet counts as happening now.
+    noteMove()
+    state.current = keyAnswerPressed(state.current, event)
+    setActiveAt(keyAnswerActiveAt(state.current))
+  }
+
   return {
-    cardRef,
+    cardProps: { ref: cardRef, onPointerDownCapture: onPress, onKeyDownCapture: onPress },
     active,
-    onPressCapture: event => {
-      // A move nothing reported yet counts as happening now.
-      noteMove()
-      state.current = keyAnswerPressed(state.current, event)
-      setActiveAt(keyAnswerActiveAt(state.current))
-    },
     early,
     counts: event => {
       const counted = keyAnswerClickCounts(state.current, event)

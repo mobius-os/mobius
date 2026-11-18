@@ -74,6 +74,8 @@
   outline: 0;
 }
 .settings-keys__input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+/* Pasting a new key's value: its title, the field, then where it is saved. */
+.settings-keys__paste { display: grid; gap: 8px; }
 
 /* -- the Keys pages -------------------------------------------------------- */
 .settings-keys-page { display: grid; }

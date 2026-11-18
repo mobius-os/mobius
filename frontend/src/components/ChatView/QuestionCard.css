@@ -522,46 +522,17 @@
   }
 }
 
-/* A key request (KeyRequestDetails.jsx): the agent's reason, where the key
-   goes, and the paste field for a new key, in the card's own type scale. */
+/* A key request (KeyRequestDetails.jsx): the shared card's lines
+   (KeyRequest.jsx) between the question and its choices, and the paste
+   field for a new key below them. */
 .qcard__key {
   display: grid;
-  gap: 6px;
+  gap: 8px;
   margin-bottom: 10px;
-  font-size: 12.5px;
-  line-height: 1.4;
-  color: var(--text);
 }
-.qcard__key p { margin: 0; }
 .qcard__key-line {
   margin: 0 0 10px;
   font-size: 12.5px;
   color: var(--muted);
 }
-.qcard__key-muted { color: var(--muted); }
-.qcard__key-warning {
-  padding: 8px 10px;
-  border: 1px solid color-mix(in srgb, var(--warning, #d97706) 32%, var(--border));
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--warning, #d97706) 8%, var(--surface));
-}
-.qcard__key-details summary {
-  cursor: pointer;
-  width: fit-content;
-  color: var(--muted);
-  font-size: 12px;
-}
-.qcard__key-details ul {
-  margin: 6px 0 0;
-  padding-left: 18px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
-}
-.qcard__key-paste {
-  display: grid;
-  gap: 6px;
-  margin-top: 4px;
-  font-weight: 600;
-}
-.qcard__key-paste small { font-weight: 400; }
-.qcard__key-paste .qcard__composer { display: block; }
+.qcard .settings-keys__paste { margin-top: 8px; }

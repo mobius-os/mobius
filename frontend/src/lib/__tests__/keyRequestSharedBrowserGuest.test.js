@@ -10,7 +10,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import { beginSharedBrowserAuth } from '../../api/client.js'
 import AppKeyRequestCard from '../../components/AppCanvas/AppKeyRequestCard.jsx'
-import KeyRequestBlock from '../../components/ChatView/markdown/KeyRequestBlock.jsx'
+import KeyQuestionCard from '../../components/ChatView/KeyQuestionCard.jsx'
 import KeysSummary, { KeyPage, KeysPage } from '../../components/SettingsView/KeysSection.jsx'
 import { KEYS_QUERY } from '../../components/SettingsView/keysQueries.js'
 import { appQueries } from '../../hooks/queries.js'
@@ -32,15 +32,21 @@ function render(element) {
 }
 
 test("a guest never sees the card over an app", () => {
-  assert.equal(render(createElement(AppKeyRequestCard, { appId: 7, visible: true })), '')
+  assert.equal(render(createElement(AppKeyRequestCard, { appId: 7 })), '')
 })
 
-test("a guest's chat card says who asked and that only the owner answers", () => {
-  const app = render(createElement(KeyRequestBlock, { block: { id: '7-maps' } }))
-  assert.match(app, /An app asked for a key\. Only the owner of this Möbius can answer\./)
-  assert.doesNotMatch(app, /Your agent|<button|<input/)
-  const agent = render(createElement(KeyRequestBlock, { block: { id: 'agent-maps' } }))
-  assert.match(agent, /Your agent asked for a key\. Only the owner of this Möbius can answer\./)
+// That its Submit never answers: ChatView/__tests__/keyQuestionCard.test.js.
+test("a guest's chat card says only the owner answers, and asks for no key", () => {
+  const card = render(createElement(KeyQuestionCard, {
+    chatId: 'chat-1', questionId: 'q-1', onAnswer() {},
+    questions: [{ id: 'key', header: 'Key', question: 'Let your agent send **maps** to **tiles.example.com**?', options: [
+      { id: 'allow', label: 'Allow', description: 'Your agents may read maps and send it to tiles.example.com.' },
+      { id: 'deny', label: 'Not now', description: "Your agent carries on without it." },
+    ] }],
+    keyRequest: { id: 'agent-maps', key: 'maps', reason: '', sites: [TILES] },
+  }))
+  assert.match(card, /Only the owner of this Möbius can answer a key request\./)
+  assert.doesNotMatch(card, /type="password"|Details/)
 })
 
 test('Settings › Keys, its page and a key page tell a guest only the owner manages keys, instead of showing nothing', () => {
