@@ -10,7 +10,8 @@ opinion, and harmless for a non-writer because the machine uses a comment only
 for someone who holds a writers-only change request. The read also carries the
 connected account's own latest review.
 An approval of an older commit is asked about once more, in read_facts: whether
-the PR's own change is the same at the head (contribution_same_work).
+the PR's own change is the same at the head (contribution_same_work). The connected
+account's own approval carries the answer too (myReview.sameWork).
 A read that failed is never a guess: its fact is 'unknown' and readComplete
 is False, which the machine never lets enable anything that needs it.
 
@@ -182,12 +183,34 @@ def mergeable_of(checks: dict | None, head: str) -> str:
   return MERGEABLE.get(checks.get("mergeable"), "unknown")
 
 
+def queued_of(checks: dict | None, head: str) -> bool | None:
+  """Whether GitHub's merge queue holds this exact head; None when the read does not say.
+
+  An entry attached to another head (the queue's own test commit) is not this pull request's.
+  """
+  if not isinstance(checks, dict) or checks.get("headRefOid") != head or "mergeQueueEntry" not in checks:
+    return None
+  entry = checks["mergeQueueEntry"]
+  return isinstance(entry, dict) and bool(entry.get("id"))
+
+
 def permission_of(repo: dict) -> str:
   """The connected account's rights here; an archived or disabled repository takes no writes."""
   if repo.get("archived") or repo.get("disabled"):
     return "READ"
   granted = repo.get("permissions") or {}
   return next((level for name, level in PERMISSIONS if granted.get(name) is True), "READ")
+
+
+def requested_of(pull: dict, actor_login: str) -> bool:
+  """Whether GitHub lists the connected account among the requested reviewers of this pull request.
+
+  The pull request read the caller already holds carries them (`requested_reviewers`; a team's request is its own
+  list and names no person here), so this costs no GitHub read. GitHub drops a request when its reviewer reviews,
+  which is why the machine reads a request beside a review of this version as a new one.
+  """
+  listed = pull.get("requested_reviewers") if isinstance(pull, dict) else None
+  return bool(actor_login) and any(isinstance(user, dict) and _login(user) == actor_login.lower() for user in listed or [])
 
 
 def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks: dict | None,
@@ -208,7 +231,9 @@ def pr_facts(*, actor_id, actor_login: str = "", repo: dict, pull: dict, checks:
     "reviewers": everyone_who_reviewed(checks),
     "myReview": None if own else my_review(checks, review_list or [], actor_login),
     "openThreads": 0, "job": job, "result": None, "outbox": None,
-    "readComplete": review_list is not None,
+    "readComplete": review_list is not None, "queued": queued_of(checks, head),
+    # Only someone else's PR, and only when true: an absent fact reads as "not requested".
+    **({"reviewRequested": True} if not own and requested_of(pull, actor_login) else {}),
   }
 
 
@@ -251,6 +276,21 @@ def _mark_carried_approvals(gh, cwd, target: dict, pull: dict, facts: dict) -> N
     same_work.mark_carried_approvals(gh, cwd, target.get("repo"), base_sha, head, review_list, author=author)
 
 
+def _carry_to_my_review(facts: dict, actor_login: str) -> None:
+  """Give the account's own approval of an older commit the proof its entry among ``reviews`` was given (sameWork).
+
+  ``myReview`` is a copy made before the proof was read; the machine counts an own approval of the same work like
+  anyone's, so it needs the same answer. Nothing is read here: no proof, nothing carried.
+  """
+  mine = facts.get("myReview")
+  if not mine or mine.get("state") != "APPROVED" or not actor_login:
+    return
+  own = next((r for r in facts["reviews"] if r["by"].lower() == actor_login.lower() and r.get("state") == "APPROVED"
+              and r.get("commit") == mine.get("commit") and "sameWork" in r), None)
+  if own is not None:
+    mine["sameWork"] = own["sameWork"]
+
+
 def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, actor_login: str = "",
                job: dict | None, checks: dict | None = None) -> dict:
   """Facts for a pull request the caller just read, adding its checks and reviews.
@@ -264,4 +304,5 @@ def read_facts(gh, cwd, target: dict, repo: dict, pull: dict, *, actor_id, actor
   checks = checks if checks is not None else read_checks(gh, cwd, target)
   facts = pr_facts(actor_id=actor_id, actor_login=actor_login, repo=repo, pull=pull, checks=checks, job=job)
   _mark_carried_approvals(gh, cwd, target, pull, facts)
+  _carry_to_my_review(facts, actor_login)
   return facts

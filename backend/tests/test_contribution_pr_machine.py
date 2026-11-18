@@ -34,12 +34,17 @@ SPACE = {
   "outbox": [None, {"head": "h2", "state": "drafted"}, {"head": "h2", "state": "unconfirmed"}],
   "readComplete": [True, False],
   "result": [None, {"head": "h2", "outcome": "findings"}, {"head": "h2", "outcome": "clear"}],
+  "queued": [None, True],
+  "reviewRequested": [None, True],
 }
 
 
 def sweep():
   for values in itertools.product(*SPACE.values()):
     facts = {"head": "h2", "openThreads": 0, **dict(zip(SPACE, values))}
+    # The fact reader sets a review request only on someone else's PR, so an author with one is not swept: half the cost.
+    if facts["role"] == "author" and facts["reviewRequested"]:
+      continue
     yield {**facts, "author": "alex" if facts["role"] == "author" else "sam"}
 
 
@@ -109,8 +114,31 @@ def a_pr_that_cannot_be_read_is_never_acted_on(decision, facts):
 def with_nothing_in_the_way_every_action_of_yours_is_offered(decision, facts):
   job = facts.get("job")
   in_the_way = (facts.get("readComplete") is False or facts["lifecycle"] not in ("open", "draft")
-                or (job is not None and job.get("state") != "stalled") or facts.get("outbox"))
+                or (job is not None and job.get("state") != "stalled") or facts.get("outbox")
+                or facts.get("queued") is True)
   return in_the_way or all((action(decision, action_id) or {}).get("enabled") for action_id in OFFERED[facts["role"]])
+
+
+def a_queued_pr_reads_as_in_the_merge_queue(decision, facts):
+  held = facts.get("queued") is True and facts["lifecycle"] in ("open", "draft") and facts.get("readComplete") is not False
+  return not held or (decision["state"] == "in_merge_queue"
+                      and action(decision, "merge")["reason"] == "This pull request is already in the merge queue.")
+
+
+def a_request_beside_your_review_of_this_version_is_your_turn(decision, facts):
+  mine = facts.get("myReview") or {}
+  free = (facts["role"] == "reviewer" and facts.get("reviewRequested") is True and mine.get("commit") == facts["head"]
+          and facts["lifecycle"] == "open" and facts.get("readComplete") is not False and not facts.get("job")
+          and not facts.get("outbox") and facts.get("queued") is not True)
+  return not free or (decision["state"] == "reviewer.re_requested" and decision["turn"] == "you"
+                      and action(decision, "review")["highlighted"] is True)
+
+
+def a_review_request_changes_the_words_and_the_turn_only(decision, facts):
+  if facts.get("reviewRequested") is not True:
+    return True
+  rows = lambda made: [(item["id"], item["enabled"], item["reason"]) for item in made["actions"]]
+  return rows(machine.decide({**facts, "reviewRequested": None})) == rows(decision)
 
 
 INVARIANTS = {
@@ -134,8 +162,14 @@ INVARIANTS = {
   "a PR that cannot be read is never acted on": a_pr_that_cannot_be_read_is_never_acted_on,
   "with nothing in the way, every action of yours is offered, whatever the review standing":
     with_nothing_in_the_way_every_action_of_yours_is_offered,
+  "a PR GitHub's merge queue holds reads as in the merge queue, and its Merge is off for that reason":
+    a_queued_pr_reads_as_in_the_merge_queue,
   "take over is for maintainers only": lambda decision, facts: not (action(decision, "take_over") or {}).get("enabled")
     or facts["permission"] in ("MAINTAIN", "ADMIN"),
+  "a request GitHub lists beside your review of this version is your turn to review, unless the PR is a draft or already "
+  "has an agent job, a draft of yours or the queue": a_request_beside_your_review_of_this_version_is_your_turn,
+  "a review request changes the words and the turn only: what may be done is exactly what it is without it":
+    a_review_request_changes_the_words_and_the_turn_only,
   "at most one action is highlighted": lambda decision, facts: sum(item["highlighted"] for item in decision["actions"]) <= 1,
   "a state that highlights an action always offers it": lambda decision, facts: not decision["next"] or any(
     item["id"] == decision["next"] and item["enabled"] for item in decision["actions"]),
@@ -195,6 +229,21 @@ def test_a_reply_alone_never_brings_their_pr_back_for_re_review_but_a_new_commit
   assert machine.decide({**base, "head": "h3"})["state"] == "reviewer.re_review"
 
 
+def test_a_review_request_listed_again_after_your_review_of_this_version_is_your_turn_whatever_your_review_said():
+  base = next(case["facts"] for case in CASES if case["name"] == "You requested changes at this version")
+  for state in ("CHANGES_REQUESTED", "APPROVED", "COMMENTED"):
+    decision = machine.decide({**base, "myReview": {"state": state, "commit": "h2"}, "reviewRequested": True})
+    assert [decision["state"], decision["turn"], decision["label"], decision["next"]] == [
+      "reviewer.re_requested", "you", "Asked to review again", "review"], state
+    assert machine.decide({**base, "myReview": {"state": state, "commit": "h2"}})["state"] != "reviewer.re_requested"
+  assert machine.decide({**base, "reviewRequested": True, "lifecycle": "draft"})["state"] == "reviewer.waiting_author"
+  assert machine.decide({**base, "reviewRequested": True, "queued": True})["state"] == "in_merge_queue"
+  assert machine.decide({**base, "reviewRequested": True, "job": {"state": "running"}})["state"] == "working"
+  assert machine.decide({**base, "reviewRequested": False})["state"] == "reviewer.waiting_author"
+  own = machine.decide({**base, "role": "author", "author": "alex", "reviewRequested": True})
+  assert not own["state"].startswith("reviewer."), "an own PR is never read as a request to you"
+
+
 def test_reviewer_and_author_names_compare_without_case():
   facts = {"role": "author", "author": "Alex", "head": "h2", "lifecycle": "open", "checks": "pass",
            "mergeable": "yes", "permission": "WRITE", "readComplete": True, "openThreads": 0,
@@ -207,3 +256,20 @@ def test_a_stalled_job_never_blocks_starting_again_but_a_running_one_does():
   base = next(case["facts"] for case in CASES if case["name"] == "Their PR, not reviewed by you")
   assert machine.action_blocker({**base, "job": {"state": "stalled"}}, "review") == ""
   assert machine.action_blocker({**base, "job": {"state": "running"}}, "review") == machine.JOB_BUSY
+
+
+def test_a_pr_in_the_merge_queue_waits_on_github_and_is_nobodys_step():
+  facts = next(case["facts"] for case in CASES if case["name"] == "Their PR is in GitHub’s merge queue")
+  decision = machine.decide(facts)
+  assert (decision["state"], decision["turn"], decision["waiting_on"]) == ("in_merge_queue", "other", "GitHub")
+  assert machine.action_blocker(facts, "merge") == machine.IN_MERGE_QUEUE
+  assert machine.decide({**facts, "role": "author", "author": "alex"})["waiting_on"] == "GitHub"
+
+
+def test_your_own_approval_of_the_same_work_says_it_still_holds_and_a_change_request_of_yours_never_does():
+  base = next(case["facts"] for case in CASES if case["name"].startswith("Your own approval of an older commit"))
+  assert machine.decide(base)["headline"].startswith("Their PR · your approval still holds, checks green.")
+  unproved = {**base, "myReview": {**base["myReview"], "sameWork": None}}
+  assert machine.decide(unproved)["state"] == "reviewer.re_review", "an approval whose work was not proved is of an older version"
+  request = {**base, "myReview": {"state": "CHANGES_REQUESTED", "commit": "h1", "sameWork": True}}
+  assert machine.decide(request)["state"] == "reviewer.re_review", "only an approval carries over"

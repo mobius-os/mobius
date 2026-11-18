@@ -76,16 +76,26 @@ def _merge_target(gh, cwd, body, repo: dict, pull: dict) -> dict:
           "base_ref": base_ref, "base_sha": reviews.base_head(gh, cwd, name, base_ref)}
 
 
-def _require_clear(target: dict, repo: dict, pull: dict, checks: dict, facts: dict) -> None:
+def _require_not_queued(target: dict, checks: dict) -> None:
+  """Refuse a pull request the merge queue already holds.
+
+  Asked at the first read, which the confirm sheet is built from, so no confirmation is minted for it,
+  let alone spent; and again at the merge, for a PR that joined the queue after the sheet.
+  """
   if reviews.queue_entry(checks, target):
-    raise HTTPException(409, "This pull request is already in the merge queue.")
+    raise HTTPException(409, machine.IN_MERGE_QUEUE)
+
+
+def _require_clear(target: dict, repo: dict, pull: dict, checks: dict, facts: dict) -> None:
+  _require_not_queued(target, checks)
   blocker = reviews.merge_blocker(target, repo, pull, checks) or machine.action_blocker(facts, "merge")
   if blocker:
     raise HTTPException(409, blocker)
 
 
 def _read_mergeable_pull(gh, cwd, body) -> tuple[dict, dict, dict, dict, dict]:
-  """Read GitHub now and refuse, in plain words, unless the exact head named is the open pull request.
+  """Read GitHub now and refuse, in plain words, unless the exact head named is the open pull request,
+  and the merge queue does not already hold it.
 
   Returns the merge target, the repository, the pull request, its checks and its
   machine facts, which carry no agent job: that is local and asked for later,
@@ -100,6 +110,7 @@ def _read_mergeable_pull(gh, cwd, body) -> tuple[dict, dict, dict, dict, dict]:
     checks = reviews.pull_checks(gh, cwd, target)
   except _READ_FAILURES as exc:
     raise HTTPException(404, UNREADABLE) from exc
+  _require_not_queued(target, checks)
   # The merge guard does not depend on who presses Merge, so no account read is needed.
   facts = pr_facts.read_facts(gh, cwd, target, repo, pull, actor_id=None, job=None, checks=checks)
   return target, repo, pull, checks, facts
