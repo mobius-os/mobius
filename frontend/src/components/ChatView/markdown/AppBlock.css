@@ -1,5 +1,5 @@
 /* Generic app block chrome. Apps own any detailed presentation in their view. */
-.md-app-block { width:min(100%, 640px); border:1px solid var(--border-light, var(--border)); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
+.md-app-block { width:100%; border:1px solid var(--border-light, var(--border)); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
 .md-blocks > .md-app-block { margin:4px 0 8px; }
 /* Assistant replies shrink to their prose (.chat__msg--assistant aligns
    flex-start). A reply with a block takes the column's width instead, so the

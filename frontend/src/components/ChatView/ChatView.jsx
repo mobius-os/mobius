@@ -288,7 +288,7 @@ import {
   normalizeGoalPresentation,
   progressRailViewModel,
 } from './goalProgress.js'
-import { AppBlockChatContext, createAppBlockChat } from './markdown/appBlockChat.js'
+import { AppBlockChatContext, createAppBlockChat, useWaitingBlock } from './markdown/appBlockChat.js'
 import './ChatView.css'
 
 // Inspectors and side panels that open only on request stay off the startup
@@ -5656,6 +5656,15 @@ export default function ChatView({
     scrollRef, hasPendingResume, resumeCardEl,
   )
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  // An app block the owner still has to act on (a prepared change waiting to
+  // be sent, say) gets the same cue once it has scrolled away. A running turn
+  // or an open question comes first: the block is not the next step then.
+  const waitingBlock = useWaitingBlock(appBlockChat)
+  const blockNudgeArmed = Boolean(waitingBlock) && !turnActive && !hasPendingQuestion
+  const waitingBlockOffscreen = useOffscreenNudge(
+    scrollRef, blockNudgeArmed, waitingBlock?.node ?? null,
+  )
+  const blockNudgeShown = blockNudgeArmed && waitingBlockOffscreen
   useChatQuestionReveal({
     activation: questionActivation, hidden, displayReady, rootRef: scrollRef,
     pendingElement: hasPendingQuestion ? pendingQuestionEl : null,
@@ -5701,6 +5710,7 @@ export default function ChatView({
     }
   }, [hasUnloadedNewer, followLatest, chatId, queryClient, applyMessagesToView])
   const offscreenControlsVisible = questionNudgeShown
+    || blockNudgeShown
     || resumeNudgeShown
     || jumpToLatestVisible
 
@@ -6463,6 +6473,18 @@ export default function ChatView({
                       )}
                     >
                       Möbius asked you something — tap to answer
+                    </button>
+                  )}
+                  {blockNudgeShown && (
+                    <button
+                      type="button"
+                      className="chat__question-nudge"
+                      {...composerAdjacentActionProps(
+                        () => revealPendingQuestion(waitingBlock.node),
+                        { activateOnTouchEnd: true },
+                      )}
+                    >
+                      {waitingBlock.appName} is waiting for you — tap to view
                     </button>
                   )}
                   {resumeNudgeShown && (

@@ -19,8 +19,13 @@
    changed state (a new `rev`) can be asked about again. Nothing here counts
    or remembers sends for safety: the in-flight set and the receipts only
    say what one ask's button shows, and both belong to that exact ask
-   (askIdentity), never to a card or its group. */
-import { createContext, useContext, useLayoutEffect, useState, useSyncExternalStore } from 'react'
+   (askIdentity), never to a card or its group.
+
+   It also names the one block the owner still has to act on (`waitingBlock`),
+   so the chat can point back to it once it has scrolled away. A block says so
+   itself, from what its app reports (PassiveAppBlock.jsx blockAwaitsOwner);
+   only the newest such block in the transcript is named. */
+import { createContext, useCallback, useContext, useLayoutEffect, useState, useSyncExternalStore } from 'react'
 
 export const REFRESH_REASONS = Object.freeze(['turn', 'visible'])
 /** What makes one block itself, for its asks: its app, intent, title and the
@@ -60,7 +65,18 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
   const receipts = new Map()
   let turns = 0
   let askVersion = 0
-  const notify = () => listeners.forEach(listener => listener())
+  // One stable object per waiting block, so a subscriber sees a new value only
+  // when the block or its app name changes.
+  let waiting = null
+  function findWaiting() {
+    const entries = [...groups.values()].flatMap(group => [...group.values()])
+      .filter(entry => entry.node && entry.waitingFor && !entry.superseded)
+    const newest = entries.find(entry => !entries.some(other => other !== entry && follows(entry.node, other.node)))
+    if (!newest) return null
+    return waiting?.node === newest.node && waiting.appName === newest.waitingFor
+      ? waiting : { node: newest.node, appName: newest.waitingFor }
+  }
+  const notify = () => { waiting = findWaiting(); listeners.forEach(listener => listener()) }
   const changed = () => { askVersion += 1; notify() }
   function recompute(key) {
     const group = groups.get(key)
@@ -77,7 +93,8 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
     place(key, id, node) {
       if (!groups.has(key)) groups.set(key, new Map())
       const group = groups.get(key)
-      group.set(id, { node, superseded: group.get(id)?.superseded === true })
+      const previous = group.get(id)
+      group.set(id, { node, superseded: previous?.superseded === true, waitingFor: previous?.waitingFor || '' })
       recompute(key)
       notify()
     },
@@ -94,6 +111,20 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
       const nodes = [...(groups.get(key)?.values() || [])].map(entry => entry.node).filter(Boolean)
       return nodes.find(node => !nodes.some(other => other !== node && follows(node, other))) || null
     },
+    /** One block says whether the owner still has to act on it, under its
+     *  app's name (an empty name means it does not). */
+    setWaiting(key, id, appName) {
+      const waitingFor = typeof appName === 'string' ? appName : ''
+      const entry = groups.get(key)?.get(id)
+      if ((entry?.waitingFor || '') === waitingFor) return
+      // A block may report before its section is placed; `place` keeps it.
+      if (entry) entry.waitingFor = waitingFor
+      else groups.set(key, (groups.get(key) || new Map()).set(id, { node: null, superseded: false, waitingFor }))
+      notify()
+    },
+    /** The newest block the owner still has to act on, as `{ node, appName }`,
+     *  or null. The same object is returned until either value changes. */
+    waitingBlock() { return waiting },
     /** Ask every mounted session to re-read its state, with a reason. */
     refresh(reason) {
       if (!REFRESH_REASONS.includes(reason)) return
@@ -145,18 +176,24 @@ export function createAppBlockChat(chatId, { send = null } = {}) {
 }
 
 export const AppBlockChatContext = createContext(null)
+/** Whether the enclosing message is the last one in its chat. The message
+ *  renderer provides it; a block cannot learn it from its own JSON. */
+export const TailMessageContext = createContext(false)
 
 const NO_REFRESH = Object.freeze({ seq: 0, reason: '' })
 const noSubscribe = () => () => {}
 
 /** This block's place in its chat: `{ context, refresh, newestNode, ref,
- *  askState, ask }`. `context` is `{ chatId, latest }`, or null outside a chat
- *  transcript (a preview, a test, a new chat with no id yet). `ref` is a
- *  callback ref for the block's section. `askState({fingerprint, refs})` and
- *  `ask({message, fingerprint, refs})` are this block's card ask
- *  (createAppBlockChat). */
+ *  askState, ask, setWaiting }`. `context` is `{ chatId, latest, tail }`, or
+ *  null outside a chat transcript (a preview, a test, a new chat with no id
+ *  yet); `tail` is whether the block is in the chat's last message. `ref` is a
+ *  callback ref for the block's section. `setWaiting(appName)` reports
+ *  whether the owner still has to act on this block (createAppBlockChat).
+ *  `askState({fingerprint, refs})` and `ask({message, fingerprint, refs})`
+ *  are this block's card ask (createAppBlockChat). */
 export function useAppBlockChat(key) {
   const chat = useContext(AppBlockChatContext)
+  const tail = useContext(TailMessageContext)
   const [id] = useState(() => ({}))
   const [node, setNode] = useState(null)
   // A changed section node (static and live views swap) keeps the block's
@@ -169,10 +206,17 @@ export function useAppBlockChat(key) {
     () => chat ? chat.refreshSnapshot() : NO_REFRESH, () => NO_REFRESH)
   // Re-render when an ask's state changes.
   useSyncExternalStore(chat ? chat.subscribe : noSubscribe, () => chat ? chat.askSnapshot() : 0, () => 0)
-  const context = chat?.chatId ? { chatId: chat.chatId, latest } : null
-  return { context, refresh, newestNode: () => chat?.newestNode(key) || null, ref: setNode,
+  const context = chat?.chatId ? { chatId: chat.chatId, latest, tail } : null
+  const setWaiting = useCallback(appName => chat?.setWaiting(key, id, appName), [chat, key, id])
+  return { context, refresh, newestNode: () => chat?.newestNode(key) || null, ref: setNode, setWaiting,
     askState: request => chat ? chat.askState(request) : 'ready',
     ask: request => chat ? chat.ask(key, id, request) : Promise.resolve(false) }
+}
+
+/** The block of this chat the owner still has to act on, as
+ *  `{ node, appName }`, or null (createAppBlockChat waitingBlock). */
+export function useWaitingBlock(chat) {
+  return useSyncExternalStore(chat ? chat.subscribe : noSubscribe, () => chat ? chat.waitingBlock() : null, () => null)
 }
 
 export const appBlockChatKey = block => `${block.app}\n${block.intent}`

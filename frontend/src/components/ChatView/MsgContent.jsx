@@ -8,6 +8,7 @@ import {
   mergePositionedActivityEntries,
 } from './activityPosition.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import { TailMessageContext } from './markdown/appBlockChat.js'
 import { markdownImageHrefs } from './markdown/markdownParser.js'
 import { safeImageHref } from './markdown/InlineContent.jsx'
 import ActivityStretch from './ActivityStretch.jsx'
@@ -76,8 +77,11 @@ function blockAnswerable(block, { msg, isLastMsg, liveQuestionId, onQuestionAnsw
 /** Prose rendered through the markdown formatter (replies and owner messages)
  * copies back as Markdown, so a selection pasted into the composer keeps its
  * formatting. Each rendered text block carries `data-markdown-block`. */
-function MarkdownCopySurface({ msg, markdownByIndex, children }) {
-  if (msg.role !== 'assistant' && msg.role !== 'user') return children
+function MarkdownCopySurface({ msg, markdownByIndex, tail = false, children }) {
+  // The one wrapper every message body shares also tells its app blocks
+  // whether this is the chat's last message (appBlockChat.js).
+  const body = <TailMessageContext.Provider value={tail === true}>{children}</TailMessageContext.Provider>
+  if (msg.role !== 'assistant' && msg.role !== 'user') return body
 
   function markdownForBlock(element) {
     const index = element.dataset.markdownBlock
@@ -94,7 +98,7 @@ function MarkdownCopySurface({ msg, markdownByIndex, children }) {
       className="chat__markdown-copy-surface"
       onCopy={(event) => copyMarkdownSelection(event, markdownForBlock)}
     >
-      {children}
+      {body}
     </div>
   )
 }
@@ -539,7 +543,7 @@ function MsgContentInner({
         )
         if (block.secure_input) {
           return (
-            <div key={assistantBlockKey(block, i)} ref={answerable ? pendingQuestionRef : undefined}>
+            <div key={assistantBlockKey(block, i)} className="chat__owner-card" ref={answerable ? pendingQuestionRef : undefined}>
               <SecureInputCard
                 chatId={chatId}
                 interactive={answerable}
@@ -556,7 +560,7 @@ function MsgContentInner({
         }
         const Card = block.key_request ? KeyQuestionCard : QuestionCard
         return (
-          <div key={assistantBlockKey(block, i)}>
+          <div key={assistantBlockKey(block, i)} className="chat__owner-card">
             <Card
               chatId={chatId}
               questions={block.questions || []}
@@ -783,7 +787,7 @@ function MsgContentInner({
       : null
 
     return (
-      <MarkdownCopySurface msg={msg} markdownByIndex={markdownByIndex}>
+      <MarkdownCopySurface msg={msg} markdownByIndex={markdownByIndex} tail={isLastMsg}>
         <AnswerCause msg={msg} onInternalNav={onInternalNav} />
         {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
         {nodes.flatMap((node, nodeIdx) => {
@@ -836,7 +840,7 @@ function MsgContentInner({
     ? stripAugmentation(msg.content) : msg.content
 
   return (
-    <MarkdownCopySurface msg={msg}>
+    <MarkdownCopySurface msg={msg} tail={isLastMsg}>
       <AnswerCause msg={msg} onInternalNav={onInternalNav} />
       {msg.role === 'user' && <Attachments attachments={msg.attachments} chatId={chatId} />}
       {text ? (

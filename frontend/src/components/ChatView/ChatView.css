@@ -410,6 +410,12 @@
   align-items: flex-start;
 }
 
+/* The row of an owner-input card (question, secure input). Replies shrink
+   each piece to its content, and a card sized by its content is as narrow as
+   its shortest question and changes width once an answer is typed. The row
+   takes the reply column instead, as a reply with an app block does. */
+.chat__owner-card { align-self: stretch; min-width: 0; }
+
 /* Event-only owner for Markdown-aware native selection copy. `contents` keeps
    every prose/tool child in the message row's existing flex and gap geometry. */
 .chat__markdown-copy-surface { display: contents; }

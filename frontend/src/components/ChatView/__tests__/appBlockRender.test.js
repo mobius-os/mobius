@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { AskControl, PassiveBlockView, SessionControls, blockAsk, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { AskControl, PassiveBlockView, SessionControls, blockAsk, blockAwaitsOwner, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -581,6 +581,27 @@ test('after a tap the ask waits, and says why only to assistive technology', () 
   assert.match(askView('already'), /is-settled" disabled=""[^>]*>.*Requested in chat<\/button><span[^>]*>This chat already has this request\.<\/span><span class="md-app-block__sr-only" role="status">This chat already has this request\./)
   const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
+})
+
+test('a block awaits the owner only while its app offers a control to press, on the newest block of the last message', () => {
+  const press = { hidden: false, disabled: false, busy: false, open: false }
+  const state = { actions: [press], recoveryPending: false }
+  const context = { chatId: 'chat-1', latest: true, tail: true }
+  assert.equal(blockAwaitsOwner({ state, admitted: true, context, ask: null }), true)
+  assert.equal(blockAwaitsOwner({ state: { ...state, actions: [{ ...press, disabled: true }, press] }, admitted: true, context, ask: null }),
+    true, 'one pressable control is enough')
+  for (const input of [
+    { state: null, admitted: true, context, ask: null },
+    { state, admitted: false, context, ask: null },
+    { state, admitted: true, context: null, ask: null },
+    { state, admitted: true, context: { ...context, latest: false }, ask: null },
+    { state, admitted: true, context: { ...context, tail: false }, ask: null },
+    { state, admitted: true, context, ask: fixAsk },
+    { state: { ...state, recoveryPending: true }, admitted: true, context, ask: null },
+    { state: { ...state, actions: [] }, admitted: true, context, ask: null },
+    ...['hidden', 'disabled', 'busy', 'open'].map(flag => (
+      { state: { ...state, actions: [{ ...press, [flag]: true }] }, admitted: true, context, ask: null })),
+  ]) assert.equal(blockAwaitsOwner(input), false, JSON.stringify(input))
 })
 
 test('an ask is drawn only for an admitted app on the attested chat\'s newest block, outside recovery', () => {

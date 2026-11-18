@@ -2,8 +2,8 @@
 
 .secure-card {
   box-sizing: border-box;
-  width: min(100%, 640px);
-  margin: 10px auto;
+  width: 100%;
+  margin: 10px 0;
   padding: 16px;
   border: 1px solid color-mix(in srgb, var(--green) 34%, var(--border));
   border-radius: 14px;

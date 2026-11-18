@@ -181,6 +181,17 @@ export function jumpTo(node) {
 export const ADMISSION_WITHDRAWN = name =>
   `${name} can no longer run in this chat. Open ${name} to check the result of the last action before trying again.`
 
+/** Whether the owner still has to act on this block: it is the newest of its
+ *  kind, in the chat's last message, and its app reports a control the owner
+ *  can press now. A control that only opens the app, one that is busy, hidden
+ *  or disabled, and the host's own ask (an offer, not a pending step) do not
+ *  count, so a sent or settled block stops waiting by itself. */
+export function blockAwaitsOwner({ state, admitted, context, ask }) {
+  if (!state || !admitted || ask || state.recoveryPending) return false
+  if (context?.latest !== true || context.tail !== true) return false
+  return state.actions.some(action => !action.hidden && !action.disabled && !action.busy && !action.open)
+}
+
 export default function PassiveAppBlock({ block, app, onInternalNav, admitted = true }) {
   const [nearRef, { near, distance }] = useNearViewport()
   // The transcript attests which chat this block is in and whether it is that
@@ -214,6 +225,9 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
   useEffect(() => setWaking(session.waking), [session.waking])
   const ask = blockAsk({ state: session.displayState, admitted, allowed: askAllowed, context: chat.context })
+  const awaitsOwner = blockAwaitsOwner({ state: session.displayState, admitted, context: chat.context, ask })
+  const { setWaiting } = chat
+  useEffect(() => { setWaiting(awaitsOwner ? app.name : '') }, [setWaiting, awaitsOwner, app.name])
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
