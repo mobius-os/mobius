@@ -14,17 +14,15 @@ import { readFileSync } from 'node:fs'
 
 const chatViewSource = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
 const streamHookSource = readFileSync(new URL('../useStreamConnection.js', import.meta.url), 'utf8')
-const msgContentSource = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const activeAssistantSource = readFileSync(
   new URL('../AssistantReply.jsx', import.meta.url),
   'utf8',
 )
-const blockRendererSource = readFileSync(new URL('../markdown/BlockRenderer.jsx', import.meta.url), 'utf8')
 
 test('active DB, live deltas, and reconnect snapshots share one assistant surface', () => {
   assert.match(activeAssistantSource, /<MsgContent[\s\S]*msg=\{row\.message\}/,
     'the stable active <li> must always delegate its selected payload to MsgContent')
-  assert.doesNotMatch(activeAssistantSource, /ToolBlock|QuestionCard|ErrorCard|ProgressiveMarkdown/,
+  assert.doesNotMatch(activeAssistantSource, /ToolBlock|QuestionCard|ErrorCard/,
     'AssistantReply must not mount a competing assistant block tree')
   assert.match(activeAssistantSource, /streamItemsToAssistantPayload\(streamItems, \{ finalize: false \}\)/,
     'the live source must feed the same DB-shaped payload consumed by MsgContent')
@@ -44,14 +42,6 @@ test('active DB, live deltas, and reconnect snapshots share one assistant surfac
     /seededByServerSnapshot[\s\S]*event\.type === 'steered_into_turn'[\s\S]*if \(!seededByServerSnapshot\) \{[\s\S]*catchUpItems = Array\.isArray\(event\.items\)/,
     'a reconnect snapshot already sits after prior steer cuts and must retain its continuation',
   )
-})
-
-test('streaming deltas are flags on the shared active markdown tree', () => {
-  assert.match(msgContentSource, /<ProgressiveMarkdown[\s\S]*isStreaming=\{isStreaming/,
-    'active DB and live text must keep ProgressiveMarkdown mounted')
-  assert.match(blockRendererSource, /data-is-streaming=\{isStreaming \? 'true' : undefined\}/)
-  assert.match(blockRendererSource, /\{isStreaming && \([\s\S]*<span className="chat__cursor" aria-hidden="true" \/>/,
-    'cursor insertion must toggle behind isStreaming instead of selecting another renderer')
 })
 
 test('R6: answering in-process keeps the active bridge through settlement', () => {

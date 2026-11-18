@@ -1,10 +1,7 @@
 /* Decide whether an exact steer-replay cut is safe for two Markdown segments. */
 
-import { Marked } from 'marked'
-import { mathTokens } from './mathTokens.js'
+import { md } from './markdownParser.js'
 
-const md = new Marked()
-md.use(mathTokens())
 const graphemeSegmenter = (
   typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
 )

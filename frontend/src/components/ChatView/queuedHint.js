@@ -1,4 +1,4 @@
-// The queued-tray caption must state the REAL reason a message is waiting.
+// Captions for a waiting owner message must state the REAL reason it waits.
 // The prior copy ("Will send after the current turn finishes") was hardcoded and
 // rendered even when no turn was active — e.g. a message queued while Möbius was
 // restarting — which read as "stuck". Kept pure and separate so this contract is

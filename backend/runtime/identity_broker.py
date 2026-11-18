@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ctypes
+import errno
 import hashlib
 import ipaddress
 import json
@@ -28,7 +30,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -37,13 +39,62 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 
+DEFAULT_LAUNCHER = "https://www.mobius.you"
+# A link, its pending enrollment and its sign-in attempts belong to one
+# launcher; the instance key and id are the same towards every launcher.
+LAUNCHER_FILES = ("identity.json", "pending-enrollment.jwt", "oauth-states.json")
+
+
+def _normalize_launcher(value: str) -> str:
+  """Normalize the case-insensitive scheme and authority of a launcher URL."""
+  value = value.strip().rstrip("/")
+  try:
+    parsed = urllib.parse.urlsplit(value)
+  except ValueError:
+    return value
+  return urllib.parse.urlunsplit((
+    parsed.scheme.lower(), parsed.netloc.lower(), parsed.path,
+    parsed.query, parsed.fragment,
+  ))
+
+
+def launcher_origin(environ: Mapping[str, str]) -> str:
+  """Return the launcher this instance links with.
+
+  Only the explicit MOBIUS_IDENTITY_ISSUER moves an instance off the default
+  launcher, so no existing installation changes launcher, or loses its link,
+  by updating.
+  """
+  configured = environ.get("MOBIUS_IDENTITY_ISSUER") or DEFAULT_LAUNCHER
+  return _normalize_launcher(configured)
+
+
+def launcher_file(private_dir: Path, name: str, launcher: str) -> Path:
+  """Return one launcher's own copy of a link file.
+
+  The default launcher keeps the historical names, so an existing link is
+  found unchanged. Any other launcher gets its own files: linking with it can
+  never overwrite, or be mistaken for, the default launcher's link.
+  """
+  if launcher == DEFAULT_LAUNCHER:
+    return private_dir / name
+  stem, _dot, suffix = name.rpartition(".")
+  digest = hashlib.sha256(launcher.encode("utf-8")).hexdigest()[:16]
+  return private_dir / f"{stem}.{digest}.{suffix}"
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 PRIVATE_DIR = DATA_DIR / "identity-broker"
+IDENTITY_BASE_URL = launcher_origin(os.environ)
 KEY_PATH = PRIVATE_DIR / "instance-ed25519.pem"
-STATE_PATH = PRIVATE_DIR / "identity.json"
+STATE_PATH = launcher_file(PRIVATE_DIR, "identity.json", IDENTITY_BASE_URL)
 INSTANCE_PATH = PRIVATE_DIR / "instance-id"
-PENDING_BOOTSTRAP_PATH = PRIVATE_DIR / "pending-enrollment.jwt"
-OAUTH_STATE_PATH = PRIVATE_DIR / "oauth-states.json"
+PENDING_BOOTSTRAP_PATH = launcher_file(
+  PRIVATE_DIR, "pending-enrollment.jwt", IDENTITY_BASE_URL
+)
+OAUTH_STATE_PATH = launcher_file(
+  PRIVATE_DIR, "oauth-states.json", IDENTITY_BASE_URL
+)
 SOCKET_PATH = Path(
   os.environ.get(
     "MOBIUS_IDENTITY_BROKER_SOCKET",
@@ -52,15 +103,12 @@ SOCKET_PATH = Path(
 )
 TCP_HOST = "127.0.0.1"
 TCP_PORT = int(os.environ.get("MOBIUS_IDENTITY_BROKER_PORT", "8765"))
-IDENTITY_BASE_URL = os.environ.get(
-  "MOBIUS_IDENTITY_ISSUER", "https://www.mobius.you"
-).rstrip("/")
 GATEWAY_BASE_URL = os.environ.get(
   # Keep the compute service independently deployable while routing it through
   # the launcher's existing public edge. A separate hostname added DNS and TLS
   # state without creating a useful trust boundary: request capabilities still
   # authenticate every exact gateway route.
-  "MOBIUS_AGENT_GATEWAY_URL", "https://www.mobius.you"
+  "MOBIUS_AGENT_GATEWAY_URL", IDENTITY_BASE_URL
 ).rstrip("/")
 CONTRIBUTION_BASE_URL = os.environ.get(
   "MOBIUS_CONTRIBUTION_RELAY_URL", IDENTITY_BASE_URL
@@ -93,6 +141,8 @@ MANAGED_UPSTREAM_POLICIES = (
 MANAGED_EXACT_ROUTES = frozenset({
   ("GET", "/api/instance/v1/agent"),
   ("POST", "/api/instance/v1/agent/trial"),
+  # The launcher issues this installation its own credits key.
+  ("POST", "/api/instance/v1/credits/key"),
   ("POST", "/api/instance/v1/railway/connect/start"),
   ("POST", "/api/instance/v1/railway/plan/refresh"),
 })
@@ -119,8 +169,9 @@ MANAGED_USER_AGENT = "mobius-managed-deployment/1"
 # 3 = standalone web search endpoint; 4 = flat gateway wire for Codex web.run;
 # 5 = account review routes; 6 = shared access; 7 = recipient invitation response;
 # 8 = native push relay routes; 9 = Railway inventory read options;
-# 10 = community listing sort; 11 = Railway display-only cost read option.
-BROKER_ROUTE_EPOCH = 11
+# 10 = community listing sort; 11 = Railway display-only cost read option;
+# 12 = managed credits key for one-tap credits pairing.
+BROKER_ROUTE_EPOCH = 12
 
 # Declarative public forwarding policy. Callers never supply a target URL,
 # audience, or arbitrary upstream path. Contribution and community routes are
@@ -531,9 +582,9 @@ def _reclaim_private_state_after_compat_chown() -> None:
   """Restore root ownership after the broad /data compatibility pass.
 
   Older official entrypoints make a persisted /data tree app-writable before
-  this root broker starts. Adopt only the broker's fixed, already-private state
-  files; reject links, unexpected owners, and permissive modes rather than
-  blessing an attacker-controlled path.
+  this root broker starts. Adopt only the broker's known, already-private state
+  files, including inactive per-launcher files; reject links, unexpected owners,
+  and permissive modes rather than blessing an attacker-controlled path.
 
   Each entry is validated and fixed up through a single descriptor. A
   concurrent app-user process can still swap a directory entry, but it can no
@@ -569,22 +620,35 @@ def _reclaim_private_state_after_compat_chown() -> None:
     ):
       raise RuntimeError("identity broker private directory is unsafe")
 
-    # These are fixed children of PRIVATE_DIR, so opening them by name relative
+    # These are known-name children of PRIVATE_DIR, so opening them relative
     # to the pinned directory keeps a rename of PRIVATE_DIR itself irrelevant.
-    for path in (
-      KEY_PATH,
-      STATE_PATH,
-      INSTANCE_PATH,
-      PENDING_BOOTSTRAP_PATH,
-      OAUTH_STATE_PATH,
-    ):
+    # The default launcher's files are reclaimed even while another launcher
+    # is active, so its link is never left writable by the application.
+    names = {
+      path.name for path in (
+        KEY_PATH,
+        STATE_PATH,
+        INSTANCE_PATH,
+        PENDING_BOOTSTRAP_PATH,
+        OAUTH_STATE_PATH,
+      )
+    } | set(LAUNCHER_FILES)
+    # The boot-wide ownership pass also touches inactive launcher files. They
+    # must be reclaimed before the broker scans them for matching issuers.
+    for name in os.listdir(dir_fd):
+      if any(
+        re.fullmatch(rf"{re.escape(stem)}\.[0-9a-f]{{16}}\.{re.escape(suffix)}", name)
+        for stem, suffix in (item.rsplit(".", 1) for item in LAUNCHER_FILES)
+      ):
+        names.add(name)
+    for name in sorted(names):
       try:
-        file_fd = os.open(path.name, open_flags, dir_fd=dir_fd)
+        file_fd = os.open(name, open_flags, dir_fd=dir_fd)
       except FileNotFoundError:
         continue
       except OSError as exc:
         raise RuntimeError(
-          f"identity broker file is unsafe: {path.name}"
+          f"identity broker file is unsafe: {name}"
         ) from exc
       opened.append((file_fd, 0o600))
       item = os.fstat(file_fd)
@@ -594,7 +658,7 @@ def _reclaim_private_state_after_compat_chown() -> None:
         or (item.st_uid, item.st_gid) not in allowed_owners
         or stat.S_IMODE(item.st_mode) & 0o077
       ):
-        raise RuntimeError(f"identity broker file is unsafe: {path.name}")
+        raise RuntimeError(f"identity broker file is unsafe: {name}")
 
     # Nothing is mutated until every entry has passed, so a rejected tree is
     # left exactly as found.
@@ -638,6 +702,76 @@ def _private_file_exists(path: Path) -> bool:
   ):
     raise RuntimeError(f"identity broker file is unsafe: {path.name}")
   return True
+
+
+def _recorded_launcher(name: str, path: Path) -> str | None:
+  """Return the launcher a link file says it was saved for, if it says."""
+  try:
+    text = path.read_text(encoding="utf-8").strip()
+    if name == "identity.json":
+      value, claim = json.loads(text), "issuer"
+    else:
+      value, claim = Broker._receipt_claims(text), "iss"
+  except (ValueError, UnicodeError):
+    return None
+  recorded = value.get(claim) if isinstance(value, dict) else None
+  return _normalize_launcher(recorded) if isinstance(recorded, str) else None
+
+
+def _rename_noreplace(source: Path, destination: Path) -> bool:
+  """Atomically move a file without replacing an existing destination.
+
+  Do not emulate this with link/unlink: a crash between those calls leaves a
+  hard link that the next boot's private-state validation must reject.
+  """
+  libc = ctypes.CDLL(None, use_errno=True)
+  try:
+    rename = libc.renameat2
+  except AttributeError:
+    log.warning("Atomic no-replace rename unavailable; leaving legacy file untouched")
+    return False
+  rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+  rename.restype = ctypes.c_int
+  # Linux AT_FDCWD and RENAME_NOREPLACE. Both files are in the private directory.
+  if rename(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+    return True
+  error = ctypes.get_errno()
+  if error == errno.EEXIST:
+    return False
+  if error in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+    log.warning("Atomic no-replace rename unsupported; leaving legacy file untouched")
+    return False
+  raise OSError(error, os.strerror(error), str(source), str(destination))
+
+
+def _adopt_historical_launcher_files() -> None:
+  """Adopt only an unambiguous matching legacy file, never replacing state.
+
+  Earlier per-launcher filenames hashed the configured URL's exact casing;
+  scan those names as well as the older unsuffixed name. Only identity and
+  receipt files identify their issuer, so OAuth attempts are not moved.
+  """
+  for name, own in (
+    ("identity.json", STATE_PATH),
+    ("pending-enrollment.jwt", PENDING_BOOTSTRAP_PATH),
+  ):
+    if _private_file_exists(own):
+      continue
+    stem, _, suffix = name.rpartition(".")
+    hashed_name = re.compile(rf"{re.escape(stem)}\.[0-9a-f]{{16}}\.{re.escape(suffix)}")
+    candidates = []
+    for path in PRIVATE_DIR.iterdir():
+      if path == own or (path.name != name and not hashed_name.fullmatch(path.name)):
+        continue
+      if _private_file_exists(path) and _recorded_launcher(name, path) == IDENTITY_BASE_URL:
+        candidates.append(path)
+    if len(candidates) > 1:
+      log.warning("Multiple matching legacy %s files; leaving them untouched", name)
+      continue
+    if not candidates:
+      continue
+    historical = candidates[0]
+    _rename_noreplace(historical, own)
 
 
 def _prepare_socket_dir() -> None:
@@ -695,6 +829,7 @@ class Broker:
     self.client = httpx.Client(timeout=30.0, follow_redirects=False)
     # Codex's opaque ref_ids are local to one search session, not a durable index.
     self.search_sessions: dict[str, dict[str, Any]] = {}
+    _adopt_historical_launcher_files()
     self.state = self._load_state()
 
   def close(self) -> None:
@@ -932,6 +1067,8 @@ class Broker:
       not isinstance(value, dict)
       or value.get("instance_id") != self.instance_id
       or value.get("key_thumbprint") != self.thumbprint()
+      or not isinstance(value.get("issuer"), str)
+      or _normalize_launcher(value["issuer"]) != IDENTITY_BASE_URL
     ):
       return None
     return value

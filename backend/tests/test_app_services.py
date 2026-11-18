@@ -948,7 +948,7 @@ def _assert_service_lineage(db, token, *, delegated):
 def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
   client, auth, db, monkeypatch, route, delegated,
 ):
-  from app import app_jobs
+  from app import app_jobs, key_vault
 
   target = _service_app(db, service_bytes=SERVICE_TOKEN)
   (runtime_parent(target.id) / target.runtime_revision / "job.sh").write_text("#!/bin/sh\nexit 0\n")
@@ -984,12 +984,21 @@ def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
   service_headers = {"Authorization": f"Bearer {token}"}
 
   # This real route reaches require_installation_owner_control through
-  # require_nondelegated_owner_or_app_control, without needing external I/O.
+  # require_nondelegated_owner_or_app_control. Its save goes to the key vault,
+  # which is stubbed so the gate, not vault I/O, decides the answer.
+  saved = []
+
+  async def save_app_key(app_id, install, name, value):
+    saved.append((app_id, name))
+    return name
+
+  monkeypatch.setattr(key_vault, "store_app_key", save_app_key)
   write = client.put(
     f"/api/apps/{target.id}/secrets/test-key", headers=service_headers,
     json={"value": "synthetic-test-value"},
   )
   assert write.status_code == (403 if delegated else 204), write.text
+  assert saved == ([] if delegated else [(target.id, "test-key")])
   _assert_service_lineage(db, token, delegated=delegated)
   # Exercise a direct installation-control gate too, without starting a job.
   job = client.post(f"/api/apps/{target.id}/run-job", headers=service_headers)
@@ -1191,8 +1200,8 @@ def test_public_invocation_cannot_spend_on_the_owners_providers(client, auth, db
   ).status_code == 403
   assert client.get("/api/app-chats", headers=public).status_code == 403
   assert client.get(
-    f"/api/apps/{app.id}/secrets/key", headers=public,
-  ).status_code == 403
+    "/api/keys/use/key/api.example.com/v1", headers=public,
+  ).status_code in (401, 403)
   # It keeps the few reads and notices a public service is reviewed to use.
   assert client.get("/api/apps/", headers=public).status_code == 200
   assert client.post(
@@ -2771,18 +2780,18 @@ async def test_http_scope_cancellation_drains_auth_before_session_cleanup(
       if entered.is_set():
         assert await asyncio.to_thread(finished.wait, 5)
 
-  # Cancellation can interrupt FastAPI's exception cleanup before __exit__,
-  # leaving get_db in a traceback cycle. Finalize it before checking ordering.
-  gc.collect()
-  if cancel_before_start:
-    assert not entered.is_set()
-  else:
-    assert finished.is_set() and closed.is_set()
   if outcome is None:
     assert scope.cancelled_caught
   else:
     assert dependency_error and isinstance(outcome, RuntimeError)
     assert str(outcome) == "authentication failed"
+
+  # The request closed its session before it finished unwinding, even though
+  # its exception and task still hold the traceback.
+  if cancel_before_start:
+    assert not entered.is_set()
+  else:
+    assert finished.is_set() and closed.is_set()
 
 
 DENSE_RESPONSE_SERVICE = b'''import json, sys

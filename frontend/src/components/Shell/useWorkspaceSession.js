@@ -26,16 +26,22 @@ function bootWorkspaceSnapshot(storage, legacyStorage) {
   return { raw: paneModel.readWorkspaceRaw(storage), source: storage }
 }
 
-export default function useWorkspaceSession({ storage, legacyStorage = null }) {
+export default function useWorkspaceSession({
+  storage, legacyStorage = null, recoveringFromCrash = false,
+}) {
   const [bootSnapshot] = useState(
     () => bootWorkspaceSnapshot(storage, legacyStorage),
   )
   const [workspaceState, dispatchWorkspaceRaw] = useReducer(
     paneModel.workspaceReducer,
     undefined,
-    () => paneModel.initialWorkspaceState(
-      paneModel.parseWorkspace(bootSnapshot.raw),
-    ),
+    () => {
+      const restored = paneModel.parseWorkspace(bootSnapshot.raw)
+      // Recover before the first render: a hidden frame still loads its app.
+      return paneModel.initialWorkspaceState(
+        recoveringFromCrash ? paneModel.withoutBootApps(restored) : restored,
+      )
+    },
   )
   const workspace = workspaceState.ws
   const blobValid = paneModel.isValidWorkspaceBlob(bootSnapshot.raw)

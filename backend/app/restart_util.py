@@ -9,7 +9,8 @@ Every restart routes through one DRAIN-GATED path (design §2.2): live turns are
 never simply killed. The worker first sets the ``draining`` gate (new sends
 queue), interrupts each live turn so it finalizes its partials + a "paused for a
 platform update" note WITHOUT touching the pending queue, then asks the frozen
-entrypoint supervisor to acknowledge the exact restart intent and cycle pid 1.
+entrypoint supervisor to acknowledge the exact restart intent and rerun the
+boot inside the container.
 A SIGKILL backstop still guarantees recovery if the handshake or shutdown
 wedges. Boot reconcile handles fallback markers and unacknowledged parks
 manually.
@@ -36,7 +37,8 @@ log = logging.getLogger("mobius.restart")
 # Grace after SIGTERM before the hard kill — the crash floor. uvicorn's graceful
 # shutdown blocks on the never-closing chat SSE stream, so without a hard-kill
 # fallback a plain SIGTERM hangs the worker in shutdown limbo: it stops serving
-# but never exits, so tini (PID 1) never exits and the container never restarts.
+# but never exits, so the boot never ends and no restart (in place or by the
+# host) can follow.
 _FORCE_KILL_AFTER_SECONDS = 5.0
 _CUTOVER_FAILSAFE_SECONDS = 90.0
 _RESTART_ADMISSION_LOCK = threading.Lock()
@@ -258,6 +260,20 @@ def _refuse_what_the_image_boot_refuses(platform_root: Path) -> None:
   )
 
 
+def _fail_this_boot(pid: int) -> None:
+  """End this boot as a failure, for a restart the root side never accepted.
+
+  Without an accepted handshake the container supervisor does not rerun the
+  boot in place. A SIGTERM stop would then reach the host as a clean exit
+  (``tini -e 143``), which Railway's default ``ON_FAILURE`` policy never
+  revives, leaving the instance down. SIGKILL ends the boot with 137, the same
+  status as the drain backstop, so every host restart policy replaces the
+  container. Callers have already drained, so a hard stop loses nothing a
+  graceful one would have saved.
+  """
+  os.kill(pid, signal.SIGKILL)
+
+
 def _claim_in_process_restart() -> bool:
   """Admit one Settings/platform/card restart for this worker lifetime.
 
@@ -352,13 +368,16 @@ async def restart_this_worker(
        nonce-stamped running row, which authenticated startup converts to the
        same due continuation state.
     4. Publish the exact intent + restart sentinel. The frozen root-owned
-       poller acknowledges it in the boot ledger, then SIGTERMs pid 1. If that
+       poller acknowledges it in the boot ledger, then asks the container
+       supervisor to rerun the boot in place. If that
        path wedges, the backstop force-exits the worker without an
-       acknowledgement, so the next boot recovers manually.
+       acknowledgement, so the next boot recovers manually. If the request
+       cannot be published at all, the worker ends its boot as a failure so
+       the host replaces the container.
 
   Data is safe: the chat writer commits before any response returns, and the
-  drain flushes each paused note before SIGTERM, so a hard kill loses nothing a
-  graceful drain would have saved.
+  drain flushes each paused note before the boot ends, so a hard kill loses
+  nothing a graceful drain would have saved.
   """
   # Last-chance defense for every caller, including future restart surfaces.
   # The synchronous owner-facing paths run this before acknowledging the
@@ -401,7 +420,7 @@ async def restart_this_worker(
       raise RuntimeError("entrypoint boot id is unavailable")
     # Publishing the sentinel is the only normal shutdown request. The frozen
     # root-owned entrypoint poller validates the matching intent, records its
-    # exact runs in the one-shot boot ledger, and then terminates pid 1.
+    # exact runs in the one-shot boot ledger, and then ends this boot.
     restart_ledger.request_restart(
       boot_id=boot_id,
       nonce=restart_nonce,
@@ -411,15 +430,15 @@ async def restart_this_worker(
       ready_path.write_text("ready\n", encoding="utf-8")
   except Exception:
     # Restart reliability and continuation authorization are independent.
-    # If the external handshake cannot be published, restart directly; the
-    # next boot has no root-owned acknowledgement and resolves every parked run
-    # to manual recovery.
+    # If the external handshake cannot be published, the host must replace the
+    # container; the next boot has no root-owned acknowledgement and resolves
+    # every parked run to manual recovery.
     log.warning(
       "planned-restart handshake failed; restarting without automatic "
       "continuation",
       exc_info=True,
     )
-    os.kill(pid, signal.SIGTERM)
+    _fail_this_boot(pid)
 
 
 async def prepare_container_cutover(
@@ -462,7 +481,7 @@ async def prepare_container_cutover(
         runs=restart_runs,
       )
     except Exception:
-      os.kill(os.getpid(), signal.SIGTERM)
+      _fail_this_boot(os.getpid())
     raise
 
   pid = os.getpid()
@@ -479,7 +498,7 @@ async def prepare_container_cutover(
         "abandoned container cutover could not self-recover",
         exc_info=True,
       )
-      os.kill(pid, signal.SIGTERM)
+      _fail_this_boot(pid)
 
   if abandoned_timeout is not None:
     watchdog = threading.Timer(abandoned_timeout, _recover_abandoned_cutover)

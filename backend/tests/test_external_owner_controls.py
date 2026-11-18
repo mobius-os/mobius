@@ -255,21 +255,18 @@ def test_delegated_bearer_cannot_add_connector(
   assert calls == []
 
 
-def test_delegated_bearer_cannot_write_app_secret(
+def test_delegated_bearer_cannot_manage_keys(
   client, owner_token, db,
 ):
-  auths, app_id = _external_control_auth(client, owner_token, db)
-  secret = client.put(
-    f"/api/apps/{app_id}/secrets/provider-key",
-    headers=auths["delegated"],
-    json={"value": "private-value"},
+  auths, _app_id = _external_control_auth(client, owner_token, db)
+  saved = client.put(
+    "/api/keys/provider-key", headers=auths["delegated"], json={"value": "private-value"},
   )
-  assert secret.status_code == 403, secret.text
-  deleted = client.delete(
-    f"/api/apps/{app_id}/secrets/provider-key",
-    headers=auths["delegated"],
-  )
+  assert saved.status_code == 403, saved.text
+  deleted = client.delete("/api/keys/provider-key", headers=auths["delegated"])
   assert deleted.status_code == 403, deleted.text
+  approved = client.post("/api/keys/requests/1-k/approve", headers=auths["delegated"], json={})
+  assert approved.status_code == 403, approved.text
 
 
 def test_delegated_bearer_cannot_create_paired_host(
@@ -296,6 +293,12 @@ def test_delegated_bearer_cannot_create_paired_host(
     headers=auths["delegated"],
   )
   assert pairing.status_code == 403, pairing.text
+  renamed = client.patch(
+    "/api/connect/hosts/h_missing",
+    headers=auths["delegated"],
+    json={"name": "Production"},
+  )
+  assert renamed.status_code == 403, renamed.text
   assert calls == []
 
 
@@ -364,11 +367,14 @@ def test_owner_top_level_and_scoped_app_keep_review_control_boundaries(
     lambda _repo_path, *args, **_kwargs: calls.append(args) or "{}",
   )
 
+  # Pause reaches the route for all three. Switching following on where no
+  # grant exists is the owner's own confirmation, so it is covered separately
+  # (test_contribution_follow.py).
   for actor in ("owner", "top_level", "app"):
     toggled = client.post(
       f"/api/github/contributions/{app_id}/missing-record/autopilot",
       headers=auths[actor],
-      json={"enabled": True},
+      json={"enabled": False},
     )
     assert toggled.status_code == 404, (actor, toggled.text)
 
@@ -422,13 +428,6 @@ def test_owner_top_level_agent_and_scoped_app_keep_scoped_connection_controls(
       },
     )
     assert added.status_code == 201, (actor, added.text)
-
-    secret = client.put(
-      f"/api/apps/{app_id}/secrets/provider-key",
-      headers=auths[actor],
-      json={"value": f"private-{actor}"},
-    )
-    assert secret.status_code == 204, (actor, secret.text)
 
     host = client.post(
       "/api/connect/hosts",

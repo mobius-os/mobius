@@ -1,6 +1,6 @@
 """FastAPI dependency functions."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from urllib.parse import urlparse
 
 from fastapi import Depends, Header, HTTPException, Request
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
+from app.agent_roles import AgentKey, confined_role_for_app
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -94,10 +95,18 @@ class Principal:
   JWT claim), never for the app's browser-frame bearer or a public invocation. It lets a route trust that the
   caller is the app's reviewed backend code, not its untrusted frame, without
   granting it anything beyond `app_id`'s existing app-scoped authority.
+
+  `app_is_public_service` is set only by `get_principal_or_public_service`,
+  for the app's service answering an anonymous visitor. Every other resolver
+  refuses that lane, so a route reading it already chose to admit visitors.
   """
   owner: models.Owner
   app_id: int | None
   app_instance_id: str | None = None
+  # The installation (``App.install_id``) of the row an app token's nonce was
+  # checked against; None for any other caller and for a token that names no
+  # nonce. The key vault matches app callers by it (routes/keys.py).
+  app_install_id: str | None = None
   scope: str = "owner"
   chat_id: str | None = None
   run_id: str | None = None
@@ -112,10 +121,12 @@ class Principal:
   # Kept apart from chat_id, which an app caller never has.
   via_agent_chat: str | None = None
   app_is_service: bool = False
-  # Signed supervised-job identity/grant; never copied into frame bearers.
-  app_job_secrets: frozenset[str] = frozenset()
+  app_is_public_service: bool = False
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
+  # Set for the key of one confined app agent run: the role, tools and
+  # provider its room was built for (agent_roles.AgentKey).
+  app_agent: AgentKey | None = None
 
   @property
   def browser_grant_id(self) -> str | None:
@@ -492,11 +503,11 @@ def authorize_current_owner_detached(
     db.close()
 
 
-def _enforce_app_scope(payload: dict, db: Session) -> int | None:
-  """Validates an app-scoped token's app identity; returns its app_id.
+def _enforce_app_scope(payload: dict, db: Session) -> models.App | None:
+  """Validates an app-scoped token's app identity; returns its app row.
 
-  Returns the int app_id for an app-scoped token, or None for an owner
-  token. Raises 401 when the token is app-scoped but:
+  Returns the live app row an app-scoped token was checked against, or None
+  for an owner token. Raises 401 when the token is app-scoped but:
     - it carries no integer app_id (malformed — it would otherwise read
       as an owner caller downstream), or
     - the app no longer exists (uninstalled: the token must stop working
@@ -534,7 +545,12 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
   if not app_consent.session_valid(app, payload.get("consent")):
     raise HTTPException(status_code=401, detail="App has not been approved.")
-  return app_id
+  key = AgentKey.from_claims(payload)
+  if key is not None and not key.matches(confined_role_for_app(app)):
+    # A narrower role (or none) applies from the next request of a run that
+    # started under a wider one, not from its next run.
+    raise HTTPException(status_code=401, detail="This app's agent access has changed.")
+  return app
 
 
 def _enforce_chat_embed_scope(
@@ -745,11 +761,14 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
   # error or dropping the caller's restrictions. Refuse it at resolution.
   if (payload.get("delegation_id") is None) != (payload.get("delegation_chat") is None):
     raise HTTPException(status_code=401, detail="Incomplete delegation lineage.")
-  app_id = _enforce_app_scope(payload, db)
+  app = _enforce_app_scope(payload, db)
+  app_id = app.id if app is not None else None
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    # Only a token bound to its installation's nonce names the installation.
+    app_install_id=app.install_id if app is not None and payload.get("app_nonce") is not None else None,
     scope="app" if app_id is not None else "owner",
     # App tokens retain the initiating helper's restrictions, never its agent
     # identity. Consumers of chat_id/run_id must not mistake an app for it.
@@ -760,7 +779,7 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     via_agent_chat=payload.get("via_agent_chat") if app_id is not None else None,
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
-    app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
+    app_agent=AgentKey.from_claims(payload) if app_id is not None else None,
   )
 
 
@@ -778,9 +797,10 @@ def get_principal_or_public_service(
   resolve through here, where it is an ordinary app caller.
   """
   owner, payload = _resolve_owner(token, db)
-  if payload.get("scope") == auth.PUBLIC_SERVICE_SCOPE:
-    payload = {**payload, "scope": "app"}
-  return _generic_principal(owner, payload, db)
+  if payload.get("scope") != auth.PUBLIC_SERVICE_SCOPE:
+    return _generic_principal(owner, payload, db)
+  principal = _generic_principal(owner, {**payload, "scope": "app"}, db)
+  return replace(principal, app_is_public_service=principal.app_id is not None)
 
 
 def require_nondelegated_owner_control(principal: Principal) -> None:
@@ -835,11 +855,60 @@ def acts_for_guest(principal: Principal) -> bool:
   return principal.browser is not None
 
 
+def is_installation_owner_control(principal: Principal) -> bool:
+  """Whether this bearer may use installation-owner controls: the owner or the
+  owner's own top-level agent, never a delegated helper or a shared-browser
+  guest (or work one started). The non-raising form of
+  ``require_installation_owner_control``, for reads that stay private by
+  returning nothing rather than refusing."""
+  return principal.delegation_id is None and not acts_for_guest(principal)
+
+
+def refuse_app_agent(principal: Principal, action: str) -> None:
+  """A confined app agent's key reaches only the routes its declared tools open
+  (agent_roles.AgentKeyScope). A route that hands out keys or secrets refuses
+  it itself too, so a looser allow-list can never open it by accident."""
+  if principal.app_agent is not None:
+    raise HTTPException(status_code=403, detail=f"An app's agent cannot {action}.")
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
+  if is_installation_owner_control(principal):
+    return
+  # A delegated helper and a shared-browser guest are refused separately so each
+  # learns which boundary it hit.
   require_nondelegated_owner_control(principal)
-  if acts_for_guest(principal):
-    raise HTTPException(403, "Only the installation owner can manage this access.")
+  raise HTTPException(403, "Only the installation owner can manage this access.")
+
+
+def require_owner_or_full_access_control(
+  principal: Principal = Depends(get_principal),
+) -> None:
+  """``require_installation_owner_control``, or a shared-browser guest (or
+  their top-level work) whose grant has Full access, read on every request.
+
+  The only gate Full access lifts, on routes a test pins (see the Full
+  access rule in ARCHITECTURE.md). No route on it may mint or use a
+  credential, spend or choose the owner's credit or provider, make the
+  owner's own decision, manage sharing, forge the owner's records, or start
+  work under the owner's lineage that would outlive the grant. A delegated
+  helper's bearer never passes it."""
+  if principal.delegation_id is None and principal.browser is not None:
+    with SessionLocal() as db:
+      if browser_access.has_full_access(db, principal.browser, principal.owner.id):
+        return
+  require_installation_owner_control(principal)
+
+
+def get_current_owner_for_full_access_control(
+  principal: Principal = Depends(get_principal),
+) -> models.Owner:
+  """``get_current_owner_for_lifecycle_control`` behind
+  ``require_owner_or_full_access_control``."""
+  owner = _owner_principal_or_403(principal)
+  require_owner_or_full_access_control(principal)
+  return owner
 
 
 def get_owner_or_delegated_owner_for_app_token(
@@ -918,8 +987,16 @@ def get_agent_run_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve the owner bearer minted for one exact physical agent run."""
+  """Resolve the bearer minted for one exact physical agent run.
+
+  A confined app agent's key is one too, bound to its app's own chat. The key
+  allow-list (agent_roles.AgentKeyScope) decides which of these run-bound
+  routes it reaches: the ones its app's declared tools name.
+  """
   principal = get_principal(token, db)
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   if (
     principal.scope != "owner"
     or principal.app_id is not None
@@ -965,6 +1042,10 @@ def get_delegation_principal(
       status_code=403,
       detail="Delegated app tokens cannot act as helper agents.",
     )
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    # A confined app agent steers only its own chat's helpers.
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   return principal
 
 
@@ -1486,12 +1567,22 @@ def _contract_data(app: models.App) -> dict:
   return data if isinstance(data, dict) else {}
 
 
+def app_manages_credits(app: models.App) -> bool:
+  """Whether the app holds an accepted ``credits_manage`` grant, so a charge
+  answer may still reveal the owner's balance to it. Only a Store app's
+  accepted first-open consent grants it; a local app that merely declares it
+  is a spend-only payer."""
+  return (_contract_data(app).get("credits_manage") is True
+          and app_consent.gated(app) and app_consent.status(app) == "accepted")
+
+
 def _require_credits_app_consent(app: models.App) -> None:
   """Local manifests never self-grant access to the owner's credits.
 
   Use the same Store/consent boundary as first-open approval, not package
   identity: local apply can copy these permissions into a contract without
-  ever showing the owner a consent card.
+  ever showing the owner a consent card. So ``credits_manage`` is Store-only:
+  a local app never gets it, whatever its manifest declares.
   """
   if not app_consent.gated(app) or app_consent.status(app) != "accepted":
     raise HTTPException(
@@ -1506,6 +1597,19 @@ def spend_credits_targets(app: models.App) -> list[str]:
   return [t for t in targets if isinstance(t, str)] if isinstance(targets, list) else []
 
 
+def spend_credits_allows(app: models.App, seller: str, priced_app: str) -> bool:
+  """Whether the owner allowed this app to pay ``seller``'s ``priced_app``.
+
+  ``"*/<app>"`` allows every creator of that app name, as a marketplace needs.
+  ``*`` is that wildcard only in the grant: no creator is literally named
+  ``*``, so a charge naming that seller is never allowed.
+  """
+  if seller == "*":
+    return False
+  targets = spend_credits_targets(app)
+  return f"{seller}/{priced_app}" in targets or f"*/{priced_app}" in targets
+
+
 def get_credits_spender(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
@@ -1517,8 +1621,8 @@ def get_credits_spender(
   and never a public invocation (``get_principal`` refuses that scope), whose
   caller is a visitor. A service a shared-browser guest or delegated helper
   invoked is refused too: neither may spend the installation owner's credits.
-  Only consent-gated Store apps qualify. The route then refuses a seller the
-  accepted grant does not name.
+  The route then refuses a seller the grant does not name, and holds every
+  charge for the owner's Pay.
   """
   require_nondelegated_owner_control(principal)
   if principal.app_id is None or not principal.app_is_service:
@@ -1534,13 +1638,62 @@ def get_credits_spender(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  _require_credits_app_consent(app)
+  # A Store app's first-open consent covers its spending. A local app needs
+  # no standing grant just to spend: every charge waits for the owner's Pay
+  # (credits_confirmations). It never manages credits, even if it asks to.
+  if app_consent.gated(app):
+    _require_credits_app_consent(app)
   if not spend_credits_targets(app):
     raise HTTPException(
       status_code=403,
       detail=(
         "This app needs permissions.spend_credits in its manifest, listing the "
         "\"<seller>/<app>\" it pays for, to spend credits."
+      ),
+    )
+  return app
+
+
+def credits_charge_apps(app: models.App) -> list[str]:
+  """The owner's priced apps whose charges this app may check."""
+  apps = _contract_data(app).get("check_credits_charges")
+  return [a for a in apps if isinstance(a, str)] if isinstance(apps, list) else []
+
+
+def get_credits_receipt_reader(
+  principal: Principal = Depends(get_principal_or_public_service),
+  db: Session = Depends(get_db),
+) -> models.App:
+  """An app service that checks sales of the apps its ``check_credits_charges``
+  grant names, on either lane.
+
+  Checking a charge moves no money, and the caller that most needs it is the
+  public lane: a marketplace answering a visitor who says they paid. So,
+  unlike ``get_credits_spender``, a service a delegated helper or a
+  shared-browser guest invoked may check one too. The browser frame stays
+  excluded, as for every credits action. A Store app's token resolves only
+  under its accepted consent (``app_consent.session_valid``), so the owner has
+  seen this grant's row. A local app's manifest is the owner's own, and the
+  read is limited to payments made to this owner for the apps it names
+  (``credits_client.own_sale_receipt``), so it may check one without managing
+  credits.
+  """
+  if principal.app_id is None or not (
+    principal.app_is_service or principal.app_is_public_service
+  ):
+    raise HTTPException(
+      status_code=403,
+      detail="Only an app's own service can check a credits charge.",
+    )
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  if not credits_charge_apps(app):
+    raise HTTPException(
+      status_code=403,
+      detail=(
+        "This app needs permissions.check_credits_charges in its manifest, "
+        "listing the priced apps whose charges it checks."
       ),
     )
   return app
@@ -1554,7 +1707,8 @@ def get_credits_price_reader(
 
   A paying app reads the seller's published price to show the owner before it
   charges. Prices are public at the credits service, so reading one grants no
-  spending or account authority and needs no credits-management grant.
+  spending or account authority and needs no credits-management grant. A
+  local app therefore reads them unasked; each charge waits for the owner's Pay.
   """
   owner = principal.owner
   if principal.app_id is None:
@@ -1562,8 +1716,9 @@ def get_credits_price_reader(
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")
-  _require_credits_app_consent(app)
-  if _contract_data(app).get("credits_manage") is True or spend_credits_targets(app):
+  if app_consent.gated(app):
+    _require_credits_app_consent(app)
+  if app_manages_credits(app) or spend_credits_targets(app):
     return owner
   raise HTTPException(
     status_code=403,

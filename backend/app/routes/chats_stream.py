@@ -196,17 +196,78 @@ async def _send_queue(
   })
 
 
-def _delegation_manages_chat(db: Session, chat_id: str) -> bool:
-  """Return whether a parent delegation owns this chat's send lifecycle.
+def _managing_delegation(db: Session, chat_id: str):
+  """The delegation (``id``, ``parent_chat_id``) that owns this chat, if any.
 
   Keep the send gate beside the route that enforces it. Delegation policy
   loading is intentionally a separate concern and may evolve independently;
   this guard only needs the durable ownership row already available through
-  the request session.
+  the request session. The chat detail reads the same row, so a helper's
+  recovery card and its send refusal can never disagree about ownership.
   """
-  return db.query(models.Delegation.id).filter(
+  return db.query(
+    models.Delegation.id, models.Delegation.parent_chat_id,
+  ).filter(
     models.Delegation.child_chat_id == chat_id,
-  ).first() is not None
+  ).limit(1).first()
+
+
+def _delegation_manages_chat(db: Session, chat_id: str) -> str | None:
+  """The parent chat whose delegation owns this chat's send lifecycle, if any."""
+  row = _managing_delegation(db, chat_id)
+  return row.parent_chat_id if row is not None else None
+
+
+def _owner_chat_above(db: Session, chat_id: str, parent_chat_id: str) -> str | None:
+  """The nearest live chat above a helper that accepts owner messages.
+
+  A nested helper's parent is itself a helper chat and refuses owner sends
+  too, so walk the delegation rows up to the first chat no delegation owns.
+  A cycle or a deleted chat yields None: there is nowhere useful to link.
+  """
+  seen = {chat_id}
+  while parent_chat_id not in seen:
+    seen.add(parent_chat_id)
+    above = _delegation_manages_chat(db, parent_chat_id)
+    if above is None:
+      live = db.query(models.Chat.id).filter(
+        models.Chat.id == parent_chat_id,
+        models.Chat.deleted_at.is_(None),
+      ).first()
+      return parent_chat_id if live is not None else None
+    parent_chat_id = above
+  return None
+
+
+def helper_chat_ref(db: Session, chat_id: str) -> dict | None:
+  """A helper chat's delegation and the nearest chat the owner can write in.
+
+  Recovery retries that exact delegation; every other action belongs to the
+  parent, which the card links exactly as the send refusal does.
+  """
+  row = _managing_delegation(db, chat_id)
+  if row is None:
+    return None
+  return {
+    "delegation_id": row.id,
+    "parent_chat_id": _owner_chat_above(db, chat_id, row.parent_chat_id),
+  }
+
+
+def _delegation_managed_conflict(
+  db: Session, chat_id: str, parent_chat_id: str,
+) -> HTTPException:
+  # A helper chat is messaged through its parent (message_agent), never
+  # directly, so the refusal names that route and, when it can, links the
+  # chat where the owner can actually write.
+  detail = {
+    "code": "delegation_managed",
+    "message": "This is a helper's chat. Message it from its parent chat.",
+  }
+  owner_chat_id = _owner_chat_above(db, chat_id, parent_chat_id)
+  if owner_chat_id is not None:
+    detail["parent_chat_id"] = owner_chat_id
+  return HTTPException(status_code=409, detail=detail)
 
 
 def _pending_question_open_conflict() -> HTTPException:
@@ -245,16 +306,17 @@ def _selected_model_for_chat(
 def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
   provider = chat.provider or "claude"
-  # A model selected on this exact pristine chat is more specific than the
-  # owner's latest global pick. This occurs when an app/test/API client creates
-  # an empty chat and then chooses its model before the first send. Re-routing
-  # it to an unrelated global provider makes the explicit model invalid and
-  # rejects the turn. Ordinary newly-created owner chats carry no per-chat
-  # model, so they still follow the latest owner selection below.
+  # A model saved on the chat is more specific than the owner's latest global
+  # pick. New owner chats snapshot their model at creation, and an app, test or
+  # API client may choose one before the first send. Re-routing it to an
+  # unrelated global provider makes the model invalid and rejects the turn. A
+  # saved model this process does not know yet (a discovered id after a
+  # restart) stays with the provider saved beside it. Only a chat with no model
+  # of its own follows the latest owner selection below.
   chat_settings = coerce_agent_settings(chat.agent_settings_json) or {}
-  explicit_provider = provider_of_model(chat_settings.get("model"))
-  if explicit_provider is not None:
-    return explicit_provider
+  model = chat_settings.get("model")
+  if isinstance(model, str) and model.strip():
+    return provider_of_model(model, preferred=provider) or provider
   # StartTurn alone re-reads the owner's latest provider for a pristine owner
   # chat. Queued, draining, app-owned, and already-started chats keep their
   # durable provider, so the model check must evaluate against that same value.
@@ -862,15 +924,16 @@ async def _send_message_impl(
   is_card_answer = bool(body.answers or body.selected_options)
   if not is_card_answer:
     require_nondelegated_owner_control(principal)
-  # The disk floor protects the whole installation, so only its owner may
-  # lift it: never a shared-browser guest, an app, an embed or an agent.
+  # The disk and process floors protect the whole installation, so only its
+  # owner may lift them: never a shared-browser guest, an app, an embed or an
+  # agent.
   if body.allow_low_storage and (
     principal.scope != "owner" or principal.browser is not None
     or not is_owner_input_principal(principal)
   ):
     raise HTTPException(
       status_code=403,
-      detail="Only the installation owner can continue below the storage floor.",
+      detail="Only the installation owner can continue past a resource floor.",
     )
   chat = get_active_chat_for_principal(db, chat_id, principal)
   agent_exact_retry = False
@@ -1122,14 +1185,9 @@ async def _send_message_impl(
         "message": "Clear the Goal from its confirmed × control instead.",
       },
     )
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
   # AskUserQuestion answer delivery. If a live SDK turn is blocked waiting for
   # the answer (held in `questions._pending[chat_id]`), persist through the
   # writer actor, then resolve the future in-place and return — the SDK
@@ -1148,6 +1206,13 @@ async def _send_message_impl(
     # input. Only the sealed consumer may queue their fixed safe outcome.
     if questions.is_secure_question(chat, body.question_id):
       raise HTTPException(409, detail="Use the secure input card to respond.")
+    # A key card records an answer the owner already gave the vault.
+    key_card = questions.saved_question(chat, body.question_id)
+    if key_card and key_card.get("key_request"):
+      if body.attachments:
+        raise HTTPException(409, detail="A key request can't take files.")
+      from app import key_request_cards
+      await key_request_cards.check_answer(key_card, body.selected_options)
     # Snapshot the Stop tombstone BEFORE waiting on the queue lock. A Stop
     # that lands after this request began must still win the race (410); a
     # Stop that had already completed is different: pressing Submit afterward
@@ -1491,14 +1556,9 @@ async def _send_message_locked(
     return duplicate
   await sweep_expired_uploads(db, chat, attachment_names(body.attachments))
 
-  if _delegation_manages_chat(db, chat_id):
-    raise HTTPException(
-      status_code=409,
-      detail={
-        "code": "delegation_managed",
-        "message": "This evaluator chat is managed by its parent workflow.",
-      },
-    )
+  managing_parent = _delegation_manages_chat(db, chat_id)
+  if managing_parent is not None:
+    raise _delegation_managed_conflict(db, chat_id, managing_parent)
 
   if body.continuation == "manual" and principal.app_id is not None:
     raise HTTPException(

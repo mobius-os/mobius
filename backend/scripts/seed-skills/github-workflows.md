@@ -50,6 +50,12 @@ preflight; do not demand a duplicate approval click. Changed head/base,
 model, prompt or scope needs a new preview and, when consent was pinned to the
 old version, a fresh decision.
 
+`--options` takes only the editable prompts (`review_prompt`, `merge_prompt`,
+plus `fix_prompt` and `max_rounds` in `review_fix_merge`) and the opt-ins
+`post_review` and `propose_verdict`. `presets` also
+returns `mandatory_instructions` for display; the platform sets those itself,
+so pass only the fields you change, never the whole presets object.
+
 `review_merge` needs `--options` with `{"post_review": true,
 "propose_verdict": true}`: it merges only after the owner submits the
 proposed approval. A takeover of someone else's PR needs `--takeover-reason`
@@ -81,7 +87,9 @@ Repeating the same saved request returns its existing run.
 
 ## Execute the returned run
 
-Follow the returned `brief` and exact selected heads. The parent reports
+Follow the returned `brief` and exact selected heads. The owner's review
+prompt decides whether independent review children are used; review alone
+when it says so. The parent reports
 `/outcomes` with full-diff evidence and all six scope values. `review` records
 historical evidence against its pinned head/base even when the target base
 later moves; only `review_merge` requires live base proof. The guarded merge
@@ -128,6 +136,32 @@ it, through the same guarded path. If GitHub refuses it, it waits for the
 owner. It is never available for `review_merge`, whose merge always follows
 the owner's own approval.
 
+Only the owner can turn it on, by choosing "Agent posts" in Contribute's
+review window. An agent's preview or start that asks for it is refused
+(403), whatever the owner said in chat and whatever an earlier run was
+granted: start the review with `propose_verdict` alone, so its verdict waits
+for the owner's Send in Contribute. When a review could not be sent because
+the PR moved, say so and let the owner start the next one there.
+
+In a run that has it, send the verdict: that choice is the owner's approval,
+so do not show the text or ask in chat first. In a run without it, the
+proposal waits in Contribute; do not ask in chat there either.
+
+A result is a finished review. While review work you can still do remains,
+keep working: do not report an outcome, end the turn or call the review
+incomplete, and never treat the size of the change, time or effort as a
+blocker. Only an obstacle outside your control (missing access, a tool that
+keeps failing, an unreadable PR, a question only the owner can answer) ends a
+review early: report `needs_you` with `"blocked": "<the exact obstacle>"` and
+without `publish`. A blocked result is never a verdict and cannot be posted;
+the owner sees that the review did not finish and why. In a review that
+publishes, a private `needs_you` without `blocked` is refused (422).
+
+Ask for changes only when a finding must be fixed before the PR merges. When
+every finding is a small note, add `"blocking": false` to the `needs_you`
+outcome: the proposal is then a plain COMMENT with the same findings, never a
+change request. `blocking` is frozen with the rest of the evidence.
+
 On the connected account's own PR nothing is proposed or posted, whatever
 the grant says: the result stays private for the owner to fix or set aside.
 Once posting is armed the recorded verdict and evidence are immutable;
@@ -142,7 +176,7 @@ Private evidence fields accept up to 200,000 characters each. The public copy
 is bounded conservatively to 65,536 UTF-16 units with explicit omission
 markers; the full accepted private evidence is retained.
 
-For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. For a verdict-proposal grant, send `publish: true` whenever the result is a verdict, findings that need changes included: it saves a proposal that posts nothing until the owner submits it in Contribute (or, when the owner chose that up front, until the server submits it at once). Owner questions and blocked verification use `publish: false` (the default), remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
+For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. For a verdict-proposal grant, send `publish: true` whenever the result is a verdict, findings that need changes included: it saves a proposal that posts nothing until the owner submits it in Contribute (or, when the owner chose that up front, until the server submits it at once). Owner questions and blocked verification use `publish: false` (the default) with `"blocked"` naming the obstacle, remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
 
 ## Scoped repair and independently reviewed successors
 
@@ -158,11 +192,13 @@ Read the run's returned brief. The parent alone calls `/repair-checkout` and
 `/repairs`; independent reviewers are admitted through `/reviewers`, inherit
 the parent's Goal, and report exact head/base evidence through
 `/independent-reviews`. A repair author cannot supply their independent review.
-Each exact head and base admits one reviewer and one verdict: `/reviewers`
-returns that same reviewer again and a second report is refused, so a
-needs_you verdict cannot be replaced by asking another reviewer. Continue only
-through a new repair (a new head), an observed target-base advance, or a new
-owner grant.
+Each exact head and base admits one verdict: `/reviewers` returns that same
+reviewer again and a second report is refused. The one exception is a reviewer
+that ended in error without reporting: `/reviewers` then cancels it and starts a
+replacement (at most 3 attempts). A live, paused, stopped or finished reviewer
+is never replaced, and once a receipt exists its needs_you verdict cannot be
+replaced by asking another reviewer. Continue only through a new repair (a new
+head), an observed target-base advance, or a new owner grant.
 
 `/repairs` validates the repair from its server checkout and saves it as a
 *proposal* (`repair_attempts` entry with state `proposed`: the head before,
@@ -183,7 +219,10 @@ neither may the agent.
 
 Edit only the server-provided checkout and frozen file scope. Ordinary
 fast-forward commits and one merge of the fetched `refs/mobius/target-base`
-are supported; never rebase or force-push. A moved target base requires fresh
+are supported; never rebase or force-push. Every repair commit, the merge
+included, ends with the trailer
+`Co-authored-by: Möbius Agent <mobius-agent@users.noreply.github.com>`;
+`/repairs` refuses a commit without it. A moved target base requires fresh
 independent review of the new combined result, not reuse of old evidence.
 
 The dedicated checkout protects cooperative agents from accidental scope

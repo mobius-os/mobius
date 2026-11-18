@@ -5,6 +5,7 @@
    fails it stays an ordinary code block. */
 
 import { safeSourceUrl } from '../messageSources.js'
+import { settingsDeepLink } from '../../../lib/settingsSections.js'
 
 // Units: every text bound is a JavaScript string length (UTF-16 code units).
 // An intent is `kind:payload` where kind is 1-32 lowercase characters and the
@@ -123,6 +124,9 @@ export function appBlockFromToken(token) {
     // same value-only facts (labels for assistive technology). Without it an
     // app's confirmation keeps visible labels, as before.
     confirmFacts: value.confirm_facts === 'values' ? 'values' : '',
+    // Compact cards place their title/status beside the action, without an
+    // extra header or app-opening link. Row links remain available.
+    statusPlacement: value.status_placement === 'footer' ? 'footer' : '',
     height: typeof value.height === 'number' && Number.isFinite(value.height)
       ? Math.max(240, Math.min(640, value.height)) : 480,
   }
@@ -142,15 +146,18 @@ export function blockItems(block) {
 }
 
 /** A transcript is not a workspace navigation owner or a chat-control
- *  authority, so an embedded view may only open a conversation or an app.
- *  Hidden session canvases get no host-request handler at all (AppCanvas
- *  refuses their requests). */
+ *  authority, so an embedded view may only open a destination: a
+ *  conversation, an app, or a Settings section (which only navigates; every
+ *  action there stays the owner's). Hidden session canvases get no
+ *  host-request handler at all (AppCanvas refuses their requests). */
 export function transcriptHostRequest(request, { navigate }) {
   if (request?.type === 'moebius:open-chat' && request.chatId) {
     navigate(`/shell/?${new URLSearchParams({ chat: request.chatId })}`)
   } else if (request?.type === 'moebius:open-app' && request.appId) {
     navigate(`/shell/?${new URLSearchParams({ app: request.appId, ...(request.intent ? { intent: request.intent } : {}) })}`)
+  } else if (request?.type === 'moebius:open-settings') {
+    navigate(settingsDeepLink(request.section))
   } else {
-    throw new Error('Open the app to use workspace controls. This transcript view can only open conversations and apps.')
+    throw new Error('Open the app to use workspace controls. This transcript view can only open conversations, apps and Settings.')
   }
 }

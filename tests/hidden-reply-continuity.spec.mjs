@@ -1,4 +1,5 @@
-/** Replies preserve continuous prose and own one safe, draft-independent footer. */
+import { expectComposerValue } from './_composer.mjs'
+/** Replies preserve prose and each complete answer owns one draft-independent footer. */
 import { test, expect } from '@playwright/test'
 import { attachCleanup, createTaggedChat } from './_chatTracker.mjs'
 import { checkHiddenReplyContinuity } from './_replyContinuityFixture.mjs'
@@ -18,6 +19,11 @@ for (const provider of ['claude', 'codex', 'mobius', 'responses']) {
   })
 }
 
+// Playwright's visibility ignores opacity, and the footer is transparent at
+// rest (still focusable), so these read its computed opacity.
+const footerOpacity = reply => reply.locator('.chat__msg-meta--start')
+  .evaluate(el => getComputedStyle(el).opacity)
+
 test.describe('reply footer', () => {
   test('Copy writes the answer as shown, with its Markdown for the composer', async ({ page }) => {
     await page.addInitScript(() => {
@@ -36,6 +42,7 @@ test.describe('reply footer', () => {
       + '| Plan | Price |\n|---|---|\n| Pro | \\$5 |\n\n```\nnpm test\n```'
     const f = await mountReplyFooter(page, BASE, { latestAnswer })
     await f.composer.fill('Keep my unfinished message')
+    await f.replies.last().hover()
     await f.replies.last().getByRole('button', { name: 'Copy message' }).click()
     await expect(f.replies.last().getByRole('button', { name: 'Copied' })).toBeVisible()
     const [copied] = await page.evaluate(() => window.__copied)
@@ -43,37 +50,66 @@ test.describe('reply footer', () => {
       'Result\n\nIt costs $5 — see the docs.\n\nPlan\tPrice\nPro\t$5\n\nnpm test')
     expect(decodeURIComponent(copied['text/html'].match(/data-mobius-markdown="([^"]*)"/)[1]))
       .toBe(latestAnswer)
-    await expect(f.composer).toHaveValue('Keep my unfinished message')
+    await expectComposerValue(f.composer, 'Keep my unfinished message')
   })
 
   for (const state of ['settled', 'running', 'pendingQuestion']) {
     test(`a ${state} conversation keeps footer actions only where appropriate`, async ({ page }) => {
       const f = await mountReplyFooter(page, BASE, state === 'settled' ? {} : { [state]: true })
-      const copy = f.replies.last().getByRole('button', { name: 'Copy message' })
-      if (state === 'running') await expect(copy).toBeHidden()
-      else await expect(copy).toBeVisible()
+      const latest = f.replies.last()
+      const copy = latest.getByRole('button', { name: 'Copy message' })
+      if (state === 'running') await expect(copy).toHaveCount(0)
+      else {
+        await expect.poll(() => footerOpacity(latest)).toBe('0')
+        await latest.hover()
+        await expect.poll(() => footerOpacity(latest)).toBe('1')
+        await expect(copy).toBeVisible()
+      }
       await expect(f.replies.getByRole('button', { name: 'Try again', includeHidden: true })).toHaveCount(0)
     })
   }
 
-  test('older reply actions reveal on tap, never on hover', async ({ page }) => {
+  test('each completed answer keeps its own footer and copies only that answer', async ({ page }) => {
+    await page.addInitScript(() => {
+      window.__copied = []
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        async write(items) {
+          for (const item of items) {
+            const blob = await item.getType('text/plain')
+            window.__copied.push(await blob.text())
+          }
+        },
+      } })
+    })
     const f = await mountReplyFooter(page, BASE)
     const older = f.replies.first()
-    const copy = older.getByRole('button', { name: 'Copy message' })
-    await older.hover()
-    await expect(copy).toBeHidden()
+    await expect(older.locator('.chat__msg-meta--start')).toHaveCount(1)
     await older.locator('.chat__text--assistant').last().click()
-    await expect(copy).toBeVisible()
-    await expect(copy).toBeHidden({ timeout: 7000 })
-    await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeVisible()
+    await older.getByRole('button', { name: 'Copy message' }).click()
+    await expect.poll(() => page.evaluate(() => window.__copied[0])).toBe('Earlier completed answer.')
+    await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toHaveCount(1)
   })
 
-  test('starting a message clears a tapped older footer before the send completes', async ({ page }) => {
+  test('a tap on the reply reveals its footer for a moment, as on owner messages', async ({ page }) => {
+    const f = await mountReplyFooter(page, BASE)
+    const latest = f.replies.last()
+    await page.mouse.move(0, 0)
+    await expect.poll(() => footerOpacity(latest)).toBe('0')
+    await latest.locator('.chat__text--assistant').first().click()
+    await expect(latest.locator('.chat__msg-meta--start')).toHaveClass(/chat__msg-meta--visible/)
+    await page.mouse.move(0, 0)
+    await expect.poll(() => footerOpacity(latest)).toBe('1')
+    await expect(latest.locator('.chat__msg-meta--start')).not.toHaveClass(/chat__msg-meta--visible/, { timeout: 7000 })
+  })
+
+  test('sending a new owner message retains earlier completed footers', async ({ page }) => {
     const f = await mountReplyFooter(page, BASE)
     await f.composer.fill('A new question')
     await waitForComposerSendable(f.surface)
-    const older = f.replies.first()
-    const copy = older.getByRole('button', { name: 'Copy message' })
+    // Named by their text: Send adds a live reply, so last() would move to it.
+    const latest = f.replies.filter({ hasText: 'Latest completed answer.' })
+    const earlier = f.replies.filter({ hasText: 'Earlier completed answer.' })
+    const copy = latest.getByRole('button', { name: 'Copy message' })
     let release
     const responseGate = new Promise(resolve => { release = resolve })
     await page.route(`**${f.path}/messages`, async route => {
@@ -81,11 +117,12 @@ test.describe('reply footer', () => {
       await route.fulfill({ status: 400, json: { detail: 'Fixture rejection; no provider starts.' } })
     })
     try {
-      await older.locator('.chat__text--assistant').last().click()
-      await expect(copy).toBeVisible()
+      await expect(copy).toHaveCount(1)
       await f.surface.getByRole('button', { name: 'Send', exact: true }).click()
-      await expect(copy).toBeHidden({ timeout: 1000 })
-      await expect(f.replies.last().getByRole('button', { name: 'Copy message' })).toBeHidden()
+      await expect(f.surface.locator('.chat__msg--user').filter({ hasText: 'A new question' })).toHaveCount(1)
+      // The newly sent owner row does not change completed answers.
+      await expect(copy).toHaveCount(1)
+      await expect(earlier.getByRole('button', { name: 'Copy message' })).toHaveCount(1)
     } finally { release() }
   })
 
@@ -102,7 +139,11 @@ test.describe('reply footer', () => {
         const copy = reply.querySelector('.chat__msg-meta--start .chat__msg-copy').getBoundingClientRect()
         const time = reply.querySelector('.chat__msg-meta--start .chat__ts').getBoundingClientRect()
         const paragraph = reply.querySelector('.md-paragraph')
-        const textLeft = paragraph.getBoundingClientRect().left + parseFloat(getComputedStyle(paragraph).paddingLeft)
+        // Range geometry and the footer rect share viewport coordinates,
+        // including the shell's desktop zoom (computed padding does not).
+        const text = document.createRange()
+        text.selectNodeContents(paragraph)
+        const textLeft = text.getBoundingClientRect().left
         const prose = reply.querySelector('.chat__reply-rows').getBoundingClientRect()
         const parent = reply.getBoundingClientRect()
         const foot = reply.closest('[data-chat-surface]').querySelector('.chat__foot').getBoundingClientRect()

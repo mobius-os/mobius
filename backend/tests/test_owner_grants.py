@@ -77,3 +77,10 @@ def test_an_app_that_declares_owner_confirm_merges_only_with_a_grant_for_that_ex
   assert desk.post("contribute").status_code == 200  # the grant for the head the owner saw is still live
   assert desk.post("contribute").status_code == 403  # and one request spends it
   assert [merge["sha"] for merge in desk.github.merges] == [SHA, SHA]
+
+
+def test_every_status_change_the_owner_taps_has_an_action_a_grant_can_cover():
+  """A route that spends a grant for an action nobody can confirm is refused for good, so the two lists agree."""
+  from app import contribution_pull_status as pull_status
+  from app.routes import contribution_owner_grants as grants
+  assert {change.machine_action for change in pull_status.CHANGES.values()} <= set(grants.GUARDED)

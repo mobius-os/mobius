@@ -1,3 +1,5 @@
+import { RESOURCE_PAUSE_KINDS } from './waitingPresentation.js'
+
 function samePendingMessages(current, next) {
   if (current === next) return true
   if (!Array.isArray(current) || !Array.isArray(next)) return false
@@ -20,8 +22,9 @@ export function normalizeBackgroundHelpers(value) {
   const count = Number.isInteger(value.count) && value.count >= items.length
     ? value.count
     : items.length
-  if (count === 0 && items.length === 0) return EMPTY_BACKGROUND_HELPERS
-  return { count, items }
+  const withGoal = value.with_goal
+  if (count === 0 && items.length === 0 && !withGoal) return EMPTY_BACKGROUND_HELPERS
+  return { count, items, ...(withGoal ? { with_goal: withGoal } : {}) }
 }
 
 /** Distinguish an eligible automatic handoff from an owner barrier or recovery. */
@@ -47,7 +50,7 @@ export function classifyChatHandoff({
     ].includes(wait.resume_blocker),
   )
   const kind = resourcePause?.pause?.kind
-  const eligibleResource = ['memory', 'storage'].includes(kind)
+  const eligibleResource = RESOURCE_PAUSE_KINDS.has(kind)
     || (['rate_limit', 'usage_limit', 'limit'].includes(kind) && autoResumeEnabled)
   if (eligibleWait || eligibleResource) {
     return 'automatic'

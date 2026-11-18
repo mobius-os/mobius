@@ -102,11 +102,28 @@ class RunnerRegistry:
     with self._admission_lock:
       self._starting.discard(chat_id)
 
-  def register(self, handle: RunnerHandle) -> None:
-    """Registers or replaces the handle for one `(chat_id, kind)`."""
+  def register(
+    self,
+    handle: RunnerHandle,
+    *,
+    run_generation: int | None = None,
+  ) -> bool:
+    """Registers or replaces the handle for one `(chat_id, kind)`.
+
+    A runner that awaits between admission and registration passes the
+    ``run_generation`` it was admitted for. A Stop or delete in that gap
+    already bumped the generation and found no handle to stop, so the stale
+    runner is refused here (returns False) and must not send its prompt.
+    """
     with self._admission_lock:
+      if (
+        run_generation is not None
+        and self.current_generation(handle.chat_id) != run_generation
+      ):
+        return False
       self._handles[(handle.chat_id, handle.kind)] = handle
       self._starting.discard(handle.chat_id)
+      return True
 
   def unregister(self, chat_id: str, kind: RunnerKind) -> None:
     """Drops one registered handle, if present."""

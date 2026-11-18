@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site
 from app.path_utils import validate_path_within_base
-from app.project_retention import PROJECT_LIFECYCLE_LOCK
+from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.shared_app_retention import owned_snapshot_root
 from app import shared_app_state
 from app.timeutil import SOFT_DELETE_TTL, now_naive_utc
@@ -190,24 +190,23 @@ def _create_shared_app(
   artifact, output_root, entry_rel = _built_artifact(project, body.artifact_id)
   instance_id = str(uuid.uuid4())
   snapshot_rel = (Path("shared") / "app-instances" / instance_id / "build").as_posix()
-  snapshot_root = (Path(get_settings().data_dir) / snapshot_rel).resolve()
-  snapshot_root.parent.mkdir(parents=True, exist_ok=True)
-  try:
-    shutil.copytree(output_root, snapshot_root)
-    row = models.SharedAppInstance(
-      id=instance_id,
-      project_id=project.id,
-      artifact_id=body.artifact_id,
-      name=(body.name or artifact.get("name") or project.name)[:256],
-      entry_path=entry_rel,
-      snapshot_path=snapshot_rel,
-    )
-    db.add(row)
-    db.commit()
-  except Exception:
-    db.rollback()
-    shutil.rmtree(snapshot_root.parent, ignore_errors=True)
-    raise
+  instance_root = (Path(get_settings().data_dir) / snapshot_rel).resolve().parent
+  with creation_staging_root(instance_root) as staging:
+    try:
+      shutil.copytree(output_root, staging / "build")
+      row = models.SharedAppInstance(
+        id=instance_id,
+        project_id=project.id,
+        artifact_id=body.artifact_id,
+        name=(body.name or artifact.get("name") or project.name)[:256],
+        entry_path=entry_rel,
+        snapshot_path=snapshot_rel,
+      )
+      db.add(row)
+      place_and_commit_new_root(db, staging, instance_root)
+    except Exception:
+      db.rollback()
+      raise
   return _view(row, principal)
 
 

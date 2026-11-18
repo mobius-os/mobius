@@ -60,36 +60,38 @@ above. Origin-bound facilities such as cookies, service workers and durable
 origin storage still require a host provider or a separate service origin; a
 raw general shell-origin bridge would recreate the authority opacity removed.
 
-### Named secret reads for supervised jobs
+### Keys are borrowed, never read
 
-An app may declare `permissions.job_secret_read`, up to 16 unique names from
-its own encrypted secret store. The accepted capability contract includes the
-names in owner review. Omitted or empty means no job read access; ordinary app
-frames still cannot read secret values. Only the owner-authorized supervised-job
-mint includes a signed `job_secrets` claim, bounded by the accepted names at
-mint time. Every read also checks the current accepted names, app installation
-nonce, owner epoch and token expiry. Removing a grant denies future reads;
-adding names does not expand an already-running job's token. Applying a manifest
-without the grant revokes it. The existing owner/service behavior is unchanged.
-
-This is not a process sandbox: reviewed jobs already run as trusted local code.
-They must not log, persist unencrypted, or expose these values through browser
-responses. A compromised permitted job could leak its own keys; denial cannot
-retract a key already read. Keep provider transport and secret handling in the
-app, not in new platform proxy routes. No grant implies permission to activate
-bots, send messages or make paid calls.
+Apps never read key values: not the frame, the service or a supervised job.
+An app asks for a key by name (`POST /api/keys/requests`) and, once the owner
+approves it in Settings › Keys, borrows it through `/api/keys/use/…`, where
+the server attests the app from its own token and the key vault adds the key
+(see SECURITY.md and KEY_VAULT_DESIGN.md). The retired
+`permissions.job_secret_read` is refused with a pointer to that route. No grant
+implies permission to activate bots, send messages or make paid calls.
 
 ### Paying for priced calls with credits
 
 The owner, or an installed Store app with accepted `credits_manage` consent
 (including frames), pairs this Möbius with a credits service using
 `POST /api/identity/credits/pair` `{operator_url, key}`; a Settings connect
-control is planned. Shared-browser guests and delegated helpers cannot pair.
+control for pasting a key is planned. A Möbius launched from mobius.you (the
+summary's `can_pair_with_account`) can instead call
+`POST /api/identity/credits/pair/account` with no body, which Settings offers
+as **Connect credits**: the launcher issues this installation its own key. It
+answers 409 `not_managed` on a self-hosted Möbius, 409 `already_paired` when
+paired unless the service refuses the key this Möbius holds (asking would
+retire a key that may still work), and 503 `credits_unavailable` when
+mobius.you cannot supply a usable key. A refused key (`key_refused` or
+`invalid_api_key` in the summary's `error`) is replaced by the same call,
+which Settings offers as **Reconnect credits**.
+Shared-browser guests and delegated helpers cannot pair.
 The paired service keeps the owner's credits, never this Möbius's database.
-For now, app credits permissions work only for installed Store apps with
-accepted owner consent. Owner-built local apps cannot use
-`credits_manage` or `spend_credits`, even if their `mobius.json` declares them;
-their account, price and charge requests receive 403.
+`credits_manage` works only for installed Store apps with accepted owner
+consent. Owner-built local apps never get it, even if their `mobius.json`
+declares it; their account requests receive 403. A local app may still pay
+with `spend_credits`, with no standing grant, because every charge waits for
+the owner's Pay (below), and may check a charge (below).
 
 A creator publishes the price of one action of their app
 under their handle at that service; another owner's copy of the app pays for a call with
@@ -108,19 +110,49 @@ that pick the same key never replay each other's charge. An upstream 5xx,
 transport failure or unreadable receipt on `/charges` answers 503
 `charge_outcome_unknown`: the charge may have been made. Retry with the same
 idempotency key, never a new one. The client never retries automatically.
-Other refusals keep the service's `detail.code` and fields (`not_paired`,
+Nothing is charged until the owner presses Pay on a sheet the shell shows
+over the app: until then the charge answers 409 `confirmation_required` (the
+app retries the same key). A cancel answers 403 `payment_declined` to every
+retry with that key for ten minutes; asking again takes a new key. A price
+that cannot be read (502 `price_unreadable`), is unpriced (`price_not_found`), or
+exceeds `max_price_micro` (`price_changed`) is refused before the owner is
+asked. Charges are paid from credits only: any `method` other than
+`"credits"` answers 422 `payment_method_unsupported`. One app may
+have at most five payments waiting (429 `too_many_payments_waiting`).
+Other refusals keep the service's `detail.code` and message (`not_paired`,
 `insufficient_credits`, `price_changed` with the current `price_micro`,
-`key_spend_cap`). `not_paired` means the owner has not connected credits yet.
+`key_spend_cap`). The 200 answer gives the paying app only its own charge: the
+charge id, the amount charged, and whether the service replayed an earlier
+identical charge; a refusal likewise keeps only the figures about the call
+(`required_micro`, `price_micro`, `max_price_micro`), never the owner's
+balance or a key's spend cap. An app that also holds `credits_manage` keeps
+every field. `not_paired` means the owner has not connected credits yet.
 A refused key answers 409 `key_refused` or the service's `invalid_api_key`,
 and an address that is not a credits service answers 502 `not_found`, so
 neither reads as the caller's own sign-in failing.
 Balance, history and purchase reads refuse a shared-browser guest.
 
+A marketplace that unlocks an item for a buyer on another Möbius checks the
+charge id that buyer's Möbius reports before unlocking:
+`GET /api/identity/credits/charges/<charge_id>` answers who paid, for which
+`{app, action}`, and how much. It needs its own read-only permission, listing
+the owner's priced apps whose sales it checks:
+`"permissions": { "check_credits_charges": ["prompts"] }`, one consent row
+that moves no money. Only the app's own service may ask, on either lane (the
+public lane is where a visitor says they paid), and it sees only a charge that
+paid this owner for one of those apps: any other, including the owner's own
+purchases, answers 404 `charge_not_found`. A local app may use it too, since
+it reads only the owner's own sales. Unlock only the item that charge's
+`action` names, and record each charge id once so one payment never unlocks
+twice. Each check is a call to the credits service under this installation's
+key, so check a visitor's claim once and keep the answer rather than asking
+again on every visit.
+
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing
-prices, and keeping or withdrawing earnings. Besides the owner, only an app
-with `permissions.credits_manage: true` reaches it, a separate critical
-consent row. `identity_manage` covers the sign-in link only and never includes
+prices, and keeping or withdrawing earnings. Besides the owner, only an
+installed Store app with accepted `permissions.credits_manage: true` reaches
+it, a separate critical consent row. `identity_manage` covers the sign-in link only and never includes
 it. Reading a seller's published prices also admits a `spend_credits` app.
 The summary and purchase terms carry a `pairing` id that changes when the
 service or its key does; a top-up that names an earlier `pairing` is refused
@@ -751,6 +783,83 @@ stages the app. Source: `backend/app/app_consent.py`.
   grants still apply before the owner answers; local and agent-built apps are
   not gated; there is no Settings screen for revoking.
 
+## App agent access
+
+An app's `agent` declaration (`scope`, `allow_tools`, `reason`) decides what
+every agent it starts can reach (manifest shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
+`backend/app/agent_gateway.py` and `backend/scripts/mobius_fence.py`.
+
+- **Scopes.** `tools` starts in an empty folder and reaches only what its
+  tools give it, `read` reads the app's files and data, `edit` reads and
+  changes them, and `admin` has full access and omits `allow_tools`. An app
+  that declares no scope keeps full access. The older `agent_role` field, and
+  any scope name not in this list, is a manifest error rather than ignored,
+  and a stored declaration Möbius cannot read runs as `tools` with no tools.
+- **The room.** A Tools, Read or Edit agent runs whole in a room built
+  before it starts: Landlock walls (system folders read-only, the app's storage
+  directory read-only or writable by scope with ordinary files only, nothing
+  else), a seccomp connect guard that admits only the Möbius API address (only
+  TCP sockets, plus route netlink to list interfaces; no TCP Fast Open), and
+  `no_new_privs`, with signals scoped to the room. Each grant (scope and tools)
+  has its own durable home in the chat's folder, holding its sessions, and
+  Möbius never writes into it: what it hands the runtime sits in a read-only
+  folder beside it. A host that cannot build rooms (Linux
+  6.12 or later with libseccomp) does not start the agent.
+- **The agent key.** The run's bearer is the app's own credential bound to the
+  live run (`auth.create_app_agent_token`), carrying its scope, tools and
+  provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
+  app's own storage by scope, and the routes of declared tools; route checks
+  still apply after it. The key stops working as soon as the app's scope
+  differs from its grant. Any change of scope, tools or consent (apply, Store
+  update, revoke) also ends the app's running agent turns through the
+  ordinary chat Stop; a Stop that fails is reported.
+- **The Agent Gateway.** `/api/agent-gateway/v1/...` serves only the run
+  provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
+  tools the app did not declare (including any tool the provider would run in
+  its own container) and hosted MCP servers, refuses a request that forces a
+  removed tool or asks the provider to fetch content from a web address, and
+  adds the owner's login outside the room.
+- **Tools.** An agent's own tools (shell, file edits, planning) always work,
+  inside its room. `allow_tools` adds Möbius tools that reach beyond it. `web` is
+  provider-hosted search through the gateway plus `open_page` through the
+  guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
+  activity. `notify` is `notify_owner`. `ask` is `request_question` and
+  `request_approval` for the run's own chat (a confined key is an agent run of
+  that chat; an approval's work claim is namespaced to the app and chat; Codex
+  ends the turn through the owner-card hook inside the room).
+  `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
+  page outside the room, with a sign-in bound to the run. That capture browser
+  is signed in as the owner, so the app's page could navigate it; the popup's
+  consent covers this, and a capture sign-in limited to the app is a planned
+  narrowing. `helpers` is `spawn_agent` and its siblings for the run's own chat's
+  helpers. `keys` opens only the vault's borrow route (`/api/keys/use/...`):
+  the vault attests the app from the agent's key, so the agent uses exactly
+  the keys and sites the owner approved for that app, never reads a value and
+  never asks for a key; each use is recorded as an `app_agent_web` activity
+  (key and site). Routes that hand out keys or secrets (agent and app key
+  requests, sealed secret cards) also refuse a confined key themselves
+  (`deps.refuse_app_agent`). Every agent an app owns runs at the app's scope: a helper's chat
+  belongs to the app that owns the delegation, so its runs get a room and an
+  agent key with the same grant (never a delegation token).
+  `<app>.<tool>` (such as `memory.search`) offers that one installed-app tool
+  through `/api/agent/app-tools`, which serves a confined key only that exact
+  app and tool (agent-facing names can collide, so they are never the
+  authority). A new tool is one `agent_roles.TOOLS` entry naming its control
+  tools, key routes and gateway types.
+- **Consent.** One `agent_role` row whose scope names what the declaration
+  reaches (`data:read`, `data:write`, `tool:<name>`), so an update asks again
+  only when it adds reach, and shows only what it adds. The popup shows the
+  scope's label, the platform's description of what it grants, the app's
+  reason and the requested tools. Admin and undeclared agent apps use the
+  critical `agent_start` row ("Full access to your Möbius"), which covers every
+  confined scope; dropping an accepted scope asks for it.
+- **History.** A confined agent continues only its own grant's session. The
+  chat transcript is never reseeded into a room, because it may hold what a
+  wider grant (or the era before scopes) read.
+- **Not yet covered:** app jobs and services still run unconfined; searches
+  that run at Anthropic are not recorded one by one; the screenshot capture
+  browser holds the owner's sign-in rather than one limited to the app.
+
 ## Stable error codes
 
 Providers may use DOM-style names for familiar browser handling, but app logic
@@ -778,6 +887,7 @@ Add primitives only after a real app needs them. Likely families are:
 
 - `media.microphone.capture`, `media.camera.capture`
 - `device.storage`, `device.asset-cache`
+- `network.direct` (exact outside origins for images and requests)
 - `files.open`, `files.save`
 - `clipboard.read`, `clipboard.write`
 - `location.tracking` (phone app), `location.current`, `location.watch`
@@ -800,6 +910,34 @@ methods; wildcard access can remain possible through explicit owner approval.
 Moving credential possession into a generic host request transport would not
 change that authorization model. Likewise, app storage and cross-app access are
 durable server capabilities, not browser-session providers.
+
+### Direct requests to declared outside sites
+
+Some providers require that searches and media loads come from the person's own
+device rather than a server proxy (GIF providers are one example), and the
+opaque app frame's policy otherwise allows no outside image or request origin.
+`network.direct` lets an app declare up to eight exact HTTPS origins:
+
+```json
+"capabilities": {
+  "network.direct": {
+    "version": 1,
+    "reason": "Search and show GIFs from KLIPY.",
+    "origins": ["https://api.klipy.com", "https://static.klipy.com"]
+  }
+}
+```
+
+There is no broker call. Once the owner accepted the grant, that app's frame
+policy adds the origins to `img-src` and `connect-src` only; scripts, styles,
+fonts and frames never widen, so the grant cannot add code. The origins are the
+consent row's scope, so a new site asks again and dropping one does not. An app
+still waiting for consent gets none, and the frame's validator changes with the
+grant so a cached frame never keeps an old policy. Wildcards, paths, plain HTTP
+and bare hosts without a public name are refused. The owner reads that those
+sites see the device's internet address and what the app asks them for.
+A published public app runs in the same frame, so its visitors' devices reach
+those sites too.
 
 ### Small device-local app state
 

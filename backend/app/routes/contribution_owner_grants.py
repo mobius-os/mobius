@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app import contribution_direct_merge as direct_merge
 from app import contribution_pr_machine as machine
 from app import contribution_pull_status as pull_status
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_runs as reviews
 from app import models, owner_grants
 from app.config import get_settings
@@ -37,6 +38,7 @@ from app.database import get_db
 from app.deps import Principal, get_agent_run_principal, get_principal, reject_cross_site
 from app.github_contributions import _validate_submit_app
 from app.routes import contribution_reviews as routes
+from app.routes import github as publication
 
 router = APIRouter(prefix="/api/owner-grants", tags=["owner-grants"])
 
@@ -53,6 +55,13 @@ QUIET_VERDICTS = {
   "continue_merge": ("Continue the merge of {pr}", "Continue merge", "caution",
                      "The review agent continues the guarded merge of the approval GitHub already holds. "
                      "Merging still checks GitHub first."),
+}
+
+
+# What each push mode of a follow-up grant lets an agent do without asking.
+FOLLOW_MODES = {
+  "auto": "When reviews, failing checks or conflicts arrive, an agent pushes its fix to this branch without asking.",
+  "ask": "An agent only prepares each fix. Nothing is pushed until you press Update PR.",
 }
 
 
@@ -171,6 +180,22 @@ async def _describe_verdict(ask: Ask) -> dict:
   return _sheet(f"Post {words} on {pr}", [*facts, _fact("Posted exactly as", text)], verb, "caution")
 
 
+async def _describe_post_findings(ask: Ask) -> dict:
+  """A finished private review going out as a plain comment: the sheet quotes the exact words."""
+  body = ask.body
+  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
+  _item_key, target, item = routes._saved_item(row, body)
+  words = post_findings.preview(item, target)
+  if words["preview_sha256"] != body.preview_sha256:
+    raise HTTPException(409, post_findings.CHANGED)
+  pr = f"{body.repo}#{body.number}"
+  return _sheet(f"Post a comment on {pr}", [
+    _fact("Pull request", pr), _fact("Version", body.head_sha[:7]),
+    _fact("Result", "A plain comment review from your connected account. Not an approval or a change request."),
+    _fact("Posted exactly as", words["body"]),
+  ], REVIEW_EVENTS["COMMENT"][0], "caution")
+
+
 async def _describe_repair(ask: Ask) -> dict:
   body = ask.body
   pr = f"{body.repo}#{body.number}"
@@ -189,6 +214,13 @@ async def _describe_repair(ask: Ask) -> dict:
   ], "Push this fix", "caution")
 
 
+async def _read_pull(repo: str, number: int) -> dict:
+  try:
+    return await _read(direct_merge._read_object, f"repos/{repo}/pulls/{number}")
+  except direct_merge._READ_FAILURES as exc:
+    raise HTTPException(404, direct_merge.UNREADABLE) from exc
+
+
 async def _describe_respond_post(ask: Ask) -> dict:
   body = ask.body
   chat = ask.db.query(models.Chat).filter(
@@ -196,10 +228,7 @@ async def _describe_respond_post(ask: Ask) -> dict:
     models.Chat.created_by_app_id == ask.app_id).first()
   if chat is None:
     raise HTTPException(404, "That conversation was not found.")
-  try:
-    pull = await _read(direct_merge._read_object, f"repos/{body.repo}/pulls/{body.number}")
-  except direct_merge._READ_FAILURES as exc:
-    raise HTTPException(404, direct_merge.UNREADABLE) from exc
+  pull = await _read_pull(body.repo, body.number)
   return _sheet(f"Post your prepared response on {body.repo}#{body.number}", [
     _fact("Pull request", f"{body.repo}#{body.number}: {pull.get('title')}"),
     _fact("Author", (pull.get("user") or {}).get("login")),
@@ -209,9 +238,31 @@ async def _describe_respond_post(ask: Ask) -> dict:
   ], "Post to GitHub", "caution")
 
 
+async def _describe_follow(ask: Ask) -> dict:
+  """Following switched on for a sent pull request, or an existing grant's push mode changed."""
+  change = await publication.autopilot_follow_change(ask.db, ask.app_id, ask.scope["record_id"], ask.body)
+  pr = f"{change['repo']}#{change['number']}"
+  pull = await _read_pull(change["repo"], change["number"])
+  if pull.get("state") != "open":
+    raise HTTPException(409, "This pull request is no longer open, so it cannot be followed.")
+  starts = change["grant"] is not None
+  # A new grant covers the head the owner reads here, as Merge covers its version.
+  version = [_fact("Version", f"{change['grant']['head_sha'][:7]}, as it is on GitHub now")] if starts else []
+  return _sheet(f"Follow {pr}" if starts else f"Change how {pr} is followed", [
+    _fact("Pull request", f"{pr}: {pull.get('title')}"),
+    _fact("Author", (pull.get("user") or {}).get("login")),
+    _fact("Branch", change["branch"]),
+    *version,
+    _fact("Pushes", FOLLOW_MODES[change["push_mode"]]),
+    _fact("Replies", "An agent may answer review comments on GitHub with your connected account."),
+    _fact("Result", "Stays on until you pause it or the pull request is merged or closed."),
+  ], "Follow" if starts else "Change", "caution")
+
+
 # The one list of actions a grant can cover: the owner-tap routes of
-# contribution_reviews.py (Merge, the five status changes, a verdict decision
-# and a repair decision) and Post. Review start is not here: who may start a
+# contribution_reviews.py (Merge, the six status changes, a verdict decision
+# and a repair decision), Post, and Follow (a first follow-up grant for a sent
+# pull request, or another push mode for an existing one). Review start is not here: who may start a
 # publishing review is for the platform design to settle, because a start
 # approved in chat conflicts with a grant rule.
 #
@@ -222,17 +273,23 @@ async def _describe_respond_post(ask: Ask) -> dict:
 # _validate_submit_app, so they accept github_access app tokens and top-level
 # agents, and land-stack fast-forwards an upstream branch. They are NOT covered
 # here. Whether they need the owner's tap is an open policy decision for the
-# platform; no grant check may claim that gap closed while they stand.
+# platform; no grant check may claim that gap closed while they stand. One
+# narrow case is settled: update-existing for a pull request followed in
+# ask-before-push mode refuses every caller but the owner's own press (no grant
+# is spent), so an agent cannot publish what it only prepared.
 GUARDED = {
   "merge": Guarded(routes.DirectMerge, _describe_merge),
   "open_for_review": Guarded(routes.PullStatusChange, partial(_describe_status, name="ready")),
   "back_to_draft": Guarded(routes.PullStatusChange, partial(_describe_status, name="draft")),
   "close": Guarded(routes.PullStatusChange, partial(_describe_status, name="close")),
+  "request_review": Guarded(routes.ReviewerRequest, partial(_describe_status, name="request-review")),
   "ask_rereview": Guarded(routes.ReviewerRequest, partial(_describe_status, name="request-reviewers")),
   "ask_approval": Guarded(routes.ApprovalRequest, partial(_describe_status, name="ask-approval")),
   "verdict": Guarded(routes.VerdictDecision, _describe_verdict, ("run_id",)),
   "repair": Guarded(routes.RepairDecision, _describe_repair, ("run_id",)),
+  "post_findings": Guarded(routes.PostFindings, _describe_post_findings, ("run_id",)),
   "respond_post": Guarded(RespondPost, _describe_respond_post),
+  "follow": Guarded(publication.AutopilotToggleBody, _describe_follow, ("record_id",)),
 }
 
 

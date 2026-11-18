@@ -62,7 +62,11 @@ export default function useResume({ chatId, runId, goalId, goalRevision, send, o
       setState({
         pending: false,
         unavailable: false,
-        error: error?.code === 'recovery_changed'
+        error: error?.code === 'helper_recovery_unavailable'
+          ? error.message
+          : error?.code === 'delegation_managed'
+            ? 'This helper is controlled by its parent chat. Open the parent chat to continue.'
+          : error?.code === 'recovery_changed'
           ? 'Recovery state changed. Refreshing the chat…'
           : error?.code === 'pending_question_open'
             ? 'Answer the waiting question to continue.'

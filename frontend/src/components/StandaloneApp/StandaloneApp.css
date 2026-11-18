@@ -2,6 +2,10 @@
   position: fixed;
   inset: 0;
   overflow: hidden;
+  /* The app frame reads 0 for env() and is never sent device insets here, so
+     the page keeps it above the home indicator / navigation bar, as the shell
+     does for its app view. The strip shows the page background. */
+  padding-bottom: env(safe-area-inset-bottom, 0px);
   background: var(--bg, #0d0d0d);
   color: var(--text, #e8e8e8);
 }

@@ -88,6 +88,7 @@ from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
   dispatch_sdk_message,
+  is_provider_response,
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
@@ -96,6 +97,7 @@ from app.platform_tools import (
   APPROVAL_TOOL_NAME,
   ASK_PARENT_TOOL_NAME,
   CONTROL_SERVER_NAME,
+  KEY_TOOL_NAME,
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
   SECRET_TOOL_NAME,
@@ -107,7 +109,7 @@ from app.process_groups import (
   terminate_agent_processes,
 )
 from app.runner_registry import RunnerKind, registry
-from app.runtime_types import RunnerResult
+from app.runtime_types import RunnerResult, prompt_not_sent_result
 from app.viewed_images import chat_media_dir
 
 log = logging.getLogger(__name__)
@@ -265,6 +267,7 @@ _CLAUDE_TURN_END_TOOLS = (
   f"mcp__{CONTROL_SERVER_NAME}__{QUESTION_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
+  f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}",
   "Bash",
 )
 # Owner cards whose save hands the turn to the owner; the visible-answer check
@@ -542,7 +545,7 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None,
+    *, sink=None, run_generation: int | None = None,
   ):
     self.chat_id = chat_id
     self.kind = RunnerKind.CLAUDE_SDK
@@ -555,7 +558,13 @@ class ActiveClaudeClient:
     # after the first hard stop.
     self._force_stop_started = False
     self._interrupt_owner: Literal["stop", "card"] | None = None
-    self._run_generation = registry.current_generation(chat_id)
+    # The generation this run was admitted for, not whatever is current when
+    # the handle is built: a Stop during startup must leave this handle stale.
+    self._run_generation = (
+      registry.current_generation(chat_id)
+      if run_generation is None else run_generation
+    )
+    self._connected = False
     self._ready = False
     self._admission_closed = False
     self._native_queue_needs_cancel = False
@@ -580,6 +589,10 @@ class ActiveClaudeClient:
   @property
   def is_steerable(self) -> bool:
     return self._ready and self.accepts_native_prompt
+
+  def mark_connected(self) -> None:
+    """The SDK client connected; before this it cannot take an interrupt."""
+    self._connected = True
 
   def mark_ready(self) -> None:
     """The initial query is on the wire; steers can no longer overtake it."""
@@ -802,27 +815,23 @@ class ActiveClaudeClient:
   async def interrupt(self) -> None:
     """Interrupts the live run and waits for runner-side drain.
 
-    Bounds the `_finished` wait at 5s as a defense-in-depth so a
-    wedged runner (one that never reaches its `finally` block) can't
-    hang Stop indefinitely. `chat.py:stop_chat_for` adds its own 2s
-    bound at the call site; this inner timeout protects any other
-    direct caller.
+    Waits on `_finished` without a bound of its own: ``stop(timeout)`` is
+    the only budget, so its caller decides how long a drain may take (2s for
+    ordinary Stop, longer for the restart drain). A wedged runner (one that
+    never reaches its `finally` block) makes ``stop`` time out and report the
+    turn as not stopped.
 
     Unconsumed input remains owned by Stop's clear-and-resend flow. Consumed
     rows have already committed under the queue lock and cannot be resent.
     """
     self._interrupt_owner = "stop"
     self.close_admission()
-    if not await self.cancel_native_queue():
+    # Before connect() returns the SDK refuses an interrupt ("Not connected"),
+    # and there is no model request to cut yet: the runner sees this Stop at
+    # its pre-prompt `accepts_native_prompt` check and ends cleanly.
+    if not await self.cancel_native_queue() and self._connected:
       await self._client.interrupt()
-    try:
-      await asyncio.wait_for(asyncio.shield(self._finished), timeout=5.0)
-    except asyncio.TimeoutError:
-      import logging
-      logging.getLogger("moebius.chat").warning(
-        "ActiveClaudeClient._finished never resolved within 5s; "
-        "runner is wedged",
-      )
+    await asyncio.shield(self._finished)
 
   @property
   def interrupt_requested(self) -> bool:
@@ -1155,8 +1164,11 @@ async def run_claude_sdk_turn(
   run_policy=None,
   connector_plan=None,
   coordination_enabled: bool = True,
+  provider_id: str = "claude",
   goal_brief_refresh=None,
   fork_from: dict | None = None,
+  run_generation: int | None = None,
+  app_room=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1171,6 +1183,9 @@ async def run_claude_sdk_turn(
     chat_id: Möbius chat identifier used for registries.
     skill_text: Möbius skill/system prompt text, passed as the system
       prompt on every turn (including resumes).
+    run_generation: The chat run generation this turn was admitted for. A
+      Stop or delete during startup supersedes it, and the turn then ends
+      before sending its prompt instead of running unseen.
     bc: Chat broadcast object with a publish(event) method.
     skills_enabled: When True, offer SDK skills to the agent
       (`setting_sources` including user+project + `skills="all"`). This
@@ -1180,12 +1195,15 @@ async def run_claude_sdk_turn(
       load, regardless of this flag.
     connector_plan: Detached owner-managed MCP configuration built before the
       request session was released. It is plain data and never queries SQLite.
+    app_room: The ``agent_roles.Room`` a confined app agent runs in, or None.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Whether any frame of this attempt was remote model output (RunnerResult).
+  provider_responded = False
   # The handle for the client currently streaming this turn. Declared in the
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
@@ -1371,7 +1389,9 @@ async def run_claude_sdk_turn(
   # A saved or global default effort must not reach a model that rejects the
   # parameter (the picker hides the control, but defaults still carry one).
   from app.config import get_settings
-  if not await model_supports_effort(get_settings().data_dir, _model):
+  if not await model_supports_effort(
+    get_settings().data_dir, _model, provider_id=provider_id,
+  ):
     _effort = None
   # The "ultracode" tier maps to xhigh effort for the SDK flag (which only
   # accepts low/medium/high/xhigh/max) and arms the Workflow-tool
@@ -1383,10 +1403,11 @@ async def run_claude_sdk_turn(
   # Cross-provider mismatch defense (mirrors codex_sdk_runner). Admission and
   # effective settings normally reject this before the SDK boundary. Keep the
   # boundary strict too: a legacy/corrupt value must never become an implicit
-  # provider-chosen model.
-  if _model and _model_belongs_to_other_provider(_model, "claude"):
+  # provider-chosen model. This runner also serves app Messages providers, so
+  # validate against the active provider rather than a hardcoded 'claude'.
+  if _model and _model_belongs_to_other_provider(_model, provider_id):
     raise ValueError(
-      f"Selected model {_model!r} does not belong to provider 'claude'."
+      f"Selected model {_model!r} does not belong to provider {provider_id!r}."
     )
   # The visible-answer check (see `answer_check.reason`) runs at each
   # hand-back: just before the root agent saves an owner card, and when it
@@ -1527,7 +1548,7 @@ async def run_claude_sdk_turn(
     return {"continue_": True}
 
   async def _run_once() -> RunnerResult:
-    nonlocal current_session_id, cost_usd, active_client
+    nonlocal current_session_id, cost_usd, active_client, provider_responded
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
     # can park until the STRUCTURED reset time rather than parsing the error
@@ -1558,8 +1579,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
+      # A room cannot reach the chat's deliverables folder.
       "system_prompt": (
-        _system_prompt_with_register(skill_text).rstrip()
+        _system_prompt_with_register(skill_text).rstrip() + "\n" if app_room is not None
+        else _system_prompt_with_register(skill_text).rstrip()
         + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
       ),
       "resume": session_id if session_id is not None else None,
@@ -1632,7 +1655,15 @@ async def run_claude_sdk_turn(
         "permission_mode": "acceptEdits",
         })
       options_kwargs.update(restricted_options)
-    if skills_enabled:
+    if app_room is not None:
+      # The room limits a confined agent, and Möbius serves its web: Claude's
+      # own page fetch runs inside the room, which has no internet.
+      options_kwargs["setting_sources"] = None
+      options_kwargs["cli_path"] = app_room.claude_launcher(_CLAUDE_CLI)
+      options_kwargs["disallowed_tools"] += [
+        "WebFetch", *(() if app_room.web else ("WebSearch",)),
+      ]
+    elif skills_enabled:
       options_kwargs["skills"] = "all"
     if _model:
       options_kwargs["model"] = _model
@@ -1675,16 +1706,24 @@ async def run_claude_sdk_turn(
         claude_control_servers,
         expected_control_tool_names,
       )
-      connector_config_handle = startup_file_stack.enter_context(
-        claude_mcp_config_handle(
-          connector_plan,
-          extra_servers=claude_control_servers(
-            enabled=control_server_enabled,
-          ),
+      if app_room is not None:
+        # A room cannot open this server's file descriptors, and its control
+        # tools carry no credential, so their configuration travels inline.
+        control_server_enabled = app_room.offers_tools
+        options_kwargs["mcp_servers"] = claude_control_servers(
+          enabled=control_server_enabled,
         )
-      )
-      if connector_config_handle:
-        options_kwargs["mcp_servers"] = connector_config_handle.path
+      else:
+        connector_config_handle = startup_file_stack.enter_context(
+          claude_mcp_config_handle(
+            connector_plan,
+            extra_servers=claude_control_servers(
+              enabled=control_server_enabled,
+            ),
+          )
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
     except Exception:
       startup_file_stack.close()
       startup_file_stack = ExitStack()
@@ -1694,12 +1733,15 @@ async def run_claude_sdk_turn(
         exc_info=True,
       )
     try:
-      options_kwargs["system_prompt"] = {
-        "type": "file",
-        "path": startup_file_stack.enter_context(
-          _system_prompt_file(options_kwargs["system_prompt"])
-        ),
-      }
+      if app_room is None:
+        # A room agent gets its prompt as text: the room cannot open this
+        # server's file descriptors, and it carries no credential.
+        options_kwargs["system_prompt"] = {
+          "type": "file",
+          "path": startup_file_stack.enter_context(
+            _system_prompt_file(options_kwargs["system_prompt"])
+          ),
+        }
       options = ClaudeAgentOptions(**options_kwargs)
       client = ClaudeSDKClient(options)
     except Exception:
@@ -1708,8 +1750,13 @@ async def run_claude_sdk_turn(
 
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
+      run_generation=run_generation,
     )
-    registry.register(active_client)
+    if not registry.register(active_client, run_generation=run_generation):
+      startup_file_stack.close()
+      active_client.mark_finished()
+      log.info("Claude turn superseded before registration chat_id=%s", chat_id)
+      return prompt_not_sent_result(current_session_id)
     # The root result reached while native helpers still owe a follow-up. Its
     # cost and usage are already spent, so any exit before the follow-up keeps
     # them.
@@ -1721,19 +1768,24 @@ async def run_claude_sdk_turn(
         try:
           with tracing.span("claude.connect"):
             await asyncio.wait_for(client.connect(), timeout=30.0)
+          active_client.mark_connected()
           with tracing.span("claude.control_mcp_ready"):
+            # A room waits only for its control tools; other apps' tools
+            # come and go with those apps.
+            control_configured = control_server_enabled and (
+              connector_config_handle is not None
+              if app_room is None else bool(app_room.control_tools)
+            )
             control_ready_error = await _await_control_mcp_ready(
               client,
-              enabled=(
-                control_server_enabled and connector_config_handle is not None
-              ),
+              enabled=control_configured,
               expected_tool_names=(
-                expected_control_tool_names(
+                None if not control_configured
+                else app_room.control_tools if app_room is not None
+                else expected_control_tool_names(
                   top_level=run_policy is None,
                   coordination_enabled=coordination_enabled,
                 )
-                if control_server_enabled and connector_config_handle is not None
-                else None
               ),
             )
           if control_ready_error:
@@ -1767,6 +1819,11 @@ async def run_claude_sdk_turn(
         label="Claude CLI",
       )
       active_client.set_process_group_id(process_group_id)
+      if not active_client.accepts_native_prompt:
+        # Stopped or superseded while connecting: end here, through the
+        # normal teardown, without a model request.
+        log.info("Claude turn superseded before its prompt chat_id=%s", chat_id)
+        return prompt_not_sent_result(current_session_id)
       await client.query(turn_message)
       active_client.mark_ready()
       # Startup timing: from the query to Claude's first message of any kind,
@@ -1792,6 +1849,8 @@ async def run_claude_sdk_turn(
           if first_output_span is not None and isinstance(sdk_msg, (StreamEvent, AssistantMessage)):
             tracing.end_span(first_output_span)
             first_output_span = None
+          if is_provider_response(sdk_msg):
+            provider_responded = True
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -2017,4 +2076,17 @@ async def run_claude_sdk_turn(
             finally:
               teardown.finish()
 
-  return await _run_once()
+  result = await _run_once()
+  if provider_responded:
+    result["provider_responded"] = True
+  # CLI 2.1.277+ restores the earlier session's cost on resume, and the source
+  # session's on a fork. The durable metrics owner has the prior snapshot and
+  # derives the additive turn cost from how this session started.
+  result["cost_scope"] = "session"
+  if session_id is not None:
+    result["session_start"] = {"kind": "resumed", "session_id": session_id}
+  elif fork_from is not None:
+    result["session_start"] = {"kind": "forked", "session_id": fork_from["session_id"]}
+  else:
+    result["session_start"] = {"kind": "fresh"}
+  return result

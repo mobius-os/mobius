@@ -71,7 +71,7 @@ def test_prepare_intersects_frozen_scope_with_current_pr_files(monkeypatch, tmp_
   monkeypatch.setattr(repairs, "_checkout_root", lambda: tmp_path)
   monkeypatch.setattr(repairs, "fetch_target_base", lambda *a: BASE)
   def git(_path, *args, **_kwargs):
-    return SimpleNamespace(stdout=SHA if args[:2] == ("rev-parse", "FETCH_HEAD^{commit}") else "")
+    return SimpleNamespace(stdout=SHA if args[:2] == ("rev-parse", "refs/mobius/pr-head^{commit}") else "")
   monkeypatch.setattr(repairs, "_git", git)
   snapshot = repairs.prepare_checkout(None, tmp_path, None,
     {**ITEM, "head_sha": SHA}, ["removed.py", "still.py"])
@@ -178,7 +178,7 @@ def test_public_review_brief_keeps_exact_dispatch_freeze_guidance(setup):
   assert "Evidence freezes once dispatch is armed; identical retry is read-only." in reviews.brief(row)
   # #1919's public guidance: posting is opt-in per verdict, never per report.
   assert "Keep owner-only questions and private data out of public evidence." in reviews.brief(row)
-  assert "publish:false (the default) and stay private" in reviews.brief(row)
+  assert 'publish:false (the default) with "blocked" and stay private' in reviews.brief(row)
 
 
 def test_frozen_and_live_scopes_use_one_file_reader(monkeypatch):

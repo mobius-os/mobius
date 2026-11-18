@@ -166,6 +166,19 @@ test('a settled pause names its cause and offers no recovery action', () => {
  }
 })
 
+test('every resource wait kind names its cause in pause and resume history', async () => {
+ const { RESOURCE_PAUSE_KINDS, RESOURCE_PAUSE_LABELS } = await vite.ssrLoadModule('/src/components/ChatView/waitingPresentation.js')
+ assert.ok(RESOURCE_PAUSE_KINDS.has('processes'))
+ for (const kind of RESOURCE_PAUSE_KINDS) {
+  const paused = render(h(PauseRecord, { block: { type: 'pause_record', source: { type: 'error', resumable: true, pause: { kind } } } }))
+  const resumed = render(h(Resume, { msg: { continuation_reason: kind } }))
+  assert.ok(paused.includes(RESOURCE_PAUSE_LABELS[kind].paused), kind)
+  assert.ok(resumed.includes(RESOURCE_PAUSE_LABELS[kind].resumed), kind)
+  assert.doesNotMatch(paused, />Paused</, `${kind} history must not fall back to a generic pause`)
+  assert.doesNotMatch(resumed, /Interrupted work recovered/, `${kind} resume must not fall back to a generic recovery`)
+ }
+})
+
 test('a resume marker shows when the work continued', () => {
  const today = new Date(); today.setHours(9, 5, 0, 0)
  const earlier = new Date(2026, 0, 3, 14, 30)
@@ -201,4 +214,35 @@ test('a full text past the display limit nests validly inside an inline row', as
  const html = render(h('span', null, h(FullNoteText, { text: 'y'.repeat(30_000) })))
  assert.doesNotMatch(html, /<div/)
  assert.match(html, /<span class="peer-note-full">/)
+})
+
+test('combined recovery notice keeps cause visible and offers dated history', () => {
+ const html = render(h(Resume, { msg: {
+   continuation_reason: 'manual', ts: Date.UTC(2026, 0, 1, 12),
+   recovery_events: [
+     { type: 'pause', source: { resumable: true, pause: { kind: 'restart' } } },
+     { type: 'resume', reason: 'manual', ts: Date.UTC(2026, 0, 1, 12) },
+   ],
+ } }))
+ assert.match(html, /Resumed manually/)
+ assert.match(html, /Paused for a platform update/)
+ assert.match(html, /aria-expanded="false"/)
+ assert.doesNotMatch(html, /Interrupted work continued/)
+ assert.match(html, /datetime=/i)
+})
+
+
+test('deliberate answer continuations are not described as automatic retries', async () => {
+ const { continuationTitle } = await vite.ssrLoadModule('/src/components/ChatView/ContinuationCard.jsx')
+ for (const [reason, label] of [
+   ['question_answer', 'Continued after your answer'],
+   ['helper_answer', 'Continued after parent answer'],
+ ]) {
+   assert.equal(continuationTitle(reason), label, 'history uses the same truthful title as its header')
+   const html = render(h(Resume, { msg: { continuation_reason: reason } }))
+   assert.ok(html.includes(label))
+   assert.doesNotMatch(html, /Resumed automatically/)
+ }
+ assert.equal(continuationTitle('manual'), 'Resumed manually')
+ assert.equal(continuationTitle('restart'), 'Resumed automatically')
 })

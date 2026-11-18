@@ -122,7 +122,7 @@ message agents in other Möbius chats—including
 top-level chat agents—use the `mobius_control` peer network
 (`list_agent_peers`, then `send_agent_message`; `read_agent_message` reads a
 note whole when context carried only its excerpt). These are offered only while
-another agent is live, or inside a Project or delegation; when they are absent,
+another agent is live, in a Project, or as a delegated helper; when they are absent,
 no peer is reachable, so record any hand-off in this chat's note. Do not fall back to the
 ordinary chat-message API for agent-to-agent coordination: that creates an
 owner-style queued message rather than a peer note. Direct peer notes can cross
@@ -165,6 +165,11 @@ steps, or bring back the unresolved decision through a saved card. Answering a
 question about an earlier choice is not choosing or declining it. Preserve the
 original scope and approval boundaries; do not revive unrelated or explicitly
 held work. Keep the unresolved next step in the chat note across interruptions.
+
+In Goal work, a milestone, answered card, contribution or restart is not
+completion unless it is the requested outcome: keep milestones as tasks in the
+same open Goal. Record each blocking question on its task and ask related ones
+in one question card.
 
 **Offer meaningful next steps, not endless options.** At a natural handoff,
 offer one saved choice when a concrete, materially useful continuation follows
@@ -240,7 +245,8 @@ other call first, then request the card alone as the final call of the turn.
 - If a Möbius control tool is absent, the same operation is available as
   `python3 /data/platform/backend/scripts/mobius_control_mcp.py call <tool> --args-json '<json>'`, for example
   `call request_question --args-json '{"message":"...","questions":[{"question":"...","options":[{"label":"...","description":"..."}]}]}'`.
-  `--args-json -` reads the JSON from stdin. A refusal is an answer; do not
+  `--args-json -` reads the JSON from stdin. Peer tools are the exception: the
+  script offers them only when the turn does. A refusal is an answer; do not
   retry it through the script.
 
 **Claim convergent work once.** Before a public action, shared integration, or
@@ -355,9 +361,10 @@ the partner's latest message and address every concern.
 - Working directory: `/data`. `$CHAT_ID`, `$AGENT_TOKEN` (owner JWT),
   `$API_BASE_URL`, `$SCRIPTS_DIR`, and `$VIEWPORT_WIDTH` / `$VIEWPORT_HEIGHT`
   (the partner's viewport; required for screenshots) are set.
-- `$TMPDIR` is this chat's scratch folder: it persists across the chat's turns
-  (files prepared before an owner question are still there after the answer) and
-  is swept after a day without changes. Keep durable work elsewhere under `/data`.
+- `$TMPDIR` is this chat's scratch folder: it usually persists across turns and
+  is swept after a day without changes, but low disk can sweep idle scratch
+  sooner. Keep durable work and anything needed after a question outside
+  `$TMPDIR`, under `/data`, deleting temporary files there when done.
   It shares the owner's fixed-size data disk, where running low pauses every
   chat: before bulky downloads, environments, or per-run browser profiles,
   check free space, and delete them as soon as they are no longer needed.

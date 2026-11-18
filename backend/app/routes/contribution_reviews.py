@@ -18,7 +18,9 @@ from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only
 
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
+from app import contribution_review_list as list_view
 from app import contribution_review_presets as presets
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
 from app.contribution_review_public_actions import post_public_review
@@ -46,14 +48,18 @@ router = APIRouter(tags=["contribution-reviews"])
 _log = logging.getLogger(__name__)
 APP_PREFIX = "/api/github/contributions"
 SCOPE = {"correctness", "maintainability", "simplicity", "tests", "security_privacy", "technical_debt"}
+# request_review_now: Contribute's Request review button. Retire the key once the Store's minimum Möbius includes
+# the release that added it, because the app then no longer needs to ask whether this platform has the route.
 # owner_confirm: the shell can confirm an action for an app (window.mobius.ownerGrant). The older owner_grant
 # key is deliberately never advertised: released Contribute reads it as proof of the owner's tap and turns Post on.
 REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_verdict": True,
                        "review_fix_merge": True, "draft_takeover": True, "merge_now": True,
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
-                       "request_rereview_now": True, "ask_approval_now": True, "pr_machine": True,
-                       "owner_confirm": True}
+                       "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
+                       "pr_machine": True, "owner_confirm": True, "post_findings_now": True,
+                       # Following (the autopilot grant) can start on a sent PR, and can ask before each push.
+                       "follow_after_send": True, "follow_ask_mode": True}
 PUBLISHING_MODES = {"review", "review_merge"}
 TAKEOVER_SCOPE = "named_pr_repairs_and_reviewed_successors"
 REVIEW_STOP_KEY = "_review_stop"
@@ -138,6 +144,22 @@ class ReviewOutcome(PullIdentity):
   tests_passed: bool | None = None
   reviewed_base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
   independent_receipt_id: str | None = Field(default=None, max_length=64)
+  # False when no finding should hold the PR up: a verdict proposal is then a plain comment.
+  blocking: bool = Field(default=True, strict=True)
+  # The obstacle outside the reviewer's control that ended this review early. Never a verdict.
+  blocked: str | None = Field(default=None, min_length=1, max_length=2000)
+
+  @model_validator(mode="after")
+  def only_findings_can_be_non_blocking(self):
+    if not self.blocking and self.state != "needs_you":
+      raise ValueError("blocking:false describes findings (needs_you); an all_clear result has none.")
+    return self
+
+  @model_validator(mode="after")
+  def a_blocked_review_is_private(self):
+    if self.blocked and (self.state != "needs_you" or self.publish):
+      raise ValueError("blocked names why a review could not finish: send it as needs_you without publish.")
+    return self
 
 
 def _row(db, app_id, run_id, principal):
@@ -234,6 +256,8 @@ def _saved_options_input(row):
 
 
 def _snapshot(db, body, principal):
+  """The options and model one preview or new grant freezes, for this caller."""
+  _refuse_agent_enabled_auto_send(body.options, principal)
   choice = resolve_round_choice(db)
   requested = getattr(body, "agent", None)
   if requested:
@@ -264,8 +288,32 @@ def _snapshot(db, body, principal):
     raise HTTPException(422, str(exc)) from exc
 
 
+AGENT_ENABLED_AUTO_SEND = (
+  "Only the owner can let a review send its verdict by itself, by choosing \"Agent posts\" when starting it "
+  "in Contribute. Start this review without agent_submits_verdict: its verdict then waits for the owner's Send.")
+
+
+def _is_agent(principal) -> bool:
+  return principal.chat_id is not None or principal.run_id is not None
+
+
+def _refuse_agent_enabled_auto_send(options, principal) -> None:
+  """Sending a verdict unseen is the owner's own choice in the review window.
+
+  A chat approval is the agent's attestation, so it never grants this: the owner
+  would learn what was posted in their name only after it was public. An app
+  token an agent minted carries the same provenance (``via_agent_chat``) even
+  though it drops the agent's chat/run identity, so it is refused too; the
+  owner's own browser mints an app token with no such provenance and keeps its
+  legitimate access.
+  """
+  agent_backed = _is_agent(principal) or principal.via_agent_chat is not None
+  if options is not None and options.agent_submits_verdict is True and agent_backed:
+    raise HTTPException(403, AGENT_ENABLED_AUTO_SEND)
+
+
 def _chat_approval(db, body, principal):
-  is_agent = principal.chat_id is not None or principal.run_id is not None
+  is_agent = _is_agent(principal)
   if body.source_chat_id is not None and (not is_agent or body.source_chat_id != principal.chat_id):
     raise HTTPException(403, "A source chat may only name the current authenticated owning conversation.")
   if principal.delegation_id is not None:
@@ -539,50 +587,49 @@ async def start_reviews(app_id: int | None, body: StartReviews,
 
 @router.get(APP_PREFIX + "/{app_id}/review-runs")
 def list_reviews(app_id: int | None, db: Session = Depends(get_db),
-                 principal: Principal = Depends(get_principal)):
+                 principal: Principal = Depends(get_principal),
+                 view: Literal["full", "summary"] = "full"):
+  """The owner's review runs, newest first.
+
+  `view=summary` is the cheap form for a client that polls: every run keeps what a row or badge
+  needs and loses its documents (see `contribution_review_list`); a run's full detail is `GET .../review-runs/{run_id}`.
+  An answer in that form says so with a top-level `"view": "summary"`; a Möbius older than the option
+  ignores it and answers in full, without the marker.
+  """
   _authorize_context(db, app_id, principal)
   rows = db.query(models.ContributionReviewRun).filter(
     models.ContributionReviewRun.owner_id == principal.owner.id,
     _read_context_filter(app_id),
   ).order_by(models.ContributionReviewRun.created_at.desc()).limit(100).all()
-  return {"runs": [_list_run_view(db, row, app_id) for row in rows],
-          "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  answer = {"runs": [_list_run_view(db, row, app_id, view) for row in rows],
+            "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+  if view == "summary":
+    answer["view"] = view
+  return answer
 
 
-def _list_run_view(db, row, app_id):
-  """Keep owning clients compatible; bound only privacy-projected navigation."""
+def _list_run_view(db, row, app_id, view="full"):
+  """A run as the list shows it: one the asking app owns whole (or as its summary), a core run it reads through always minimized."""
   value = _run_view(db, row, context_app_id=app_id)
   if app_id is None or row.app_id == app_id:
-    return value
-  fields = ("repo", "number", "head_sha", "base_ref", "base_sha", "state", "url", "title",
-            "review_chat_id", "review_run_id", "merge_sha", "queue_entry_id",
-            "successor", "approved_head_sha", "approved_base_sha", "current_base_sha")
-  items = []
-  for item in value["items"]:
-    brief = {key: item[key] for key in fields if key in item}
-    if item.get("summary"):
-      summary = item["summary"]
-      if len(summary) > 240:
-        omission = "… open this run for the full findings"
-        brief.update(summary=summary[:240-len(omission)] + omission, summary_truncated=True)
-      else:
-        brief["summary"] = summary
-    if item.get("public_review"):
-      receipt = item["public_review"]
-      brief["public_review"] = {key: receipt[key] for key in ("state", "url", "id") if key in receipt}
-    items.append(brief)
-  value["items"] = items
+    return list_view.summary_run(value) if view == "summary" else value
+  value["items"] = [list_view.navigation_item(item) for item in value["items"]]
   if "options" in value:
-    value["options"] = {key: val for key, val in (value["options"] or {}).items()
-      if key in {"provider", "model", "reasoning_effort", "post_review", "confirmation_scope"}}
+    value["options"] = list_view.navigation_options(value["options"])
   return value
+
+
+UNFINISHED_IS_NOT_A_RESULT = (
+  "This review publishes what it finds: send findings with publish:true. A private needs_you is only for an "
+  "obstacle outside your control, named in \"blocked\". An unfinished review is not a result: finish it first.")
 
 
 def _reported_outcome(previous, body, row, principal):
   """Build private review evidence once; callers add only transition facts."""
   return {**previous, "state": body.state, "summary": body.summary, "scope": body.scope,
     "tests": body.tests, "tests_passed": body.tests_passed,
-    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha,
+    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha, "blocking": body.blocking,
+    "blocked": body.blocked,
     "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
 
 
@@ -705,6 +752,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       raise HTTPException(422, "Record the complete review scope and test evidence before all clear.")
     if body.publish and not _posts_review(row):
       raise HTTPException(403, "This grant does not authorize a public review.")
+    if _posts_review(row) and body.state == "needs_you" and not body.publish and not body.blocked:
+      raise HTTPException(422, UNFINISHED_IS_NOT_A_RESULT)
     if row.mode == "review_merge" and _posts_review(row) and body.state == "all_clear" and not body.publish:
       raise HTTPException(422, "This grant posts its review before merging. Send the all-clear outcome with publish:true.")
     if row.mode == "review" and not attempted and not body.publish:
@@ -1256,6 +1305,50 @@ async def core_decide_verdict(run_id: str, body: VerdictDecision, db: Session = 
   return await decide_verdict(None, run_id, body, db, principal)
 
 
+class PostFindings(PullIdentity):
+  # A public tap: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+  preview_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _saved_item(row, body):
+  """The run's pinned target and saved item for the pull request a request names, at its exact version."""
+  item_key = reviews.key(body.model_dump())
+  original = next((t for t in row.targets_json if reviews.key(t) == item_key), None)
+  target = reviews.effective_target(row, original) if original else None
+  if target is None or target["head_sha"] != body.head_sha:
+    raise HTTPException(409, "This review is of another version. Nothing was posted.")
+  return item_key, target, (row.outcomes_json or {}).get(item_key) or {}
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post-preview", dependencies=[Depends(reject_cross_site)])
+def preview_posted_findings(app_id: int, run_id: str, body: PullIdentity, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """Read-only: the exact words Post to GitHub would send for this private review, and their hash."""
+  _item_key, target, item = _saved_item(_row(db, app_id, run_id, principal), body)
+  return post_findings.preview(item, target)
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def post_findings_now(app_id: int, run_id: str, body: PostFindings, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """The owner's own tap: post a finished private review's previewed words, once, as a plain comment review.
+
+  200 {state: posted, url, review_id}; 409 with a plain reason when nothing was posted;
+  502 post_unconfirmed when GitHub may have taken it. See contribution_review_post_findings.
+  """
+  _require_owner_hands(principal, "Only you can post a review from here. An agent cannot press Post.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "post_findings", body, run_id=run_id)
+  row = _row(db, app_id, run_id, principal)
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    _owner_decision_authority(db, row)
+    item_key, target, _item = _saved_item(row, body)
+    cwd = Path(get_settings().data_dir) / "platform"
+    return await post_findings.post(db, row, item_key, target, body.preview_sha256, principal, cwd, gh=_gh,
+                                    authorize=lambda: _owner_decision_authority(db, row))
+
+
 class DirectMerge(PullIdentity):
   # An irreversible tap: a misspelled field must fail loudly, never be ignored.
   model_config = ConfigDict(extra="forbid")
@@ -1357,6 +1450,14 @@ async def close_pull_now(app_id: int, body: PullStatusChange, db: Session = Depe
                          principal: Principal = Depends(get_principal)):
   """The owner's own Close, unmerged (close): their own PR, or one they can write to."""
   return await _owner_status_change(app_id, "close", body, db, principal)
+
+
+@router.post(APP_PREFIX + "/{app_id}/pulls/request-review",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def request_review_now(app_id: int, body: ReviewerRequest, db: Session = Depends(get_db),
+                             principal: Principal = Depends(get_principal)):
+  """The owner's own Request review (request_review): GitHub's review request to people they pick, who need not have reviewed."""
+  return await _owner_status_change(app_id, "request-review", body, db, principal)
 
 
 @router.post(APP_PREFIX + "/{app_id}/pulls/request-reviewers",
@@ -1886,13 +1987,42 @@ async def core_publish_repair(run_id: str, body: RepairPublish, db: Session = De
   return await publish_repair(None, run_id, body, db, principal)
 
 
+# A head and base admit one reviewer; a replacement is only for one that failed
+# without reporting, and this bounds how many such failures it can absorb.
+MAX_REVIEWER_ATTEMPTS = 3
+
+
+def _reviewer_task_key(row, target, attempt):
+  """The first reviewer keeps the original key; a replacement adds its attempt."""
+  seed = f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}"
+  return "review-" + hashlib.sha256((f"{seed}:{attempt}" if attempt else seed).encode()).hexdigest()
+
+
+def _reviewer_failed_unreported(db, reviewer, previous, target) -> bool:
+  """Whether a registered reviewer ended in error and recorded no evidence.
+
+  Only that reviewer may be replaced. One that is live, armed, paused, stopped,
+  finished or waiting on a question keeps its seat, and any receipt for this
+  head and base is final: a verdict is never replaced by asking another reviewer.
+  """
+  from app.chat import is_chat_busy
+  from app.delegations import delegation_statuses
+  if any(r.get("head_sha") == target["head_sha"] and r.get("base_sha") == target["base_sha"]
+         for r in previous.get("independent_reviews", [])):
+    return False
+  child = db.get(models.Chat, reviewer.child_chat_id)
+  return (child is not None and not is_chat_busy(db, child)
+    and delegation_statuses(db, [reviewer])[reviewer.id] in {"failed", "needs_review"})
+
+
 @router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/reviewers",
              dependencies=[Depends(reject_cross_site)])
 async def start_independent_reviewer(app_id: int | None, run_id: str, body: PullIdentity,
                                      db: Session = Depends(get_db),
                                      principal: Principal = Depends(get_agent_run_principal)):
   from app.delegations import (DelegationIntent, create_or_attach_delegation,
-    ensure_delegation_started, serialize_delegation, parent_root_run_id)
+    ensure_delegation_started, serialize_delegation, parent_root_run_id,
+    latch_cancelled, mark_cancelled)
   row = _row(db, app_id, run_id, principal)
   _parent(db, row, principal)
   async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
@@ -1915,16 +2045,22 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
       if not frozen.get("model"):
         raise HTTPException(409, "A fresh selection with run-frozen prompt/model is required.")
       prompt = reviews.independent_brief(row, target)
-      task_key = "review-" + hashlib.sha256(f"{row.id}:{reviews.key(target)}:{target['head_sha']}:{target['base_sha']}".encode()).hexdigest()
+      attempts = sum(s.get("head_sha") == target["head_sha"] and s.get("base_sha") == target["base_sha"]
+                     for s in previous.get("reviewer_steps", []))
+      task_key = _reviewer_task_key(row, target, max(attempts - 1, 0))
       existing = db.query(models.Delegation).filter_by(parent_chat_id=row.chat_id, task_key=task_key).first()
+      superseded = None
       if existing:
         # Never revive a stopped child when observing a saved step, even across
         # parent turns with a fresh logical root id.
         _assert_independent_reviewer(row, existing, target)
-        if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
-          await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
-          _parent(db, row, principal)
-        return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
+        if attempts < MAX_REVIEWER_ATTEMPTS and _reviewer_failed_unreported(db, existing, previous, target):
+          superseded, task_key = existing, _reviewer_task_key(row, target, attempts)
+        else:
+          if not db.query(models.ChatRun.id).filter_by(chat_id=existing.child_chat_id).first():
+            await ensure_delegation_started(db, existing, start_turn=start_programmatic_chat_turn)
+            _parent(db, row, principal)
+          return {"delegation": serialize_delegation(db, existing), "run": _run_view(db, row)}
       # Registration resets the item to reviewing. That would hide a live merge
       # from /observe and the cross-grant fence, or mask an unclear push.
       if _merge_attempted(previous) or any(a.get("state") in {"pushing", "push_unknown"}
@@ -1940,6 +2076,9 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
         provider=frozen["provider"], model=frozen["model"], effort=frozen.get("reasoning_effort"),
         cwd=str(Path(get_settings().data_dir)), notify_parent_on_complete=True)
       def register_reviewer(admitted):
+        if superseded:
+          # Committed with the replacement, so the old reviewer can never report late.
+          latch_cancelled(db, superseded)
         reviews.write_outcome(db, row, reviews.key(target), {**previous,
           "state": "reviewing", "head_sha": target["head_sha"],
           "reviewer_steps": [*previous.get("reviewer_steps", []), {
@@ -1947,6 +2086,8 @@ async def start_independent_reviewer(app_id: int | None, run_id: str, body: Pull
             "prompt_sha256": admitted.prompt_sha256, "provider": admitted.provider, "model": admitted.model,
             "effort": admitted.effort}]})
       child, _ = create_or_attach_delegation(db, intent, admit_child=register_reviewer)
+      if superseded:
+        mark_cancelled(db, superseded)  # the cancelled lifecycle event; the latch above already committed
       db.refresh(row)
       _assert_independent_reviewer(row, child, target)
       _parent(db, row, principal)

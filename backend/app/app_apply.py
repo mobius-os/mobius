@@ -40,6 +40,7 @@ from app.compiler import (
 from app.config import get_settings
 from app.manifest_identity import requested_manifest_source
 from app.manifest_contract import (
+  BOOLEAN_PERMISSIONS,
   MANIFEST_MAX_BYTES,
   PACKAGE_MAX_BYTES,
   ManifestContractError,
@@ -601,6 +602,25 @@ def _apply_local_manifest_runtime(
     service=service,
     tools=list(manifest.get("tools") or []),
     model_provider=manifest.get("model_provider"),
+    agent_access=manifest.get("agent"),
+  )
+
+
+def _ignored_local_grant_warnings(app: models.App, manifest: dict) -> tuple[str, ...]:
+  """Name the server grants a local manifest declares but the owner never gave.
+
+  Only a reviewed Store install sets a grant that has its own App column, so a
+  local manifest's declaration of one is silently inert. Say so on the apply
+  result instead of letting the first sign be a 403 that blames the manifest.
+  """
+  declared = manifest.get("permissions") or {}
+  return tuple(
+    f"permissions.{key} is ignored for a local app; only a Store-installed "
+    "app can hold it"
+    for key in BOOLEAN_PERMISSIONS
+    if key in models.App.__table__.columns
+    and declared.get(key) is True
+    and not getattr(app, key)
   )
 
 
@@ -774,11 +794,11 @@ async def _apply_source_revision(
           # The broker signs with the owner's Möbius account. The platform
           # owns that provider and ignores this declaration, but only the
           # reviewed Möbius · You package may still carry it. Local apps
-          # declare their own HTTPS endpoint and app-secret key.
+          # declare their own HTTPS endpoint and vault key.
           raise AppApplyError(
             "local_model_broker",
             "Local apps may declare an HTTPS model provider with their own "
-            "app secret, not the protected Möbius broker transport.",
+            "vault key, not the protected Möbius broker transport.",
           )
         schedule = manifest.get("schedule")
         job_name = schedule.get("job") if isinstance(schedule, dict) else None
@@ -995,6 +1015,8 @@ async def _apply_source_revision(
           warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
         elif store_divergence_warning:
           warnings = (*warnings, store_divergence_warning)
+        elif not store_managed:
+          warnings = (*warnings, *_ignored_local_grant_warnings(app, manifest))
         return ApplyResult(app=app, mode="unchanged", warnings=warnings)
 
       app.jsx_source = source
@@ -1036,6 +1058,8 @@ async def _apply_source_revision(
         warnings = (*warnings, _LOCAL_PACKAGE_WARNING)
       elif store_divergence_warning:
         warnings = (*warnings, store_divergence_warning)
+      elif not store_managed:
+        warnings = (*warnings, *_ignored_local_grant_warnings(app, manifest))
       return ApplyResult(
         app=app,
         mode="created" if created else "updated",

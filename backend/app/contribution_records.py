@@ -26,14 +26,16 @@ def now_iso() -> str:
   return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
+def records_dir(app_id: int) -> Path:
+  """The folder holding one app's contribution records."""
+  return Path(get_settings().data_dir) / "apps" / str(app_id) / "contributions"
+
+
 def record_paths(app_id: int, record_id: str) -> tuple[Path, Path]:
   if not _CONTRIBUTION_ID.match(record_id):
     raise HTTPException(status_code=400, detail="Invalid contribution id.")
-  base = Path(get_settings().data_dir) / "apps" / str(app_id)
-  return (
-    base / "contributions" / f"{record_id}.json",
-    base / "contributions" / f"{record_id}.diff",
-  )
+  base = records_dir(app_id)
+  return base / f"{record_id}.json", base / f"{record_id}.diff"
 
 
 def read_record(path: Path) -> dict:

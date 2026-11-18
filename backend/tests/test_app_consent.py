@@ -65,6 +65,16 @@ def test_runtime_capability_wording_comes_from_the_contract():
   assert (row["title"], row["critical"]) == ("Record audio", False)
 
 
+def test_model_provider_consent_names_where_its_key_is_sent():
+  contract = _contract()
+  contract["model_provider"] = {"base_url": "https://api.example.com/v1", "secret_name": "key"}
+  (row,) = app_consent.rows_from_contract(contract)
+  assert "api.example.com" in row["text"]
+  contract["model_provider"] = {"base_url": "http://127.0.0.1:8765/v1", "transport": "identity_broker"}
+  (row,) = app_consent.rows_from_contract(contract)
+  assert "127.0.0.1" not in row["text"] and "key" not in row["text"]
+
+
 def test_unaccepted_store_app_is_dormant_until_accepted(client, owner_token, db):
   headers = _owner_headers(client, owner_token)
   app = _app(db, "newapp", contract=_contract(github_access=True))
@@ -109,6 +119,23 @@ def test_local_apps_are_not_gated(client, owner_token, db):
   headers = _owner_headers(client, owner_token)
   assert client.get(f"/api/apps/{app.id}/consent", headers=headers).json()["status"] == "not_applicable"
   assert client.post("/api/auth/app-token", json={"app_id": app.id}, headers=headers).status_code == 200
+
+
+def test_a_local_app_asking_for_credits_keeps_working(client, owner_token, db):
+  """Declaring credits never holds a local app dormant; its credits routes
+  decide what it may do (``credits_manage`` is Store-only)."""
+  app = _app(db, "localpay", contract=_contract(spend_credits=["*/prompts"], credits_manage=True),
+             store=False)
+  headers = _owner_headers(client, owner_token)
+  assert not app_consent.gated(app) and not app_consent.dormant(app)
+  assert client.post("/api/auth/app-token", json={"app_id": app.id}, headers=headers).status_code == 200
+
+
+def test_a_store_app_widening_its_credits_still_asks_again(db):
+  app = _accepted(db, "storewiden", _contract(credits_manage=True))
+  assert app_consent.status(app) == "accepted"
+  app.capability_contract = _contract(credits_manage=True, spend_credits=["*/prompts"])
+  assert app_consent.status(app) == "required"
 
 
 def test_update_asks_only_when_it_needs_more(db):
@@ -170,8 +197,7 @@ def test_every_contract_permission_has_a_row():
       "github_access": True, "github_connect": True, "connections_manage": True,
       "connect_manage": True, "identity_manage": True, "credits_manage": True,
       "railway_manage": True, "location_history_read": True,
-      "spend_credits": ["ana/prompts"],
-      "job_secret_read": ["TOKEN"],
+      "spend_credits": ["ana/prompts"], "check_credits_charges": ["prompts"],
     },
   }
   contract = contract_from_manifest(manifest)
@@ -182,7 +208,7 @@ def test_every_contract_permission_has_a_row():
           "filesystem_access", "manage_apps", "manage_skills", "github_access",
           "github_connect", "connections_manage", "connect_manage",
           "identity_manage", "credits_manage", "railway_manage",
-          "location_history_read", "spend_credits", "job_secret_read"} <= ids
+          "location_history_read", "spend_credits", "check_credits_charges"} <= ids
 
 
 def test_helper_activity_read_has_a_non_critical_row():
@@ -199,6 +225,12 @@ def test_spending_credits_is_a_critical_row_naming_who_it_pays():
     ("spend_credits", "Spend your credits on paid features", True, ["ana/prompts"]),
   ]
   assert "ana/prompts" in rows[0]["text"]
+
+
+def test_paying_any_creator_of_an_app_is_named_plainly():
+  rows = app_consent.rows_from_contract(_contract(spend_credits=["*/prompts", "bob/notes"]))
+  assert rows[0]["scope"] == ["*/prompts", "bob/notes"]
+  assert rows[0]["text"].endswith("to: any creator's prompts, bob/notes.")
 
 
 def test_acceptance_stores_rows_and_survives_a_rewording(db, monkeypatch):
@@ -269,19 +301,19 @@ def _accepted(db, slug, contract):
   return app
 
 
-def test_named_secrets_are_part_of_the_accepted_answer(db):
-  app = _accepted(db, "secrets", _contract(job_secret_read=["A"]))
-  assert app.accepted_consent["rows"] == [
-    {"id": "job_secret_read", "rank": 1, "scope": ["A"]},
+def test_checking_charges_is_its_own_read_only_row_naming_the_apps():
+  rows = app_consent.rows_from_contract(_contract(check_credits_charges=["prompts"]))
+  assert [(r["id"], r["title"], r["critical"], r["scope"]) for r in rows] == [
+    ("check_credits_charges", "Check payments for your apps", False, ["prompts"]),
   ]
+  assert "cannot move credits" in rows[0]["text"]
+
+
+def test_checking_a_new_apps_charges_asks_again(db):
+  app = _accepted(db, "market", _contract(check_credits_charges=["prompts"]))
   assert app_consent.status(app) == "accepted"
-  # Fewer names is no new request; an added or swapped name asks again.
-  app.capability_contract = _contract()
-  assert app_consent.status(app) == "accepted"
-  app.capability_contract = _contract(job_secret_read=["A", "B"])
-  assert [r["id"] for r in app_consent.needed_rows(app)] == ["job_secret_read"]
-  app.capability_contract = _contract(job_secret_read=["B"])
-  assert app_consent.status(app) == "required"
+  app.capability_contract = _contract(check_credits_charges=["notes", "prompts"])
+  assert [r["id"] for r in app_consent.needed_rows(app)] == ["check_credits_charges"]
 
 
 def test_paying_a_new_seller_asks_again(db):
@@ -309,10 +341,10 @@ def test_an_identity_manager_asks_again_before_managing_credits(db):
   assert [r["id"] for r in app_consent.needed_rows(app)] == ["credits_manage"]
 
 
-def test_changed_secret_names_change_the_digest_so_a_stale_accept_fails(db):
-  app = _app(db, "stale", contract=_contract(job_secret_read=["A"]))
+def test_changed_payees_change_the_digest_so_a_stale_accept_fails(db):
+  app = _app(db, "stale", contract=_contract(spend_credits=["ana/prompts"]))
   shown = app_consent.request_digest(app_consent.current_rows(app))
-  app.capability_contract = _contract(job_secret_read=["B"])
+  app.capability_contract = _contract(spend_credits=["bob/notes"])
   assert not app_consent.accept(app, shown)
   assert app.accepted_consent is None
 

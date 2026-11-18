@@ -82,7 +82,8 @@ test('Chat Changes is a modeless panel whose outside press reaches its destinati
   assert.match(css, /\.chat-work__overlay\s*\{[\s\S]*?pointer-events:\s*none/)
   assert.match(css, /\.chat-work\s*\{[\s\S]*?pointer-events:\s*auto/)
   assert.match(outsideDismiss, /document\.addEventListener\('pointerdown', dismissFromOutsidePointer, true\)/)
-  assert.match(focus, /if \(modal\) \{[\s\S]*?holdInert\(element\)/)
+  assert.match(focus, /if \(modal\) return dialogSiblingElements\(container\)/)
+  assert.match(focus, /blocked\.elements\.forEach\(holdInert\)/)
   assert.match(focus, /event\.key !== 'Tab' \|\| !modal/)
   assert.doesNotMatch(changes, /elementFromPoint|dispatchEvent|\.click\(\)/,
     'outside activation must remain the browser’s real pointer sequence, not a replayed synthetic click')
@@ -126,7 +127,7 @@ test('a restored image with no media token stops spinning and exposes its failur
 
 test('QuestionCard gives the custom answer area a durable accessible name', () => {
   const source = read('../QuestionCard.jsx')
-  assert.match(source, /aria-label=\{`Custom answer for: \$\{question\}`\}/)
+  assert.match(source, /aria-label="Custom answer for:"\n\s*aria-labelledby=\{`\$\{id\} \$\{questionTextId\}`\}/)
   assert.match(source, /placeholder=\{answered \? 'No custom answer' : \(placeholder \|\| 'Or type your own answer…'\)\}/)
 })
 
@@ -141,7 +142,6 @@ test('message references are an accessible lazy disclosure with safe links', () 
   const source = read('../MessageSources.jsx')
   const sourceRead = read('../hooks/useMessageSources.js')
   const sourcePaths = read('../messageSources.js')
-  const reply = read('../AssistantReply.jsx')
   const css = read('../ChatView.css')
   const favicon = read('../SourceFavicon.jsx')
 
@@ -157,10 +157,8 @@ test('message references are an accessible lazy disclosure with safe links', () 
     'the metadata read must not begin before expansion')
   assert.match(source,
     /<ul className="chat__sources-list" aria-label="References for this answer">/)
-  assert.match(reply, /!isStreaming && <MessageSources/,
-    'the collapsed reference row should appear only after the whole reply settles')
-  assert.match(reply, /refs=\{sourceRows\.flatMap/,
-    'the reply must pass original indices from every source row, including folded rows')
+  // Where a reply's References appear (after it settles, once per stretch,
+  // with every source row) is rendered behaviour: replyFooter.test.js.
   assert.match(source,
     /<li key=\{source\.url\} className="chat__source-item chat__source-item--web">/)
   assert.doesNotMatch(source, /source\.snippet|chat__source-snippet|chat__source-rank/,

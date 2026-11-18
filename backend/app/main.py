@@ -67,6 +67,7 @@ from app.runtime_provenance import (
 )
 from app.response_policy import (
   chat_embed_csp,
+  APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY,
   PLATFORM_CODE_SCOPE_KEY,
   PUBLISHED_SITE_CSP,
   absolute_csp_origin,
@@ -85,12 +86,15 @@ from app import activity, models, stall_recorder, tracing
 from app.routes import (
   admin_router, agent_coordination_router, apps_router, app_services_router,
   app_consent_router,
+  agent_gateway_router,
+  app_agent_router,
   app_tools_router,
   auth_router, browser_access_router,
   app_chat_router,
   chat_continuity_router, chat_embed_router, chat_logs_router, chat_router,
   chats_router, chats_stream_router,
   secure_inputs_router,
+  model_relay_router,
   connectors_router, connectors_public_router,
   community_router,
   contribution_relay_router,
@@ -109,11 +113,13 @@ from app.routes import (
   shared_folders_router,
   public_apps_router,
   public_storage_router,
-  secrets_router, self_reminders_router, settings_router, skills_router,
+  self_reminders_router, settings_router, skills_router,
   client_error_router, client_signal_router, standalone_router, storage_router,
   theme_router, uploads_router, generated_files_router, platform_router,
   published_router,
   connect_router,
+  keys_router,
+  app_secrets_compat_router,
   projects_router,
   project_copies_router,
   shared_apps_router,
@@ -293,6 +299,13 @@ async def lifespan(app):
   # behind are ended; their helpers' durable turns recover like any other.
   from app import helper_hosts
   helper_hosts.end_orphaned_hosts()
+  # A data volume that is already full gets its recovery reserve back
+  # before database initialization writes anything (see storage_guard).
+  from app.storage_guard import release_reserve_at_boot
+  try:
+    release_reserve_at_boot(settings.data_dir)
+  except Exception:
+    _log.warning("startup recovery-reserve check failed", exc_info=True)
   from app.startup import (
     StartupContext,
     run_startup_plan,
@@ -361,7 +374,10 @@ async def lifespan(app):
     record_memory_checkpoint("shutdown_begin")
     from app.public_app_transport import close_public_fetch_clients
     from app.routes.proxy import close_proxy_clients
-    for close_clients in (close_public_fetch_clients, close_proxy_clients):
+    from app.routes.model_relay import close_model_relay_client
+    for close_clients in (
+      close_public_fetch_clients, close_proxy_clients, close_model_relay_client,
+    ):
       try:
         await close_clients()
       except Exception as exc:
@@ -613,15 +629,19 @@ def _chat_embed_csp_for_scope(scope) -> str:
 
 
 def _app_frame_csp_for_scope(scope) -> str:
-  """Let the loopback test harness exercise the real opaque app frame."""
+  """The opaque app frame's policy, widened only by that app's accepted
+  ``network.direct`` origins, which the frame route records in the scope.
+  Also lets the loopback test harness exercise the real opaque app frame."""
   delivery_origin = _loopback_delivery_origin(scope)
-  if delivery_origin is None:
+  direct_origins = tuple(scope.get(APP_FRAME_DIRECT_ORIGINS_SCOPE_KEY) or ())
+  if delivery_origin is None and not direct_origins:
     return _APP_FRAME_CSP
   return app_frame_csp(
     settings.frontend_origin,
     _SERVICE_GATEWAY_ORIGIN,
     _BROWSER_API_ORIGIN,
-    delivery_origin,
+    delivery_origin or "",
+    direct_origins,
   )
 
 # Published sites (`/sites/<token>/`) are public snapshots of the owner's own
@@ -725,7 +745,9 @@ class _SecurityHeadersMiddleware:
       elif chat_embed:
         csp = _chat_embed_csp_for_scope(scope)
       elif app_frame:
-        csp = _app_frame_csp_for_scope(scope)
+        # Decided when the response starts: the frame route names the app's
+        # accepted direct origins in the scope while it handles the request.
+        csp = None
       elif artifact_output:
         csp = _ARTIFACT_OUTPUT_CSP
       elif _APP_SERVICE_PATH.match(path):
@@ -748,9 +770,11 @@ class _SecurityHeadersMiddleware:
         if not service_surface:
           # Outside the namespace lanes, the handler that answered decides:
           # platform code runs as the shell, everything else is inert.
-          policy = csp or (
-            _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
-            else _INERT_CONTENT_CSP
+          policy = (
+            _app_frame_csp_for_scope(scope) if app_frame else csp or (
+              _SHELL_CSP if scope.get(PLATFORM_CODE_SCOPE_KEY)
+              else _INERT_CONTENT_CSP
+            )
           )
           headers.append((_CONTENT_SECURITY_POLICY, policy.encode("ascii")))
         message["headers"] = headers
@@ -965,8 +989,8 @@ app.add_middleware(
   # All sensitive endpoints are independently protected by JWT.
   allow_origins=[settings.frontend_origin, "null"],
   allow_credentials=False,
-  # HEAD is the documented app-secret presence check; an Authorization
-  # header makes the opaque frame preflight it like any other method.
+  # Apps borrow keys with any of these methods through /api/keys/use; an
+  # Authorization header makes the opaque frame preflight every one.
   allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   # The app runtime uses X-Mobius-Version to opt into ETag reads, then
   # If-Match / If-None-Match for conflict-safe writes. Sandboxed app frames
@@ -994,7 +1018,18 @@ app.add_middleware(
   ],
   # ETag is not CORS-safelisted. Expose it so getWithVersion() can actually
   # return the version token that the storage route intentionally emits.
-  expose_headers=["ETag", "X-Recovery-Notification-Id"],
+  # A key borrow (/api/keys/use) relays the site's download and rate-limit
+  # headers (routes/keys.py _RELAYED_RESPONSE_HEADERS; CORS has no prefixes,
+  # so each family member is named), X-Vault-Denied (the vault, not the site,
+  # refused the request) and X-Vault-Location (where a site's redirect points,
+  # never followed for the app).
+  expose_headers=[
+    "ETag", "X-Recovery-Notification-Id",
+    "Content-Disposition", "Retry-After",
+    "RateLimit", "RateLimit-Policy", "RateLimit-Limit", "RateLimit-Remaining", "RateLimit-Reset",
+    "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset",
+    "X-Vault-Denied", "X-Vault-Location",
+  ],
 )
 
 
@@ -1045,7 +1080,67 @@ class _OpaqueOriginCorsMiddleware:
     return await self.app(scope, receive, send_wrapper)
 
 
+class _KeyUsePreflightMiddleware:
+  """Lets an app frame send the site's own headers through a key borrow.
+
+  A borrow (``/api/keys/use/...``) carries whatever headers the third-party
+  site needs (``Notion-Version``, ``anthropic-version``, a custom ``X-...``),
+  and a sandboxed frame preflights every one. CORSMiddleware allows only the
+  platform's fixed list, so those borrows would fail in the browser before
+  reaching the server. For a borrow's preflight from an allowed origin this
+  answers with exactly the token-shaped header names requested; the route
+  itself still drops Möbius credentials, routing and override headers before
+  anything leaves. Every other path keeps CORSMiddleware's fixed list.
+
+  Placed outside CORSMiddleware and inside _OpaqueOriginCorsMiddleware, which
+  rewrites the frame's ``null`` origin to ``*`` here too.
+  """
+
+  _PREFIX = b"/api/keys/use/"
+  _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
+  _METHODS = "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS"
+
+  def __init__(self, app):
+    self.app = app
+
+  async def __call__(self, scope, receive, send):
+    if (
+      scope["type"] != "http" or scope["method"] != "OPTIONS"
+      or not (scope.get("raw_path") or scope["path"].encode()).startswith(self._PREFIX)
+    ):
+      return await self.app(scope, receive, send)
+    headers = {key: value.decode("latin-1") for key, value in scope.get("headers") or ()}
+    origin = headers.get(b"origin")
+    method = headers.get(b"access-control-request-method", "").upper()
+    requested = [
+      name.strip().lower()
+      for name in headers.get(b"access-control-request-headers", "").split(",") if name.strip()
+    ]
+    if (
+      origin not in (settings.frontend_origin, "null")
+      or method not in self._METHODS.split(", ")
+      or not all(self._TOKEN.fullmatch(name) for name in requested)
+    ):
+      return await self.app(scope, receive, send)
+    answer = [
+      (b"access-control-allow-origin", origin.encode("latin-1")),
+      (b"access-control-allow-methods", self._METHODS.encode()),
+      (b"access-control-max-age", b"600"),
+      (b"vary", b"Origin"),
+      (b"content-type", b"text/plain; charset=utf-8"),
+      (b"content-length", b"2"),
+    ]
+    if requested:
+      answer.append((b"access-control-allow-headers", ", ".join(requested).encode()))
+    await send({"type": "http.response.start", "status": 200, "headers": answer})
+    await send({"type": "http.response.body", "body": b"OK"})
+
+
+app.add_middleware(_KeyUsePreflightMiddleware)
 app.add_middleware(_OpaqueOriginCorsMiddleware)
+# A confined app agent's key reaches only its role's allow-list.
+from app.agent_roles import AgentKeyScope  # noqa: E402
+app.add_middleware(AgentKeyScope)
 
 # Security remains outside CORS and request-size enforcement so its headers
 # land on those generated responses. Request context is outermost so every
@@ -1080,8 +1175,11 @@ app.include_router(chat_embed_router)
 app.include_router(chats_router)
 app.include_router(chats_stream_router)
 app.include_router(secure_inputs_router)
+app.include_router(model_relay_router)
 app.include_router(agent_coordination_router)
 app.include_router(app_tools_router)
+app.include_router(agent_gateway_router)
+app.include_router(app_agent_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)
@@ -1099,6 +1197,8 @@ app.include_router(public_apps_router)
 app.include_router(local_services_router)
 app.include_router(location_router)
 app.include_router(connect_router)
+app.include_router(keys_router)
+app.include_router(app_secrets_compat_router)
 app.include_router(browser_access_router)
 app.include_router(client_error_router)
 app.include_router(client_signal_router)
@@ -1109,7 +1209,6 @@ app.include_router(platform_router)
 app.include_router(uploads_router)
 app.include_router(generated_files_router)
 app.include_router(media_router)
-app.include_router(secrets_router)
 # Before github_router: its /contributions/{app_id}/{record_id}/<action> paths would take
 # an owner action at /contributions/{app_id}/pulls/<action> as a record named "pulls".
 app.include_router(contribution_reviews_router)
@@ -1267,8 +1366,9 @@ def ready_agent(response: Response):
 
   Basic `/api/ready` remains the container healthcheck so history can keep
   serving when agent work is resource-degraded. This public facet adds the
-  agent runtime's storage and memory prerequisites while returning stable codes
-  only; account state, exact capacity, paths, and writer details stay private.
+  agent runtime's storage, memory and process prerequisites while returning
+  stable codes only; account state, exact capacity, paths, and writer details
+  stay private.
   """
   response.headers["Cache-Control"] = "no-store"
   from app.agent_readiness import agent_readiness

@@ -20,6 +20,7 @@ import {
   consumeReturnView,
   parseShellDeepLink,
   persistActiveNavigation,
+  previousPageDied,
   readRestoredCanvas,
   readStoredChatId,
 } from '../lib/navigationPersistence.js'
@@ -101,6 +102,11 @@ if (deepLink?.view === 'chat' && deepLink.focusQuestion) {
   requestChatQuestionReveal(deepLink.chatId, deepLink.questionId)
 }
 
+// Read once per page load: the browser killed this tab's previous page. The
+// workspace boots without any app mounted (paneModel.withoutBootApps) and the
+// cold-restored app is not pre-mounted, so a crashing app cannot loop.
+export const recoveringFromCrash = previousPageDied()
+
 // Cold-restore of the active view/app (mirror of moebius_active_chat) so a
 // COLD relaunch of the shell PWA lands on the app the user was viewing
 // instead of defaulting to a chat. Only the canvas needs an explicit
@@ -119,7 +125,8 @@ const returnView = ownerWorkspace ? consumeReturnView() : null
 // live /api/apps list ONCE and demotes a restored-but-uninstalled canvas
 // to chat. See ARCHITECTURE.md (Navigation back-stack + drawer model).
 export const coldRestoredCanvasAppId =
-  (!shellReload?.activeView && !deepLink?.view && restored?.view === 'canvas')
+  (!recoveringFromCrash && !shellReload?.activeView && !deepLink?.view
+    && restored?.view === 'canvas')
     ? restored.appId
     : null
 
@@ -246,6 +253,11 @@ export default function useNavigation({
   // remount (pushNavEntry is not idempotent). See the mount effect below.
   const seededHomeRef = useRef(false)
   const historyInitializedRef = useRef(false)
+  // The first commit renders the restored workspace; the mount effect below
+  // then applies an explicit boot destination (deep link, reload claim). Shell
+  // mounts content surfaces only after that decision, so a restored chat that
+  // the launch replaces never starts its own transcript reads.
+  const [bootRouteApplied, setBootRouteApplied] = useState(false)
 
   const navStackRef = useRef([])
   // Monotonic shell-route generation. Delayed cold-boot slug resolution uses
@@ -1509,6 +1521,18 @@ export default function useNavigation({
         openBootTab(tabModel.makeTab('chat', initialNav.chatId))
       }
 
+      // A page killed while showing an app (iOS Safari kills a page that runs out
+      // of memory, then reloads it) must not reopen that app on its own: it would
+      // crash again until Safari gives up with "A problem repeatedly occurred".
+      // The restored workspace already mounts no app (a restored app screen is
+      // the empty home); a reload or launch target that names an app is
+      // overridden here. Go home (the latest chat, or the empty chat home); the
+      // app stays one tap away.
+      if (recoveringFromCrash && snapshotRoute().view === 'canvas') {
+        restoreRoute(navRoute('chat', null, null, bootPaneId, { homeSeed: true }))
+        bootPaneId = workspaceStateRef.current.ws.focusedPaneId
+      }
+
       // Reset URL to /shell/ once on mount (must match the manifest scope). The
       // deep-link path is now in workspace/Settings state, no need to keep it
       // visible. Whether to seed HOME is derived from the ACTUAL booted view — not
@@ -1563,6 +1587,7 @@ export default function useNavigation({
       // destination with another base entry.
       currentNavStateRef.current = history.state
     }
+    setBootRouteApplied(true)
 
     function handleForward(destination, sourceRoute) {
       // A forward traversal abandons any in-flight drawer close: clear the LOGICAL
@@ -2336,6 +2361,7 @@ export default function useNavigation({
 
   return {
     initialNav,
+    bootRouteApplied,
     activeView,
     activeAppId,
     activeChatId,

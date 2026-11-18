@@ -1,4 +1,4 @@
-import { helpersOutsideGoal } from './goalHelpers.js'
+import { trayHelpers } from './goalHelpers.js'
 import { LocalAnswersContext } from './localAnswersContext.js'
 import {
   chatCompactingKind,
@@ -10,6 +10,7 @@ import { questionAnswerPatch } from './questionSubmission.js'
 import { usePeerTimeline, PeerTimelineRows } from './PeerTimeline.jsx'
 import { PeerTimelineContext } from './peerTimelineContext.js'
 import { consumeChatChanges, subscribeChatChanges } from '../../lib/chatChangesNavigation.js'
+import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import {
   lazy,
   startTransition,
@@ -65,6 +66,7 @@ import {
   getOnlineSnapshot,
   getDeliveryReadySnapshot,
   getRecoverySnapshot,
+  requireDeliveryReady,
   subscribeRecovery,
 } from '../../lib/connectivityStore.js'
 import {
@@ -80,6 +82,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { sendRecoveryResume } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
@@ -101,11 +104,13 @@ import LazySurface from '../ErrorBoundary/LazySurface.jsx'
 import BrainUsageButton from './BrainUsageButton.jsx'
 import ConnectionStatus from './ConnectionStatus.jsx'
 import ProgressRail from './ProgressRail.jsx'
+import useFootReveal from './hooks/useFootReveal.js'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
+import { HelperPreviewProvider } from './helperPreviewSlot.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
-import AssistantReply, { endsAgentStretch } from './AssistantReply.jsx'
+import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
 import QueuedMessages from './QueuedMessages.jsx'
 import MsgContent from './MsgContent.jsx'
@@ -114,7 +119,7 @@ import BranchOrigin from './BranchOrigin.jsx'
 import ActivityLineHeader from './ActivityLineHeader.jsx'
 import { messageCopyText } from './messageCopy.js'
 import { formatResetTime, isProviderLimitPause, pauseTiming } from './resetTime.js'
-import { isResourcePause } from './waitingPresentation.js'
+import { isResourcePause, resourcePausePresentation } from './waitingPresentation.js'
 import { limitRecoveryCredit } from './limitRecoveryCredit.js'
 import {
   resetDeadlineDelay,
@@ -176,12 +181,13 @@ import { createQueuedEditOrder } from './queuedEditOrder.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
+  isHelperChatSendFailure,
   isModelSelectionRequiredFailure,
   isPendingQuestionSendFailure,
   queueSendFailureMessage,
-  sendFailureMessage,
   shouldKeepQueuedAfterSendFailure,
 } from './sendFailure.js'
+import { sendFailureNotice } from './HelperChatSendNotice.jsx'
 import { isQuestionStateChangedError } from './sendErrors.js'
 import {
   assistantStreamBelongsToActiveMessage,
@@ -196,6 +202,9 @@ import {
   deriveActiveAssistantSelection,
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
+import { stretchClipboard } from './messageCopy.js'
+import { footerCopyParts, footerHasCopy, replyFooters } from './replyFooter.js'
+import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
   assistantReplyRoot,
@@ -230,6 +239,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   supersedeResumedPauseBlocks,
+  combineRecoveryHistory,
   serverSnapshotBehindLocal,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
@@ -411,6 +421,7 @@ export default function ChatView({
   builtAppsReady = false,
   onOpenApp,
   onInternalNav,
+  onOpenProviderSettings,
   onMessageStart,
   onOwnerActivity,
   // True while this chat is filed under Archived; the notice offers Restore.
@@ -856,7 +867,7 @@ export default function ChatView({
 
   const showMessageMeta = useCallback((event, key) => {
     if (event.defaultPrevented) return
-    if (event.target.closest?.('button, a, input, textarea, select, summary, [role="button"]')) return
+    if (event.target.closest?.(INTERACTIVE_TARGET)) return
     if (window.getSelection?.()?.toString()) return
     if (messageMetaTimerRef.current) clearTimeout(messageMetaTimerRef.current)
     setVisibleMessageMetaKey(key)
@@ -922,11 +933,12 @@ export default function ChatView({
   // current() to fire the bar's hidden picker. ChatInputBar's layout
   // effect installs the function.
   const attachTriggerRef = useRef(null)
-  // ChatInputBar installs `{ open(cid), setAside(cid) }` here so the queue
-  // tray's pencil and × reach the chat box; it reports which queued message
-  // the box is editing for the tray's "In the chat box" tag.
+  // ChatInputBar installs `{ open(cid), setAside(cid), back(fromKeyboard) }`
+  // here so the queue tray's pencil, × and Stop editing reach the chat box; it
+  // reports which queued message the box is editing and whether it is saving,
+  // for the row that offers Stop editing.
   const queuedComposerRef = useRef(null)
-  const [queuedInComposerCid, setQueuedInComposerCid] = useState(null)
+  const [queuedInComposer, setQueuedInComposer] = useState(null)
   // The model/effort picker can accept another choice before the prior save
   // settles. Keep its serialized write tail at ChatView scope so both a closed
   // + popover and an immediate Send still observe the same ordering boundary.
@@ -941,6 +953,7 @@ export default function ChatView({
   // every other indirect scroll-geometry write.
   const chatRef = useRef(null)
   const footRef = useRef(null)
+  const footHandoffsRef = useRef(null)
   // `--composer-room` — how much of this chat the reader can actually SEE,
   // read by the composer's growth cap (`.chat__input` max-height).
   //
@@ -1617,6 +1630,10 @@ export default function ChatView({
   // payload and hydrate only runtime fields — do not replace the transcript.
   const refreshRuntimeState = useCallback(async ({ shared = false } = {}) => {
     if (provisionalNewChatRef.current) return null
+    // Until activation settles it alone reads this chat, and the result below
+    // would be discarded anyway; a focus or recovery nudge during activation
+    // must not spend a runtime read the activation already makes redundant.
+    if (!activationSettledRef.current) return null
     const gen = fetchGenRef.current
     try {
       const read = () => (
@@ -1626,7 +1643,8 @@ export default function ChatView({
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
       if (chatIdStaleRef.current) return null
       // A running status alone must not attach a stream over a transcript that
-      // never loaded; a resumed reply would then look like the whole chat.
+      // never loaded; a resumed reply would then look like the whole chat. An
+      // activation retry can begin while this read is in flight.
       if (!activationSettledRef.current) return null
       if (fetchGenRef.current !== gen) return null
       // Runtime-only reads cannot retire recovery before Resume appends its acknowledged row.
@@ -1869,7 +1887,7 @@ export default function ChatView({
       // onNeedsRefresh below is the authority for whether the run truly ended.
       promoteStreamToMessages({ keepTurnOpen: true })
     },
-    onStreamEnd: ({ continues, promotedMessage } = {}) => {
+    onStreamEnd: ({ continues, promotedMessage, runEndedTs } = {}) => {
       dispatchQuestionFollowHandoff({ type: 'stream_ended' })
       if (embedded && continues === false) setEmbeddedRunActive(false)
       const continuation = continues ? queuedContinuationRef.current : null
@@ -1892,6 +1910,7 @@ export default function ChatView({
       promoteStreamToMessages({
         followingMessages: promotedRows,
         authoritativeCut: true,
+        runEndedTs,
       })
       if (continues) {
         // The next physical run has been created but its assistant identity is
@@ -2080,10 +2099,7 @@ export default function ChatView({
       // The rows have now genuinely left `chat.pending_messages`, so retire the
       // tray entries the deferred-cut window kept durably queued but hidden.
       // The cut is the one place that owns the hand-off for both providers.
-      for (const msg of steeredMessages) {
-        const cid = cidOf(msg)
-        if (cid != null) pendingQueue.cancelByCid(cid)
-      }
+      pendingQueue.completeByCid(steeredMessages.map(cidOf))
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
       // This event is the backend's authoritative transcript commit. Refresh
       // the shell's chat list here so a deferred steer advances drawer recency
@@ -2141,13 +2157,16 @@ export default function ChatView({
   }, [chatId, committedSteerKeyboardDismiss, inputValueRef])
   // The composer clears before this boundary, so a slow picker save delays
   // transport without swallowing text entered after Send.
-  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+  const settingsSaved = useCallback(async () => {
     await settingsSaveTailRef.current
     if (chatIdStaleRef.current) {
       throw new Error('This chat is no longer open.')
     }
+  }, [])
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaved()
     return streamSend(text, attachments, options)
-  }, [streamSend])
+  }, [settingsSaved, streamSend])
 
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
@@ -2348,6 +2367,7 @@ export default function ChatView({
     items: explicitItems = null,
     assistantMessageId: explicitAssistantMessageId = undefined,
     authoritativeCut = false,
+    runEndedTs = null,
   } = {}) {
     const following = Array.isArray(followingMessages)
       ? followingMessages.filter(Boolean)
@@ -2419,6 +2439,7 @@ export default function ChatView({
       promotedItems: items,
       assistantMessageId,
       bridgeTs,
+      runEndedTs,
       followingMessages: following,
       commitMessages,
     })
@@ -2960,6 +2981,10 @@ export default function ChatView({
         // A cache fallback preserves readable history, but the failed runtime
         // read did not prove that this chat may accept a new turn.
         setActivationPhase('error')
+        // The recovery edge retries a visible failed activation at once. A
+        // failure before delivery is confirmed (the startup window) must make
+        // the next ready verdict such an edge rather than wait for quiet retries.
+        requireDeliveryReady()
         if (retry != null) {
           activationRecoveryRef.current.attempts += 1
           activationRecoveryRef.current.timer = setTimeout(retryActivation, retry)
@@ -3333,9 +3358,14 @@ export default function ChatView({
     }
     // A failed send's recovery belongs to the composer's draft; a send from
     // elsewhere only re-reads the transcript, which shows it if it arrived.
-    function keepFailedDraft(failedAttempt) {
+    function keepFailedDraft(failedAttempt, error) {
       if (!fromComposer) return
-      rememberFailedAttempt(failedAttempt)
+      // A helper's chat refuses every owner send, so nothing landed and there
+      // is no delivery to reconcile. Any attempt still remembered (an earlier
+      // lost send of this draft) is settled too, or a later transcript read
+      // would replace the refusal with "send it again".
+      if (isHelperChatSendFailure(error)) clearFailedAttempt()
+      else rememberFailedAttempt(failedAttempt)
       restoreComposerAfterFailedSend()
     }
     function settleAmbiguousFailure(failedAttempt) {
@@ -3589,9 +3619,11 @@ export default function ChatView({
             transportContent: text,
             attachments: composerFileSnapshot,
           }
-          keepFailedDraft(failedAttempt)
+          keepFailedDraft(failedAttempt, err)
         }
-        const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+        const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+          online: getOnlineSnapshot(), onInternalNav: internalNav,
+        })
         setSendFailure(banner)
         if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
         if (modelSelectionBlocked) {
@@ -3804,7 +3836,7 @@ export default function ChatView({
           transportContent: sendText,
           attachments: composerFileSnapshot,
         }
-        keepFailedDraft(failedAttempt)
+        keepFailedDraft(failedAttempt, err)
         // Ambiguity recovery already verified reachability and safely replayed
         // this exact cid once. If even that acknowledgement was lost, keep the
         // same cid with the restored draft so a manual retry can only reconcile
@@ -3816,7 +3848,9 @@ export default function ChatView({
           return next
         })
       }
-      const banner = modelSelectionBlocked ? null : sendFailureMessage(err, { online: getOnlineSnapshot() })
+      const banner = modelSelectionBlocked ? null : sendFailureNotice(err, {
+        online: getOnlineSnapshot(), onInternalNav: internalNav,
+      })
       setSendFailure(banner)
       if (!keepQueued && isAmbiguousSendFailure(err)) settleAmbiguousFailure(failedAttempt)
       if (modelSelectionBlocked) {
@@ -3857,6 +3891,7 @@ export default function ChatView({
     restoreFiles,
     releaseFiles,
     acknowledgeFirstMessageAccepted,
+    internalNav,
   ])
 
   useEffect(() => {
@@ -4380,15 +4415,19 @@ export default function ChatView({
     !activationSettledRef.current
     || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
+  const helperDelegationId = chatInfo?.helper_delegation_id || null
+  const helperParentChatId = chatInfo?.helper_parent_chat_id || null
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
     resumeRequestRef.current = request
     try {
-      return await sendAfterSettingsSaved(text, attachments, options)
+      return await sendRecoveryResume({
+        helperDelegationId, settingsSaved, request: apiFetch, send: sendAfterSettingsSaved,
+      }, text, attachments, options)
     } finally {
       if (resumeRequestRef.current === request) resumeRequestRef.current = null
     }
-  }, [chatId, sendAfterSettingsSaved])
+  }, [chatId, helperDelegationId, sendAfterSettingsSaved, settingsSaved])
   const { resume: handleResume, state: resumeState } = useResume({
     chatId,
     runId: recoveryRunId,
@@ -4540,8 +4579,10 @@ export default function ChatView({
       )
       const data = await jsonOrThrow(res, 'Queued-message edit failed')
       if (data.updated && Array.isArray(data.pending_messages)) {
-        // Reconcile the edited text from server truth.
-        pendingQueue.hydrate(data.pending_messages)
+        // This edit confirms only its own row, not the pre-cut snapshot of
+        // siblings. A concurrent steer must not be undone by that old list.
+        const serverMsg = data.pending_messages.find(row => cidOf(row) === cid)
+        if (serverMsg) pendingQueue.confirmQueued(cid, { serverMsg })
         return 'saved'
       }
       // updated:false — a racing promotion or cancel already pulled this row
@@ -5288,6 +5329,7 @@ export default function ChatView({
   // scrolling becomes possible; later pages remain user-driven and bounded.
   // Observation reports an initial size, so re-subscribing when loading or
   // the loaded page changes re-checks both.
+  useFootReveal(scrollRef, footRef, footHandoffsRef, !showEmpty && !showLoadError)
   const hasTranscript = !showEmpty && !showLoadError
   useLayoutEffect(() => {
     const el = scrollRef.current
@@ -5726,9 +5768,7 @@ export default function ChatView({
     if (!pendingResumeBlock) return null
     if (serverHandoff?.kind === 'recovery') return 'This chat needs recovery. Review the saved recovery card.'
     if (resourcePause) {
-      return resourcePause.pause?.kind === 'storage'
-        ? 'Waiting for storage headroom. This chat will resume automatically.'
-        : 'Waiting for memory to settle. This chat will resume automatically.'
+      return `${resourcePausePresentation(resourcePause).summary}. This chat will resume automatically.`
     }
     if (modelCapacityPause) {
       const label = formatResetTime(pendingLimitCheckAt)
@@ -5800,7 +5840,12 @@ export default function ChatView({
     turnActive, hasPendingQuestion, hasPendingResume: !!pendingResumeBlock, chatHandoff,
   })
   const progressGoal = currentProgressGoal(goalPresentation, { turnActive })
-  const separateBackgroundHelpers = helpersOutsideGoal(backgroundHelpers, progressGoal)
+  const ownedHelpers = trayHelpers(backgroundHelpers, progressGoal)
+  // A resource or provider park is the idle chat's own hold; a running turn
+  // has already moved past it.
+  const footResourcePause = turnActive
+    ? null
+    : resourcePause || (modelCapacityPause || pendingLimitPark ? pendingResumeBlock : null)
   const buildPhaseRail = buildPhaseRailViewModel(buildPhases)
   // Goal ownership comes from authoritative runtime reconciliation, never
   // message text or a momentary browser transport signal.
@@ -5808,7 +5853,7 @@ export default function ChatView({
   const progressRail = progressRailViewModel(
     progressGoal,
     buildPhaseRail,
-    { turnActive },
+    { turnActive, directHelpersInTray: !hasPendingQuestion && backgroundHelpers.with_goal?.goal_id === progressGoal?.id },
   ).map(item => {
     if (item.key !== 'goal') return item
     // The Goal step owns a two-tap clear affordance and the plan details.
@@ -5871,12 +5916,19 @@ export default function ChatView({
     () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
     [settledMessages, activeSteerPrefix],
   )
-  const peerTimeline = usePeerTimeline(
+  const projectedTimeline = usePeerTimeline(
     chatId,
     displayedMessages,
     !hidden && transcriptPaintable,
     streamItems,
   )
+  // Settled pause history joins its resume notice only where the projected
+  // timeline draws nothing between them.
+  const peerTimeline = useMemo(() => {
+    const combined = combineRecoveryHistory(projectedTimeline.messages, projectedTimeline)
+    return combined === projectedTimeline.messages
+      ? projectedTimeline : { ...projectedTimeline, messages: combined }
+  }, [projectedTimeline])
   const committedReplyGroupsRef = useRef(null)
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0
@@ -5908,6 +5960,70 @@ export default function ChatView({
     }
   }
 
+  // Answering a card starts the turn the moment it is submitted, before the
+  // server acknowledges it; a failed answer ends it and the controls return
+  // in the line the answer kept.
+  const questionPending = questionFollowHandoff != null
+  const turnStarting = turnActive || questionPending
+  // The settled footer reply's end (see replyFooters). It is state set from a
+  // committed render's layout effect, so a discarded render cannot name a
+  // reply, and it updates before paint. Kept with its chat, so switching
+  // chats never carries one chat's settled reply into another.
+  const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
+  const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
+  // One footer per complete answer. Only the current answer follows the live
+  // surface: it keeps its line, without controls, while the same answer
+  // continues (a question answered inside its row), and leaves it to the new
+  // reply when another turn starts. An answer a still-running run wrote
+  // (before a visible steer) stays working until that run settles.
+  const footerLiveIndex = showActiveAssistantSurface
+    ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
+  const runningRoot = turnActive
+    ? assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId })
+    : null
+  const footers = useMemo(() => replyFooters({
+    messages: peerTimeline.messages, replyGroups, liveIndex: footerLiveIndex,
+    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot,
+    questionPending,
+  }), [peerTimeline.messages, replyGroups, footerLiveIndex,
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot, questionPending])
+  const footerEnd = footers.current?.end ?? null
+  useLayoutEffect(() => {
+    if (!turnStarting) {
+      setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
+        ? prev : { chatId, end: footerEnd }))
+    }
+  }, [chatId, turnStarting, footerEnd])
+  // At most the first loaded answer can begin before the history page. Its
+  // start is read lazily (abortable, retryable), whether it is historical or
+  // the current answer.
+  const truncatedFooter = [...footers.byGroup.values()].some(item => item.truncated)
+  const [stretchStartRows, requestStretchStart] = useStretchPrefix(
+    chatId, truncatedFooter ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+  )
+  // Copy shows when an answer settled with prose to copy (footerHasCopy) and
+  // builds its text only when pressed, from the transcript as it is then.
+  // The handler is stable and each answer's References rows keep their
+  // identity, so the footer gives an unchanged settled answer no new props on
+  // a streamed frame.
+  const copyReadRef = useRef(null)
+  useLayoutEffect(() => {
+    copyReadRef.current = {
+      footers,
+      context: {
+        startRows: stretchStartRows, messages: peerTimeline.messages, offset,
+        slots: peerTimeline.slots, positions: peerTimeline.positions,
+        displayKeys: assistantDisplayKeys, liveQuestionId: answerableQuestionId,
+      },
+    }
+  })
+  const copyAnswer = useCallback((button, answerKey) => {
+    const { footers: current, context } = copyReadRef.current
+    const footer = [...current.byGroup.values()].find(item => item.group.rows[0].key === answerKey)
+    const parts = footerCopyParts(footer, context)
+    return parts?.length ? stretchClipboard(parts, button.closest('.chat__list')) : null
+  }, [])
+
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
     setDepth: depth => { fileDragDepthRef.current = depth },
@@ -5928,9 +6044,10 @@ export default function ChatView({
       : -1
     const active = activeIndex >= 0
     const replyRoot = assistantReplyRoot(group.rows[0].message)
-    const continuingRun = !!(turnActive && replyRoot && replyRoot
-      === assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId }))
+    // The running run is still writing this reply (see runningRoot).
+    const continuingRun = !!runningRoot && replyRoot === runningRoot
     const tail = group.rows.at(-1)
+    const groupFooter = footers.byGroup.get(group)
     const last = active || group.lastVisibleIndex === lastVisibleMessageIndex
     return <AssistantReply
       key={group.rows[0].key}
@@ -5948,7 +6065,9 @@ export default function ChatView({
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
-      canOverrideStorage={canStartFreshSession}
+      canContinueAnyway={canStartFreshSession}
+      helperChat={!!helperDelegationId}
+      helperParentChatId={helperParentChatId}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -5966,11 +6085,20 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      endsStretch={endsAgentStretch(peerTimeline.messages, replyGroups, group)}
-      // Only an idle latest reply pins its actions. A live reply may not yet
-      // have a stored row; that must not leave the previous reply pinned too.
-      metaVisible={(!turnActive && last) || visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={showMessageMeta}
+      // Each complete answer keeps its own footer; only one the running turn
+      // is still writing, or briefly the one it is leaving, has no controls.
+      footer={groupFooter?.state ?? null}
+      copy={footerHasCopy(groupFooter, {
+        startRows: stretchStartRows, messages: peerTimeline.messages, liveQuestionId: answerableQuestionId,
+      })
+        ? copyAnswer : undefined}
+      metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={groupFooter ? showMessageMeta : undefined}
+      onFooterIntent={groupFooter?.truncated ? requestStretchStart : undefined}
+      // References sit in the answer footer. While the answer continues they
+      // keep their place, held and unusable, so submitting an answer cannot
+      // move the transcript; they are usable again once it settles.
+      stretchSourceRows={groupFooter?.sourceRows ?? null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
@@ -5992,7 +6120,7 @@ export default function ChatView({
     ? renderAssistantReply(appendedReply) : null
 
 
-  return (
+  const pane = (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
@@ -6239,7 +6367,7 @@ export default function ChatView({
           {branchOriginAtEnd && branchOriginRow}
 
           {turnActive && streamItems.length === 0 && !loading && !showActiveAssistantSurface && (
-            <li className="chat__msg chat__msg--assistant">
+            <li className="chat__msg chat__msg--assistant chat__msg--pending-reply">
               {/* The placeholder occupies the same wrapper and shared header as
                   the first real activity stretch, so event promotion cannot
                   change its alignment. The hook remains a presence probe only. */}
@@ -6295,16 +6423,6 @@ export default function ChatView({
               </li>
             )
           })()}
-          {!hasPendingQuestion && !turnActive && (armedWaits.length > 0 || separateBackgroundHelpers.count > 0 || resourcePause || modelCapacityPause || pendingLimitPark) && <li className="chat__handoff-slot" data-key="current-waiting-handoff">
-            <WaitingChip
-              waits={armedWaits}
-              backgroundHelpers={separateBackgroundHelpers}
-              resourcePause={resourcePause || (modelCapacityPause || pendingLimitPark ? pendingResumeBlock : null)}
-              handoff={serverHandoff}
-              onCancel={handleCancelWait}
-              onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
-            />
-          </li>}
         </ul>
         </PeerTimelineContext.Provider>
         </LocalAnswersContext.Provider>
@@ -6317,8 +6435,8 @@ export default function ChatView({
       <div ref={footRef} className="chat__foot">
         {/* Foot order, top to bottom:
             floating actions overlay the transcript without joining the measured
-            footer; build-progress rail → connection/retry → queued messages →
-            composer remain in normal footer flow. The shell owns the one persistent
+            footer; handoff layer (progress, helpers, waits) → connection/retry →
+            queued messages → composer remain in normal footer flow. The shell owns the one persistent
             offline explanation; the composer retains contextual send-failure copy.
             Transient trouble (a stream reattaching, an older page or activation
             that failed) recovers quietly with no note here. Only a state the
@@ -6391,13 +6509,32 @@ export default function ChatView({
             </div>
           )}
         </div>
-        <ProgressRail
-          items={progressRail}
-          resetKey={goalPresentation?.id || visibleGoalObjective || 'build-progress'}
-          ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
-          onClearItem={handleClearGoal}
-          onActionItem={handleGoalRailAction}
-        />
+        {/* Handoffs slide behind input without changing footer clearance. */}
+        <div ref={footHandoffsRef} className="chat__foot-handoffs">
+          <ProgressRail
+            items={progressRail}
+            resetKey={goalPresentation?.id || visibleGoalObjective || 'build-progress'}
+            ariaLabel={visibleGoalObjective ? 'Goal progress' : 'Build progress'}
+            onClearItem={handleClearGoal}
+            onActionItem={handleGoalRailAction}
+          />
+          {/* What this chat is still owed (helpers, armed waits, an idle
+              park) stays beside the composer through running turns. A saved
+              owner question outranks it, as it does the Goal helper headline,
+              and needs the room. Its height joins the measured foot. */}
+          <WaitingChip
+            hidden={hasPendingQuestion}
+            waits={armedWaits}
+            helpers={ownedHelpers.rows}
+            unlistedHelpers={ownedHelpers.unlistedHelpers}
+            resourcePause={footResourcePause}
+            handoff={turnActive ? null : serverHandoff}
+            chatId={chatId}
+            onCancel={handleCancelWait}
+            onRevealRecovery={resumeCardEl ? () => revealPendingQuestion(resumeCardEl) : undefined}
+            onInternalNav={internalNav}
+          />
+        </div>
         {draftGoal !== null && <GoalDraftChip objective={draftGoal} />}
         {archived && !provisionalNewChat && (
           <ArchivedChatNotice onRestore={onRestoreArchived} />
@@ -6417,7 +6554,9 @@ export default function ChatView({
             }}
             onRetry={handleRetryRejected}
             onEditInComposer={cid => queuedComposerRef.current?.open(cid)}
-            inComposerCid={queuedInComposerCid}
+            onStopEditing={fromKeyboard => queuedComposerRef.current?.back(fromKeyboard)}
+            inComposerCid={queuedInComposer?.cid ?? null}
+            inComposerSaving={!!queuedInComposer?.saving}
             onSteerOne={handleSteerOne}
             steerActive={turnActive && !hasPendingQuestion && deliveryReady}
             steerBusy={steerBusy}
@@ -6491,12 +6630,14 @@ export default function ChatView({
           onSaveQueued={handleUpdatePending}
           draftAside={composerDraftAside}
           queuedComposerRef={queuedComposerRef}
-          onQueuedInComposerChange={setQueuedInComposerCid}
+          onQueuedInComposerChange={setQueuedInComposer}
           provider={chatInfo?.provider}
           projectRef={chatInfo?.project || null}
           leftButtons={
             <BrainUsageButton
-              usageEnabled={!embedded}
+              // A hidden instance paints no gauge (a handoff cover still
+              // does); it reads usage when it is shown again.
+              usageEnabled={!embedded && (!hidden || keepTranscriptPainted)}
               chatId={chatId}
               provider={chatInfo?.provider}
               providerSessionId={chatInfo?.session_id}
@@ -6533,6 +6674,7 @@ export default function ChatView({
                   embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={mergeChatInfo}
+                onOpenProviderSettings={onOpenProviderSettings}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
@@ -6557,4 +6699,6 @@ export default function ChatView({
       </div>
     </div>
   )
+  // One helper preview per pane: opening another helper replaces the open one.
+  return <HelperPreviewProvider>{pane}</HelperPreviewProvider>
 }

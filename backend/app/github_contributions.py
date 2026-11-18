@@ -31,6 +31,7 @@ from app import (
   contribution_staging,
   fs_locks,
   github_auth,
+  git_checkout,
   github_contribution_git as _git_ops,
   models,
   settled,
@@ -51,6 +52,7 @@ from app.contribution_records import (
   now_iso as _now_iso,
   read_record as _read_record,
   record_paths as _record_paths,
+  records_dir as _records_dir,
   write_record as _write_record,
 )
 from app.deps import Principal
@@ -743,7 +745,7 @@ def _recheck_submit_app(db: Session, app_id: int, expected_nonce: str | None) ->
     raise HTTPException(status_code=404, detail="App not found.")
 
 
-def _safe_repo_path(raw: object) -> Path:
+def _durable_repo_path(raw: object) -> Path:
   if not isinstance(raw, str) or not raw:
     raise ContributionSubmitError(
       "This record needs to be prepared again: it has no durable repo_path."
@@ -776,6 +778,13 @@ def _safe_repo_path(raw: object) -> Path:
     "/data/contributions, /data/apps, or /data/platform; nothing was sent "
     "to GitHub."
   )
+
+
+def _safe_repo_path(raw: object) -> Path:
+  """A durable review folder whose Git state still belongs to that folder."""
+  repo = _durable_repo_path(raw)
+  contribution_staging.require_checkout_ownership(repo)
+  return repo
 
 
 def _safe_equivalence_source_path(raw: object) -> Path:
@@ -819,12 +828,21 @@ def _safe_equivalence_source_path(raw: object) -> Path:
 
 
 def _equivalence_source_repo(record: dict) -> tuple[Path, Path] | None:
-  """Return ``(durable source, review checkout)`` for one contribution."""
+  """Return ``(durable source, review checkout)`` for one contribution.
+
+  The review checkout is only located here, not trusted: a recorded
+  ``source_repo_path`` must stay reachable after its disposable review folder
+  went stale, or settling a finished PR would leave its bookkeeping behind.
+  Publishing callers check the folder's ownership with ``_safe_repo_path``.
+  """
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
-  review_repo = _safe_repo_path(plan.get("repo_path"))
+  review_repo = _durable_repo_path(plan.get("repo_path"))
   raw_source_repo = plan.get("source_repo_path")
   if raw_source_repo:
     return _safe_equivalence_source_path(raw_source_repo), review_repo
+  # Without a recorded source, the folder's own Git state names the source,
+  # so that state must still belong to this folder.
+  contribution_staging.require_checkout_ownership(review_repo)
   primary = app_git.primary_worktree_path(review_repo)
   if primary is not None:
     return _safe_equivalence_source_path(str(primary)), review_repo
@@ -916,14 +934,20 @@ def _pending_equivalence_spec(record: dict) -> _PendingEquivalenceSpec | None:
   # Older cleanup could remove a linked review worktree before the merged-state
   # poll created its durable witness. The reviewed commits remain in the live
   # repository, but only reuse it when both immutable commits still resolve.
+  # A stale folder that no longer owns its Git state is never read: only the
+  # durable source can stand in for it.
+  review_owned = git_checkout.checkout_ownership_error(review_repo) is None
   if (
-    not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
+    not review_owned
+    or not app_git.ref_exists(review_repo, f"{base_sha}^{{commit}}")
     or not app_git.ref_exists(review_repo, f"{head_sha}^{{commit}}")
   ) and (
     app_git.ref_exists(source_repo, f"{base_sha}^{{commit}}")
     and app_git.ref_exists(source_repo, f"{head_sha}^{{commit}}")
   ):
     review_repo = source_repo
+  elif not review_owned:
+    return None
 
   try:
     current_source = app_git.head_sha(source_repo, "HEAD")
@@ -1252,22 +1276,110 @@ def _settle_equivalence(record: dict, upstream_sha: str | None = None) -> str | 
   return None
 
 
-def _cleanup_terminal_staging_checkout(record: dict) -> bool:
-  """Remove a terminal contribution checkout through its owning Git shape."""
-  if record.get("status") not in {
-    "merged", "closed", "superseded", "commented", "abandoned",
-  }:
-    return False
+_TERMINAL_RECORD_STATUSES = frozenset({
+  "merged", "closed", "superseded", "commented", "abandoned",
+})
+
+
+def _separate_git_dir(repo: Path, git_dir: Path) -> bool:
+  """Whether ``git_dir`` is ``repo``'s sibling ``git`` folder, removed with it."""
+  return git_dir.name == "git" and git_dir.parent == repo.parent
+
+
+def _checkout_removal_paths(repo: Path) -> tuple[Path, ...]:
+  """Everything removing ``repo`` deletes: the checkout and a separate Git dir."""
+  git_dir = git_checkout.linked_git_dir(repo)
+  if git_dir is not None and _separate_git_dir(repo, git_dir):
+    return repo, git_dir
+  return (repo,)
+
+
+def _staging_roots() -> tuple[Path, Path]:
+  """The folders terminal cleanup may remove checkouts from."""
+  data_dir = Path(get_settings().data_dir).resolve()
+  return data_dir / "contrib", data_dir / "contributions"
+
+
+def _staging_checkout(raw_repo: object) -> Path | None:
+  """A recorded checkout path inside a staging root (not the root itself)."""
+  if not isinstance(raw_repo, str) or not raw_repo:
+    return None
+  try:
+    repo = Path(raw_repo).resolve()
+  except (OSError, RuntimeError):
+    return None
+  roots = _staging_roots()
+  return repo if any(repo != root and repo.is_relative_to(root) for root in roots) else None
+
+
+def checkout_kept_for(app_id: int, record_id: str, repo: Path) -> str | None:
+  """Another unfinished contribution of this app that needs the checkout ``repo``.
+
+  Contributions can share a checkout: a follow-up PR prepared in the clone of
+  the PR before it, a folder around it, or a worktree whose Git data lives in
+  it. A finished one must not delete what another still needs; Contribute
+  asks again about a kept checkout, so it goes once nothing needs it. Returns
+  the id of the contribution it is kept for.
+  """
+  removed = _checkout_removal_paths(repo)
+  for path in sorted(_records_dir(app_id).glob("*.json")):
+    if path.stem == record_id:
+      continue
+    try:
+      other = _read_record(path)
+    except HTTPException:
+      continue
+    if other.get("status") in _TERMINAL_RECORD_STATUSES:
+      continue
+    plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
+    raw = plan.get("repo_path")
+    if not isinstance(raw, str) or not raw:
+      continue
+    try:
+      other_repo = Path(raw).resolve()
+    except (OSError, RuntimeError):
+      continue
+    other_git = git_checkout.linked_git_dir(other_repo)
+    # A checkout or its Git data inside what removal deletes is always kept.
+    # Only an enclosing folder must itself be a real staging checkout, so a
+    # stray path such as the data folder cannot keep every checkout.
+    encloses = _staging_checkout(raw) is not None and any(
+      gone.is_relative_to(other_repo) for gone in removed
+    )
+    if encloses or any(
+      other_repo.is_relative_to(gone)
+      or (other_git is not None and other_git.is_relative_to(gone))
+      for gone in removed
+    ):
+      return str(other.get("id") or path.stem)
+  return None
+
+
+def terminal_checkout_cleanup(
+  record: dict, *, app_id: int, record_id: str | None = None,
+) -> tuple[bool, str | None]:
+  """Remove a terminal contribution checkout; or say which open one keeps it.
+
+  Returns whether the checkout is gone, and the id of the unfinished
+  contribution it was kept for when that is why it stays.
+  """
+  if record.get("status") not in _TERMINAL_RECORD_STATUSES:
+    return False, None
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
-  repo = _safe_repo_path(raw_repo)
+  # Cleanup must still handle stale folders without touching the replacement
+  # checkout's administrative state; its reciprocal check below owns that case.
+  repo = _durable_repo_path(raw_repo)
   recorded_repo = Path(raw_repo)
   if not recorded_repo.is_absolute() or recorded_repo != repo:
-    return False
+    return False, None
   data_dir = Path(get_settings().data_dir).resolve()
-  roots = (data_dir / "contrib", data_dir / "contributions")
+  roots = _staging_roots()
   if not any(repo.is_relative_to(root) for root in roots):
-    return False
+    return False, None
+  kept_for = checkout_kept_for(app_id, record_id or str(record.get("id") or ""), repo)
+  if kept_for is not None:
+    return False, kept_for
   cleaned = not repo.exists() or _remove_staging_checkout(repo, data_dir)
   if cleaned and repo.parent.parent in roots:
     # The per-record folder holds only this checkout by convention. Remove it
@@ -1276,7 +1388,7 @@ def _cleanup_terminal_staging_checkout(record: dict) -> bool:
       repo.parent.rmdir()
     except OSError:
       pass
-  return cleaned
+  return cleaned, None
 
 
 def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
@@ -1287,27 +1399,11 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
   # Linked worktrees and separate-git-dir checkouts both use a .git file.
   if marker.is_file():
-    try:
-      marker_value = marker.read_text().strip()
-    except OSError:
-      return False
-    if not marker_value.startswith("gitdir:"):
-      return False
-    raw_git_dir = marker_value.removeprefix("gitdir:").strip()
-    if not raw_git_dir:
-      return False
-    marker_git_dir = Path(raw_git_dir)
-    if not marker_git_dir.is_absolute():
-      marker_git_dir = marker.parent / marker_git_dir
-    try:
-      marker_git_dir = marker_git_dir.resolve()
-    except (OSError, RuntimeError):
+    marker_git_dir = git_checkout.linked_git_dir(repo)
+    if marker_git_dir is None:
       return False
 
-    separate_git_dir = (
-      marker_git_dir.name == "git" and marker_git_dir.parent == repo.parent
-    )
-    if separate_git_dir:
+    if _separate_git_dir(repo, marker_git_dir):
       # Delete the Git directory first. If removing the checkout then fails,
       # the next call sees its missing sibling and can finish idempotently.
       if marker_git_dir.exists():
@@ -1317,17 +1413,7 @@ def _remove_staging_checkout(repo: Path, data_dir: Path) -> bool:
 
     # Git can recycle a pruned worktree admin slot for a newer checkout. Every
     # linked admin directory must still point back to this exact checkout.
-    back_reference = marker_git_dir / "gitdir"
-    owns_checkout = False
-    if back_reference.is_file() and not back_reference.is_symlink():
-      try:
-        registered_marker = Path(back_reference.read_text().strip())
-        if not registered_marker.is_absolute():
-          registered_marker = back_reference.parent / registered_marker
-        owns_checkout = registered_marker.resolve() == marker.resolve()
-      except (OSError, RuntimeError):
-        owns_checkout = False
-    if not owns_checkout:
+    if not git_checkout.linked_worktree_owns_checkout(repo, marker_git_dir):
       shutil.rmtree(repo)
       return True
 
@@ -3543,34 +3629,54 @@ def _push_branch(
   repo: Path,
   remote: str,
   branch: str,
-  source: str = "HEAD",
+  commit: str,
   expected_remote_sha: str | None = None,
 ) -> str | None:
-  """Push once behind the exact remote tip observed before the intent.
+  """Push the exact reviewed commit behind the remote tip observed before the intent.
 
   A transport failure is ambiguous: retrying before an authoritative read can
   turn an accepted first request into a misleading lease rejection. The
-  caller probes GitHub and resumes from its signed intent instead.
+  caller probes GitHub and resumes from its signed intent instead. A refusing
+  pre-push gate raises ``PushGateRefused``: nothing left the instance.
   """
   if expected_remote_sha is not None:
     _git_ops._canonical_reviewed_oid(expected_remote_sha, "remote branch head")
-  lease = f"--force-with-lease=refs/heads/{branch}:{expected_remote_sha or ''}"
-  proc = _git_ops._git(
-    repo, "push", lease, remote, f"{source}:refs/heads/{branch}", check=False,
+  proc = _git_ops.push(
+    repo, remote, commit, f"refs/heads/{branch}", lease=expected_remote_sha or "",
   )
   if proc.returncode == 0:
     return None
   return (proc.stderr or proc.stdout or "").strip() or "Git push failed."
 
 
+def _push_refusal(
+  detail: str, refused_locally: ContributionSubmitError | None, record_patch: dict,
+) -> ContributionSubmitError:
+  """The rejection for a push that did not land: the gate's own, or GitHub's."""
+  if refused_locally is not None:
+    return ContributionSubmitError(
+      refused_locally.message, code=refused_locally.code,
+      detail=refused_locally.detail, record_patch=record_patch,
+    )
+  return push_rejected(detail, record_patch=record_patch)
+
+
 def _push_topic_branch(
   repo: Path,
   branch: str,
-  source: str = "HEAD",
+  commit: str,
   expected_remote_sha: str | None = None,
+  *,
+  fork_slug: str,
 ) -> str | None:
-  """Push a reviewed topic to the owner's configured fork remote."""
-  return _push_branch(repo, "fork", branch, source, expected_remote_sha)
+  """Push a reviewed topic to the owner's verified fork.
+
+  The URL comes from the verified fork, never from the checkout's ``fork``
+  remote, which code in the checkout (the gate, say) could rewrite.
+  """
+  return _push_branch(
+    repo, f"https://github.com/{fork_slug}.git", branch, commit, expected_remote_sha,
+  )
 
 
 def _github_remote_slug(remote_url: str) -> str | None:
@@ -3591,32 +3697,18 @@ def _github_remote_slug(remote_url: str) -> str | None:
 
 
 def _ensure_owner_fork_remote(repo: Path, upstream_repo: str, login: str) -> str:
-  """Make local remote `fork` point at the approving owner's fork."""
-  # A cached `fork` remote is never trusted on its own: it can name a fork the
-  # owner has since deleted on GitHub, and pushing reviewed code at a missing
-  # repository fails with an opaque error. Drop any existing remote and always
-  # re-resolve through `gh repo fork`, which is idempotent — it reuses the
-  # owner's fork or creates one — so a stale, ambient, or deleted remote all
-  # heal the same way. The staged contribution checkout is disposable, so
-  # replacing the remote is safe.
-  if _git_ops._git(repo, "remote", "get-url", "fork", check=False).returncode == 0:
-    _git_ops._git(repo, "remote", "remove", "fork", check=False)
-
-  origin = _git_ops._git(repo, "remote", "get-url", "origin", check=False)
-  origin_slug = (
-    _github_remote_slug(origin.stdout) if origin.returncode == 0 else None
-  )
-  if not origin_slug or origin_slug.lower() != upstream_repo.lower():
-    _git_ops._git(
-      repo,
-      "remote", "set-url" if origin.returncode == 0 else "add",
-      "origin", f"https://github.com/{upstream_repo}.git",
-    )
-
-  # gh 2.96 rejects --remote with a repository argument; origin selects
-  # the upstream repo for the in-repo fork command.
-  _git_ops._gh(repo, "repo", "fork", "--remote", "--remote-name", "fork")
-  final = _git_ops._git(repo, "remote", "get-url", "fork", check=False)
+  """Resolve and verify the approving owner's fork of ``upstream_repo``."""
+  # The fork is re-resolved through `gh repo fork` every time, which is
+  # idempotent: it reuses the owner's fork or creates one, so a deleted fork
+  # heals too. The checkout's own remotes are neither read nor written; the
+  # push goes to the URL verified here.
+  # gh 2.96 rejects --remote with a repository argument, so the in-repo fork
+  # command runs in a server scratch repository whose origin is upstream:
+  # gh, holding the token, never runs Git in the agent-writable checkout.
+  with _git_ops._server_scratch(bare=False) as scratch:
+    _git_ops._git(scratch, "remote", "add", "origin", f"https://github.com/{upstream_repo}.git")
+    _git_ops._gh(scratch, "repo", "fork", "--remote", "--remote-name", "fork")
+    final = _git_ops._git(scratch, "remote", "get-url", "fork", check=False)
   final_slug = _github_remote_slug(final.stdout) if final.returncode == 0 else None
   if not final_slug or final_slug.split("/", 1)[0].lower() != login.lower():
     raise ContributionSubmitError(
@@ -4289,7 +4381,6 @@ def _submit_prepared_pr(
           record_patch=record_patch,
         )
 
-    push_source = "HEAD"
     push_source_sha = str(
       record_patch.get("head_sha") or expected_head
     ).strip().lower()
@@ -4406,6 +4497,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
+        refused_locally = None
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4425,8 +4517,10 @@ def _submit_prepared_pr(
             last_push_error = None
           else:
             last_push_error = _push_branch(
-              repo, push_remote, branch, push_source, remote_before_push,
+              repo, push_remote, branch, push_source_sha, remote_before_push,
             )
+        except _git_ops.PushGateRefused as exc:
+          last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4451,7 +4545,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or _is_transient_push_error(last_push_error)
+            or (refused_locally is None and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4473,11 +4567,12 @@ def _submit_prepared_pr(
           else:
             if attempt_event is not None:
               attempt_event("armed", {
-                "action": "push_rejected", "repo": upstream_repo,
+                "action": "push_gate_refused" if refused_locally else "push_rejected",
+                "repo": upstream_repo,
                 "head_repository": upstream_repo, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            raise _push_refusal(last_push_error, refused_locally, record_patch)
 
     else:
       if public_branch_recovery:
@@ -4501,7 +4596,6 @@ def _submit_prepared_pr(
           record_patch=record_patch,
         )
       record_patch = _git_ops._record_patch_with(record_patch, {"head_repository": fork_slug})
-      push_source = "HEAD"
       if not public_branch_recovery:
         remote_before_push = expected_remote_tip(fork_slug)
         pending_patch = _git_ops._record_patch_with(record_patch, {
@@ -4519,6 +4613,7 @@ def _submit_prepared_pr(
             "base_branch": submit_base,
             "expected_remote_sha": remote_before_push,
           }, pending_patch)
+        refused_locally = None
         try:
           if branch_lease_sha is not None:
             if remote_before_push != branch_lease_sha:
@@ -4538,8 +4633,10 @@ def _submit_prepared_pr(
             last_push_error = None
           else:
             last_push_error = _push_topic_branch(
-              repo, branch, push_source, remote_before_push,
+              repo, branch, push_source_sha, remote_before_push, fork_slug=fork_slug,
             )
+        except _git_ops.PushGateRefused as exc:
+          last_push_error, refused_locally = exc.detail or exc.message, exc
         except (subprocess.TimeoutExpired, OSError) as exc:
           ambiguous_patch = _git_ops._record_patch_with(record_patch, {
             "last_submit_stage": "push_ambiguous",
@@ -4564,7 +4661,7 @@ def _submit_prepared_pr(
             last_push_error = None
           elif (
             (accepted is None and prior_push_request is not None)
-            or _is_transient_push_error(last_push_error)
+            or (refused_locally is None and _is_transient_push_error(last_push_error))
           ):
             ambiguous_patch = _git_ops._record_patch_with(record_patch, {
               "last_submit_stage": "push_ambiguous",
@@ -4586,11 +4683,12 @@ def _submit_prepared_pr(
           else:
             if attempt_event is not None:
               attempt_event("armed", {
-                "action": "push_rejected", "repo": upstream_repo,
+                "action": "push_gate_refused" if refused_locally else "push_rejected",
+                "repo": upstream_repo,
                 "head_repository": fork_slug, "branch": branch,
                 "head_sha": push_source_sha, "base_branch": submit_base,
               }, record_patch)
-            raise push_rejected(last_push_error, record_patch=record_patch)
+            raise _push_refusal(last_push_error, refused_locally, record_patch)
 
       published_repo = fork_slug
     pushed_branch_url = (
@@ -4612,8 +4710,6 @@ def _submit_prepared_pr(
       or push_source_sha
       or ""
     ).strip()
-    if not _GIT_SHA.match(pushed_sha):
-      pushed_sha = _git_ops._git(repo, "rev-parse", push_source).stdout.strip()
     if not _GIT_SHA.match(pushed_sha):
       raise ContributionSubmitError(
         "Could not verify the exact reviewed commit after pushing this branch.",
@@ -5031,19 +5127,16 @@ def _push_stack_tip_with_lease(
 ) -> None:
   """Atomically advance one unchanged upstream ref to a proven stack tip."""
   remote = f"https://github.com/{upstream_repo}.git"
+  ref = f"refs/heads/{target_branch}"
+  # The gate runs once, before any attempt: a retry only re-sends the push,
+  # so a refusal can never follow an attempt whose outcome is unknown.
+  _git_ops._pre_push_gate(repo, remote, landed_sha, ref, expected_base)
   last_error = ""
   last_actual = expected_base
   saw_ambiguous_attempt = False
   for attempt in range(_PUSH_RETRIES):
     try:
-      proc = _git_ops._git(
-        repo,
-        "push",
-        f"--force-with-lease=refs/heads/{target_branch}:{expected_base}",
-        remote,
-        f"{landed_sha}:refs/heads/{target_branch}",
-        check=False,
-      )
+      proc = _git_ops._send_push(repo, remote, landed_sha, ref, expected_base)
     except (subprocess.TimeoutExpired, OSError) as exc:
       proc = None
       last_error = str(exc)

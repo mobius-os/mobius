@@ -9,6 +9,7 @@ from app.broadcast import SystemBroadcast
 from app.runtime_supervisors import (
   PROVIDER_SESSION_RETENTION_BACKLOG_INTERVAL_SECS,
   PROVIDER_SESSION_RETENTION_INTERVAL_SECS,
+  REQUIRED_DATABASE_SUPERVISORS,
   RuntimeSupervisors,
   provider_retention_delay_after,
 )
@@ -87,12 +88,18 @@ async def test_start_fails_open_when_chat_supervisor_wiring_breaks(monkeypatch):
   monkeypatch.setattr(supervisors, "_start_frontend_watcher", frontend)
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", broken_chat_wiring)
 
+  async def key_vault_stub():
+    await asyncio.Event().wait()
+
+  monkeypatch.setattr("app.key_vault.supervise_key_vault", key_vault_stub)
+
   await supervisors.start_process_services()
   before = set(supervisors._tasks)
   await supervisors.start_database_services()
 
   assert frontend_started is True
   assert "connect-outbound" in supervisors._tasks
+  assert "key-vault" in supervisors._tasks
   assert set(supervisors._tasks) == before
   assert supervisors.database_service_readiness() == (
     False, "runtime_supervisor_start_failed",
@@ -131,10 +138,7 @@ async def test_optional_supervisor_exit_does_not_fail_core_readiness(monkeypatch
     return None
 
   async def start_required_and_optional():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
     supervisors._spawn("optional-retention", short_lived())
 
@@ -155,10 +159,7 @@ async def test_required_supervisor_exit_fails_core_readiness(monkeypatch):
     await asyncio.Event().wait()
 
   async def start_required():
-    for name in (
-      "wedged-marker-sweep", "reset-park-sweep", "chat-wait-sweep",
-      "writer-supervisor",
-    ):
+    for name in REQUIRED_DATABASE_SUPERVISORS:
       supervisors._spawn(name, resident())
 
   monkeypatch.setattr(supervisors, "_start_chat_supervisors", start_required)

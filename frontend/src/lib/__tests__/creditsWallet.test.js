@@ -4,8 +4,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import WalletSection from '../../components/SettingsView/WalletSection.jsx'
-import { activityLabel, checkoutPage, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
+import WalletSection, { WalletConnect } from '../../components/SettingsView/WalletSection.jsx'
+import { activityLabel, canReconnect, checkoutPage, creditsSection, openStripeWindow, settleTopup, termsFor } from '../creditsWallet.js'
 
 const SUMMARY = {
   mode: 'customer',
@@ -36,6 +36,49 @@ test('a paid app run shows in recent activity with who was paid', () => {
 
 test('without the service terms no amounts are offered', () => {
   assert.doesNotMatch(render({ terms: null }), /Buy /)
+})
+
+test('settings offers one-tap connect only to an unpaired Möbius launched from mobius.you', () => {
+  assert.equal(creditsSection(SUMMARY), 'wallet')
+  assert.equal(creditsSection({ ...SUMMARY, can_pair_with_account: true }), 'wallet')
+  assert.equal(creditsSection({ mode: 'unpaired', can_pair_with_account: true }), 'connect')
+  assert.equal(creditsSection({ mode: 'unpaired', can_pair_with_account: false }), null)
+  // A server from before one-tap pairing does not say, so it is not offered.
+  assert.equal(creditsSection({ mode: 'unpaired' }), null)
+  assert.equal(creditsSection(null), null)
+})
+
+test('the connect card says why a connection was refused and holds while connecting', () => {
+  const idle = renderToStaticMarkup(createElement(WalletConnect, {}))
+  assert.match(idle, />Connect credits</)
+  assert.doesNotMatch(idle, /role="alert"/)
+  const busy = renderToStaticMarkup(createElement(WalletConnect, {
+    busy: true, refusal: 'mobius.you could not connect your credits just now.',
+  }))
+  assert.match(busy, /Connecting…/)
+  assert.match(busy, /disabled=""/)
+  assert.match(busy, /role="alert">mobius\.you could not connect your credits just now\.</)
+})
+
+test('a wallet whose key the service refuses offers to reconnect through mobius.you', () => {
+  const refused = {
+    mode: 'customer', service_host: 'www.mobius.you', balance: null, can_pair_with_account: true,
+    error: { code: 'key_refused', message: "The credits service refused this installation's key. It may have been revoked." },
+  }
+  assert.equal(canReconnect(refused), true)
+  assert.equal(canReconnect({ ...refused, error: { code: 'invalid_api_key', message: 'no' } }), true)
+  // A key that may still work is never replaced, and a self-hosted Möbius cannot ask.
+  assert.equal(canReconnect({ ...refused, error: { code: '', message: 'Could not reach www.mobius.you.' } }), false)
+  assert.equal(canReconnect({ ...refused, can_pair_with_account: false }), false)
+  assert.equal(canReconnect({ ...refused, can_pair_with_account: undefined }), false)
+  assert.equal(canReconnect(SUMMARY), false)
+
+  const html = render({ summary: refused, terms: null })
+  assert.match(html, /may have been revoked/)
+  assert.match(html, />Reconnect credits</)
+  assert.match(render({ summary: refused, terms: null, busy: true }), /disabled=""[^>]*>Connecting…</)
+  assert.doesNotMatch(render({ summary: { ...refused, can_pair_with_account: false }, terms: null }), /Reconnect/)
+  assert.doesNotMatch(render({}), /Reconnect/)
 })
 
 test('activity labels fall back to the service wording', () => {

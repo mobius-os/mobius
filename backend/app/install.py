@@ -64,7 +64,7 @@ from app import app_consent, app_cron
 from app.build_admission import BuildLeaseUnavailable
 from app.app_capabilities import contract_and_digest
 from app.app_compile_contract import RolldownStalled
-from app.app_source_check import SourceCheckResult, check_app_source
+from app.app_source_check import SourceCheckResult, check_app_source, direct_hosts_from_manifest
 from app.compiler import (
   CompileError,
   compile_jsx,
@@ -1634,6 +1634,7 @@ def _source_completeness(
     source_files=manifest.get("source_files") or [],
     job=(manifest.get("schedule") or {}).get("job"),
     static_assets=(f"static/{dest}" for dest in static_assets),
+    direct_hosts=direct_hosts_from_manifest(manifest),
   )
 
 
@@ -3912,17 +3913,23 @@ async def install_from_manifest(
   # under the caller's lifecycle lock. So each step settles before a cancelled
   # caller unwinds, and the cancellation then stops the install between steps.
   try:
-    return await settled.settle(
+    result = await settled.settle(
       install_candidate(python_check=None), abandoned=_abandon_install_step,
     )
   except _UncheckedPythonTree as unchecked:
-    pending = unchecked
-  python_check = await settled.settle(
-    _check_reconciled_python(pending), abandoned=_abandon_install_step,
-  )
-  return await settled.settle(
-    install_candidate(python_check=python_check), abandoned=_abandon_install_step,
-  )
+    python_check = await settled.settle(
+      _check_reconciled_python(unchecked), abandoned=_abandon_install_step,
+    )
+    result = await settled.settle(
+      install_candidate(python_check=python_check), abandoned=_abandon_install_step,
+    )
+  # An update that changes what the app's agents may reach ends their turns.
+  from app.agent_roles import stop_runs_outside_grant
+  if not await stop_runs_outside_grant(db, result.app.id):
+    result.warnings.append(
+      "Some of this app's running agents did not stop after its agent access changed."
+    )
+  return result
 
 
 def _abandon_install_step(step: asyncio.Future) -> None:
@@ -4791,7 +4798,7 @@ async def _install_candidate(
   # reruns this whole install, post-commit effects included.
   try:
     async with fs_locks.source_dir_lock(app.source_dir):
-      await clear_pending_conflict_update(db, app)
+      await clear_pending_conflict_update(db, app, completed=True)
   except (OSError, subprocess.SubprocessError, SQLAlchemyError):
     db.rollback()
     log.warning("install: could not clear the finished pending update", exc_info=True)

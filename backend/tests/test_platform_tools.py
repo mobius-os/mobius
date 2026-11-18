@@ -188,6 +188,31 @@ def test_spawn_forwards_an_explicit_goal_task_without_guessing(
   assert schema["properties"]["plan_task"]["maxLength"] == 128
 
 
+def test_spawn_forwards_an_optional_title_and_lists_it(monkeypatch):
+  monkeypatch.setenv("MOBIUS_AGENT_PROVIDER", "codex")
+  monkeypatch.setenv("MOBIUS_AGENT_MODEL", "current")
+  monkeypatch.setenv("CHAT_ID", "parent")
+  control = _control_module()
+  sent = []
+  def api(method, path, body=None):
+    if path.endswith("/capabilities"):
+      return {"connections": {"codex": {"configured": True}},
+              "models": {"codex": [{"id": "current"}]}}
+    sent.append(body)
+    return {"id": "child", "task_key": "review", "title": "Reviewing the diff"}
+  monkeypatch.setattr(control, "_agent_api_call", api)
+  view = control._call_spawn_agent({
+    "name": "review", "task": "Review", "title": "  Reviewing the diff ",
+  })
+  assert sent[-1]["title"] == "Reviewing the diff"
+  assert view["title"] == "Reviewing the diff"
+  control._call_spawn_agent({"name": "review", "task": "Review", "title": " "})
+  assert "title" not in sent[-1]
+  schema = control._TOOL_DEFINITIONS["spawn_agent"]["inputSchema"]
+  assert "title" in schema["properties"] and "title" not in schema["required"]
+  assert schema["properties"]["title"]["maxLength"] == 256
+
+
 def test_claude_pointer_does_not_replace_missing_helpers_with_a_provider_cli():
   text = (Path(__file__).resolve().parents[1] / "scripts/seed-skills/claude.md").read_text()
   assert "current tool list" in text
@@ -216,6 +241,8 @@ def test_control_server_configs_share_one_script_and_no_secret_arguments():
     # Non-secret calling-turn selection and delegation identity.
     "MOBIUS_AGENT_PROVIDER", "MOBIUS_AGENT_MODEL", "MOBIUS_AGENT_EFFORT",
     "MOBIUS_DELEGATION_ID",
+    # Non-secret menu of a confined app agent's declared tools.
+    "MOBIUS_AGENT_TOOLS", "MOBIUS_AGENT_APP_TOOLS",
     # Non-secret capture context for the screenshot tool.
     "VIEWPORT_WIDTH", "VIEWPORT_HEIGHT", "VIEWPORT_PIXEL_RATIO",
     "AGENT_BROWSER_SESSION", "AGENT_BROWSER_PROFILE", "AGENT_BROWSER_ARGS",
@@ -622,6 +649,22 @@ def test_isolated_owner_control_does_not_advertise_peer_tools(monkeypatch):
   assert "spawn_agent" in instructions
   assert "peer tools" not in instructions
   assert "agents in other Möbius chats" not in instructions
+
+
+def test_peer_tool_refusal_names_the_gate_and_the_alternative(monkeypatch):
+  """A parent without peer tools learns why and what to use instead."""
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "isolated-owner-run")
+  monkeypatch.setenv("MOBIUS_COORDINATION_ENABLED", "0")
+  control = _control_module()
+
+  refused = control._call_tool_as_caller("list_agent_peers", {})
+  assert refused["isError"] is True
+  text = refused["content"][0]["text"]
+  assert "another agent is live" in text
+  assert "message_agent" in text
+
+  other = control._call_tool_as_caller("unknown_tool", {})
+  assert "peer" not in other["content"][0]["text"].lower()
 
 
 def test_peer_tool_descriptions_cut_coordination_calls():
@@ -1955,3 +1998,16 @@ def test_read_work_claim_pages_one_claim_text(monkeypatch):
     refused = control._call_tool({"name": "read_work_claim", "arguments": bad})
     assert refused["isError"] and "non-empty strings" in refused["content"][0]["text"]
   assert platform_tools.READ_CLAIM_TOOL_NAME in platform_tools.WORK_OWNERSHIP_TOOL_NAMES
+
+
+def test_helper_uses_service_retirement_mapping_only_for_its_provider(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv('MOBIUS_AGENT_PROVIDER', 'mobius')
+  monkeypatch.setenv('MOBIUS_AGENT_MODEL', 'retired')
+  monkeypatch.setenv('MOBIUS_AGENT_EFFORT', 'low')
+  monkeypatch.setattr(control, '_agent_api_call', lambda *args: {
+    'connections': {'mobius': {'configured': True}},
+    'models': {'mobius': [{'id': 'active', 'name': 'Active'}]},
+    'replacements': {'mobius': {'retired': 'active'}},
+  })
+  assert control._helper_selection({}) == ('mobius', 'active', 'low')

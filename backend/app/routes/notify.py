@@ -59,8 +59,8 @@ _OPEN_ITEM_KINDS = frozenset({"app", "chat"})
 # The ids mirror frontend/src/lib/settingsSections.js (pinned by
 # tests/test_notify_open_item.py).
 _SETTINGS_SECTIONS = frozenset({
-  "ai-providers", "background-agents", "github", "models",
-  "mobius-account", "mobius-models",
+  "ai-providers", "background-agents", "github", "keys", "models",
+  "mobius-account", "mobius-models", "notifications-elsewhere",
 })
 _OPEN_ITEM_PLACEMENTS = frozenset({"beside-source", "with-source", "with-focus"})
 _OPEN_ITEM_ACTIVATIONS = frozenset({"background", "foreground"})

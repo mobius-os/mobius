@@ -51,6 +51,9 @@ REQUIRED_DATABASE_SUPERVISORS = frozenset({
   "reset-park-sweep",
   "chat-wait-sweep",
   "writer-supervisor",
+  # Without it nothing stops a running turn from filling the data volume to
+  # the last byte, after which nothing can commit (see storage_guard).
+  "storage-guard",
 })
 
 
@@ -150,6 +153,8 @@ class RuntimeSupervisors:
     await self._start_frontend_watcher()
     from app.connect_outbound import supervise_outbound_connects
     self._spawn("connect-outbound", supervise_outbound_connects())
+    from app.key_vault import supervise_key_vault
+    self._spawn("key-vault", supervise_key_vault())
     self._spawn("oom-watchdog", self._oom_watchdog_loop())
     self._spawn("browser-reaper", self._browser_reaper_loop())
 
@@ -695,6 +700,8 @@ class RuntimeSupervisors:
     self._spawn("agent-scratch-retention", agent_scratch_loop())
     self._spawn("provider-session-retention", provider_session_retention_loop())
     self._spawn("capacity-monitor", capacity_monitor_loop())
+    from app.storage_guard import start_guard
+    self._spawn("storage-guard", start_guard(self.settings.data_dir).run())
     self._spawn("repair-checkout-gc", self._repair_checkout_gc_loop())
     self._spawn("platform-update-watch", platform_update_watch_loop())
 

@@ -1,3 +1,4 @@
+import { expectComposerValue } from './_composer.mjs'
 /* Rendered recovery contracts: Resume is acknowledged control, never a queued owner message. */
 import { test as base, expect, chromium } from '@playwright/test'
 import { installMockProviderUsage, runtimeSnapshot } from './_chatTestPrerequisites.mjs'
@@ -51,7 +52,7 @@ function deferred() {
   return { promise, resolve }
 }
 
-async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false, successorBeforeAck = false } = {}) {
+async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPause = false, successorBeforeAck = false, helperRetry = null } = {}) {
   await page.setViewportSize({
     width: Number(process.env.MOBIUS_RECOVERY_WIDTH || 1512),
     height: Number(process.env.MOBIUS_RECOVERY_HEIGHT || 911),
@@ -74,10 +75,17 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
       type: 'error', message: 'Your workspace is out of credits. Add credits to continue.',
       resumable: true, pause: { kind: 'credits', provider: 'codex' },
     }],
+  } : helperRetry ? {
+    ...partial,
+    blocks: [partial.blocks[0], {
+      type: 'error', message: 'Provider limit reached.', resumable: true,
+      pause: { kind: 'usage_limit', check_at: '2099-11-20T01:19:00Z' },
+    }],
   } : partial
   const messages = [{ role: 'user', content: 'Original question A', cid: 'original-a', ts: 1788800000100 }, initialAnswer]
   const detail = () => ({
     id: CHAT, title: 'Recovery fixture', provider: 'codex', messages,
+    helper_delegation_id: helperRetry ? 'helper-recovery-fixture' : null,
     total: messages.length, offset: 0,
     ...runtimeSnapshot({ running: resumed, pending_messages: [queued] }),
     active_goal_objective: null,
@@ -90,7 +98,21 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
   await page.route('**/api/**', async route => {
     const req = route.request()
     const url = new URL(req.url())
+    if (helperRetry && url.pathname === '/api/delegations/helper-recovery-fixture/retry' && req.method() === 'POST') {
+      attempts.push(req.postDataJSON())
+      requested.resolve()
+      await accepted.promise
+      resumed = helperRetry === 'running'
+      return route.fulfill({ json: {
+        retry_started: resumed, status: helperRetry,
+        physical_run_id: resumed ? 'resumed-a' : 'interrupted-a',
+      } })
+    }
     if (url.pathname === `${path}/messages` && req.method() === 'POST') {
+      if (helperRetry) {
+        unexpected.push('manual helper chat send')
+        return route.fulfill({ status: 409, json: { detail: { code: 'delegation_managed' } } })
+      }
       attempts.push(req.postDataJSON())
       requested.resolve()
       if (rejectFirst && attempts.length === 1) return route.fulfill({ status: 409, json: { detail: 'Recovery state changed; retry with current details.' } })
@@ -174,7 +196,7 @@ async function mount(page, { rejectFirst = false, loseFirstAck = false, creditPa
   await page.goto(`${BASE}/shell/?chat=${CHAT}`, { waitUntil: 'domcontentloaded' })
   await page.bringToFront()
   const surface = page.locator('[data-chat-surface="painted"]')
-  await expect(surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
+  await expect(surface.getByRole('button', { name: helperRetry ? 'Try now' : 'Resume', exact: true })).toBeVisible({ timeout: 15000 })
   const composer = surface.getByRole('textbox', { name: 'Message Möbius…' })
   await composer.fill(draft)
   await surface.locator('input[type="file"]').setInputFiles({ name: 'draft-note.txt', mimeType: 'text/plain', buffer: Buffer.from('draft attachment') })
@@ -228,11 +250,11 @@ for (const width of [1512, 390]) {
     expect(state.attempts[0]).toMatchObject({ continuation: 'manual', resume_run_id: 'interrupted-a' })
     expect(state.attempts[0].attachments || []).toHaveLength(0)
     expect(state.attempts[0].content).toBe('')
-    await expect(state.composer).toHaveValue(draft)
+    await expectComposerValue(state.composer, draft)
     await expect(state.attachment).toBeVisible()
     state.accepted.resolve()
     await expect(card).toHaveCount(0)
-    await expect(state.composer).toHaveValue(draft)
+    await expectComposerValue(state.composer, draft)
     expect(state.unexpected).toEqual([])
   })
 }
@@ -282,7 +304,7 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   await page.mouse.click(button.x + button.width / 2, button.y + button.height / 2)
   await state.requested.promise
   await expect(state.surface.getByRole('button', { name: 'Resuming…', exact: true })).toBeDisabled()
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
@@ -296,7 +318,7 @@ test('Resume waits for acknowledgement without changing draft, attachment, queue
   expect(state.attempts[0].attachments || []).toHaveLength(0)
   state.accepted.resolve()
   await expect(manualResumeMarker(state.surface)).toBeVisible()
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
@@ -314,7 +336,7 @@ test('a rejected Resume leaves recovery retryable without changing owner intent'
   const state = await mount(page, { rejectFirst: true })
   await state.surface.getByRole('button', { name: 'Resume', exact: true }).click()
   await expect(state.surface.getByText('Could not confirm Resume. Your draft and queued messages are unchanged. Try again.', { exact: true })).toBeVisible()
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   await expect(manualResumeMarker(state.surface)).toHaveCount(0)
@@ -326,7 +348,7 @@ test('a rejected Resume leaves recovery retryable without changing owner intent'
   expect(state.attempts[1].attachments || []).toHaveLength(0)
   state.accepted.resolve()
   await expect(manualResumeMarker(state.surface)).toBeVisible()
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
 })
@@ -380,7 +402,7 @@ test('a delayed no-stream reconciliation keeps the partial answer painted until 
   state.detailAccepted.resolve()
   await expect(state.surface.getByRole('button', { name: 'Resume', exact: true })).toBeVisible()
   await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toHaveCount(1)
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
   const after = await sampleGeometry(page, 'Recovered paragraph 28:')
@@ -397,7 +419,7 @@ test('a lost Resume acknowledgement retries the same control without exposing co
   expect(state.attempts.every(attempt => JSON.stringify(attempt) === JSON.stringify(state.attempts[0]))).toBe(true)
   await expect(manualResumeMarker(state.surface)).toHaveCount(1)
   await expect(state.surface.getByText('continue', { exact: true })).toHaveCount(0)
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   await expect(state.surface.getByText('Queued B stays behind A', { exact: true })).toBeVisible()
 })
@@ -427,7 +449,7 @@ test('failed transcript replacement retains the answer and a successful Retry re
   const retry = state.surface.getByRole('button', { name: 'Retry', exact: true })
   await expect(retry).toBeVisible()
   await expect(state.surface.getByText(/^Recovered paragraph 28:/)).toHaveCount(1)
-  await expect(state.composer).toHaveValue(draft)
+  await expectComposerValue(state.composer, draft)
   await expect(state.attachment).toBeVisible()
   state.allowDetail()
   await retry.click()
@@ -454,9 +476,32 @@ test('foreground and active-queue refreshes share one bounded runtime read', asy
     // Keep the response held across a real queue-poll interval as well.
     await page.waitForTimeout(1200)
     expect(fixture.runtimeRequestCount()).toBe(1)
-    await expect(fixture.composer).toHaveValue(draft)
+    await expectComposerValue(fixture.composer, draft)
     await expect(fixture.attachment).toBeVisible()
     await expect(fixture.surface.getByText(queued.content, { exact: true })).toBeVisible()
     expect(fixture.attempts).toHaveLength(0)
   } finally { gate.accepted.resolve() }
 })
+
+
+for (const helperRetry of ['running', 'cancelled']) {
+  test(`helper Try now uses delegation retry and handles ${helperRetry} without sending the draft`, async ({ page }) => {
+    const state = await mount(page, { helperRetry })
+    const retry = state.surface.getByRole('button', { name: 'Try now', exact: true })
+    await retry.click()
+    await state.requested.promise
+    expect(state.attempts).toEqual([{ run_token: 'interrupted-a' }])
+    await expect(state.surface.getByRole('button', { name: 'Resuming…', exact: true })).toBeDisabled()
+    state.accepted.resolve()
+    if (helperRetry === 'cancelled') {
+      await expect(state.surface.getByText('This helper is no longer waiting for a retry. Open its parent chat to continue.', { exact: true })).toBeVisible()
+      await expect(retry).toBeEnabled()
+    } else {
+      await expect(retry).toHaveCount(0)
+    }
+    await expectComposerValue(state.composer, draft)
+    await expect(state.attachment).toBeVisible()
+    await expect(state.surface.getByText(queued.content, { exact: true })).toBeVisible()
+    expect(state.unexpected).toEqual([])
+  })
+}

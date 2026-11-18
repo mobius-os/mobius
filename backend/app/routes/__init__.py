@@ -58,6 +58,8 @@ apps_router = _load("apps")
 app_services_router = _load("app_services")
 app_consent_router = _load("app_consent")
 app_tools_router = _load("app_tools")
+agent_gateway_router = _load("agent_gateway")
+app_agent_router = _load("agent_gateway", "app_agent_router")
 auth_router = _load("auth")
 chat_router = _load("chat")
 chat_continuity_router = _load("chat_continuity")
@@ -66,6 +68,7 @@ chats_router = _load("chats")
 app_chat_router = _load("chats", "app_chat_router")
 chats_stream_router = _load("chats_stream")
 secure_inputs_router = _load("secure_inputs")
+model_relay_router = _load("model_relay")
 chat_logs_router = _load("chat_logs")
 connectors_router = _load("connectors")
 connectors_public_router = _load("connectors", "public_router")
@@ -83,7 +86,6 @@ fs_router = _load("fs")
 uploads_router = _load("uploads")
 generated_files_router = _load("generated_files")
 media_router = _load("media")
-secrets_router = _load("secrets")
 github_router = _load("github")
 github_access_router = _load("github_access")
 reviewer_router = _load("reviewer")
@@ -109,6 +111,8 @@ contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
+keys_router = _load("keys")
+app_secrets_compat_router = _load("app_secrets_compat")
 browser_access_router = _load("browser_access")
 projects_router = _load("projects")
 project_copies_router = _load("project_copies")
@@ -122,6 +126,8 @@ __all__ = [
   "app_services_router",
   "app_consent_router",
   "app_tools_router",
+  "agent_gateway_router",
+  "app_agent_router",
   "storage_router",
   "fs_router",
   "chat_router",
@@ -130,6 +136,7 @@ __all__ = [
   "app_chat_router",
   "chats_stream_router",
   "secure_inputs_router",
+  "model_relay_router",
   "chat_logs_router",
   "connectors_router",
   "connectors_public_router",
@@ -145,7 +152,6 @@ __all__ = [
   "uploads_router",
   "generated_files_router",
   "media_router",
-  "secrets_router",
   "github_router",
   "github_access_router",
   "reviewer_router",
@@ -171,6 +177,8 @@ __all__ = [
   "platform_router",
   "published_router",
   "connect_router",
+  "keys_router",
+  "app_secrets_compat_router",
   "browser_access_router",
   "projects_router",
   "project_copies_router",

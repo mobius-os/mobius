@@ -29,7 +29,7 @@ export default function AgentCoordinationFeed({
   if (compact && peers.length <= 1 && visibleMessages.length === 0) return null
 
   const liveNames = livePeers
-    .map(peer => peer.name)
+    .map(peer => peer.title || peer.name)
     .filter(Boolean)
     .slice(0, 3)
   const status = peerNetworkStatus(snapshot)

@@ -13,6 +13,9 @@ const { default: AssistantReply } = await vite.ssrLoadModule(
 const { assistantReplyGroups } = await vite.ssrLoadModule(
   '/src/components/ChatView/assistantReplies.js',
 )
+const { persistDisclosureOpen, _resetDisclosureStateForTests } = await vite.ssrLoadModule(
+  '/src/components/ChatView/disclosureState.js',
+)
 after(() => vite.close())
 
 function searchedMessage(id, url) {
@@ -43,6 +46,9 @@ function renderReply(messages, isStreaming = false) {
     streamItems: null,
     chatId: 'chat-references',
     isStreaming,
+    // A settled answer end: References sit in its footer.
+    footer: 'settled',
+    stretchSourceRows: [],
   }))
 }
 
@@ -62,6 +68,22 @@ test('a reply spanning several messages still shows one References disclosure', 
   assert.equal(referencesCount(html), 1)
 })
 
-test('a streaming reply defers References until it settles', () => {
-  assert.equal(referencesCount(renderReply([searchedMessage('one', 'https://example.com/a')], true)), 0)
+test('a streaming reply holds its References in place until it settles', () => {
+  const html = renderReply([searchedMessage('one', 'https://example.com/a')], true)
+  assert.equal(referencesCount(html), 1, 'the line keeps its References, so settling cannot resize it')
+  assert.match(html, /<section class="chat__sources chat__sources--held" inert="">/,
+    'unseen and unusable until the answer settles')
+  assert.doesNotMatch(renderReply([searchedMessage('one', 'https://example.com/a')]), /chat__sources--held/)
+})
+
+test('an open References list stays shown, but unusable, while its answer continues', () => {
+  // Opened while the reply waited on a question, then the question answered:
+  // the list keeps its place and stays visible instead of leaving a blank gap.
+  _resetDisclosureStateForTests()
+  persistDisclosureOpen('chat-references', 'one:references', true)
+  try {
+    const html = renderReply([searchedMessage('one', 'https://example.com/a')], true)
+    assert.match(html, /<section class="chat__sources chat__sources--open chat__sources--held" inert="">/)
+    assert.match(html, /href="https:\/\/example\.com\/a"/, 'its links are still rendered')
+  } finally { _resetDisclosureStateForTests() }
 })

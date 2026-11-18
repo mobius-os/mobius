@@ -41,6 +41,7 @@ from typing import Any
 from app import helper_hosts
 from app.helper_hosts import Host, HostKey, TurnEnvFile
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
+from app.runtime_types import prompt_not_sent_result
 from app.usage_metrics import normalize_claude_helper_usage
 
 log = logging.getLogger(__name__)
@@ -274,6 +275,8 @@ class HelperTurn:
   # The helper's last provider call ended in a safety refusal (its own
   # stop reason); a later successful call clears it.
   refused: bool = False
+  # This turn's own agent produced remote model output (RunnerResult).
+  provider_responded: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
   # goals.CompactionBriefRefresh for a helper with a Goal assignment.
@@ -621,7 +624,7 @@ class ClaudeHelperHost(Host):
       ToolUseBlock,
       UserMessage,
     )
-    from app.claude_events import dispatch_sdk_message
+    from app.claude_events import dispatch_sdk_message, is_provider_response
     try:
       async for message in self._client.receive_messages():
         if isinstance(message, TaskStartedMessage):
@@ -655,6 +658,8 @@ class ClaudeHelperHost(Host):
         turn = self._turn_for_parent(parent)
         if turn is None or turn.done.is_set():
           continue
+        if is_provider_response(message):
+          turn.provider_responded = True
         if isinstance(message, AssistantMessage):
           # Claude repeats one model call's message per content block; the
           # latest copy carries that call's most complete usage.
@@ -1163,8 +1168,14 @@ async def run_claude_host_turn(
   helper_host_key: HostKey,
   data_dir: str,
   goal_brief_refresh=None,
+  run_generation: int | None = None,
 ) -> dict:
-  """Run one delegated Claude helper turn inside its parent's shared host."""
+  """Run one delegated Claude helper turn inside its parent's shared host.
+
+  ``run_generation`` is the chat run generation this turn was admitted for;
+  a Stop or delete while the host starts supersedes it, and the turn then ends
+  without dispatching work.
+  """
   from app.process_groups import RUN_MARKER_ENV, terminate_run_processes
   from app.runner_registry import registry, RunnerKind
 
@@ -1174,9 +1185,12 @@ async def run_claude_host_turn(
   env_file = TurnEnvFile(Path(turn_env.get("TMPDIR") or data_dir), marker, turn_env)
   settings = agent_settings or {}
   model = settings.get("model") or (run_policy.model if run_policy else None)
-  effort = settings.get("effort") or (run_policy.effort if run_policy else None)
+  # The turn's resolved effort, including "none", wins over the raw policy.
+  effort = settings["effort"] if "effort" in settings else (run_policy.effort if run_policy else None)
   from app.providers import model_supports_effort
-  supports_effort = await model_supports_effort(data_dir, model)
+  supports_effort = await model_supports_effort(
+    data_dir, model, provider_id=helper_host_key.provider_id,
+  )
   if not supports_effort:
     effort = None
   _host_session, agent_id, launch_tool_use_id = parse_session(session_id)
@@ -1233,8 +1247,12 @@ async def run_claude_host_turn(
         helper_host_key, options_factory=factory, session_file=session_file,
       ),
     ) as host:
-      handle = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
-      registry.register(handle)
+      candidate = ActiveClaudeHelperTurn(chat_id, host, turn, marker)
+      if not registry.register(candidate, run_generation=run_generation):
+        candidate.mark_finished()
+        log.info("Claude helper turn superseded before dispatch chat_id=%s", chat_id)
+        return prompt_not_sent_result(session_id)
+      handle = candidate
       started_at = time.monotonic()
 
       async def on_started(started: HelperTurn) -> None:
@@ -1271,6 +1289,8 @@ async def run_claude_host_turn(
         "cost_usd": None,
         "error": None,
       }
+      if turn.provider_responded:
+        result["provider_responded"] = True
       if turn.status == "failed" or (
         turn.status == "stopped" and not handle.stop_requested
       ):

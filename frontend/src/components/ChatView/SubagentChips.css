@@ -109,6 +109,8 @@
       pointer-events: none;
       white-space: nowrap;
       overflow: hidden;
+      /* Clip exactly like the base copy, or a long title shows a stray tail. */
+      text-overflow: ellipsis;
       color: color-mix(in srgb, var(--text) 96%, var(--bg)); /* CONTRACT: the bright band colour over the base */
       -webkit-mask-image: linear-gradient(90deg, transparent 0%, #000 18%, #000 32%, transparent 50%);
       mask-image: linear-gradient(90deg, transparent 0%, #000 18%, #000 32%, transparent 50%);

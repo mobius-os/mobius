@@ -22,6 +22,8 @@ _BACKEND_DIR = _SCRIPT_DIR.parent
 if str(_BACKEND_DIR) not in sys.path:
   sys.path.insert(0, str(_BACKEND_DIR))
 from app import app_python_env, cron_tz
+from app.process_groups import RUN_MARKER_ENV, run_marker
+from app.resource_pressure import disk_is_critical
 from app.manifest_contract import (
   ManifestContractError,
   job_interpreter,
@@ -392,6 +394,11 @@ def _execute_job(
       # uninstall without checking the backend was up at this stamp.
       _log(app_id, "skipped: app not live (uninstalled/tombstoned) or backend unreachable")
       return 4
+    if disk_is_critical(DATA_DIR):
+      # The storage guard is pausing work so the data volume does not fill;
+      # a job started now would only be stopped again within a second.
+      _log(app_id, "skipped: storage is critically low; runs again at its next schedule")
+      return 4
     context = _job_context(app_id, app_token)
     if context is None:
       _log(app_id, "failed: job-context fetch")
@@ -416,6 +423,10 @@ def _execute_job(
       _log(app_id, f"failed: {runtime_job.name}: {exc}")
       return 4
     child_env = app_python_env.activated_environment(child_env, python_env)
+    # The run marker names this job's processes, so the storage guard stops a
+    # job that keeps writing once the volume is critical (see
+    # process_groups.stop_agent_commands), exactly as it stops agent commands.
+    child_env[RUN_MARKER_ENV] = run_marker(f"app-job:{app_id}:{uuid.uuid4().hex}")
     try:
       command = _job_command(runtime_job, app_id, python_env)
     except (OSError, ManifestContractError) as exc:

@@ -178,7 +178,7 @@ test('activity surfaces use their intended width and compact status type', () =>
 
 test('message references use a bounded responsive two-column grid', () => {
   const css = stripComments(chatCss)
-  const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
+  const sourcesRule = css.match(/(?:^|\})\s*(\.chat__sources\s*\{[^}]*\})/)?.[1] || ''
   const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
   const itemRule = css.match(/\.chat__source-item\s*\{[^}]*\}/)?.[0] || ''
   const nonWebItemRule = css.match(/\.chat__source-item:not\(\.chat__source-item--web\)\s*\{[^}]*\}/)?.[0] || ''
@@ -213,8 +213,21 @@ test('message references use a bounded responsive two-column grid', () => {
   assert.match(chipRule, /width:\s*100%/,
     'each source card should fill its grid column')
   assert.match(css,
-    /@media\s*\(max-width:\s*340px\)\s*\{\s*\.chat__sources-list\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
-    'narrow panes should fall back to one reference column')
+    /@container\s+chat-sources\s*\(max-width:\s*560px\)\s*\{\s*\.chat__sources-list\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap/s,
+    'narrow panes should wrap compact reference pills instead of using grid columns')
+  assert.match(css.match(/(?:^|\})\s*(\.chat__sources-body\s*\{[^}]*\})/)?.[1] || '', /container:\s*chat-sources\s*\/\s*inline-size/,
+    'the pill layout follows the references body width, not the screen')
+  assert.match(css,
+    /\.chat__source-item--web\s*\{\s*width:\s*auto;\s*max-width:\s*min\(100%,\s*220px\)/,
+    'long reference labels should cap their pill width on phones')
+})
+
+test('held References: closed ones are unseen, an open list stays shown', () => {
+  const css = stripComments(chatCss)
+  assert.match(css, /\.chat__sources--held:not\(\.chat__sources--open\)\s*\{\s*visibility:\s*hidden;\s*\}/,
+    'only a closed held disclosure is hidden, like the other working-footer controls')
+  assert.doesNotMatch(css, /\.chat__sources--held\s*\{[^}]*visibility/,
+    'an open held list is never hidden, so it leaves no list-sized gap')
 })
 
 test('transitions into Stop are sequential while Send to Steer stays immediate', () => {
@@ -311,6 +324,52 @@ test('queued row actions are compact and evenly spaced in send · edit · cancel
   assert.match(queuedMessages, /<DoubleChevronRight width=\{16\} height=\{16\}/)
   assert.match(queuedMessages, /<Pencil width=\{16\} height=\{16\}/)
   assert.match(queuedMessages, /<X width=\{16\} height=\{16\}/)
+})
+
+// Splits CSS into the text inside `@media (hover: hover) and (pointer: fine)`
+// blocks and everything else, matching braces so nested rules stay intact.
+function splitFinePointerHover(css) {
+  const opener = /@media\s*\(hover:\s*hover\)\s*and\s*\(pointer:\s*fine\)\s*\{/g
+  let gated = ''
+  let ungated = ''
+  let cursor = 0
+  for (const match of css.matchAll(opener)) {
+    if (match.index < cursor) continue
+    ungated += css.slice(cursor, match.index)
+    let depth = 1
+    let i = match.index + match[0].length
+    while (depth > 0 && i < css.length) {
+      if (css[i] === '{') depth += 1
+      else if (css[i] === '}') depth -= 1
+      i += 1
+    }
+    gated += css.slice(match.index + match[0].length, i - 1)
+    cursor = i
+  }
+  ungated += css.slice(cursor)
+  return { gated, ungated }
+}
+
+test('queued tray hover fills never stick after a touch expand or collapse', () => {
+  const { gated, ungated } = splitFinePointerHover(stripComments(chatCss))
+
+  // A touch tap leaves :hover on the tapped header or row until the next tap
+  // elsewhere. Every tray hover rule must therefore be fine-pointer only.
+  assert.doesNotMatch(ungated, /\.queued[\w-]*(?:[.:][\w-]+|\([^)]*\))*:hover/,
+    'queued tray :hover rules must live inside (hover: hover) and (pointer: fine)')
+
+  // A hovered row must neither sink to --bg (a hole in the tray) nor take the
+  // action wells' own fill, which would erase the send/edit/cancel buttons.
+  const fill = (rule) => rule.match(/background:\s*([^;]+);/)?.[1].trim()
+  const rowFill = fill(gated.match(/\.queued__row:hover\s*\{[^}]*\}/)?.[0] || '')
+  const actionFill = fill(ungated.match(/\.queued__action\s*\{[^}]*\}/)?.[0] || '')
+  assert.ok(rowFill, 'hovered queued rows have a fill')
+  assert.ok(actionFill, 'queued action wells have a resting fill')
+  assert.notEqual(rowFill, actionFill, 'hovered row fill must differ from the action wells')
+  assert.doesNotMatch(rowFill, /var\(--bg\)/)
+
+  // Press feedback stays available to touch.
+  assert.match(ungated, /\.queued__cancel:not\(:disabled\):active\s*\{[^}]*var\(--danger\)/)
 })
 
 test('queued message content participates in native text selection', () => {

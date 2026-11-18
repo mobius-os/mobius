@@ -85,6 +85,8 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   get_current_owner, get_current_owner_for_lifecycle_control,
+  require_owner_or_full_access_control,
+  get_current_owner_for_full_access_control,
   get_current_owner_or_app, get_principal, get_principal_or_public_service,
   Principal, revocable_browser_stream,
   get_owner_or_app_with_manage_apps, reject_cross_site,
@@ -518,6 +520,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     raise AppPurgeBlocked(
       "Agents are still working for this app. Try again when they finish."
     )
+  from app import key_vault
   # Project recovery includes linked source, not only legacy imports. Provider
   # metadata alone is not ownership: native projects can detach safely.
   from app.project_retention import projects_using_app_files
@@ -534,8 +537,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
 
   # Remove the ID-KEYED trees, and fail loudly if any survives, BEFORE the row
   # is deleted. App.id has no AUTOINCREMENT, so SQLite can hand a freed id to
-  # the next install; a silently-orphaned /data/apps/<id>/ tree (or its secrets)
-  # would then be readable by that unrelated replacement app under its own valid
+  # the next install; a silently-orphaned /data/apps/<id>/ tree would then be
+  # readable by that unrelated replacement app under its own valid
   # credentials. Keeping the row — hence the id — claimed until the storage is
   # gone closes that window: a persistent failure leaves the tombstone for the
   # next purge rather than exposing data. The compiled bundle is id-keyed too;
@@ -543,11 +546,17 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   # compiled_path can never turn this into an arbitrary unlink.
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   storage_dir = apps_root / str(deleted_app_id)
-  secrets_dir = Path(settings.data_dir) / "app-secrets" / str(deleted_app_id)
   from app.compiler import purge_app_bundles
+  # The app's own keys are its data, erased with it; its grants go too, though
+  # they name its installation, which an app reusing the id never is. The
+  # vault goes first: if it is unavailable, nothing is removed yet and the
+  # tombstone stays for the next attempt.
+  await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
-  await asyncio.to_thread(_rmtree_strict, secrets_dir)
+  # The app's model engine home (threads, transcripts) is id-keyed too.
+  from app.providers import app_engine_home
+  await asyncio.to_thread(_rmtree_strict, app_engine_home(settings.data_dir, deleted_app_id))
   from app import service_preload
   from app.app_python_env import remove_app_envs
   from app.applied_app_runtime import runtime_parent
@@ -2048,10 +2057,10 @@ def _check_conflict_resolver_bindings(
 
 
 async def _create_conflict_resolver_chat(
-  db: Session, app_ids: list[int],
+  db: Session, app_ids: list[int], agent: schemas.UpdateAgentChoice | None = None,
 ) -> schemas.AppConflictResolverChatOut:
   """Prepare the exact selected batch, then open its owner-visible resolver."""
-  from app import background_agents
+  from app import update_chat
 
   prepared = []
   sources = []
@@ -2137,10 +2146,8 @@ async def _create_conflict_resolver_chat(
     if existing is not None:
       chat, created, provider = existing, False, existing.provider
     else:
-      # Walk the owner's background-agent choices to the first with quota.
-      choice = background_agents.resolve_background_chat_choice(
-        get_settings().data_dir, db,
-      )
+      # Freeze an explicit selection; only omission uses the background order.
+      choice = update_chat.resolve_update_chat_choice(db, agent)
       provider = choice["provider"]
       chat = chat_writer.create_chat(
         id=str(uuid.uuid4()),
@@ -2148,7 +2155,9 @@ async def _create_conflict_resolver_chat(
         messages=[],
         pending_messages=[],
         provider=provider,
-        agent_settings_json=choice["agent_settings"],
+        agent_settings_json=update_chat.resolver_batch_settings(
+          choice["agent_settings"], [app for app, *_ in prepared],
+        ),
         created_by_app_id=None,
       )
       db.add(chat)
@@ -2190,7 +2199,7 @@ async def create_conflict_resolver_batch_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create one owner-visible resolver turn for all selected app conflicts."""
-  return await _create_conflict_resolver_chat(db, body.app_ids)
+  return await _create_conflict_resolver_chat(db, body.app_ids, body.agent)
 
 
 @router.post(
@@ -2208,7 +2217,7 @@ async def create_conflict_resolver_chat(
   owner: models.Owner = Depends(get_owner_or_app_with_manage_apps),
 ):
   """Create or return the owner-visible resolver chat for an app conflict."""
-  return await _create_conflict_resolver_chat(db, [app_id])
+  return await _create_conflict_resolver_chat(db, [app_id], body.agent if body else None)
 
 
 @router.post(
@@ -2286,11 +2295,13 @@ async def apply_app_source(
         result = await settled.settle(_apply(None), what="App apply")
 
   _publish_apply_events(result, body.chat_id)
-  return schemas.AppApplyOut(
-    mode=result.mode,
-    app=result.app,
-    warnings=list(result.warnings),
-  )
+  warnings = list(result.warnings)
+  from app.agent_roles import stop_runs_outside_grant
+  if not await stop_runs_outside_grant(db, result.app.id):
+    warnings.append(
+      "Some of this app's running agents did not stop after its agent access changed."
+    )
+  return schemas.AppApplyOut(mode=result.mode, app=result.app, warnings=warnings)
 
 
 @asynccontextmanager
@@ -2435,6 +2446,7 @@ async def save_store_listing(
   edit = store_listing_source.ListingEdit(
     tagline=body.tagline,
     description=body.description,
+    license=body.license,
     icon=_listing_image(body.icon, "app icon"),
     hero=_listing_image(body.hero, "banner image"),
     screenshots=tuple(
@@ -2652,7 +2664,7 @@ async def resolve_app_update(
       ):
         # Already installed: a retry after a lost response, or a finish that
         # stopped after removing its receipt. Clear any leftover checkout.
-        await pending_update.clear_pending_conflict_update(db, app)
+        await pending_update.clear_pending_conflict_update(db, app, completed=True)
         get_system_broadcast().publish(
           {"type": "app_updated", "appId": str(app.id)}
         )
@@ -2860,7 +2872,7 @@ async def set_app_badge(
 
   The write runs under the app's storage lock; keep it a tiny transition.
   """
-  require_nondelegated_owner_or_app_control(principal)
+  require_owner_or_full_access_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(
       status_code=403, detail="App token can only set its own badge.",
@@ -3341,7 +3353,7 @@ async def get_icon(
 async def delete_uninstalled_app_permanently(
   app_id: int,
   db: Session = Depends(get_db),
-  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+  _: models.Owner = Depends(get_current_owner_for_full_access_control),
 ):
   """Erases an uninstalled app now instead of waiting out its 7-day window.
 
@@ -3349,6 +3361,7 @@ async def delete_uninstalled_app_permanently(
   reinstall. Only the owner (never an app or a helper agent) can do it: the
   recovery window is the undo, and this gives it up.
   """
+  from app import key_vault
   async with (
     fs_locks.install_uninstall_lock(),
     fs_locks.app_storage_lock(app_id),
@@ -3367,6 +3380,16 @@ async def delete_uninstalled_app_permanently(
       )
     except AppPurgeBlocked as exc:
       raise HTTPException(status_code=409, detail=str(exc))
+    except key_vault.VaultUnavailable:
+      raise HTTPException(
+        status_code=503,
+        detail="The key vault isn't answering, so the app's keys can't be removed yet. Try again shortly.",
+      ) from None
+    except key_vault.VaultRefused as exc:
+      raise HTTPException(
+        status_code=502,
+        detail=f"The key vault refused to remove this app's keys: {exc.reason}",
+      ) from None
 
 
 @router.delete(
@@ -3614,16 +3637,17 @@ async def delete_app_data(
       settings, app.id, app.token_nonce,
     )
     storage_dir = apps_root / str(app.id)
-    secrets_dir = Path(data_dir) / "app-secrets" / str(app.id)
     # Drop the id-keyed runtime tree and its mirrored content-type sidecars.
     # Leaving the dir absent is fine — routes/storage.py recreates it on the
     # next write (atomic_write mkdirs its parent). Wipe LOUDLY: a swallowed
     # failure would rotate the nonce and answer 204 while artifact values the
     # owner asked to erase are still on disk and readable by the still-live app.
+    from app import key_vault
     try:
       await settled.run_settled(_rmtree_strict, storage_dir)
-      await settled.run_settled(_rmtree_strict, secrets_dir)
-    except OSError as exc:
+      # The app's own secrets are its data too (keys it only borrows are not).
+      await settled.settle(key_vault.erase_app_keys(app.id), what="App key erase")
+    except (OSError, key_vault.VaultUnavailable, key_vault.VaultRefused) as exc:
       log.error("app %s data wipe failed: %s", app.id, exc)
       raise HTTPException(
         500,

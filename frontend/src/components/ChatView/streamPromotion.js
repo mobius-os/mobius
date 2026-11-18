@@ -53,6 +53,7 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.question_id ? { question_id: item.question_id } : {}),
       ...(item.answers ? { answers: item.answers } : {}),
       ...(item.platform_action ? { platform_action: item.platform_action } : {}),
+      ...(item.key_request ? { key_request: item.key_request } : {}),
       ...(item.message ? { message: item.message } : {}),
     }
   }
@@ -557,12 +558,15 @@ export function findAssistantPromotionIndex(
 }
 
 
+/** `runEndedTs`, the final `done` event's run end time, is stamped on the
+ *  promoted row as `run_ended_ts`, as a chat detail read would carry it. */
 export function promoteAssistantStream(
   messages,
-  { items, assistantMessageId = null, bridgeTs = null },
+  { items, assistantMessageId = null, bridgeTs = null, runEndedTs = null },
 ) {
   if (!Array.isArray(items) || items.length === 0) return messages
   const { content, blocks } = streamItemsToAssistantPayload(items)
+  const ended = runEndedTs != null ? { run_ended_ts: runEndedTs } : {}
 
   const bridgeIdx = findAssistantPromotionIndex(messages, {
     assistantMessageId,
@@ -576,6 +580,7 @@ export function promoteAssistantStream(
       ...(assistantMessageId ? { id: assistantMessageId } : {}),
       content,
       blocks: carryDurableBlockState(blocks, bridgedMsg.blocks || []),
+      ...ended,
     }
     return [
       ...messages.slice(0, bridgeIdx),
@@ -589,6 +594,7 @@ export function promoteAssistantStream(
     role: 'assistant',
     content,
     blocks,
+    ...ended,
   }]
 }
 
@@ -608,6 +614,7 @@ export function promoteAssistantStreamWithFollowingMessages(
     items,
     assistantMessageId = null,
     bridgeTs = null,
+    runEndedTs = null,
     followingMessages = [],
   },
 ) {
@@ -620,6 +627,7 @@ export function promoteAssistantStreamWithFollowingMessages(
     items,
     assistantMessageId,
     bridgeTs,
+    runEndedTs,
   })
   const batch = Array.isArray(followingMessages)
     ? followingMessages.filter(Boolean)

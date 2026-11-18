@@ -1147,6 +1147,31 @@ export const api = {
       { method: 'POST', body: JSON.stringify({}) },
     ),
   },
+  // Settings › Keys. Only reveal (the owner's Show) ever returns a value.
+  keys: {
+    list: (options = {}) => apiFetch('/keys', options),
+    put: (name, body) => apiFetch(`/keys/${encodeURIComponent(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+    revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    reveal: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/value`),
+    approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+    // The ticket names the exact request the owner saw, so a card left open
+    // never answers a newer request that reuses the same id.
+    deny: (requestId, ticket) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/deny`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ticket ? { ticket } : {}),
+    }),
+    forgetRequest: (requestId) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}`, { method: 'DELETE' }),
+    usage: (name, limit = 8) => apiFetch(
+      `/keys/usage?${new URLSearchParams({ key: name, limit: String(limit) })}`,
+    ),
+  },
   apps: {
     list: (options = {}) => apiFetch('/apps/', options),
     // Apps in their 7-day recovery window (undo with `recover`, below).
@@ -1226,6 +1251,11 @@ export const api = {
     consent: (appId) => apiFetch(`/apps/${appId}/consent`),
     acceptConsent: (appId, digest) => apiFetch(`/apps/${appId}/consent`, {
       method: 'POST', body: JSON.stringify({ digest }),
+    }),
+    // Every credits charge waits for the owner's Pay or Cancel.
+    waitingPayments: (appId) => apiFetch(`/apps/${appId}/credits-charges`),
+    answerPayment: (appId, paymentId, pay) => apiFetch(`/apps/${appId}/credits-charges/${encodeURIComponent(paymentId)}`, {
+      method: 'POST', body: JSON.stringify({ pay }),
     }),
     markActivitySeen: (appId, activityVersion, appCreatedAt) => apiFetch(`/apps/${appId}/activity/seen`, {
       method: 'POST',
@@ -1838,6 +1868,21 @@ export const api = {
         // Sign-out reloads the page right after; let the request finish.
         keepalive: true,
       }),
+    },
+    // Outside channels (Slack, Discord, ntfy, webhooks) that get a copy of
+    // notifications. The link goes in once and is never read back.
+    channels: {
+      list: () => apiFetch('/push/channels'),
+      add: (payload) => apiFetch('/push/channels', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      }),
+      update: (id, payload) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(payload),
+      }),
+      remove: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+      test: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     },
   },
 }

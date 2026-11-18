@@ -43,13 +43,15 @@ export function useOnScreen(showing) {
 /** No new owner event while one awaits acknowledgement, an action is busy,
  *  or admission was withdrawn under an unresolved session. */
 export function sessionLocked(session, admitted) {
-  return !admitted || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
+  return !admitted || (!session.authoritative && !session.canWake) || session.state?.loading || session.awaitingAck || Boolean(session.state?.actions.some(action => action.busy))
 }
 
 
-/** Host-drawn controls for one app action. Before this document reports,
- *  saved actions are history, not controls. Confirm takes the action's own
- *  fixed-size place; "Not now" sits beside it. An `open` action is a plain
+/** Host-drawn controls for one app action. The block's saved actions are
+ *  history until a document reports. An action from the app's saved display
+ *  can only wake the block (useAppBlockSession requestEvent), never confirm
+ *  or cancel. Confirm takes the action's own fixed-size place; "Not now"
+ *  sits beside it. An `open` action is a plain
  *  link to the block in its app (`openHref`) and sends no event. */
 export function SessionControls({ target, state, locked, confirmArmed = false, confirmRef = null, onEvent,
   openHref = '', onInternalNav = null }) {
@@ -90,7 +92,9 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
 }
 
 /** The ask this block may draw now, or null: only one its admitted app
- *  reported in this document (never a saved snapshot), on the newest block of
+ *  reported, live or as the block's saved display (a tap on a saved ask is
+ *  checked against the woken document's ask before anything is sent,
+ *  useAppBlockSession requestAsk), on the newest block of
  *  its kind in the chat the transcript attests, outside recovery. The parser
  *  already drops an ask while an action confirms or is busy. */
 export function blockAsk({ state, admitted, allowed, context }) {
@@ -195,27 +199,31 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   const [listEndRef, listEndView] = useOnScreen(showing)
   const listEdgeRefs = { start: listStartRef, end: listEndRef }
   const [retained, setRetained] = useState(false)
+  const [wantsFrame, setWantsFrame] = useState(true)
+  const [waking, setWaking] = useState(false)
   const [staticOpen, setStaticOpen] = useState(false)
-  // Without admission no new frame starts; a retained one keeps its own.
-  const granted = usePassiveSlot(app.id, { wanted: admitted && near && !staticOpen, retained, distance })
+  // Without admission no new frame starts; a retained one keeps its own. A
+  // tapped sleeping block gets a frame ahead of idle ones (passiveSlots.js).
+  const granted = usePassiveSlot(app.id, { wanted: admitted && near && wantsFrame && !staticOpen, retained, distance, waking })
   const askAllowed = passiveAskAllowed(app)
-  const session = useAppBlockSession({ block, near: admitted && near && granted && !staticOpen,
+  const session = useAppBlockSession({ block, near: admitted && near && !staticOpen, granted,
     revision: `${app.passive_block_module_digest}:${appFrameVersion(app)}`,
     confirmView, listStartView, listEndView, admitted, context: chat.context, refresh: chat.refresh, ask: askAllowed })
   useEffect(() => setShowing(session.showing), [session.showing])
   useEffect(() => setRetained(session.retained), [session.retained])
-  const ask = blockAsk({ state: session.state, admitted, allowed: askAllowed, context: chat.context })
-  const message = ask ? askMessage(block.app, ask) : ''
-  if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen }) === 'static') {
+  useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
+  useEffect(() => setWaking(session.waking), [session.waking])
+  const ask = blockAsk({ state: session.displayState, admitted, allowed: askAllowed, context: chat.context })
+  if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {
     return <StaticAppBlock block={block} app={app} appsLoading={false} onInternalNav={onInternalNav}
       sectionRef={sectionRef} onOpenChange={setStaticOpen} />
   }
-  return <PassiveBlockView block={block} app={app} state={session.state} locked={sessionLocked(session, admitted)}
+  return <PassiveBlockView block={block} app={app} state={session.displayState} locked={sessionLocked(session, admitted)}
     confirmArmed={admitted && session.confirmArmed} notice={admitted ? '' : ADMISSION_WITHDRAWN(app.name)}
-    onEvent={session.dispatch} onInternalNav={onInternalNav} sectionRef={sectionRef}
+    onEvent={session.requestEvent} onInternalNav={onInternalNav} sectionRef={sectionRef}
     confirmRef={confirmRef} listEdgeRefs={listEdgeRefs}
     ask={ask ? <AskControl status={chat.askState({ fingerprint: blockFingerprint(block), refs: ask.refs })} locked={sessionLocked(session, admitted)}
-      onAsk={() => { void chat.ask({ message, fingerprint: blockFingerprint(block), refs: ask.refs }) }} /> : null}
+      onAsk={() => session.requestAsk(current => { void chat.ask({ message: askMessage(block.app, current), fingerprint: blockFingerprint(block), refs: current.refs }) })} /> : null}
     onJump={chat.context?.latest === false ? () => jumpTo(chat.newestNode()) : null}>
     {session.frameMounted ? <SessionHost app={app} session={session} /> : null}
   </PassiveBlockView>

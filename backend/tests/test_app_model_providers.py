@@ -10,7 +10,6 @@ from app import background_agents, models, providers
 from app.app_capabilities import contract_from_manifest
 from app.config import get_settings
 from app.manifest_contract import ManifestContractError, validate_manifest_contract
-from app.routes.secrets import _write_secret
 
 
 def _manifest():
@@ -145,7 +144,7 @@ def test_bad_app_model_declarations_fail_before_acceptance(change):
 
 
 @pytest.mark.asyncio
-async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp_path):
+async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp_path, monkeypatch):
   manifest = _manifest()
   app = models.App(
     name="DeepSeek Connect", slug="deepseek-connect", description="",
@@ -175,7 +174,17 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
   assert resolved["primary"] == {
     "provider": provider_id, "model": "deepseek-flash", "effort": "high",
   }
-  _write_secret(Path(data_dir) / "app-secrets" / str(app_id) / "api_key", "test-only-placeholder-key")
+  # The owner approves the app's request for its declared vault key.
+  from app import key_vault
+  granted = {(app_id, "api_key")}
+  monkeypatch.setattr(
+    key_vault, "model_provider_key_sync",
+    lambda a, name, base_url, **_destination: name if (a, name) in granted else None,
+  )
+  monkeypatch.setattr(
+    key_vault, "reveal_model_provider_key",
+    lambda a, name, base_url, **_destination: "test-only-placeholder-key" if (a, name) in granted else None,
+  )
   adapter = providers.PROVIDERS[provider_id]
   assert providers.provider_runtime_kind(provider_id) == "codex_sdk"
   assert adapter.check_auth(data_dir) is None
@@ -188,9 +197,11 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
     **current, "model_providers_enabled": {provider_id: True},
   })
   env = adapter.build_env({}, data_dir, "chat-test")
-  assert env[f"MOBIUS_APP_MODEL_KEY_{app_id}"] == "test-only-placeholder-key"
+  # The engine holds only the relay token; the real key stays in the relay.
+  assert env[f"MOBIUS_MODEL_RELAY_TOKEN_{app_id}"] == adapter.relay_token()
+  assert "test-only-placeholder-key" not in "\n".join(env.values())
   assert "test-only-placeholder-key" not in "\n".join(adapter.codex_config_overrides())
-  catalog = json.loads((Path(data_dir) / "apps" / str(app_id) / "model-runtime" / "catalog.json").read_text())
+  catalog = json.loads((Path(data_dir) / "cli-auth" / f"app-{app_id}" / "catalog.json").read_text())
   assert [row["slug"] for row in catalog["models"]] == [
     "deepseek-flash", "deepseek-v4-pro",
   ]

@@ -49,6 +49,18 @@ PM_COMMIT_ROOT=/data/platform pm-commit --from "$START" 'what and why' -- <paths
 The `chown` matters twice: `pm-commit` runs as the owner, so it cannot read a
 root-only file, and a file left root-owned makes the next agent edit fail.
 
+**A full data volume.** If Möbius will not start because `/data` is full,
+delete the recovery reserve first; it always frees room for the boot to commit,
+and the running server re-creates it once space is comfortable again:
+
+```bash
+rm -f /data/run/recovery-reserve
+```
+
+Then start Möbius and free space. While storage is critical, Möbius defers
+every new turn; use **Continue anyway** on a chat paused for storage to let
+its agent run and free the space.
+
 ## Host-owned container replacement
 
 A container recreation is not an ordinary server restart. Use the Settings
@@ -62,8 +74,9 @@ back to manual Resume after boot.
 
 - Uploaded files: `/data/chats/{chat_id}/uploads/`
 - Chat media: `/data/chats/{chat_id}/media/`
-- Encrypted app credentials: `/data/app-secrets/{app_id}/` — use the app-secret
-  API, never edit ciphertext files.
+- Key vault: `/data/.vault/` (encrypted keys, grants, app requests, usage log),
+  reached only through its socket via `/api/keys`; never edit its files.
+  `/data/app-secrets/` holds only data from the retired per-app secret store.
 - Per-app storage (numeric id): `/data/apps/{app_id}/<path>`
 - Per-app source (slug): `/data/apps/{slug}/`
 - Shared storage: `/data/shared/<path>`

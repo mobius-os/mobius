@@ -39,6 +39,7 @@ from app.app_source_check import check_manifest_tree  # noqa: E402
 from app.app_compile_contract import (  # noqa: E402
   ROLLDOWN_WALL_LIMIT_SECS,
   RolldownStalled,
+  compile_failure_detail,
   rolldown_command,
   rolldown_report_contract_error,
 )
@@ -117,8 +118,10 @@ def _compile(
       # run() has already killed and reaped the build.
       raise RolldownStalled() from None
     if result.returncode != 0:
-      detail = " ".join(result.stderr.strip().splitlines())
-      return detail or f"Rolldown exited {result.returncode}"
+      detail = compile_failure_detail(result.returncode, result.stderr.encode())
+      return " ".join(detail.strip().splitlines()) or (
+        f"Rolldown exited {result.returncode}"
+      )
     try:
       report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

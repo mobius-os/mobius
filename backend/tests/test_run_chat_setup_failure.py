@@ -12,7 +12,7 @@ from concurrent.futures import Future
 import pytest
 
 from app import chat as chat_mod
-from app.agent_admission import AgentTurnDeferred
+from app.agent_admission import AgentTurnDeferred, TurnStartHolds
 from app.broadcast import create_broadcast, remove_broadcast
 
 
@@ -35,7 +35,7 @@ class _Writer:
 
 
 async def _run_broken_setup(chat, monkeypatch, writer, *, error=None):
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False
@@ -124,7 +124,7 @@ async def test_failed_helper_setup_wakes_parent_with_settled_result(db, monkeypa
   ))
   db.commit()
 
-  async def admitted(_data_dir):
+  async def admitted(_data_dir, **_kwargs):
     pass
 
   setup_started = False
@@ -216,7 +216,7 @@ async def test_setup_failure_does_not_end_a_successor_stream(chat, monkeypatch, 
 async def test_setup_cancellation_still_propagates(chat, monkeypatch):
   admitted = False
 
-  async def admit(_data_dir):
+  async def admit(_data_dir, **_kwargs):
     nonlocal admitted
     admitted = True
 
@@ -237,6 +237,37 @@ async def test_setup_cancellation_still_propagates(chat, monkeypatch):
   assert admitted is True
 
 
+@pytest.mark.parametrize("ends", ["completes", "is cancelled"])
+@pytest.mark.asyncio
+async def test_admitted_turn_releases_its_start_hold_when_it_ends(chat, monkeypatch, ends):
+  """A turn that ends inside the start window stops counting as starting."""
+  holds = TurnStartHolds()
+
+  async def admit(_data_dir, **_kwargs):
+    return holds.hold()
+
+  async def impl(*_args, **_kwargs):
+    assert holds.starting_turns() == 1
+    if ends == "is cancelled":
+      raise asyncio.CancelledError()
+    return chat_mod.chat_queue.TerminalDisposition.EMPTY_TERMINAL_CLEARED
+
+  monkeypatch.setattr(chat_mod, "require_agent_turn_admission", admit)
+  monkeypatch.setattr(chat_mod, "_run_chat_impl", impl)
+  create_broadcast(chat.id)
+  try:
+    try:
+      await chat_mod.run_chat(
+        [], chat_id=chat.id, session_id=None, provider_id="codex",
+        run_gen=chat_mod.current_run_generation(chat.id), run_token="tok-hold",
+      )
+    except asyncio.CancelledError:
+      assert ends == "is cancelled"
+  finally:
+    remove_broadcast(chat.id)
+  assert holds.starting_turns() == 0
+
+
 @pytest.mark.asyncio
 async def test_disk_admission_deferral_persists_resumable_pause(
   chat, monkeypatch, caplog,
@@ -244,7 +275,7 @@ async def test_disk_admission_deferral_persists_resumable_pause(
   """The incident case: a disk-pressure deferral must leave a DURABLE, RESUMABLE
   pause card (so a reopen shows the reason + Resume affordance), not a transient
   broadcast that reloads as a saved user message with an empty assistant reply."""
-  async def defer(_data_dir):
+  async def defer(_data_dir, **_kwargs):
     raise AgentTurnDeferred(
       "This turn is waiting for storage headroom because only 512 MiB remains.",
       resource="storage",

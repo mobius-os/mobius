@@ -252,7 +252,7 @@ test('the chat sends a card ask as an owner message that leaves the composer\'s 
   // Every composer mutation in doSend goes through a guarded helper.
   assert.equal((doSend.match(/setComposerInput\(''\)/g) || []).length, 1)
   assert.match(doSend, /function clearComposerForSend\(\) \{\n\s+if \(!fromComposer\) return\n\s+setComposerInput\(''\)/)
-  assert.match(doSend, /function keepFailedDraft\(failedAttempt\) \{\n\s+if \(!fromComposer\) return/)
+  assert.match(doSend, /function keepFailedDraft\(failedAttempt, error\) \{\n\s+if \(!fromComposer\) return/)
   assert.match(doSend, /if \(fromComposer && listeningRef\.current\) stopVoiceRef\.current\?\.\(\)/)
   assert.match(doSend, /if \(fromComposer && shouldDismissComposerKeyboardOnSubmit\(/)
   assert.equal((doSend.match(/rememberFailedAttempt\(|restoreComposerText\(|settleAmbiguousSendConfirmation\(/g) || []).length, 3,

@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 from pathlib import PurePath
 import re
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlsplit
 
 from pydantic import (
@@ -14,6 +14,7 @@ from pydantic import (
 from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
 from app.manifest_identity import requested_manifest_source
 from app.providers import PROVIDERS, _model_belongs_to_other_provider
+from app.update_chat import UpdateAgentChoice
 
 
 class SetupRequest(BaseModel):
@@ -153,6 +154,9 @@ class StoreListingIn(BaseModel):
   screenshots: list[StoreListingScreenshotIn] = Field(
     default_factory=list, max_length=MAX_STORE_SCREENSHOTS,
   )
+  # An SPDX id from store_licenses.OFFERED_LICENSES. Omitted keeps the
+  # current license; the save refuses any other value.
+  license: str | None = Field(default=None, max_length=40)
 
 
 class AppResolveUpdate(BaseModel):
@@ -288,6 +292,9 @@ class AppOut(BaseModel):
   # Internal publication inputs. Clients receive the typed projections below,
   # never the nullable persistence fields or executable path.
   published_manifest_url: str | None = Field(default=None, exclude=True)
+  # Consent inputs to the frame reload key (granted direct sites).
+  accepted_consent: dict | None = Field(default=None, exclude=True)
+  project_templates_json: Any = Field(default=None, exclude=True)
   public_name: str | None = Field(default=None, exclude=True)
   public_bundle_path: str | None = Field(default=None, exclude=True)
   public_bundle_digest: str | None = Field(default=None, exclude=True)
@@ -298,6 +305,9 @@ class AppOut(BaseModel):
   # Internal source for frame and storage-generation projections. App-scoped
   # JWTs separately carry this nonce as app_nonce.
   token_nonce: str | None = Field(default=None, exclude=True)
+  # The installation, never reused (models.App.install_id). An app grant in a
+  # key save (PUT /api/keys/<name>) names it beside the id; it is no credential.
+  install_id: str | None = None
   runtime_revision: str | None = Field(default=None, exclude=True)
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed
@@ -700,6 +710,7 @@ class AppConflictResolverChatOut(BaseModel):
 
 
 class AppConflictResolverChatRequest(BaseModel):
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 
@@ -710,6 +721,7 @@ class AppConflictResolverBatchChatRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
 
   app_ids: list[int] = Field(min_length=1, max_length=50)
+  agent: UpdateAgentChoice | None = None
   # Accepted for compatibility with the published Store's request.
   resolution_policy: Literal["preserve_local"] | None = None
 
@@ -863,7 +875,10 @@ class ChatProviderSwitch(BaseModel):
     if _model_belongs_to_other_provider(model, self.provider):
       raise ValueError("target model does not belong to target provider")
     self.agent_settings_json.model = model
-    if effort not in PROVIDERS[self.provider].switch_efforts:
+    if self.provider == "mobius":
+      if not PROVIDERS["mobius"].validate_model_effort(model, effort):
+        raise ValueError("target effort does not belong to target model")
+    elif effort not in PROVIDERS[self.provider].switch_efforts:
       raise ValueError("target effort does not belong to target provider")
     return self
 
@@ -873,7 +888,8 @@ class SendMessage(BaseModel):
   # Exact physical run shown by Resume; stale recovery controls cannot start
   # a new continuation after automatic recovery has already advanced it.
   resume_run_id: str | None = None
-  # Explicit, warned Continue anyway control for one storage-waiting run.
+  # Explicit, warned Continue anyway control for one storage- or
+  # process-waiting run. The name predates the process floor.
   allow_low_storage: bool = False
   # Goal Resume names the durable obligation, not an unrelated chat tail.
   resume_goal_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -943,7 +959,7 @@ class SendMessage(BaseModel):
     if self.allow_low_storage and (
       self.continuation != "manual" or not self.resume_run_id
     ):
-      raise ValueError("Continue anyway requires the exact storage-waiting run")
+      raise ValueError("Continue anyway requires the exact waiting run")
     goal_target = self.resume_goal_id is not None or self.resume_goal_revision is not None
     if goal_target and (
       self.resume_goal_id is None or self.resume_goal_revision is None
@@ -1199,6 +1215,8 @@ class ModelRegistryResponse(BaseModel):
 
   # Map provider id → ordered list of models.
   providers: dict[str, list[ModelEntry]]
+  defaults: dict[str, str] = Field(default_factory=dict)
+  replacements: dict[str, dict[str, str]] = Field(default_factory=dict)
 
 
 class ModelPrefsUpdate(BaseModel):

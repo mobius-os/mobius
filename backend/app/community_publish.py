@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 
 from PIL import Image, ImageOps, JpegImagePlugin, UnidentifiedImageError
 
-from app import app_git, icon_assets, models
+from app import app_git, icon_assets, models, store_licenses
 from app.config import get_settings
 from app.credential_files import is_credential_file
 from app.manifest_contract import (
@@ -409,6 +409,7 @@ LISTING_ITEMS = (
   ("tagline", "Tagline"),
   ("description", "Description"),
   ("screenshots", "Screenshots"),
+  ("license", "License"),
   ("hero", "Banner image"),
 )
 _OPTIONAL_LISTING_ITEMS = {"hero"}
@@ -809,6 +810,26 @@ def _listing_screenshots(store: dict, by_path: dict[str, dict]) -> list[dict]:
   return projected
 
 
+def _listing_license(manifest: dict, by_path: dict[str, dict], listed: bool) -> str:
+  """The license publishing accepts from the source, with its text beside it."""
+  spdx = store_licenses.publishable_license(manifest, listed=listed)
+  if not spdx:
+    declared = store_licenses.declared_license(manifest)
+    if declared in store_licenses.LISTED_FREE_SPDX:
+      raise _incomplete(
+        f"Choose a free license the Store offers. Only an app the Store "
+        f"already lists under {declared} can keep publishing under it.",
+      )
+    raise _incomplete(
+      "Choose a free license so people know how they may use and share your app.",
+    )
+  if not store_licenses.has_license_file(by_path):
+    raise _incomplete(
+      "Add the license text. Saving the listing writes the LICENSE file.",
+    )
+  return spdx
+
+
 def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dict:
   """The listing as currently written, valid or not, for editing."""
   def text(field: str) -> str:
@@ -834,6 +855,11 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
+    # The choice the editor shows (only an offered one), and what the
+    # source declares now, so the owner can see a license the Store doesn't
+    # offer, including one an already listed app keeps.
+    "license": store_licenses.offered_license(manifest),
+    "declared_license": store_licenses.declared_license(manifest),
   }
 
 
@@ -881,6 +907,8 @@ def _published_images_with_metadata(
 def store_listing_review(
   files: list[dict[str, str]],
   source_problems: list[CommunityPublicationError] | tuple = (),
+  *,
+  listed: bool = False,
 ) -> dict:
   """Check every Store listing requirement of one accepted snapshot at once.
 
@@ -893,6 +921,9 @@ def store_listing_review(
   directly without a copy step. It remains ordinary accepted source rather
   than ``static_assets`` package input; the manifest contract reserves this
   subtree so installer-owned runtime bytes cannot collide with it.
+  ``listed`` says the Store already lists this app, so the License item
+  also accepts the other free licenses it may keep (see
+  ``keeps_a_listed_license``).
   """
   by_path = {
     str(item.get("path") or ""): item
@@ -945,6 +976,7 @@ def store_listing_review(
     store, "description", "a description", DESCRIPTION_MAX_BYTES,
   ))
   check("screenshots", lambda: _listing_screenshots(store, by_path))
+  check("license", lambda: _listing_license(manifest, by_path, listed))
   check("hero", lambda: (
     _listing_asset(store.get("hero"), "banner image", by_path)
     if store.get("hero") not in (None, "") else None
@@ -970,6 +1002,7 @@ def store_listing_review(
       "icon": results["icon"],
       "hero": {"path": hero} if hero else None,
       "screenshots": results["screenshots"],
+      "license": results["license"],
     }
   draft = _listing_draft(manifest, store, by_path)
   return {
@@ -977,12 +1010,28 @@ def store_listing_review(
     "checklist": checklist,
     "listing": listing,
     "draft": draft,
+    "license_options": store_licenses.license_options(),
   }
 
 
-def public_store_listing(files: list[dict[str, str]]) -> dict:
+def keeps_a_listed_license(files: list[dict[str, str]]) -> bool:
+  """Whether the snapshot's license is publishable only for an already listed app.
+
+  Only then does publishing need to ask the Store whether the app is listed.
+  The Host still admits the update only when its listed revision declares
+  the same license.
+  """
+  by_path = {str(item.get("path") or ""): item for item in files if isinstance(item, dict)}
+  try:
+    manifest = _parsed_manifest(by_path)
+  except CommunityPublicationError:
+    return False
+  return store_licenses.declared_license(manifest) in store_licenses.LISTED_FREE_SPDX
+
+
+def public_store_listing(files: list[dict[str, str]], *, listed: bool = False) -> dict:
   """Return the publishable listing, or raise its first unmet requirement."""
-  review = store_listing_review(files)
+  review = store_listing_review(files, listed=listed)
   if review["listing"] is None:
     first = next(item for item in review["checklist"] if not item["done"])
     raise CommunityPublicationError(first["message"], first["code"])
@@ -1195,7 +1244,8 @@ def read_public_snapshot(
 
   Only source that cannot be read at all raises; the listing preview reports
   everything else as checklist items. Over the package budget, only the
-  manifest and listing artwork are read, which is all the review needs.
+  manifest, listing artwork and root license text are read, which is all
+  the review needs.
 
   Reading a Git tree rather than the editable worktree prevents an unsaved or
   concurrently-changing draft from crossing the public-source consent boundary.
@@ -1228,10 +1278,12 @@ def read_public_snapshot(
         manifest = json.loads(_blob(repo, manifest_entry))
       except ValueError:
         manifest = {}
+    # The root license text too, so the License item stays honest.
     wanted = {"mobius.json"} | _listing_paths(manifest)
     entries = [
       entry for entry in entries
-      if entry.path in wanted and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
+      if (entry.path in wanted or store_licenses.is_license_file(entry.path))
+      and entry.size <= STORE_LISTING_IMAGE_MAX_BYTES
     ]
 
   files: list[dict[str, str]] = []

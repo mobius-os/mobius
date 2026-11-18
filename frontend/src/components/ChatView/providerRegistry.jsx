@@ -125,10 +125,22 @@ export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
 
 /** Built-ins keep their familiar order; accepted app providers follow it. */
 export function providerOrderFor(registry) {
+  const providers = registry?.providers || registry
   return [
     ...PROVIDER_ORDER,
-    ...Object.keys(registry || {}).filter(id => !PROVIDER_ORDER.includes(id)),
+    ...Object.keys(providers || {}).filter(id => !PROVIDER_ORDER.includes(id)),
   ]
+}
+
+/**
+ * Where a provider is set up. Built-ins have their own Settings page; an app
+ * provider (`app-<id>`) is connected inside its app, which Settings has no page
+ * for. Anything else has no setup destination.
+ */
+export function providerSetupTarget(id) {
+  if (PROVIDER_ORDER.includes(id)) return { kind: 'settings', page: id }
+  const app = /^app-(\d+)$/.exec(id || '')
+  return app ? { kind: 'app', appId: Number(app[1]) } : null
 }
 
 export function providerInfoFor(id, status) {

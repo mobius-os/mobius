@@ -14,8 +14,8 @@ used by chat turns, model pickers, and background agents:
     runner) reuses one helper from `codex_appserver.py`
     (`_extract_bash_command`); the provider itself shapes credentials + env.
 
-`MobiusProvider` serves the platform-owned Möbius subscription catalogue
-(`mobius_models.json`) through the local identity broker; it needs no app.
+`MobiusProvider` discovers the service-owned subscription catalogue through
+the local identity broker; it needs no app or model-specific client release.
 
 `AppModelProvider` binds one installed app's reviewed Responses endpoint and
 model list. New Responses-compatible services need a manifest declaration and
@@ -25,19 +25,26 @@ an app-owned setup UI, not another platform runner or picker branch.
 import asyncio
 import base64
 import copy
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+import hashlib
+import hmac
 import json
 import logging
 import math
 import os
 import shutil
 import stat
+import tempfile
 import threading
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterable
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, NamedTuple, Protocol
+from urllib.parse import urlsplit
 
 from app.storage_io import atomic_write
 
@@ -276,15 +283,29 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when `model` is a KNOWN model for some OTHER provider.
-  Use this to reject cross-provider mismatches without blocking
-  unknown / future model names — the SDK is the authority on what
-  it accepts; we only intercept the specific failure mode of
-  sending a Codex model to Claude or vice versa."""
+  """True when another provider owns `model` and `provider` does not.
+
+  Ownership is the (provider, model) pair: an id that two providers both list
+  (an app declaration and Codex discovery, say) stays valid for each of them.
+  Use this to reject cross-provider mismatches without blocking unknown /
+  future model names — the SDK is the authority on what it accepts; we only
+  intercept sending a Codex model to Claude or vice versa."""
+  if model in known_model_ids(provider):
+    return False
   for p in PROVIDERS:
     if p != provider and model in known_model_ids(p):
       return True
   return False
+
+
+def _declared_model_ids(provider_ids: Iterable[str]) -> set[str]:
+  """Built-in and declared ids of these providers, never discovered ones.
+
+  The one collision rule for both the Möbius catalogue and app declarations:
+  an id discovery also lists is shared by (provider, model), not a collision.
+  """
+  return {mid for pid in provider_ids
+          for mid in known_model_ids(pid, include_discovered=False)}
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -334,12 +355,66 @@ def hidden_model_ids(model_prefs: Any) -> list[str]:
   ]
 
 
-def known_model_ids(provider_id: str) -> list[str]:
-  """Built-in fallback IDs, the Möbius catalogue, or an app's accepted IDs."""
+RECENT_MODEL_LIMIT = 20
+
+
+def recent_model_ids(model_prefs: Any) -> list[str]:
+  """Confirmed owner picker choices, newest first; stale catalog ids are safe."""
+  raw = model_prefs.get("recent_ids", []) if isinstance(model_prefs, dict) else []
+  if not isinstance(raw, list):
+    return []
+  return list(dict.fromkeys(
+    model_id for model_id in raw
+    if isinstance(model_id, str) and model_id
+  ))[:RECENT_MODEL_LIMIT]
+
+
+def picker_recent_model_ids(model_prefs: Any, data_dir: str) -> list[str]:
+  """Seed an upgraded owner's empty history from their explicit last pick.
+
+  This reads only the saved global choice, never the runtime/provider default.
+  It does not write synthetic history; the next confirmed pick starts it.
+  """
+  recent = recent_model_ids(model_prefs)
+  if recent:
+    return recent
+  saved = _load_agent_settings(data_dir)
+  model_id = saved.get("model")
+  return [model_id] if isinstance(model_id, str) and model_id.strip() else []
+
+
+def remember_recent_model(model_prefs: Any, model_id: str) -> dict:
+  """Move a committed picker choice to the front without changing visibility."""
+  prefs = dict(model_prefs) if isinstance(model_prefs, dict) else {}
+  prefs["recent_ids"] = [
+    model_id, *(old for old in recent_model_ids(prefs) if old != model_id)
+  ][:RECENT_MODEL_LIMIT]
+  return prefs
+
+
+def known_model_ids(
+  provider_id: str, *, include_discovered: bool = True,
+) -> list[str]:
+  """Accepted identities, including newly discovered native-provider models.
+
+  Catalog expiry and availability govern discovery, not ownership: the last
+  served catalog is reused without I/O, and offline identities stay when a
+  live catalog is partial. App providers retain their declaration as
+  authority. Discovery lives only in this process's memory, so after a
+  restart a discovered id is unknown here until the model list is fetched
+  again; meanwhile the provider saved on the chat, and the provider the
+  picker sends with every pick, carry the pair. ``include_discovered=False``
+  gives only the built-in and declared ids, which do not depend on timing.
+  """
   provider = PROVIDERS.get(provider_id)
   if isinstance(provider, (MobiusProvider, AppModelProvider)):
-    return [model["id"] for model in provider.declaration["models"]]
-  return KNOWN_MODELS.get(provider_id, [])
+    return ([model["id"] for model in provider.declaration["models"]]
+            + list(provider.declaration.get("replacements", {})))
+  if not include_discovered:
+    return list(KNOWN_MODELS.get(provider_id, []))
+  cached = _model_registry_cache.get(provider_id)
+  discovered = [entry["id"] for entry in cached[1]] if cached else []
+  return list(dict.fromkeys([*KNOWN_MODELS.get(provider_id, []), *discovered]))
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -396,6 +471,8 @@ def effective_agent_settings(
   data_dir: str,
   chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
+  *,
+  file_layer: dict | None = None,
 ) -> dict:
   """Merge per-chat choices on top of the owner's latest picker choices.
 
@@ -431,7 +508,7 @@ def effective_agent_settings(
   # provider switch — without this, a brand-new empty chat would lose
   # the user's previously-picked Claude effort the moment they
   # switched to Codex in the panel (and vice versa).
-  file_layer = _load_agent_settings(data_dir)
+  file_layer = file_layer if file_layer is not None else _load_agent_settings(data_dir)
   if file_layer.get("effort") is not None:
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
@@ -460,6 +537,10 @@ def effective_agent_settings(
       if v is None:
         continue
       merged[k] = v
+  if prov in PROVIDERS:
+    merged["model"], merged["effort"] = PROVIDERS[prov].resolve_selection(
+      merged["model"], merged["effort"],
+    )
   return merged
 
 
@@ -470,6 +551,7 @@ def snapshot_chat_agent_settings(
   model: str | None = None,
   effort: str | None = None,
   fallback_model: str | None = None,
+  file_layer: dict | None = None,
 ) -> dict | None:
   """Freeze one coherent, explicit runtime choice onto a new chat.
 
@@ -498,8 +580,10 @@ def snapshot_chat_agent_settings(
   if isinstance(effort, str) and effort.strip():
     overrides["effort"] = effort.strip()
   effective = effective_agent_settings(
-    data_dir, overrides or None, provider=provider,
+    data_dir, overrides or None, provider=provider, file_layer=file_layer,
   )
+  if provider == "mobius" and chosen_model and not effective.get("model"):
+    return None
   chosen_model = effective.get("model") or fallback_model
   if not isinstance(chosen_model, str) or not chosen_model.strip():
     return None
@@ -513,6 +597,31 @@ def snapshot_chat_agent_settings(
     if value is not None:
       snapshot[key] = value
   return snapshot
+
+
+def snapshot_owner_chat_choice(
+  data_dir: str,
+  configured_provider: str | None = None,
+  *,
+  allow_unselected: bool = False,
+) -> tuple[str, dict | None]:
+  """Freeze provider and model from one picker revision for a new owner chat.
+
+  Resolving the provider and snapshotting the model each used to read the
+  settings file, so a pick landing between the two reads could split a valid
+  pair, especially for a future model absent from the offline catalog. The
+  file is read once here (``atomic_write`` makes one read a whole revision)
+  and that dict feeds both steps. No lock is held: the app registry refresh is
+  a database read and the provider checks read sign-in files.
+  """
+  sync_app_model_providers(data_dir)
+  settings = _load_agent_settings(data_dir)
+  provider = owner_default_provider(data_dir, configured_provider, settings=settings)
+  return provider, snapshot_chat_agent_settings(
+    data_dir, provider,
+    fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
+    file_layer=settings,
+  )
 
 
 def _background_default_choice(
@@ -695,6 +804,20 @@ class BaseProvider:
   # Provider-wide switch boundary; model catalogs can advertise narrower scales.
   switch_efforts: frozenset[str] = frozenset()
 
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """The model and effort a turn actually runs with; saved state is unchanged.
+
+    Native providers take the saved choice as is; providers with a declared
+    catalogue hold it to what that catalogue offers.
+    """
+    return model, effort
+
+  def engine_home(self, data_dir: str) -> Path:
+    """The engine's own home (Claude config dir or CODEX_HOME) for this provider."""
+    return Path(data_dir) / "cli-auth" / self.auth_dir
+
   def check_auth(self, data_dir: str) -> str | None:
     """Returns an error message if not authenticated, None if ok."""
     return None
@@ -728,6 +851,15 @@ class BaseProvider:
 
   def codex_config_overrides(self) -> list[str]:
     return []
+
+  def measured_run_accounting(
+    self, cost_usd: float | None, usage: dict | None,
+  ) -> tuple[float | None, dict | None]:
+    """The run cost and usage this provider's engine truthfully measured.
+
+    Recorded as-is by default; `None` means unknown and is omitted from display.
+    """
+    return cost_usd, usage
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     """Return the provider's live or declared catalog before normalization."""
@@ -881,24 +1013,18 @@ CODEX_NATIVE_HELPERS_OFF = (
 # Agent Coaching) pass CODEX_TOOLS_OFF last, so it wins over a provider's own
 # settings (the Möbius subscription turns web search on for chats).
 #
-# Traced on Codex 0.163.0 on 2026-11-04, through the real fork and compaction
-# paths pointed at a local fake Responses endpoint: the tools each request
-# sent, plus an `exec` call the endpoint scripts to print ALL_TOOLS (deferred
-# nested tools are missing from exec's description). 0.162.0 gives identical
-# results in the same harness. What stays reaches no file or network: `exec`,
-# which refuses to run with code_mode_host off, so its nested apply_patch,
-# clock and MCP resource readers are unreachable; `wait`, for exec cells only;
-# and request_user_input, for Plan mode only (models whose catalog lists it
-# also get request_user_input_async, which only asks the user). A model without
-# code mode gets a direct apply_patch instead, and the read-only sandbox
-# rejects its writes. `unified_exec` is not listed: Codex keeps it on whatever
-# the switch says, and shell_tool=false already removes its exec_command and
-# write_stdin tools.
+# Traced on Codex 0.167.2 on 2026-11-13 with the same native-helper and
+# tool-off overrides used by fork and compaction, against a local fake
+# Responses endpoint (no paid request). A known model, gpt-5.6-sol, sent
+# `tools: []`; an unknown fallback model offered only `request_user_input`.
+# `codex features list` also reported every switch below known and false.
+# The earlier 0.163.0 trace additionally exercised a local `exec` call to
+# inspect deferred tools; do that again if a future release exposes exec here.
 #
 # Re-trace the same way before changing CODEX_TOOLS_OFF_VERIFIED_FOR. A test
 # fails while it differs from the Dockerfile's CODEX_VERSION, and session
 # forks refuse to run unless Codex reports every feature below as known and off.
-CODEX_TOOLS_OFF_VERIFIED_FOR = "0.163.0"
+CODEX_TOOLS_OFF_VERIFIED_FOR = "0.167.2"
 CODEX_TOOL_FEATURES_OFF = (
   "shell_tool",
   "apps",
@@ -1006,21 +1132,17 @@ def _write_responses_catalog(
       "supported_reasoning_levels": [
         {"effort": effort, "description": effort.title()} for effort in efforts
       ],
-      "default_reasoning_level": "medium" if "medium" in efforts else efforts[0],
+      "default_reasoning_level": model.get("default_effort") or (
+        "medium" if "medium" in efforts else efforts[0] if efforts else "none"
+      ),
     })
+    if broker:
+      for field in ("supports_parallel_tool_calls", "supports_search_tool",
+                    "supports_image_detail_original", "supports_reasoning_summaries"):
+        row[field] = model.get(field, False)
+      row["supports_reasoning_summary_parameter"] = row["supports_reasoning_summaries"]
     catalog.append(row)
   atomic_write(path, json.dumps({"models": catalog}))
-
-
-def _load_mobius_model_catalogue() -> dict[str, Any]:
-  """The platform-owned Möbius subscription catalogue (mobius_models.json).
-
-  It has the same shape as an app manifest's ``model_provider`` block so the
-  Codex catalog writer and model registry treat both alike. The platform owns
-  it because the subscription and account are platform features: the
-  provider must exist whether or not any app is installed.
-  """
-  return json.loads(Path(__file__).with_name("mobius_models.json").read_text())
 
 
 class MobiusProvider(BaseProvider):
@@ -1040,26 +1162,152 @@ class MobiusProvider(BaseProvider):
 
   def __init__(self):
     # Named like AppModelProvider.declaration because it has the same shape.
-    self.declaration: dict[str, Any] = _load_mobius_model_catalogue()
+    self.declaration: dict[str, Any] = {
+      "name": "Möbius", "transport": "identity_broker",
+      "base_url": "http://127.0.0.1:8765/v1", "default_model": None,
+      "models": [], "replacements": {},
+    }
+    self._catalogue_scope = None
     self.name = self.declaration["name"]
-    self.switch_efforts = frozenset(
-      effort for model in self.declaration["models"]
-      for effort in model.get("effort_levels", [])
-    ) or frozenset({"low", "medium", "high"})
+    self.switch_efforts = frozenset({"minimal", "low", "medium", "high", "max"})
     self._held_reads: dict[str, tuple[float, dict[str, Any]]] = {}
     self._held_generation = 0
     self._held_lock = threading.Lock()
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
-    # The catalogue is authoritative, as app declarations are for every
-    # Responses connection. A broker's live list may use a different product
-    # alias from a stable saved-chat model ID; filtering it would hide that.
-    return self.declaration["models"]
+    # Registry owns refresh cadence and coalescing. Keep the complete snapshot
+    # here so execution and the picker use identical capabilities/defaults.
+    return await asyncio.to_thread(self._refresh_catalogue, data_dir)
+
+  def _refresh_catalogue(self, data_dir: str) -> list[Any]:
+    from app.runtime_identity import broker_client
+    with self._held_lock:
+      generation = self._held_generation
+    identity = self._identity()
+    if identity.get("linked") is not True:
+      with self._held_lock:
+        if generation == self._held_generation:
+          self._clear_catalogue()
+      raise ValueError("Möbius account is not linked")
+    scope = hashlib.sha256(json.dumps([
+      identity.get(k) for k in ("issuer", "subject", "instance_id", "key_generation")
+    ]).encode()).hexdigest()
+    cache_path = Path(data_dir) / "cache" / "mobius-models.json"
+    # A restart may reuse public metadata only for the same broker identity.
+    # No API key, private route, or model transcript is stored in this cache.
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      if self._catalogue_scope != scope:
+        self._clear_catalogue()
+        self._catalogue_scope = scope
+        try:
+          saved = json.loads(cache_path.read_text())
+          if saved.get("scope") == scope:
+            self._publish_catalogue(self._validate_catalogue(saved["catalogue"]))
+        except (OSError, ValueError, KeyError, TypeError):
+          pass
+    with broker_client(timeout=5.0) as client:
+      response = client.get("/v1/models")
+      response.raise_for_status()
+      payload = response.json()
+    declaration = self._validate_catalogue(payload)
+    public_payload = {
+      "contract_version": 1, "default_model": declaration["default_model"],
+      "replacements": declaration["replacements"],
+      "data": [{**row, "name": row["label"], "owned_by": "mobius"}
+               for row in declaration["models"]],
+    }
+    with self._held_lock:
+      if generation != self._held_generation:
+        raise ValueError("Möbius account changed during catalogue discovery")
+      try:
+        atomic_write(cache_path, json.dumps({"scope": scope, "catalogue": public_payload}), mode=0o600)
+      except OSError:
+        log.warning("Could not save Möbius model metadata cache")
+      self._publish_catalogue(declaration)
+      return copy.deepcopy(declaration["models"])
+
+  @staticmethod
+  def _validate_catalogue(payload: Any) -> dict[str, Any]:
+    from app.mobius_catalogue import parse_catalogue
+    declaration = parse_catalogue(payload)
+    ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
+    # Built-in and app-declared ids only: Claude or Codex later discovering
+    # one of these ids shares it by (provider, model); it is not a collision
+    # that should discard the whole catalogue. The current Möbius declaration
+    # is what this replaces, so it grants no ownership here.
+    claimed = _declared_model_ids(pid for pid in PROVIDERS if pid != "mobius")
+    if any(mid in claimed for mid in ids):
+      raise ValueError("Möbius catalogue collides with another provider")
+    return declaration
+
+  def _publish_catalogue(self, declaration: dict[str, Any]) -> None:
+    self.declaration = declaration
+    self.switch_efforts = frozenset(
+      effort for model in declaration["models"] for effort in model["effort_levels"]
+    )
+    DEFAULT_MODELS["mobius"] = declaration["default_model"]
+    DEFAULT_BACKGROUND_MODELS["mobius"] = declaration["default_model"]
+
+  def _clear_catalogue(self) -> None:
+    _model_registry_cache.pop("mobius", None)
+    self._publish_catalogue({**self.declaration, "models": [],
+                             "default_model": None, "replacements": {}})
+
+  def registry_snapshot(self) -> dict[str, Any]:
+    """Read rows and selection metadata from one immutable published version."""
+    declaration = self.declaration
+    return {
+      "models": _live_model_entries("mobius", declaration["models"]),
+      "default": declaration["default_model"],
+      "replacements": dict(declaration["replacements"]),
+    }
+
+  def resolve_model(self, model: str | None) -> str | None:
+    """Resolve only service-declared retirement edges; never guess a successor."""
+    if not model or not self.declaration["models"]:
+      return model
+    if model in self.declaration.get("replacements", {}):
+      return self.declaration["replacements"][model]
+    return model if model in {m["id"] for m in self.declaration["models"]} else None
+
+  def model_effort_levels(self, model: str | None) -> list[str] | None:
+    """None means unknown; [] means this selected model rejects effort."""
+    for row in self.declaration["models"]:
+      if row["id"] == model:
+        return row.get("effort_levels")
+    return None
+
+  def resolve_selection(
+    self, model: str | None, effort: str | None,
+  ) -> tuple[str | None, str | None]:
+    """Apply declared retirement and effort policy without changing saved state.
+
+    A formerly valid effort may not exist on the successor's scale. Use that
+    model's declared default, not a provider-wide guess; an empty scale sends
+    no override at all.
+    """
+    resolved = self.resolve_model(model)
+    for row in self.declaration["models"]:
+      if row["id"] == resolved:
+        levels = row["effort_levels"]
+        if not levels:
+          return resolved, None
+        if effort is not None and effort not in levels:
+          return resolved, row["default_effort"]
+        break
+    return resolved, effort
+
+  def validate_model_effort(self, model: str | None, effort: str | None) -> bool:
+    levels = self.model_effort_levels(model)
+    if levels is None:
+      return effort is None or effort in self.switch_efforts
+    return effort is None or effort in levels
 
   @staticmethod
   def _catalog_path() -> Path:
-    # Möbius intentionally owns the public product catalog instead of exposing
-    # implementation model names. The context cap also bounds trial exposure.
+    # Runtime wire defaults, independent of the service-owned model list.
     return Path(__file__).with_name("responses_codex_template.json").resolve()
 
   def forget_account_reads(self) -> None:
@@ -1067,6 +1315,8 @@ class MobiusProvider(BaseProvider):
     with self._held_lock:
       self._held_generation += 1
       self._held_reads.clear()
+      self._clear_catalogue()
+      self._catalogue_scope = None
 
   def _held_broker_read(
     self, route: str, *, hold_seconds: float, timeout: float,
@@ -1117,7 +1367,8 @@ class MobiusProvider(BaseProvider):
       from app.config import get_settings
       catalog_path = Path(get_settings().data_dir) / "cli-auth" / "mobius" / "catalog.json"
     return [
-      f'model={quote(self.declaration["default_model"])}',
+      *([f'model={quote(self.declaration["default_model"])}']
+        if self.declaration["default_model"] else []),
       'model_provider="mobius_trial"',
       f"model_catalog_json={quote(str(catalog_path))}",
       'model_providers.mobius_trial.name="Möbius subscription"',
@@ -1183,50 +1434,223 @@ class MobiusProvider(BaseProvider):
     return env
 
 
+@dataclass(frozen=True)
+class MobiusRuntimeSnapshot:
+  model: str | None
+  effort: str | None
+  declaration: dict[str, Any]
+  config_overrides: list[str]
+
+
+@asynccontextmanager
+async def mobius_runtime_snapshot(
+  data_dir: str, model: str | None, effort: str | None,
+) -> AsyncIterator[MobiusRuntimeSnapshot]:
+  """Freeze one discovered service catalogue for the entire CLI/SDK lifetime.
+
+  The provider owns discovery, selection and the temporary catalogue. Callers
+  retain this context until their Codex process has stopped, not merely until
+  startup, so a concurrent registry refresh cannot alter the running model.
+  """
+  await _fetch_model_entries(data_dir, "mobius")
+  provider = copy.copy(PROVIDERS["mobius"])
+  provider.declaration = copy.deepcopy(provider.declaration)
+  resolved_model, resolved_effort = provider.resolve_selection(model, effort)
+  if not resolved_model or not provider.declaration["models"]:
+    yield MobiusRuntimeSnapshot(None, None, provider.declaration, [])
+    return
+  with tempfile.TemporaryDirectory(prefix="mobius-models-") as directory:
+    catalog_path = Path(directory) / "catalog.json"
+    _write_responses_catalog(catalog_path, provider.declaration, broker=True)
+    yield MobiusRuntimeSnapshot(
+      resolved_model, resolved_effort, provider.declaration,
+      provider.codex_config_overrides(catalog_path),
+    )
+
+
+def model_relay_token(provider_id: str, consent_scope: str = "") -> str:
+  """Local credential the agent presents to the model relay for one provider.
+
+  Derived from the server secret, so it needs no storage and survives restarts,
+  and it is only honoured by the loopback-only relay. The provider's real key
+  never enters the agent process.
+  """
+  from app.config import get_settings
+  return hmac.new(
+    get_settings().secret_key.encode(),
+    f"mobius-model-relay:v1:{provider_id}:{consent_scope}".encode(),
+    hashlib.sha256,
+  ).hexdigest()
+
+
+class RelayKeyRead(NamedTuple):
+  key: str | None
+  unavailable: str | None
+
+
+def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
+  """An app model provider's engine home (Codex threads, Claude config).
+
+  Platform-owned, like the owner's engine homes: never under the app's own
+  storage, where the app could read transcripts or plant engine config
+  (Codex config.toml, Claude settings.json hooks).
+  """
+  return Path(data_dir) / "cli-auth" / f"app-{app_id}"
+
+
+def remove_legacy_app_engine_homes(data_dir: str | Path, app_ids) -> list[str]:
+  """Once, delete engine homes older versions kept in model-provider apps' storage.
+
+  ``apps/<id>/model-runtime`` held that provider's Codex threads and Claude
+  config, readable by the app. They are not moved: the app could have written
+  engine config there, so nothing in them is trusted; chats on those
+  providers start a new thread, reseeded from the chat. Only apps that
+  declare a model provider are touched (another app may use that name for
+  its own data), and only until a sweep completes; a failed removal is
+  logged and retried on the next boot. Returns the removed app ids.
+  """
+  from app.storage_io import atomic_write, rmtree_strict
+  marker = Path(data_dir) / "cli-auth" / ".legacy-app-engine-homes-removed"
+  if marker.exists():
+    return []
+  removed, failed = [], False
+  for app_id in sorted(app_ids):
+    old = Path(data_dir) / "apps" / str(app_id) / "model-runtime"
+    if not (old.is_symlink() or old.is_dir()):
+      continue
+    try:
+      rmtree_strict(old)
+      removed.append(str(app_id))
+    except OSError as exc:
+      failed = True
+      _model_registry_log.warning("legacy engine home for app %s not removed: %s", app_id, exc)
+  if not failed:
+    atomic_write(marker, "")
+  return removed
+
+
 class AppModelProvider(BaseProvider):
-  """An accepted app's declarative Responses-API model connection."""
+  """An accepted app's declarative model connection.
 
-  runtime_kind = "codex_sdk"
-  cli_cmd = "codex"
+  `responses` declarations run on the Codex engine and `anthropic_messages`
+  declarations on the Claude engine. Both talk to the local model relay
+  (`routes/model_relay.py`) with a relay token; the relay holds the real key
+  and repairs request shapes compatible providers reject.
+  """
 
-  def __init__(self, app_id: int, declaration: dict[str, Any]):
+  def __init__(self, app_id: int, declaration: dict[str, Any], consent_scope: str = ""):
     self.app_id = app_id
     self.declaration = declaration
+    # Bound to the acceptance observed by the registry. A stale provider must
+    # never mint a credential for a later acceptance of the same declaration.
+    self.consent_scope = consent_scope
     self.name = declaration["name"]
     self.auth_dir = f"app-{app_id}"
+    self.protocol = declaration.get("protocol", "responses")
+    self.runtime_kind = "claude_sdk" if self.protocol == "anthropic_messages" else "codex_sdk"
+    self.cli_cmd = "claude" if self.protocol == "anthropic_messages" else "codex"
     self.switch_efforts = frozenset(
       effort for model in declaration["models"]
       for effort in model.get("effort_levels", [])
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
+    # Availability only: the key's value is never read. The relay re-checks
+    # everything on every request.
+    return self.read_relay_key(data_dir, authorize=False).unavailable
+
+  def read_relay_key(
+    self, data_dir: str, *, authorize: bool = True, endpoint: str | None = None,
+  ) -> RelayKeyRead:
+    """Resolve current authorization and the saved key in one blocking read.
+
+    The relay runs this in a worker; a stale registry object or failed consent
+    read must be refused before touching the encrypted app secret.
+    ``endpoint`` is the path under ``base_url`` the relay is about to call
+    (the protocol's main endpoint when omitted): the key's sites must allow it.
+    """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
-      return f"{self.name} is turned off in its app."
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    if not path.is_file():
-      return f"Connect {self.name} in its app to use these models."
-    try:
-      from app.app_secret_crypto import decrypt_app_secret
-      if decrypt_app_secret(path).strip():
-        return None
-    except Exception:
-      pass
-    return f"Reconnect {self.name} in its app; its saved key is unavailable."
+      return RelayKeyRead(None, f"{self.name} is turned off in its app.")
+    # The installation whose accepted declaration this provider serves: a
+    # grant given to another installation that had the same id never counts.
+    install = _usable_app_model_install(self.app_id, self.declaration, self.consent_scope)
+    if install is None:
+      return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
+    from app import key_vault
+    # The declared secret name is the vault key the app asked for; the owner's
+    # grant to this app, for the provider's own site, makes the models
+    # available. An availability check never reads the value itself.
+    secret, base_url = self.declaration["secret_name"], self.declaration["base_url"]
+    destination = {"install": install, "protocol": self.protocol, "endpoint": endpoint}
+    if not authorize:
+      if key_vault.model_provider_key_sync(self.app_id, secret, base_url, **destination):
+        return RelayKeyRead(None, None)
+    else:
+      key = key_vault.reveal_model_provider_key(self.app_id, secret, base_url, **destination)
+      if key:
+        return RelayKeyRead(key, None)
+    return RelayKeyRead(None, (
+      f"Connect {self.name} in its app, then approve its key request for "
+      f"{urlsplit(base_url).hostname} in Settings › Keys to use these models."
+    ))
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
 
+  def resolve_selection(self, model, effort):
+    # An effort inherited from another provider (Claude's ultracode or xhigh,
+    # a level this model lacks) is not sent: the provider's own default
+    # applies. A model with no declared levels takes the provider's scale.
+    levels = next((
+      row.get("effort_levels") for row in self.declaration["models"]
+      if row["id"] == (model or self.declaration["default_model"])
+    ), None)
+    allowed = self.switch_efforts if levels is None else levels
+    return model, (effort if effort in allowed else None)
+
+  def relay_token(self) -> str:
+    return model_relay_token(f"app-{self.app_id}", self.consent_scope)
+
+  def measured_run_accounting(self, cost_usd, usage):
+    # The engines price tokens at their own vendor's rates, meaningless for
+    # another company's model, so no cost is kept. Some compatible providers
+    # stream no usage at all and the engine then reports zeros, which would
+    # read as a free run: all-zero usage is unknown, not zero.
+    counted = isinstance(usage, dict) and any(
+      (usage.get(field) or 0) > 0
+      for field in ("input_tokens", "output_tokens", "total_tokens")
+    )
+    return None, (usage if counted else None)
+
+  def _relay_base_url(self) -> str:
+    # Direct loopback to the listener: the relay refuses proxied requests.
+    from app.config import loopback_listener_url
+    return loopback_listener_url(f"/api/model-relay/app-{self.app_id}")
+
+  def _runtime_home(self, data_dir: str) -> Path:
+    return app_engine_home(data_dir, self.app_id)
+
+  def engine_home(self, data_dir: str) -> Path:
+    home = self._runtime_home(data_dir)
+    return home / "claude" if self.protocol == "anthropic_messages" else home
+
+  @property
+  def _relay_token_env(self) -> str:
+    # Outside the per-turn MOBIUS_APP_* namespace (helper_hosts): a shared
+    # helper host holds it, as it does any other inference credential.
+    return f"MOBIUS_MODEL_RELAY_TOKEN_{self.app_id}"
+
   def codex_config_overrides(self) -> list[str]:
     provider_id = f"app_{self.app_id}"
-    key_name = f"MOBIUS_APP_MODEL_KEY_{self.app_id}"
+    key_name = self._relay_token_env
     return [
       f'model_provider={json.dumps(provider_id)}',
       f'model_providers.{provider_id}.name={json.dumps(self.name)}',
-      f'model_providers.{provider_id}.base_url={json.dumps(self.declaration["base_url"])}',
+      f'model_providers.{provider_id}.base_url={json.dumps(self._relay_base_url() + "/v1")}',
       f'model_providers.{provider_id}.env_key={json.dumps(key_name)}',
       f'model_providers.{provider_id}.wire_api="responses"',
       f'model_catalog_json={json.dumps(str(self._catalog_path()))}',
-      # The key is for the inference transport, not shell tools.
+      # The relay token is for the inference transport, not shell tools.
       f'shell_environment_policy.exclude=[{json.dumps(key_name)}]',
       'features.enable_request_compression=false',
       'features.apps=false',
@@ -1236,24 +1660,78 @@ class AppModelProvider(BaseProvider):
 
   def _catalog_path(self) -> Path:
     from app.config import get_settings
-    return Path(get_settings().data_dir) / "apps" / str(self.app_id) / "model-runtime" / "catalog.json"
+    return self._runtime_home(get_settings().data_dir) / "catalog.json"
 
   def build_env(self, base_env, data_dir, chat_id=None):
-    from app.app_secret_crypto import decrypt_app_secret
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    key = decrypt_app_secret(path)
     env = dict(base_env)
-    for name in list(env):
+    # SDKs merge the ambient environment underneath this override mapping.
+    # Apply the existing credential-name policy to both sets of names without
+    # copying ambient values or stripping unrelated control/run variables.
+    for name in os.environ.keys() | env.keys():
       if name.endswith(("_API_KEY", "_API_TOKEN", "_AUTH_TOKEN")) or name in {
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
       }:
         env[name] = ""
-    env[f"MOBIUS_APP_MODEL_KEY_{self.app_id}"] = key
+    # SDK subprocesses inherit ambient proxy settings. Keep the relay token
+    # off those proxies without discarding the owner's other exclusions.
+    no_proxy = ",".join(filter(None, (
+      os.environ.get("NO_PROXY"), os.environ.get("no_proxy"),
+      env.get("NO_PROXY"), env.get("no_proxy"),
+    )))
+    no_proxy = ",".join(filter(None, (no_proxy, "127.0.0.1", "localhost")))
+    env["NO_PROXY"] = no_proxy
+    env["no_proxy"] = no_proxy
+    if self.protocol == "anthropic_messages":
+      return self._claude_relay_env(env, data_dir, chat_id)
+    env[self._relay_token_env] = self.relay_token()
     # Isolate custom-provider threads and auth from the owner's Codex login.
-    home = Path(data_dir) / "apps" / str(self.app_id) / "model-runtime"
+    home = self._runtime_home(data_dir)
     home.mkdir(parents=True, exist_ok=True)
     _write_responses_catalog(home / "catalog.json", self.declaration)
     env["CODEX_HOME"] = str(home)
+    if chat_id:
+      env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
+    return env
+
+  def _claude_relay_env(self, env, data_dir, chat_id):
+    """Point the Claude engine at the loopback relay with a relay-only token."""
+    # Own config dir: sessions and settings never mix with the owner's Claude
+    # sign-in, which must not be used for another company's models.
+    home = self.engine_home(data_dir)
+    home.mkdir(parents=True, exist_ok=True)
+    # The same Möbius defaults as the owner's Claude home: Claude's own
+    # transcript retention and no Claude co-author trailer on commits.
+    from app.provider_session_retention import ensure_claude_settings_defaults
+    ensure_claude_settings_defaults(data_dir, config_dir=home)
+    env["CLAUDE_CONFIG_DIR"] = str(home)
+    # The SDK merges os.environ underneath options.env. Omitting a key here
+    # would restore ambient owner auth or select a different inference route.
+    for name in (
+      "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_AUTH_TOKEN",
+      "ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_MODEL",
+      "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION",
+      "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+      "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+      "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_MANTLE",
+      "CLAUDE_CODE_USE_GATEWAY", "CLAUDE_CODE_GATEWAY_TOKEN",
+      "CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",
+      "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+    ):
+      env[name] = ""
+    env.update(CLAUDE_CLI_POLICY_ENV)
+    env["ANTHROPIC_BASE_URL"] = self._relay_base_url()
+    env["ANTHROPIC_API_KEY"] = self.relay_token()
+    # Background and alias model slots must resolve to this provider's models;
+    # Anthropic model ids would be unknown to it.
+    default_model = self.declaration["default_model"]
+    for slot in (
+      "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+      "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    ):
+      env[slot] = default_model
+    # Nothing in this run should reach Anthropic's services (updates, telemetry).
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     if chat_id:
       env["AGENT_BROWSER_SESSION"] = f"chat-{chat_id}"
     return env
@@ -1304,7 +1782,7 @@ def sync_app_model_providers(data_dir: str, *, force: bool = False) -> None:
     _apply_app_model_declarations(_read_app_model_declarations())
 
 
-async def refresh_app_model_providers(data_dir: str) -> None:
+async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> None:
   """``sync_app_model_providers`` for async callers, with the read off-loop.
 
   The declaration query froze the event loop for seconds on a saturated disk.
@@ -1312,35 +1790,84 @@ async def refresh_app_model_providers(data_dir: str) -> None:
   on the loop.
   """
   async with _app_provider_refresh_lock:
-    if not _app_providers_fresh():
+    if force or not _app_providers_fresh():
       declarations = await asyncio.to_thread(_read_app_model_declarations)  # unsettled: read-only (app declarations)
       _apply_app_model_declarations(declarations)
 
 
-def _read_app_model_declarations() -> list[tuple[Any, dict]] | None:
+def _usable_app_model_rows(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app row, declaration, relay scope)`` for each app whose consent is active.
+
+  Loads only the contract, consent and installation columns, never app source
+  or icon blobs: the registry refresh runs about once a second and the relay
+  on every request.
+  """
+  from sqlalchemy.orm import load_only
+  from app import app_consent, models
+  query = db.query(models.App).options(load_only(
+    models.App.id, models.App.install_id, models.App.capability_contract, models.App.manifest_url,
+    models.App.accepted_consent, models.App.project_templates_json,
+  )).filter(models.App.deleted_at.is_(None))
+  if app_id is not None:
+    query = query.filter(models.App.id == app_id)
+  return [
+    (app, app.capability_contract["model_provider"], _app_model_relay_scope(app))
+    for app in query.all()
+    if isinstance(app.capability_contract, dict)
+    and isinstance(app.capability_contract.get("model_provider"), dict)
+    and not app_consent.dormant(app)
+  ]
+
+
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app_id, declaration, relay scope)`` for each app whose consent is active."""
+  return [(app.id, declaration, scope) for app, declaration, scope in _usable_app_model_rows(db, app_id)]
+
+
+def _read_app_model_declarations() -> list[tuple[Any, dict, str]] | None:
   """Accepted app model declarations as plain data; safe in a worker."""
   try:
-    from app import models
     from app.database import SessionLocal
     with SessionLocal() as db:
-      # Only the contract column: full App rows carry source and icon blobs
-      # (megabytes across installs) and this runs about once a second.
-      rows = db.query(models.App.id, models.App.capability_contract).filter(
-        models.App.deleted_at.is_(None)
-      ).all()
-      return [
-        (app_id, contract["model_provider"])
-        for app_id, contract in rows
-        if isinstance(contract, dict)
-        and isinstance(contract.get("model_provider"), dict)
-      ]
+      return _usable_app_model_declarations(db)
   except Exception as exc:
     _model_registry_log.warning("app model registry read failed: %s", exc)
     return None
 
 
+def _app_model_relay_scope(app) -> str:
+  """Bind relay credentials to both the acceptance and reviewed endpoint."""
+  accepted = app.accepted_consent
+  accepted_id = accepted.get("id") if isinstance(accepted, dict) else None
+  declaration = app.capability_contract.get("model_provider")
+  fingerprint = hashlib.sha256(json.dumps(declaration, sort_keys=True).encode()).hexdigest()
+  return f"{accepted_id or ''}:{fingerprint}"
+
+
+def _usable_app_model_install(
+  app_id: int, declaration: dict, consent_scope: str,
+) -> str | None:
+  """The installation of the app whose accepted ``declaration`` a provider
+  serves, read with the consent check; None (fail closed) for stale provider
+  objects, consent changes, and read errors.
+
+  A registry snapshot is deliberately throttled; it cannot authorize a new
+  relay request after revocation or contract replacement.
+  """
+  try:
+    from app.database import SessionLocal
+    with SessionLocal() as db:
+      return next((
+        app.install_id for app, usable, scope in _usable_app_model_rows(db, app_id)
+        if (usable, scope) == (declaration, consent_scope)
+      ), None)
+  except Exception as exc:
+    _model_registry_log.warning("app model authorization read failed: %s", exc)
+    return None
+
+
 def _apply_app_model_declarations(
-  declarations: list[tuple[Any, dict]] | None,
+  declarations: list[tuple[Any, dict, str]] | None,
 ) -> None:
   """Apply one completed load; a failed read keeps the current registry."""
   global _app_provider_sync_at
@@ -1348,9 +1875,12 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
-  claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
-  claimed_models.update(known_model_ids("mobius"))
-  for app_id, declaration in declarations:
+  # Built-in, Möbius and earlier apps' declared ids collide, exactly as for the
+  # Möbius catalogue. Claude/Codex discovery does not: an id both list is
+  # shared by (provider, model), so registration never depends on discovery
+  # timing and an app update cannot evict a live provider and orphan its chats.
+  claimed_models = _declared_model_ids(("claude", "codex", "mobius"))
+  for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
     # inert rather than a second app-NNN provider (see manifest_contract).
@@ -1367,8 +1897,9 @@ def _apply_app_model_declarations(
     next_ids.add(provider_id)
     claimed_models.update(model_ids)
     current = PROVIDERS.get(provider_id)
-    if not isinstance(current, AppModelProvider) or current.declaration != declaration:
-      PROVIDERS[provider_id] = AppModelProvider(app_id, declaration)
+    if (not isinstance(current, AppModelProvider) or current.declaration != declaration
+        or current.consent_scope != consent_scope):
+      PROVIDERS[provider_id] = AppModelProvider(app_id, declaration, consent_scope)
       _model_registry_cache.pop(provider_id, None)
     DEFAULT_MODELS[provider_id] = declaration["default_model"]
     DEFAULT_BACKGROUND_MODELS[provider_id] = declaration["default_model"]
@@ -1473,12 +2004,20 @@ def resolve_default_provider(
   return provider_id
 
 
-def provider_of_model(model: str | None) -> str | None:
-  """The provider a model id belongs to, or None for unknown/blank ids."""
+def provider_of_model(
+  model: str | None, *, preferred: str | None = None,
+) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids.
+
+  ``preferred`` (a chat's saved provider or the picker's mirrored one) wins
+  when it also owns the id, so a shared id keeps its (provider, model) pair.
+  """
   from app.config import get_settings
   sync_app_model_providers(get_settings().data_dir)
   if not isinstance(model, str) or not model:
     return None
+  if isinstance(preferred, str) and preferred in PROVIDERS and model in known_model_ids(preferred):
+    return preferred
   for provider_id in PROVIDERS:
     if model in known_model_ids(provider_id):
       return provider_id
@@ -1488,6 +2027,8 @@ def provider_of_model(model: str | None) -> str | None:
 def owner_default_provider(
   data_dir: str,
   configured_provider: str | None = None,
+  *,
+  settings: dict | None = None,
 ) -> str:
   """The provider from the owner's latest atomic picker choice.
 
@@ -1517,11 +2058,11 @@ def owner_default_provider(
 
   Background agents are deliberately NOT routed here: they carry their own
   configured provider/model block, a separate selection from the interactive
-  last-used model.
+  last-used model. ``settings`` lets a caller reuse one file read.
   """
-  settings = _load_agent_settings(data_dir)
+  settings = settings if settings is not None else _load_agent_settings(data_dir)
   model = settings.get("model")
-  prov = provider_of_model(model)
+  prov = provider_of_model(model, preferred=settings.get("provider"))
   if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")
@@ -1691,7 +2232,7 @@ def _live_model_entries(
       and not isinstance(context_window, bool)
       and context_window > 0
     ):
-      entry["context_window"] = round(context_window)
+      entry["context_window"] = _catalog_context_window(metadata) or round(context_window)
     elif model_id in MODEL_CONTEXT_WINDOWS:
       entry["context_window"] = MODEL_CONTEXT_WINDOWS[model_id]
     entries.append(entry)
@@ -2419,13 +2960,14 @@ async def _fetch_model_entries(
         "model registry fetch failed for %s: %s; %s", provider_id, exc,
         "keeping the last live catalog" if keep_live else "using KNOWN_MODELS",
       )
-      if keep_live:
+      if keep_live or provider_id == "mobius":
+        entries = prior[1] if keep_live else entries
         # Stamp it so it expires after the retry interval, not a full TTL.
         _model_registry_cache[provider_id] = (
           time.monotonic() - _MODEL_CACHE_TTL_SECONDS + _MODEL_REFRESH_RETRY_SECONDS,
-          prior[1],
+          entries,
         )
-        return provider_id, prior[1]
+        return provider_id, entries
     _model_registry_cache[provider_id] = (time.monotonic(), entries)
     return provider_id, entries
 
@@ -2448,7 +2990,7 @@ async def list_models(
   KNOWN_MODELS fallback for both.
   """
 
-  sync_app_model_providers(data_dir, force=force_refresh)
+  await refresh_app_model_providers(data_dir, force=force_refresh)
 
   # Serve cached reads (fresh or stale, unless forced) without taking a
   # lock. Only providers with no catalog go through _fetch_model_entries
@@ -2478,23 +3020,29 @@ async def list_models(
   return result
 
 
-async def model_supports_effort(data_dir: str, model: str | None) -> bool:
-  """Use a current Claude capability at execution, not a stale picker row.
+async def model_supports_effort(
+  data_dir: str, model: str | None, *, provider_id: str = "claude",
+) -> bool:
+  """Use a current capability from the selected provider at execution.
 
-  Unlike list_models, this does not serve an expired catalog: a saved effort
-  sent to a newly effortless model is rejected by Claude, so an expired
-  Claude catalog is refreshed (only Claude) before answering. A fresh catalog
-  answers without I/O; unrelated discovery never belongs here.
+  A cold or expired Claude catalog refreshes before answering so a saved
+  effort cannot reach a newly effortless model. App providers use their own
+  declared catalog and never discover the owner's Claude connection.
   """
   if not model:
     return True
-  entries = _fresh_model_entries("claude")
-  if entries is None:
-    entries = (await _fetch_model_entries(data_dir, "claude"))[1]
+  # A provider removed since admission fails as "not installed".
+  provider = registered_provider(provider_id)
+  if isinstance(provider, AppModelProvider):
+    entries = provider.declaration["models"]
+  else:
+    entries = _fresh_model_entries(provider_id)
+    if entries is None:
+      entries = (await _fetch_model_entries(data_dir, provider_id))[1]
   for entry in entries:
     if entry.get("id") == model:
       return entry.get("effort_levels") != []
-  return MODEL_EFFORT_LEVELS.get(model) != []
+  return provider_id != "claude" or MODEL_EFFORT_LEVELS.get(model) != []
 
 
 def invalidate_model_cache() -> None:

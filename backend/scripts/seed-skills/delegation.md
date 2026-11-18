@@ -20,6 +20,10 @@ will do what. Avoid paid test calls unless the owner approved them.
   retain its original prompt and policy. If defaults changed, inspect the
   existing helper and pass its original settings explicitly; do not invent a
   new task key merely to bypass a conflict.
+- Give each helper a short `title`: the name the owner reads for it, a
+  plain-language phrase in sentence case free of jargon, such as "Fixing the
+  tray's closing conversation". It is presentation only; `name` stays the
+  helper's identity.
 - Make `task` self-contained: outcome, relevant file paths, exact work scope,
   any read-only or editing constraints, and what verification means. Helpers do
   not see the parent's conversation. They use one trusted execution mode;
@@ -55,7 +59,10 @@ combined outcome, and state which provider did what.
 
 Use `message_agent` for a finished helper's follow-up, `stop_agent` to cancel,
 and `list_agents` to inspect an existing result. For a decision-changing note
-to a still-working helper, use the peer coordination tools instead.
+to a still-working helper, use the peer coordination tools instead. A top-level
+turn that started with no other agent live and no Project has no peer tools
+even after it spawns helpers: put what the helper needs in its task, wait for its
+result, and use `message_agent` for a follow-up.
 
 A helper's `ask_parent` question is addressed to its parent agent, and the
 owner sees it only as internal activity. When it is genuinely the owner's

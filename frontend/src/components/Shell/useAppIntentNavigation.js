@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
+import { requestedSettingsSection } from '../../lib/settingsSections.js'
 
 export function findAppForOpenTarget(list, target) {
   if (target == null) return null
@@ -14,6 +15,7 @@ export default function useAppIntentNavigation({
   setAppIntents,
   navToRef,
   requestComposer,
+  openSettingsSection,
 }) {
   const openAppWithIntent = useCallback(async (
     target,
@@ -58,8 +60,10 @@ export default function useAppIntentNavigation({
       }
       navToRef.current('chat', { chatId: chat })
       if (typeof composer?.draft === 'string') requestComposer(chat, { draft: composer.draft })
+    } else if (url.searchParams.has('settings')) {
+      openSettingsSection(requestedSettingsSection(url.searchParams.get('settings')))
     }
-  }, [openAppWithIntent, requestComposer])
+  }, [openAppWithIntent, openSettingsSection, requestComposer])
 
   return { openAppWithIntent, handleChatInternalNav }
 }

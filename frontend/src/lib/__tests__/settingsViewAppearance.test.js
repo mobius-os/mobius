@@ -245,7 +245,7 @@ test('appearance indicator waits for the same seeded theme repaint as the palett
 
 
 test('Settings keeps spacious grouped lists and full model summaries', () => {
-  assert.match(css, /\.settings\s*\{[^}]*padding:\s*28px 22px 20px;/s)
+  assert.match(css, /\.settings\s*\{[^}]*padding:\s*28px 22px calc\(20px \+ /s)
   assert.match(pageCss, /\.settings-list\s*\{[^}]*border-radius:\s*12px;/s)
   assert.match(pageCss, /\.settings-item\s*\{[^}]*min-height:\s*56px;/s)
   assert.match(css, /\.settings-bg-row\s*\{[^}]*min-height:\s*64px;/s)
@@ -300,7 +300,21 @@ test('external update instructions come from the activation owner, not a second 
 
 test('only top provider actions are pills; Updates inherits standard Settings corners', () => {
   const providerCss = readFileSync(new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url), 'utf8')
-  assert.match(css, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
+  const buttonCss = readFileSync(new URL('../../components/SettingsView/settingsButtons.css', import.meta.url), 'utf8')
+  assert.match(buttonCss, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
   assert.doesNotMatch(updateCss, /border-radius:\s*999px/)
   assert.match(providerCss, /\.provider-row__action\s*\{[^}]*border-radius:\s*999px;/s)
+})
+
+test('every Settings layout scrolls its last rows clear of the device bottom bar', () => {
+  // The shell draws edge-to-edge, so a fixed end gap leaves the last rows
+  // under the navigation bar / home indicator. The narrow-pane container
+  // query restates the padding, so check every `.settings` rule.
+  const paddings = [...css.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(?:^|\n)\s*\.settings\s*\{([^}]*)\}/g)]
+    .map(([, body]) => body.match(/padding:[^;]*;/)?.[0])
+    .filter(Boolean)
+  assert.ok(paddings.length >= 2, 'expected the base and narrow-pane .settings paddings')
+  for (const padding of paddings) {
+    assert.match(padding, /var\(\s*--shell-bottom-inset,\s*env\(safe-area-inset-bottom,\s*0px\)\s*\)/)
+  }
 })

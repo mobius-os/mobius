@@ -148,6 +148,25 @@ def test_stage_derives_the_canonical_candidate_from_git(staging):
   assert response.json()["source_sync"]["state"] == "in_source"
 
 
+def test_stage_rejects_recycled_checkout_before_reading_another_reviews_branch(staging):
+  worktree = staging["worktree"]
+  marker = worktree / ".git"
+  admin = Path(marker.read_text().split(":", 1)[1].strip())
+  before = marker.read_bytes()
+  # Model the retained-folder failure without operating on a live repository.
+  pointer = admin / "gitdir"
+  original = pointer.read_bytes()
+  pointer.write_text(str(worktree.parent / "another-review" / ".git"))
+  try:
+    response = staging["new_record"]()
+    assert response.status_code == 409, response.text
+    assert response.json()["detail"]["code"] == "checkout_ownership_mismatch"
+    assert marker.read_bytes() == before
+    assert pointer.read_text().endswith("another-review/.git")
+  finally:
+    pointer.write_bytes(original)
+
+
 def test_review_verdict_binds_to_the_exact_staged_head(staging):
   record = staging["new_record"]().json()["record"]
   moved = {**record, "plan": {**record["plan"], "head_sha": "0" * 40}}
@@ -293,6 +312,18 @@ def test_stage_refuses_a_commit_without_the_coauthor_trailer(staging):
   response = staging["new_record"]()
   assert response.status_code == 409
   assert response.json()["detail"]["code"] == "missing_coauthor"
+
+
+def test_stage_names_a_branch_that_shares_no_history_with_upstream(staging):
+  empty_tree = _git(staging["source"], "hash-object", "-t", "tree", "/dev/null")
+  staging["upstream"]["sha"] = _git(
+    staging["source"], "commit-tree", empty_tree, "-m", "Rewritten upstream",
+  )
+  response = staging["new_record"]()
+  assert response.status_code == 409
+  detail = response.json()["detail"]
+  assert detail["code"] == "unrelated_history"
+  assert "shares no history with upstream main" in detail["message"]
 
 
 def test_stage_refuses_uncommitted_review_work(staging):
@@ -446,7 +477,10 @@ def test_autopilot_round_restages_its_open_pr_in_place(staging, monkeypatch):
     "body": "Adds a greeting.",
   }
   monkeypatch.setattr(github_routes, "_autopilot_live_target", lambda *_: live)
-  monkeypatch.setattr(contribution_autopilot, "get_row", lambda *_: object())
+  monkeypatch.setattr(
+    contribution_autopilot, "get_row",
+    lambda *_: github_routes.models.ContributionAutopilot(push_mode="auto"),
+  )
   monkeypatch.setattr(
     contribution_autopilot, "verify_claim",
     lambda _row, run_id: run_id == "round-1",

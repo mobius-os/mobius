@@ -464,14 +464,18 @@ class AcknowledgeProviderSuccess(_Command):
 
   Provider admission is intentionally earlier: it prevents ambiguous replay
   of an execution attempt. It is not proof that the provider accepted the
-  prompt. This later acknowledgement both heals an older provider-limit signal
-  and records what the provider received — the peer-note cursor, the Wait
-  results and the added side questions the turn carried — in the same
-  writer-owned transaction.
+  prompt. This later acknowledgement records what the provider received — the
+  peer-note cursor, the Wait results and the added side questions the turn
+  carried — and, only with ``provider_responded``, heals an older
+  provider-limit signal, in the same writer-owned transaction. Input receipt
+  and availability are separate facts: a Stop after submission but before any
+  provider output still delivered the input, yet proves nothing about quota.
   """
 
   chat_id: str = ""
   run_token: str = ""
+  # The runner's RunnerResult.provider_responded evidence for this attempt.
+  provider_responded: bool = False
   peer_message_through_created_at: datetime | None = None
   peer_message_through_id: str | None = None
   wait_results: tuple[str, ...] = ()
@@ -495,6 +499,9 @@ class RecordRunMetrics(_Command):
   provider_session_id: str | None = None
   cost_usd: float | None = None
   usage: dict | None = None
+  cost_scope: str = "turn"
+  # How a session-scoped call started (runtime_types.SessionStart).
+  session_start: dict | None = None
 
 
 @dataclass
@@ -3116,7 +3123,7 @@ class ChatWriterActor:
   def _acknowledge_provider_success(
     self, db, cmd: AcknowledgeProviderSuccess,
   ) -> None:
-    """Heal availability and record what the provider received."""
+    """Record what the provider received; heal availability on a response."""
     from app.models import ChatRun
 
     delivered_at = cmd.peer_message_through_created_at
@@ -3152,12 +3159,13 @@ class ChatWriterActor:
         run.peer_message_through_created_at = delivered_at
         run.peer_message_through_id = delivered_id
       run.peer_message_delivery_pending = False
-    from app.provider_availability import (
-      clear_provider_availability_after_success,
-    )
-    clear_provider_availability_after_success(
-      db, run.provider, run.started_at,
-    )
+    if cmd.provider_responded:
+      from app.provider_availability import (
+        clear_provider_availability_after_response,
+      )
+      clear_provider_availability_after_response(
+        db, run.provider, run.started_at,
+      )
     from app.chat_waits import stage_wait_results_delivered
     stage_wait_results_delivered(db, cmd.chat_id, cmd.wait_results, run_id=run.id)
     from app.goal_dependencies import stage_dependency_results_delivered
@@ -3299,10 +3307,37 @@ class ChatWriterActor:
       db, results, incorporated=True, filters=tuple(ownership_filters),
     )
 
-  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> bool:
+  def _session_cost_baseline_run(self, db, run, chat_id: str, start: dict):
+    """The latest earlier run whose session total this call's start restored.
+
+    A resume restores this chat's own session; a fork restores its source
+    session, recorded under the chat it was branched from. Excluding this exact
+    row keeps repeated metric acknowledgements idempotent, and a late result
+    must never subtract a successor's spend.
+    """
+    from sqlalchemy import and_, or_
+    from app.models import ChatRun
+
+    same_session = ChatRun.provider_session_id == start["session_id"]
+    if start["kind"] == "resumed":
+      # A run that died before reporting its session id may still have spent
+      # on this session, so it leaves the baseline unknown.
+      same_session = and_(ChatRun.chat_id == chat_id, or_(
+        same_session,
+        (ChatRun.provider_session_id.is_(None)
+         & ChatRun.provider_execution_admitted.is_not(False)),
+      ))
+    return db.query(ChatRun).filter(
+      same_session,
+      ChatRun.provider == run.provider,
+      ChatRun.id != run.id,
+      ChatRun.started_at < run.started_at,
+    ).order_by(ChatRun.started_at.desc(), ChatRun.id.desc()).first()
+
+  def _record_run_metrics(self, db, cmd: RecordRunMetrics) -> dict:
     """Attach provider usage/cost to the exact durable run row."""
     if not cmd.chat_id or not cmd.run_token:
-      return False
+      return {"cost_usd": None}
     from app.models import ChatRun
 
     run = db.query(ChatRun).filter(
@@ -3314,9 +3349,30 @@ class ChatWriterActor:
 
     if cmd.provider_session_id:
       run.provider_session_id = cmd.provider_session_id
-    if cmd.cost_usd is not None:
-      run.cost_usd = float(cmd.cost_usd)
     usage = copy.deepcopy(cmd.usage) if cmd.usage else None
+    if cmd.cost_scope == "session" and cmd.cost_usd is not None:
+      from app.claude_costs import (
+        counters_cover_turn, session_cost_snapshot, turn_cost,
+      )
+
+      usage = usage or copy.deepcopy(run.usage_json) or {}
+      start = cmd.session_start or {}
+      baseline = 0.0 if start.get("kind") == "fresh" else None
+      restored_baseline = baseline is not None
+      if start.get("kind") in ("resumed", "forked") and start.get("session_id"):
+        previous = self._session_cost_baseline_run(db, run, cmd.chat_id, start)
+        if previous is not None:
+          baseline = session_cost_snapshot(previous.usage_json, previous.cost_usd)
+          # The CLI saves totals only on a normal exit; an older restore would
+          # make total - baseline a silent under-count.
+          restored_baseline = counters_cover_turn(usage, previous.usage_json)
+      run.cost_usd = turn_cost(cmd.cost_usd, baseline) if restored_baseline else None
+      usage["provider_cost"] = {
+        "scope": "session", "total_usd": cmd.cost_usd,
+        "baseline_usd": baseline,
+      }
+    elif cmd.cost_usd is not None:
+      run.cost_usd = float(cmd.cost_usd)
     if usage is not None:
       run.usage_json = usage
       for field_name in (
@@ -3328,6 +3384,8 @@ class ChatWriterActor:
         "total_tokens",
         "model_context_window",
       ):
+        if cmd.usage is None:
+          continue  # A cost-only acknowledgement must not erase token metrics.
         value = usage.get(field_name)
         setattr(
           run,
@@ -3336,7 +3394,7 @@ class ChatWriterActor:
         )
     if not _commit_or_rollback(db):
       raise _PersistFailed("RecordRunMetrics did not persist")
-    return True
+    return {"cost_usd": run.cost_usd}
 
   def _stash_tool_output(self, db, cmd: "StashToolOutput") -> bool:
     """Insert/upsert a large tool output's full text into `tool_outputs`.
@@ -3895,7 +3953,7 @@ class ChatWriterActor:
     # The resume_run_id check above already pinned prior to that exact run.
     if cmd.allow_low_storage and (
       not cmd.owner_input or cmd.resume_run_id is None
-      or prior.park_reason != "storage"
+      or prior.park_reason not in models.OWNER_OVERRIDABLE_RESOURCES
       or prior.status not in {"parked", "resume_pending", "interrupted"}
     ):
       db.rollback()
