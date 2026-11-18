@@ -16,7 +16,8 @@ The lifecycle, per (app_id, record_id):
   agent  ─▶  /update (validated push) / /reply ─▶ /complete ─▶ idle, round logged
   ask mode ─▶ no /update: the round restages a prepared update, the owner's
   Update PR press publishes it, and /complete settles the round as ``prepared``
-  crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it
+  crash   ─▶  lease expires ─▶ next retry marks it stale and reclaims it, and the
+  recovery pass mirrors the released round onto the ledger
   2 consecutive stale/failed rounds ─▶ escalate (there is no round budget:
   follow-up continues while rounds keep completing)
   escalate ─▶ blocked + human_required warning, claim revoked but grant retained
@@ -33,6 +34,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -40,6 +42,7 @@ from sqlalchemy import and_, update
 from sqlalchemy.orm import Session
 
 from app import chat_writer
+from app import contribution_attention
 from app import fs_locks, models, providers, settled
 from app.chat_start import start_programmatic_chat_turn
 from app.config import get_settings
@@ -281,10 +284,11 @@ def _reclaim_expired(
     "consecutive_failures": failures,
     "updated_at": now_naive_utc(),
   }
+  app_id, record_id = row.app_id, row.record_id
   result = db.execute(
     update(models.ContributionAutopilot)
     .where(
-      _claim_match(row.app_id, row.record_id, str(row.run_id or "")),
+      _claim_match(app_id, record_id, str(row.run_id or "")),
       models.ContributionAutopilot.lease_expires_at
       == row.lease_expires_at,
       models.ContributionAutopilot.lease_expires_at <= now_naive_utc(),
@@ -292,7 +296,35 @@ def _reclaim_expired(
     .values(**values)
   )
   db.commit()
+  if result.rowcount == 1:
+    _note_reclaimed(app_id, record_id)
   return result.rowcount == 1, failures
+
+
+# Reclaiming runs in a worker thread or inside a route, neither of which may take the
+# app-storage lock the ledger write needs. The record that still says "responding" is
+# remembered here, and the recovery pass (which runs in the event loop) mirrors it.
+_reclaimed_lock = threading.Lock()
+_reclaimed: set[tuple[int, str]] = set()
+
+
+def _note_reclaimed(app_id: int, record_id: str) -> None:
+  with _reclaimed_lock:
+    _reclaimed.add((app_id, record_id))
+
+
+async def mirror_reclaimed_leases() -> int:
+  """Write the released round onto every record whose lease expired since the last pass.
+
+  The row is released the moment its lease is reclaimed, but the record's mirror kept saying
+  "responding" until some later transition rewrote it. Returns the records mirrored.
+  """
+  with _reclaimed_lock:
+    pending = sorted(_reclaimed)
+    _reclaimed.clear()
+  for app_id, record_id in pending:
+    await mirror_to_ledger(app_id, record_id)
+  return len(pending)
 
 
 def sweep_expired_leases(db: Session) -> int:
@@ -818,6 +850,33 @@ async def set_ledger_attention(
     except Exception:
       return None
     return record
+
+  async with fs_locks.app_storage_lock(app_id):
+    return await settled.run_settled(_write)
+
+
+async def clear_ledger_attention(
+  app_id: int, record_id: str, flags: list[str], *, untyped: bool = False, shown_only: bool = False,
+) -> bool:
+  """Clear only the named attention flags from the ledger record; every other flag stays.
+
+  The owner's Resume answers an escalation, a finished round answers GitHub's feedback: neither
+  may wipe what the other owns. Writes nothing when no named flag is there.
+  """
+  def _write() -> bool:
+    record_path, _ = record_paths(app_id, record_id)
+    try:
+      record = read_record(record_path)
+    except Exception:
+      return False
+    if not contribution_attention.clear_flags(record, flags, untyped=untyped, shown_only=shown_only):
+      return False
+    record["updated_at"] = now_iso()
+    try:
+      write_record(record_path, record)
+    except Exception:
+      return False
+    return True
 
   async with fs_locks.app_storage_lock(app_id):
     return await settled.run_settled(_write)

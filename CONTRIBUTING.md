@@ -106,6 +106,14 @@ revert-and-reapply or a merge-parent change. Only a later, separately approved
 Send converts it into publication provenance. Accepted upstream work still
 uses the ordinary update/resolver path, preserving local resolved differences.
 
+## The lifecycle writer of a Contribute app
+
+`lifecycle_writer` is a key in the Contribute app's own `settings.json` (in its storage folder, beside
+`contributions/`) that both the app and the platform's contribution routes read (`app.contribution_lifecycle.writer_mode`):
+`"engine"` writes each record's `status` and `lifecycle` field from the shared lifecycle engine. Absent or anything
+else (for the platform, which reads at most 64 KiB, also an unreadable or larger file) means `"shadow"`: records are
+written exactly as before and the engine only logs where it would differ.
+
 ## Tests
 
 The required PR checks live in `.github/workflows/test.yml`; the commands below mirror them.

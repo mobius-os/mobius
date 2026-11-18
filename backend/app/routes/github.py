@@ -49,6 +49,9 @@ from app import (
   activity,
   app_git,
   contribution_assignments,
+  contribution_attention,
+  contribution_lifecycle as lifecycle,
+  contribution_lifecycle_moves as lifecycle_moves,
   contribution_runtime,
   contribution_screenshots,
   contribution_staging,
@@ -158,7 +161,9 @@ from app.github_contributions import (
   publication_handoff_identity,
   publication_handoff_spec,
   terminal_checkout_cleanup,
+  finished_record,
   _claim_record,
+  stamped,
   _assert_publication_approval,
   confirmed_publication_records,
   _stack_meta,
@@ -727,6 +732,9 @@ def _personal_resume_allowed(
         "personal_submit_input_sha256", "submit_started_at", "submitter",
       ):
         restored.pop(key, None)
+      restored = stamped(
+        current, restored, lifecycle_moves.resume_released(current), record_path,
+      )
       _write_record(record_path, restored)
     return False
   if _cleanup_durable_complete_attempt(
@@ -749,14 +757,14 @@ def _personal_resume_allowed(
         status_code=409,
         detail="The contribution changed after its public attempt was recorded.",
       )
-    restored = {
+    restored = stamped(current, {
       **current,
       **patch,
       "status": "submitting",
       "submitter": claim_input.get("submitter"),
       "personal_submit_input_sha256": str(receipt.get("claim_sha256") or ""),
       "updated_at": _now_iso(),
-    }
+    }, lifecycle_moves.resume_restored(current), record_path)
     _write_record(record_path, restored)
     return True
   if current.get("status") != "submitting":
@@ -2343,7 +2351,22 @@ _SOURCE_SYNC_RESERVE = 1024
 _STAGE_CLEARED_FIELDS = (
   "last_submit_error", "last_submit_error_code", "last_submit_error_detail",
   "last_submit_upstream_conflict",
+  # The hint, and the probe that says it was already looked for, describe the version
+  # being replaced: the app looks again at the next pass.
+  "reconciliation_hint", "reconciliation_probe",
 )
+
+
+def _clear_restaged_attention(record: dict, in_place: bool) -> None:
+  """Re-preparing a public PR answers what GitHub raised about the version it replaces.
+
+  Left in place, that attention would hold the very update that answers it. An escalation
+  (`human_required`) stays: only the owner clears it. An Autopilot round restaging in place
+  keeps its own attention until its /complete.
+  """
+  if in_place or record["plan"].get("action") != "pr_update":
+    return
+  contribution_attention.clear_flags(record, lifecycle.attention_cleared_by("STAGE_UPDATE"))
 
 
 def _clear_superseded_push_stage(record: dict) -> None:
@@ -2585,6 +2608,7 @@ def _stage_record(
     record["chat_ids"] = [*chat_ids, source_chat]
   for field in _STAGE_CLEARED_FIELDS:
     record.pop(field, None)
+  _clear_restaged_attention(record, inputs["in_place"])
   _clear_superseded_push_stage(record)
   _exact_reviewed_pr_text(record)
   _reviewed_pr_labels(plan)
@@ -2735,6 +2759,10 @@ async def stage_contribution(
         )
       except ContributionSubmitError as exc:
         raise _stage_error(exc) from exc
+      record = stamped(
+        previous, record, lifecycle_moves.staged(previous, record, inputs["in_place"]),
+        record_path, as_dict=True,
+      )
       contribution_screenshots.store(record_path, screenshot_bytes)
       atomic_write(diff_path, candidate.diff)
       _write_record(record_path, record)
@@ -3457,11 +3485,12 @@ async def observe_contribution_publication(
         return response("changed", current, "The publication or GitHub connection changed during observation; no result was saved.", attempt)
       if proof["outcome"] != "settled":
         return response(proof["outcome"], current, proof["message"], attempt, proof.get("effect"))
+      observed = _observed_pr_record(current, attempt, proof["result"])
+      observed = stamped(current, observed, lifecycle_moves.observed(
+        current, observed, proof["result"].get("base_is_default"),
+      ), record_path)
       settled_attempt = _signed_personal_attempt({
-        **attempt, "observation_settlement": {
-          "before": current,
-          "after": _observed_pr_record(current, attempt, proof["result"]),
-        },
+        **attempt, "observation_settlement": {"before": current, "after": observed},
       })
       atomic_write(
         contribution_runtime.personal_attempt_path(app_id, record_id),
@@ -5312,8 +5341,13 @@ async def cleanup_contribution_staging(
           "terminal contribution upstream lookup failed %s/%s",
           app_id, record_id, exc_info=True,
         )
+  # With the app on the lifecycle engine, a discarded update leaves its PR public: nothing of it is
+  # finished, so its pinned draft, its checkout and its follow-up stay. In shadow mode the route is
+  # exactly what it always was: the equivalence is settled and the grant closed out whatever the word.
+  finished = finished_record(settled_record, record_path)
+  settles = finished or lifecycle.writer_mode(record_path) != lifecycle.ENGINE
   async with fs_locks.source_dir_lock(str(lock_repo)):
-    if settled_record.get("status") != "merged" or upstream_sha is not None:
+    if settles and (settled_record.get("status") != "merged" or upstream_sha is not None):
       try:
         await settled.run_settled(
           _settle_equivalence, settled_record, upstream_sha,
@@ -5328,13 +5362,14 @@ async def cleanup_contribution_staging(
     )
   # Terminal cleanup also ends autopilot: the PR merged/closed, so release any
   # claim and disable the grant (symmetric with the submit-time grant stamp).
-  try:
-    from app import contribution_autopilot as autopilot
-    autopilot.close_out(db, app_id, record_id)
-    await autopilot.mirror_to_ledger(app_id, record_id)
-  except Exception:
-    log.debug("autopilot close_out failed %s/%s", app_id, record_id,
-              exc_info=True)
+  if settles:
+    try:
+      from app import contribution_autopilot as autopilot
+      autopilot.close_out(db, app_id, record_id)
+      await autopilot.mirror_to_ledger(app_id, record_id)
+    except Exception:
+      log.debug("autopilot close_out failed %s/%s", app_id, record_id,
+                exc_info=True)
   if kept_for:
     # Another unfinished contribution still needs this checkout. Say so, so
     # nobody removes it by hand and Contribute asks again later instead of
@@ -6541,8 +6576,9 @@ async def autopilot_complete(
       "Autopilot's follow-up rounds keep failing to complete.",
     )
   elif result["productive"]:
-    await autopilot.set_ledger_attention(
-      app_id, record_id, None, needs_attention=False,
+    # The round answered GitHub's feedback. An escalation is the owner's to clear.
+    await autopilot.clear_ledger_attention(
+      app_id, record_id, lifecycle.github_flags(), untyped=True, shown_only=True,
     )
   await autopilot.mirror_to_ledger(app_id, record_id)
   return {"status": "ok"}
@@ -6647,10 +6683,13 @@ async def autopilot_toggle(
   if row is None:
     raise HTTPException(status_code=404, detail="No autopilot grant for this record.")
   if body.enabled and not started:
-    # Resume clears any human_required flag the owner is acting on. A first
-    # grant has raised none, and the record's attention is not its to clear.
-    await autopilot.set_ledger_attention(
-      app_id, record_id, None, needs_attention=False,
+    # Resume clears the human_required flag the owner is acting on, and no other:
+    # a failing check or a conflict on GitHub is still there. It looks at the flag
+    # on show alone, as it always did: the ones waiting behind it were never its
+    # to clear. A first grant has raised none, and the record's attention is not
+    # its to clear.
+    await autopilot.clear_ledger_attention(
+      app_id, record_id, ["human_required"], untyped=True, shown_only=True,
     )
   await autopilot.mirror_to_ledger(app_id, record_id)
   return {
