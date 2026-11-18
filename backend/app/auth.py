@@ -5,7 +5,7 @@ import os
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import bcrypt
 import jwt
@@ -184,7 +184,6 @@ def create_app_token(
   delegation_id: str | None = None,
   delegation_chat: str | None = None,
   service: str | None = None,
-  job_secrets: list[str] | None = None,
   browser: BrowserLineage | None = None,
   via_agent_chat: str | None = None,
 ) -> str:
@@ -206,16 +205,11 @@ def create_app_token(
   that wants the owner's own tap (``_require_owner_hands``) refuses it, so an
   agent cannot turn its bearer into a clean app token for that route.
 
-  `job_secrets` is set only by the owner-authorized job-token endpoint. It
-  records the reviewed names at mint time, not a blanket service credential.
-  Every secret read also intersects the current accepted permission.
-
   `service` marks a token minted only for one invocation of the app's own
   server-side service (see app_services.service_environment), never for the
   browser frame. `"private"` is an invocation by an authenticated caller: the
   token keeps the app's authority and additionally lets deps.Principal tell the
-  app's reviewed backend from its untrusted frame, which is what allows a
-  service to read back its own secrets (routes/secrets.get_secret). `"public"`
+  app's reviewed backend from its untrusted frame. `"public"`
   is an invocation by an anonymous visitor: the token gets its own scope, which
   every principal resolver refuses except
   deps.get_principal_or_public_service, so it can reach only the few routes a
@@ -230,10 +224,6 @@ def create_app_token(
     claims["consent"] = consent
   if service == "private":
     claims["service"] = True
-  if job_secrets is not None:
-    # Only the owner-authorized supervised-job mint sets this distinct claim.
-    # Snapshot names prevent a running older job gaining newly approved access.
-    claims["job_secrets"] = job_secrets
   if (delegation_id is None) != (delegation_chat is None):
     raise ValueError("delegation identity and chat must be supplied together")
   if delegation_id is not None:
@@ -244,6 +234,42 @@ def create_app_token(
   return create_access_token(
     claims,
     expires_delta=expires_delta,
+    token_epoch=token_epoch,
+    browser=browser,
+  )
+
+
+def create_app_agent_token(
+  app_id: int,
+  owner_username: str,
+  token_epoch: int,
+  *,
+  app_nonce: str | None,
+  consent: str | None,
+  chat_id: str,
+  run_id: str,
+  grant: dict[str, Any],
+  browser: BrowserLineage | None = None,
+) -> str:
+  """The key of one confined app agent run (``agent_roles.AgentKey``).
+
+  It is the app's own credential, with nonce and consent checked like the
+  app's frame token, bound to the run like ``create_agent_token`` so it
+  expires with the physical run. ``grant`` names the role, tools and provider
+  the run's room was built for; the key allow-list and the Agent Gateway
+  enforce them.
+  """
+  claims = {
+    "sub": owner_username, "scope": "app", "app_id": app_id,
+    "agent_chat": chat_id, "agent_run": run_id, **grant,
+  }
+  if app_nonce is not None:
+    claims["app_nonce"] = app_nonce
+  if consent is not None:
+    claims["consent"] = consent
+  return create_access_token(
+    claims,
+    expires_delta=AGENT_RUN_TOKEN_TTL,
     token_epoch=token_epoch,
     browser=browser,
   )

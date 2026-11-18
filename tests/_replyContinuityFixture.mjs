@@ -95,6 +95,9 @@ export async function checkHiddenReplyContinuity(page, chat, base, provider = 'c
   await expect(surface.locator('.chat__sources')).toHaveCount(1)
   await expect(surface.locator('.chat__source-chip')).toHaveCount(0)
   expect(sourceReads).toEqual([])
+  // References sit in the reply's auto-hiding footer: a tap on its prose
+  // reveals it, and the open disclosure then holds it shown.
+  await paragraph.click()
   await surface.getByRole('button', { name: /^References/ }).click()
   await expect(surface.getByText('Some references could not load.')).toBeVisible()
   await expect(surface.locator('.chat__source-chip')).toHaveCount(2)

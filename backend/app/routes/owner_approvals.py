@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.orm import Session
 
 from app import transcript_rows
-from app import chat_queue, models, questions, secure_inputs
+from app import chat_queue, key_request_cards, key_vault, models, questions, secure_inputs
 from app.chat_event_sink import get_active_sink
 from app.database import get_db
 from app.deps import Principal, get_agent_run_principal, reject_cross_site
@@ -107,6 +107,18 @@ class RestartRequest(BaseModel):
   message: ClosingMessage = None
 
 
+class KeyRequest(BaseModel):
+  """An agent's ask to use a key on sites; the vault validates the fields."""
+
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+  key: str = Field(min_length=1, max_length=64)
+  # The vault keeps at most this much of a reason (MAX_REASON).
+  reason: str = Field(min_length=1, max_length=300)
+  sites: list[dict] = Field(default_factory=list, max_length=20)
+  inject: dict | None = None
+  message: ClosingMessage = None
+
+
 class TurnEndRequest(BaseModel):
   model_config = ConfigDict(extra="forbid")
   receipt_id: str = Field(min_length=1, max_length=64)
@@ -165,12 +177,80 @@ async def request_approval(
   db: Session = Depends(get_db),
 ):
   public_body = body.model_dump(exclude={"work_key", "message"}, exclude_none=True)
+  work_key = body.work_key
+  if principal.app_agent is not None:
+    # A confined app agent's claim stays inside its own app and chat, so it
+    # can never reserve owner work that another chat is about to do.
+    work_key = f"app:{principal.app_agent.app_id}:chat:{chat_id}:{work_key}"
   return await save_owner_question(chat_id, {
     "questions": [{"id": "approval", "header": "Approval", **public_body}],
-    "action_key": body.work_key,
+    "action_key": work_key,
   }, principal, db, identity_payload=body.model_dump(exclude={"message"}, exclude_none=True),
-     approval_work_key=body.work_key,
+     approval_work_key=work_key,
      approval_summary=body.question[:500], closing_message=body.message)
+
+
+def _live_chat_title(db: Session, chat_id: str) -> str | None:
+  """``chat_id``'s title as an agent is told it, or None when that chat is deleted."""
+  row = db.query(models.Chat.title).filter(
+    models.Chat.id == chat_id, models.Chat.deleted_at.is_(None),
+  ).first()
+  return None if row is None else (row[0] or "Untitled chat")
+
+
+@router.post("/{chat_id}/key-request", dependencies=[Depends(reject_cross_site)])
+async def request_key(
+  chat_id: str,
+  body: KeyRequest,
+  principal: Principal = Depends(get_agent_run_principal),
+  db: Session = Depends(get_db),
+):
+  """Ask the vault; when the owner must answer, save the ask as this turn's card.
+
+  A key the agent may already use where it asked answers at once, with no
+  card, and the turn continues.
+  """
+  from app.routes.keys import agent_asks
+
+  if principal.chat_id != chat_id:
+    raise HTTPException(status_code=403, detail="Agent run belongs to another chat.")
+  ask = body.model_dump(exclude={"message"}, exclude_none=True)
+
+  answer = await agent_asks(ask, principal)
+  if not key_request_cards.needs_owner(answer):
+    return {"state": "answered_without_card", "answer": answer}
+  waiting = await key_request_cards.waiting_elsewhere(answer, chat_id)
+  if waiting is not None:
+    # One request per key speaks for every agent; it is answered on the card
+    # in the chat that asked, if that chat still shows one, or in Settings ›
+    # Keys, which lists every waiting request.
+    holder = waiting.get("chat_id")
+    title = (_live_chat_title(db, holder)
+             if holder and key_request_cards.holds_open_card(db, holder, waiting["id"]) else None)
+    return {
+      "state": "answered_without_card", "answer": answer,
+      "waiting_chat_id": holder if title is not None else None,
+      "note": key_request_cards.elsewhere_note(title),
+    }
+  try:
+    receipt = await save_owner_question(
+      chat_id, key_request_cards.card_payload(answer),
+      principal, db, closing_message=body.message,
+    )
+  except Exception:
+    # The turn stopped, or the card could not be saved: unless this chat
+    # still shows a card for it, withdraw this chat's request, so the owner
+    # isn't asked for something no agent is waiting on.
+    db.rollback()
+    try:
+      stored = await key_request_cards.stored_request(answer)
+    except HTTPException:
+      stored = None  # the vault is down: the request shows in Settings › Keys
+    if (stored is not None and stored.get("chat_id") == chat_id
+        and not key_request_cards.holds_open_card(db, chat_id, answer["id"])):
+      await key_vault.withdraw_request(answer["id"], stored.get("ticket"))
+    raise
+  return {**receipt, "answer": answer}
 
 
 @router.post("/{chat_id}/restart-request", dependencies=[Depends(reject_cross_site)])

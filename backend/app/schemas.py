@@ -305,6 +305,9 @@ class AppOut(BaseModel):
   # Internal source for frame and storage-generation projections. App-scoped
   # JWTs separately carry this nonce as app_nonce.
   token_nonce: str | None = Field(default=None, exclude=True)
+  # The installation, never reused (models.App.install_id). An app grant in a
+  # key save (PUT /api/keys/<name>) names it beside the id; it is no credential.
+  install_id: str | None = None
   runtime_revision: str | None = Field(default=None, exclude=True)
   # The manifest version currently installed (e.g. "1.7.0"). Null for
   # user-built apps and for rows installed before the column existed

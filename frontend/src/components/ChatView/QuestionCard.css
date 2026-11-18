@@ -521,3 +521,18 @@
     padding-inline: 14px;
   }
 }
+
+/* A key request (KeyRequestDetails.jsx): the shared card's lines
+   (KeyRequest.jsx) between the question and its choices, and the paste
+   field for a new key below them. */
+.qcard__key {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.qcard__key-line {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.qcard .settings-keys__paste { margin-top: 8px; }

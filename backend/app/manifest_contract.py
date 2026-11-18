@@ -710,7 +710,7 @@ def validate_manifest_contract(manifest) -> None:
         _fail("Manifest `model_provider.base_url` must be an HTTPS API base URL without credentials or query.")
       secret_name = model_provider["secret_name"]
       if not isinstance(secret_name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", secret_name):
-        _fail("Manifest `model_provider.secret_name` must name one app secret.")
+        _fail("Manifest `model_provider.secret_name` must name the key the app asks for.")
     # A declared effort must survive every launch path on the protocol's
     # engine: Responses-only values cannot be sent to Claude or dropped by
     # its helper/compaction dispatchers.
@@ -821,6 +821,18 @@ def validate_manifest_contract(manifest) -> None:
   for field in ("offline_capable", "embeds_agent", "shell_shortcuts", "owner_confirm"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
+  if "agent_role" in manifest:
+    # Ignoring it would leave the app undeclared, which is full access.
+    _fail(
+      "Manifest `agent_role` is now `agent`: "
+      '{"scope": "tools|read|edit|admin", "allow_tools": [...], "reason": "..."}.'
+    )
+  if manifest.get("agent") is not None:
+    from app.agent_roles import normalize_declaration
+    try:
+      normalize_declaration(manifest["agent"])
+    except ValueError as exc:
+      _fail(str(exc))
 
   permissions = manifest.get("permissions", {})
   if not isinstance(permissions, Mapping):
@@ -846,15 +858,12 @@ def validate_manifest_contract(manifest) -> None:
       f"Manifest permission {names} has been removed; server-side app jobs "
       "run as ordinary Möbius processes."
     )
-  job_secrets = permissions.get("job_secret_read", [])
-  if (
-    not isinstance(job_secrets, list) or len(job_secrets) > 16
-    or any(not isinstance(name, str) or not re.fullmatch(
-      r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", name,
-    ) for name in job_secrets)
-    or len(set(job_secrets)) != len(job_secrets)
-  ):
-    _fail("Manifest `permissions.job_secret_read` must list up to 16 unique secret names.")
+  if "job_secret_read" in permissions:
+    _fail(
+      "Manifest permission `permissions.job_secret_read` has been removed; apps "
+      "never read key values. Ask for a key with POST /api/keys/requests and "
+      "use it through /api/keys/use (see 'Keys' in the building-apps guide)."
+    )
   targets = permissions.get("spend_credits", [])
   if (
     not isinstance(targets, list) or len(targets) > SPEND_CREDITS_MAX

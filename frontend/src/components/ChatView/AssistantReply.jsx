@@ -1,8 +1,6 @@
-/* One reply owns live/saved source rows and continuous prose. The reply that
-   ends an agent stretch also holds the stretch's References, and the one at
-   the very end of the chat holds the one footer: its time, Copy of everything
-   the agent said since the owner last spoke, and Branch (see replyFooter.js). */
-import { Fragment, memo, useContext, useMemo } from 'react'
+/* A reply owns continuous prose and saved/live sources. The reply ending a
+   complete answer stretch holds its time, Copy, Branch and References. */
+import { Fragment, memo, useCallback, useContext, useMemo } from 'react'
 import MsgContent from './MsgContent.jsx'
 import MessageSources from './MessageSources.jsx'
 import MessageMetaRow from './MessageMetaRow.jsx'
@@ -74,21 +72,34 @@ function AssistantReply({
     activeIndex: isStreaming ? activeRowIndex : -1, positions,
   }), [proseRows, activeRowIndex, isStreaming, positions])
   const rows = activity.rows
+  // Copy names this answer to ChatView's one handler, which builds the text
+  // only when pressed.
+  const answerKey = presentationRows[0].key
+  const readCopy = useCallback(button => copy(button, answerKey), [copy, answerKey])
   const displayTimeline = useMemo(() => ({ tools: timeline?.tools, positions: activity.positions }), [timeline?.tools, activity.positions])
   if (!msg) return null
 
   const lastVisibleRow = rows.findLastIndex(row => !row.message.hidden)
   const branchThroughId = rows[rows.length - 1].message.id
-  const metaKey = presentationRows[0].key
   const settled = footer === 'settled' && !isStreaming
   const endedAt = presentationRows.at(-1).message.run_ended_ts
-  // A stretch lists its References once, after its last reply.
+  // A stretch lists its References once, in its last reply's footer, after
+  // time, Copy and Branch, so References never show without a footer. While
+  // the answer continues they keep their place but are held, like the other
+  // controls: the line does not change size when the answer settles.
   const referenceRows = stretchSourceRows
     && [...stretchSourceRows, ...sourceRows.map(row => row.message)]
+  const references = footer && referenceRows && <MessageSources
+    chatId={chatId}
+    groups={referenceRows.map(message => message.blocks)}
+    refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
+    disclosureKey={`${rows[lastVisibleRow].key}:references`}
+    held={!settled}
+  />
   return <PeerTimelineContext.Provider value={displayTimeline}><li
     className="chat__reply"
     // A tap on the reply reveals its footer for a moment, as on owner rows.
-    onClick={settled && onRevealMeta ? event => onRevealMeta(event, metaKey) : undefined}
+    onClick={settled && onRevealMeta ? event => onRevealMeta(event, answerKey) : undefined}
     // Pointing at or focusing the footer's reply readies what it copies.
     onPointerEnter={settled ? onFooterIntent : undefined}
     onFocus={settled ? onFooterIntent : undefined}
@@ -141,29 +152,24 @@ function AssistantReply({
         </Fragment>
       })}
     </ul>
-    {!isStreaming && referenceRows && <MessageSources
-      chatId={chatId}
-      groups={referenceRows.map(message => message.blocks)}
-      refs={referenceRows.flatMap(message => message.source_ref ? [message.source_ref] : [])}
-      disclosureKey={`${rows[lastVisibleRow].key}:references`}
-    />}
-    {/* Only the chat's last reply has a footer; replies above it leave no
-        gap. It is mounted while the agent works too, empty: settling fills
-        the reserved line instead of adding one under a followed transcript. */}
+    {/* One footer per complete answer stretch, never per internal run. A
+        working stretch reserves its line so settling does not jump. */}
     {footer && <MessageMetaRow
       // When the reply settled: when the run that wrote its last row ended.
       // Until the server reports that, its start, and the row says so (a
       // row's own time is when it began).
       timestamp={settled ? (endedAt ?? presentationRows[0].message.ts) : null}
       timeIsStart={endedAt == null}
-      copy={settled ? copy : undefined}
+      copy={settled && copy ? readCopy : undefined}
       // Branching continues from the whole settled reply: its last row, named
       // by the id the server stored it under.
       branch={settled && onBranch && branchThroughId != null
         ? () => onBranch(String(branchThroughId)) : undefined}
       side="start"
       visible={metaVisible}
-    />}
+    >
+      {references}
+    </MessageMetaRow>}
   </li></PeerTimelineContext.Provider>
 }
 

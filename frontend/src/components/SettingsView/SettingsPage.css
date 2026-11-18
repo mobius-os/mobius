@@ -453,6 +453,38 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
 }
 .settings__btn svg { flex: none; }
 
+/* ── Forms ─────────────────────────────────────────────────────────────
+   A labelled field (label, input, hint) and the controls Settings forms
+   share: a text input, a segmented choice and a switch with its label. */
+.settings-field { display: grid; gap: 6px; min-width: 0; }
+.settings-field__label { color: var(--text); font-size: 13px; font-weight: 600; line-height: 1.3; }
+.settings-field__optional { margin-left: 4px; color: var(--muted); font-weight: 400; }
+.settings-field__hint { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.settings-field__hint strong { color: var(--text); font-weight: 600; }
+.settings-field__hint--error { color: var(--danger-text, var(--danger)); }
+.settings-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 8px 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  outline: 0;
+}
+.settings-input::placeholder { color: var(--muted); opacity: 0.8; }
+.settings-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.settings-input[aria-invalid="true"] { border-color: var(--danger); }
+.settings-input--multiline { min-height: 120px; resize: vertical; font-family: var(--mono); font-size: 13px; line-height: 1.4; }
+.settings-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.settings-switch-row__title { display: block; color: var(--text); font-size: 13.5px; line-height: 1.35; }
+.settings-switch-row__sub { display: block; margin-top: 2px; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
+.settings-link { padding: 0; border: 0; background: none; font: inherit; font-size: 13px; cursor: pointer; }
+
 /* Inline message under a list (errors and confirmations). */
 .settings-message {
   margin: 10px 2px 0;

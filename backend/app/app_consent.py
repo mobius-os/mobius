@@ -17,6 +17,7 @@ import json
 import secrets
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -97,7 +98,7 @@ _FLAGS = (
 # permission can never silently go missing from the popup.
 HANDLED_DATA_KEYS = frozenset(
   {"chat_logs", "shared_memory", "cross_app_access", "share_with_apps",
-   "job_secret_read", "spend_credits", "check_credits_charges"}
+   "spend_credits", "check_credits_charges"}
   | {key for key, *_ in _FLAGS}
 )
 
@@ -108,11 +109,11 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
   """One thing an app asks for.
 
   ``rank`` orders levels of the same permission (read < write). ``scope`` names
-  the specific things a row covers (secret names, an install-time run): an
-  accepted answer covers a request only when it includes every name, so
-  adding or swapping one asks again. ``limits`` are a runtime capability's
-  upper bounds: an accepted answer covers only values at or below the ones the
-  owner saw, so raising any of them asks again.
+  the specific things a row covers (an install-time run): an accepted answer
+  covers a request only when it includes every name, so adding or swapping one
+  asks again. ``limits`` are a runtime capability's upper bounds: an accepted
+  answer covers only values at or below the ones the owner saw, so raising any
+  of them asks again.
   """
   return {
     "id": row_id, "title": title, "text": text, "level": level,
@@ -120,6 +121,60 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
     "scope": sorted(set(scope)) if scope else None,
     "limits": dict(sorted(limits.items())) if limits else None,
   }
+
+
+def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
+  """The one "AI agents" row: the agents' access scope, what it grants, the
+  app's own reason and the tools it asks for.
+
+  Admin, and an app that declares no scope but runs agents, keep full access
+  and use the critical ``agent_start`` row. A confined scope names what it
+  reaches, so an update asks again only when it adds reach (Read to Edit, a
+  new tool) and never when it narrows. ``grant`` is the platform's own words:
+  an app's reason cannot be trusted to state its own risk. ``declared`` says
+  whether ``text`` is the app's reason or the platform's note for an app that
+  declares nothing.
+  """
+  from app.agent_roles import ROLES, role_from_contract
+
+  role = role_from_contract({"agent": agent})
+  if role is None and not agent.get("embeds_agent"):
+    return None
+  if role is None or not role.confined:
+    text = role.reason if role is not None else (
+      "Can open agent chats on its own. Commands in those chats run on your "
+      "Möbius without asking you first."
+    )
+    row = _row("agent_start", "Run AI agents", text, level=ROLES["admin"].label)
+    return {
+      **row, "group": "agent", "grant": ROLES["admin"].grants,
+      "declared": role is not None, "tools": [],
+    }
+  data = role.spec.data
+  reach = {"read": ["data:read"], "write": ["data:read", "data:write"], None: []}[data]
+  return {
+    **_row("agent_role", "Run AI agents", role.reason, level=role.spec.label,
+           scope=[*reach, *(f"tool:{name}" for name in role.tools)]),
+    "group": "agent",
+    "grant": role.spec.grants,
+    "declared": True,
+    "tools": [_agent_tool(name, role.reads_private_data) for name in role.tools],
+  }
+
+
+def _agent_tool(name: str, private_data: bool) -> dict[str, Any]:
+  """One declared tool as the popup lists it. A tool that sends things outside
+  Möbius (web, keys) beside private data could carry app data out; ``warning``
+  then says where, and the popup marks it."""
+  from app.agent_roles import TOOLS
+
+  tool = TOOLS.get(name)
+  if tool is None:  # another app's tool, ``<app>.<tool>``
+    app, _, action = name.partition(".")
+    return {"id": name, "title": name, "warning": None,
+            "text": f"Use the {action} tool of your {app} app, with the data it reaches."}
+  return {"id": name, "title": tool.label, "text": tool.text,
+          "warning": tool.sends_out if tool.sends_out and private_data else None}
 
 
 def rows_from_contract(
@@ -154,13 +209,6 @@ def rows_from_contract(
   for key, row_id, title, text in _FLAGS:
     if data.get(key):
       rows.append(_row(row_id, title, text))
-  names = data.get("job_secret_read")
-  if isinstance(names, list) and names:
-    rows.append(_row(
-      "job_secret_read", "Read named secrets in its job",
-      "Its background job can read the secrets it names: " + ", ".join(names) + ".",
-      scope=[str(name) for name in names],
-    ))
   targets = data.get("spend_credits")
   if isinstance(targets, list) and targets:
     rows.append(_row(
@@ -193,12 +241,9 @@ def rows_from_contract(
       rank=2 if scheduled else 1,
       scope=["initialize_on_install"] if initialize else None,
     ))
-  if agent.get("embeds_agent"):
-    rows.append(_row(
-      "agent_start", "Start agent chats on its own",
-      "Can open agent chats on its own. Commands in those chats run on your "
-      "Möbius without asking you first.",
-    ))
+  agent_row = _agent_row(agent)
+  if agent_row is not None:
+    rows.append(agent_row)
   if agent.get("system_prompt"):
     rows.append(_row(
       "agent_prompt", "Add instructions to your agent chats",
@@ -209,10 +254,14 @@ def rows_from_contract(
       "agent_extend", "Add skills and tools to your agents",
       "Installs the skills it ships and lets agents call the tools it declares.",
     ))
-  if contract.get("model_provider"):
+  provider = contract.get("model_provider")
+  if provider:
     rows.append(_row(
       "model_provider", "Add a model provider",
-      "Adds a model provider whose requests use a secret saved in the app.",
+      "Adds a model provider served through your Möbius account."
+      if provider.get("transport") == "identity_broker" else
+      f"Adds a model provider at {urlsplit(provider.get('base_url') or '').hostname}. "
+      "Its requests use a key the app saved, or one you let it use on that site.",
     ))
   service = contract.get("service") or {}
   public = contract.get("public") or {}
@@ -391,10 +440,20 @@ def granted_direct_origins(app: Any) -> tuple[str, ...]:
 
 
 def current_rows(app: models.App) -> list[dict[str, Any]]:
-  return rows_from_contract(
+  rows = rows_from_contract(
     app.capability_contract,
     project_builders=bool(getattr(app, "project_templates_json", None)),
   )
+  accepted = accepted_rows(app)
+  if (
+    accepted is not None and "agent_role" in accepted
+    and not any(row.get("group") == "agent" for row in rows)
+  ):
+    # Dropping an accepted role leaves the app's agents unconfined. That is
+    # full access, so it is asked for like any other widening.
+    rows.append(_agent_row({"embeds_agent": True}))
+    rows.sort(key=lambda row: (not row["critical"], row["title"]))
+  return rows
 
 
 def _stored_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -448,6 +507,9 @@ def accepted_rows(app: models.App) -> dict[str, dict[str, Any]] | None:
 
 def _covered(row: dict[str, Any], accepted: dict[str, dict[str, Any]]) -> bool:
   held = accepted.get(row["id"])
+  if held is None and row["id"] == "agent_role" and "agent_start" in accepted:
+    # Full agent access, once accepted, covers every confined role.
+    return True
   # A limit missing from the answer was never shown to the owner (answers
   # saved before limits were recorded), so it covers nothing.
   return (
@@ -539,6 +601,27 @@ def _note(row: dict[str, Any], held: dict[str, list[tuple[str, int]]]) -> str:
   return " ".join(parts)
 
 
+def _agent_update(
+  row: dict[str, Any], accepted: dict[str, dict[str, Any]] | None,
+) -> dict[str, Any]:
+  """The AI agents block on an update: only the tools it adds, and the scope it
+  replaces. It speaks otherwise only in the app's own reason."""
+  from app.agent_roles import ROLES
+
+  held = (accepted or {}).get("agent_role") if row["id"] == "agent_role" else None
+  if held is None:
+    return {**row, "note": None}
+  scope = held["scope"]
+  before = ROLES[
+    "edit" if "data:write" in scope else "read" if "data:read" in scope else "tools"
+  ].label
+  return {
+    **row,
+    "tools": [tool for tool in row["tools"] if f"tool:{tool['id']}" not in scope],
+    "note": f"Previously {before}." if before != row["level"] else None,
+  }
+
+
 def build_request(db: Session, app: models.App) -> dict[str, Any]:
   """What the popup shows: only the rows not yet accepted, with context."""
   held = _holders(db, app)
@@ -548,7 +631,11 @@ def build_request(db: Session, app: models.App) -> dict[str, Any]:
     "app_description": app.description,
     "digest": request_digest(current_rows(app)),
     "is_update": accepted_rows(app) is not None,
-    "rows": [{**row, "note": _note(row, held)} for row in needed_rows(app)],
+    "rows": [
+      _agent_update(row, accepted_rows(app)) if row.get("group")
+      else {**row, "note": _note(row, held)}
+      for row in needed_rows(app)
+    ],
     "baseline": BASELINE,
   }
 

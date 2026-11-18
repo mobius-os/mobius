@@ -11,6 +11,8 @@ export const SETTINGS_SECTIONS = Object.freeze([
   'ai-providers',
   'background-agents',
   'github',
+  // A whole sub-page too: Settings › Keys.
+  'keys',
   'models',
   // Whole sub-pages: Accounts › Möbius, and AI providers › Möbius (credit,
   // trial and Möbius models).
@@ -25,10 +27,20 @@ export function settingsSectionPage(section) {
   if (section === 'mobius-account') return 'mobius-account'
   if (section === 'mobius-models') return 'mobius'
   if (section === 'notifications-elsewhere') return 'notifications-elsewhere'
+  if (section === 'keys') return 'keys'
   return null
 }
 
 const KNOWN = new Set(SETTINGS_SECTIONS)
+
+/**
+ * The request Settings navigates to: a section to focus, or a whole page such
+ * as one provider's (`{ page }`). Null opens Settings without a target. The
+ * nonce makes a repeat of the same request navigate again.
+ */
+export function settingsFocusRequest(section, { page = null } = {}, nonce = Date.now()) {
+  return section || page ? { section: section || null, page, nonce } : null
+}
 
 /** A known section id, or null for Settings without a focused section. */
 export function settingsSectionOrNull(value) {

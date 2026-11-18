@@ -60,7 +60,7 @@ ARG CODEX_VERSION=0.167.2
 ARG CODEX_SDK_VERSION=0.167.2
 ARG AGENT_BROWSER_VERSION=0.38.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    age ca-certificates cron curl git iproute2 jq poppler-utils procps ripgrep sudo tini unzip util-linux xxd \
+    age ca-certificates cron curl git iproute2 jq libseccomp2 poppler-utils procps ripgrep sudo tini unzip util-linux xxd \
     libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
     libdrm2 libxkbcommon0 libatspi2.0-0 libxcomposite1 libxdamage1 \
     libxfixes3 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2t64 \
@@ -497,6 +497,9 @@ RUN mkdir -p /data/db /data/apps /data/compiled /data/shared \
 COPY backend/app ./app/
 COPY backend/scripts ./scripts/
 COPY backend/runtime ./runtime/
+# The key vault program beside the scripts: /app/scripts/restore-data.py runs
+# as root and loads /app/vault/keyvault.py, never agent-editable /data code.
+COPY backend/vault ./vault/
 COPY skill/ ./skill/
 COPY protected-files.txt ./protected-files.txt
 

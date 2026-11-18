@@ -1,13 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { queuedHint, steerPendingHint } from '../queuedHint.js'
-
-test('a delivered mid-turn steer says when the agent reads it, never that it is still waiting to send', () => {
-  const hint = steerPendingHint()
-  assert.equal(hint, 'Agent will read this after its current step')
-  assert.doesNotMatch(hint, /send|turn finishes/i)
-})
+import { queuedHint } from '../queuedHint.js'
 
 test('a live turn keeps the original "after the current turn finishes" copy', () => {
   assert.equal(

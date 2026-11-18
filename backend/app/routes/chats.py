@@ -978,23 +978,30 @@ def _chat_detail_response(
   # stored provider was frozen at creation; if the global model's family has
   # since changed, effective_agent_settings(provider=chat.provider) resolves no
   # model and the picker shows nothing. Derive the display provider the same way
-  # the send path does: an explicit per-chat model wins; otherwise a pristine
-  # chat follows the current global model (the single source of truth); a chat
-  # that already ran keeps its committed provider.
+  # the send path does: a per-chat model wins, staying with the saved provider
+  # when this process does not know the id yet (a discovered id after a
+  # restart); otherwise a pristine chat follows the current global model (the
+  # single source of truth); a chat that already ran keeps its committed provider.
   _has_assistant_turns = any(m.get("role") == "assistant" for m in coordinates)
-  provider = (
-    providers.provider_of_model((settings_obj or {}).get("model"))
-    or (
-      chat.provider or "claude"
-      if _has_assistant_turns
-      else providers.owner_default_provider(get_settings().data_dir, chat.provider)
-    )
-  )
+  _chat_model = (settings_obj or {}).get("model")
+  if isinstance(_chat_model, str) and _chat_model.strip():
+    provider = providers.provider_of_model(
+      _chat_model, preferred=chat.provider or "claude",
+    ) or chat.provider or "claude"
+  elif _has_assistant_turns:
+    provider = chat.provider or "claude"
+  else:
+    provider = providers.owner_default_provider(get_settings().data_dir, chat.provider)
   active_goal_objective = (
     running_goal_objective(db, chat.id) if running else None
   )
   goal = presented_goal(db, chat.id, include_foreign_context=expose_session)
   run_id, run_status, runtime_revision = _latest_run_snapshot(db, chat.id)
+  # Parent metadata is foreign context: embedded chat surfaces never see it.
+  helper = None
+  if expose_session:
+    from app.routes.chats_stream import helper_chat_ref
+    helper = helper_chat_ref(db, chat.id)
   response = {
     "id": chat.id,
     "title": chat.title,
@@ -1042,6 +1049,10 @@ def _chat_detail_response(
     # project files activates only for a chat that belongs to a live project.
     "project": _project_ref_for_chat(db, chat),
     "branch_origin": _branch_origin_ref(db, chat),
+    # Retry the existing delegated attempt, never an independent owner turn;
+    # anything else a helper's recovery card needs is done in its parent.
+    "helper_delegation_id": (helper or {}).get("delegation_id"),
+    "helper_parent_chat_id": (helper or {}).get("parent_chat_id"),
     # Armed durable waits: the visible "Waiting for …" state. Refreshed by the
     # detail refetches the run lifecycle already triggers, so declare (during a
     # run) and resume (a new run) both reach the UI without extra plumbing.
@@ -1469,13 +1480,6 @@ def create_chat(
 
   owner = db.query(models.Owner).first()
   data_dir = get_settings().data_dir
-  # Provider follows the last-selected model (the single source of truth) so a
-  # new chat always starts on the family of the model it will actually use —
-  # never a provider whose remembered model belongs to the other family.
-  provider = providers.owner_default_provider(
-    data_dir, owner.provider if owner else None,
-  )
-
   with _OWNER_CHAT_CREATE_LOCK:
     if body.agent is not None:
       from app.update_chat import resolve_update_chat_choice
@@ -1483,15 +1487,11 @@ def create_chat(
       provider = choice["provider"]
       agent_settings = choice["agent_settings"]
     else:
-      agent_settings = providers.snapshot_chat_agent_settings(
-        data_dir, provider,
+      provider, agent_settings = providers.snapshot_owner_chat_choice(
+        data_dir,
+        owner.provider if owner else None,
+        allow_unselected=db.query(models.Chat.id).first() is None,
       )
-      if agent_settings is None and db.query(models.Chat.id).first() is not None:
-        agent_settings = providers.snapshot_chat_agent_settings(
-          data_dir,
-          provider,
-          fallback_model=providers.DEFAULT_MODELS.get(provider),
-        )
     if body.archive_on_goal_complete:
       agent_settings = {**(agent_settings or {}), "archive_on_goal_complete": True}
 
@@ -1892,20 +1892,23 @@ async def patch_chat(
       # be on stale state. Without this check the PATCH would succeed
       # silently and then every subsequent message turn would fail
       # auth, leaving the user confused. 409 surfaces the real
-      # problem at pick-time.
-      from app.providers import get_provider
-      candidate = get_provider(target_provider)
-      auth_error = await run_in_threadpool(  # unsettled: read-only (provider sign-in check)
-        candidate.check_auth, get_app_settings().data_dir
-      )
-      if auth_error is not None:
-        raise HTTPException(
-          status_code=409,
-          detail=(
-            f"{candidate.name} is not connected. "
-            "Open Settings to connect, then try again."
-          ),
+      # problem at pick-time. Only a real switch is checked: the picker sends
+      # the provider with every pick, and a same-provider pick must not hang
+      # on a sign-in check (a network call for Möbius) it did not change.
+      if provider_changing:
+        from app.providers import get_provider
+        candidate = get_provider(target_provider)
+        auth_error = await run_in_threadpool(  # unsettled: read-only (provider sign-in check)
+          candidate.check_auth, get_app_settings().data_dir
         )
+        if auth_error is not None:
+          raise HTTPException(
+            status_code=409,
+            detail=(
+              f"{candidate.name} is not connected. "
+              "Open Settings to connect, then try again."
+            ),
+          )
       if chat.provider != target_provider:
         # Sessions aren't cross-provider portable: a Claude session id
         # is not a valid Codex thread id and vice versa. Wipe the
@@ -2935,6 +2938,7 @@ async def delete_chat(
           "Chat %s was deleted but its durable run marker could not be cleared",
           chat_id,
         )
+      deleted_at = chat.deleted_at if chat else None
   # Destructive cleanup has settled before releasing transition ownership.
   # The tombstone and releases are already durable. Nudge exact-Goal delivery as a
   # best-effort layer; failure cannot roll back an owner-requested
@@ -2947,6 +2951,13 @@ async def delete_chat(
       log.exception(
         "Chat %s was deleted but claim dependencies were not nudged", chat_id,
       )
+  # Its agent's waiting key requests could only be answered on its cards.
+  # Withdrawn after the transition lock, so a vault that hangs never holds it;
+  # only requests made up to the deletion go, so a late withdrawal never
+  # touches what the chat asks for once recovered.
+  if deleted_at is not None:
+    from app import key_vault
+    await key_vault.forget_chat(str(chat_id), deleted_at)
   # The current chat has just entered its recovery window and therefore cannot
   # be selected when this existing lifecycle boundary reclaims older tombstones.
   _reclaim_expired_tombstones_after_chat_write(db)
@@ -3907,14 +3918,28 @@ def _add_app_chat(
       data_dir, db,
     )
     provider = background_choice["provider"]
+  elif body.provider:
+    provider = body.provider
   else:
-    provider = body.provider or providers.provider_of_model(
-      body.model,
-    ) or providers.owner_default_provider(
+    # A model id both a provider and an app declare resolves to the owner's
+    # current provider when that provider owns it.
+    default_provider = providers.owner_default_provider(
       data_dir, owner.provider if owner else None,
     )
+    provider = providers.provider_of_model(
+      body.model, preferred=default_provider,
+    ) or default_provider
   if provider not in providers.PROVIDERS:
     raise HTTPException(status_code=422, detail=f"unknown provider: {provider}")
+  from app.agent_roles import ROOM_PROVIDERS, confined_role_for_app
+  if (
+    provider not in ROOM_PROVIDERS
+    and confined_role_for_app(db.get(models.App, app_id))
+  ):
+    raise HTTPException(
+      status_code=422,
+      detail="This app's agents run confined, on Claude, Codex or Möbius models.",
+    )
   if body.model and providers._model_belongs_to_other_provider(
     body.model, provider,
   ):

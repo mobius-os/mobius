@@ -700,12 +700,15 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     "runtime": normalize_runtime_capabilities(manifest),
     "public": normalize_public_access(manifest),
   }
-  if perms.get("job_secret_read"):
-    contract["data"]["job_secret_read"] = sorted(perms["job_secret_read"])
   if perms.get("spend_credits"):
     contract["data"]["spend_credits"] = sorted(perms["spend_credits"])
   if perms.get("check_credits_charges"):
     contract["data"]["check_credits_charges"] = sorted(perms["check_credits_charges"])
+  if manifest.get("agent") is not None:
+    # Present only when declared, so the contracts (and digests) of apps that
+    # declare no access scope are unchanged. See app.agent_roles.
+    from app.agent_roles import normalize_declaration
+    contract["agent"]["access"] = normalize_declaration(manifest["agent"])
   service = manifest.get("service")
   if isinstance(manifest.get("model_provider"), dict):
     # Freeze the reviewed declaration; editable source is never consulted by
@@ -807,15 +810,16 @@ def contract_from_app_state(
   service: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
   tools: list[dict[str, Any]] | None = None,
   model_provider: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
+  agent_access: dict[str, Any] | None | object = _PRESERVE_ACCEPTED,
 ) -> dict[str, Any]:
   """Build an accurate contract for an owner-authored local app.
 
   Store installs derive their complete contract from the reviewed manifest.
   Local apps are created and edited directly by their owner, so their durable
   database state is authoritative for server permissions while ``mobius.json``
-  is authoritative for host-mediated runtime capabilities — including an
-  app-secret model provider, which reaches no turn until the owner saves its
-  key in the app.
+  is authoritative for host-mediated runtime capabilities — including a
+  vault-key model provider, which reaches no turn until the owner approves its
+  key request in Settings › Keys.
   """
   if capabilities is None:
     capabilities = runtime_declaration_from_contract(
@@ -851,7 +855,6 @@ def contract_from_app_state(
       # Manifest apply passes an explicit mapping: omission revokes. An
       # unrelated row projection (no mapping, e.g. a PATCH of pinned or
       # chat_log_access) retains every contract-only grant the owner accepted.
-      "job_secret_read": contract_grants.get("job_secret_read", []),
       "identity_manage": bool(contract_grants.get("identity_manage", False)),
       "credits_manage": bool(contract_grants.get("credits_manage", False)),
       "railway_manage": bool(contract_grants.get("railway_manage", False)),
@@ -901,6 +904,14 @@ def contract_from_app_state(
     model_provider = accepted.get("model_provider") if isinstance(accepted, dict) else None
   if isinstance(model_provider, dict):
     manifest["model_provider"] = model_provider
+  if agent_access is _PRESERVE_ACCEPTED:
+    accepted = getattr(app, "capability_contract", None)
+    accepted_agent = accepted.get("agent") if isinstance(accepted, dict) else None
+    agent_access = (
+      accepted_agent.get("access") if isinstance(accepted_agent, dict) else None
+    )
+  if isinstance(agent_access, dict):
+    manifest["agent"] = agent_access
   contract = contract_from_manifest(manifest)
   if accepted_transfer is not None:
     for key in _TRANSFER_LIMIT_FIELDS:
@@ -1061,9 +1072,13 @@ def diff_contracts(
       k in _EXACT_CEILING_PATHS and _exact_json(before[k]) != _exact_json(after[k])
     )
   )
+  paths = [*added, *removed, *changed]
   widens = any(
     _widens(path, before.get(path), after.get(path), after)
-    for path in [*added, *removed, *changed]
+    for path in paths if not path.startswith("agent.access.")
+  ) or (
+    any(path.startswith("agent.access.") for path in paths)
+    and _agent_role_widens(installed, candidate)
   ) or (
     # Transfer limits the runtime refuses disable the service, so they cannot
     # be ranked against anything, even when they compare equal or pruning made
@@ -1080,6 +1095,15 @@ def diff_contracts(
     "removed": removed,
     "changed": changed,
   }
+
+
+def _agent_role_widens(installed: dict[str, Any], candidate: dict[str, Any]) -> bool:
+  """Whether the app's agents reach more. Dropping the scope is full access; its
+  reason is explanatory copy and grants nothing."""
+  from app.agent_roles import role_from_contract
+
+  old, new = role_from_contract(installed), role_from_contract(candidate)
+  return old is None or new is None or not old.covers(new)
 
 
 # Only these known contract paths have ordered grants. An unfamiliar field is
@@ -1101,7 +1125,7 @@ _BOOLEAN_GRANTS = {
 }
 
 _LIST_GRANTS = {
-  "agent.skills", "agent.tools", "data.job_secret_read", "data.spend_credits",
+  "agent.skills", "agent.tools", "data.spend_credits",
   "data.check_credits_charges", "public.network",
 }
 
