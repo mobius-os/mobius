@@ -11,7 +11,8 @@
   (``POST /api/keys/requests``); after the owner approves, it sends requests
   through ``/api/keys/use/<key>/<host>/<path>`` with its own app token, and
   the vault adds the key on the way out. This route attests which app is
-  calling from that token, so an app cannot borrow another app's grant.
+  calling from that token (its id and installation), so an app cannot borrow
+  another app's grant, nor one given to an earlier app with the same id.
 - A top-level agent that needs a key on a new site asks with the
   ``request_key`` control, which saves an owner card in its chat; the owner
   answers there or in Settings › Keys, which lists every waiting request.
@@ -113,7 +114,11 @@ def _caller(principal: Principal) -> str:
   if principal.browser is not None:
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
   if principal.app_id is not None:
-    return f"app:{principal.app_id}"
+    # The installation of the row the token was checked against, never one
+    # read afterwards: by then the id may belong to an app that reused it.
+    if principal.app_install_id is None:
+      raise HTTPException(401, "App token is not bound to an installation.")
+    return key_vault.app_caller(principal.app_id, principal.app_install_id)
   if principal.scope != "owner":
     raise HTTPException(403, "This credential cannot use keys.")
   if _is_agent(principal):
@@ -134,15 +139,6 @@ def reader_caller(principal: Principal) -> str:
       403, "Delegated helpers cannot read key values. Use the key through /api/keys/use instead.",
     )
   return _caller(principal)
-
-
-def _granted_app_ids(grants) -> list[int]:
-  """Each app a save names; the vault refuses malformed grants."""
-  apps = grants.get("apps") if isinstance(grants, dict) else None
-  return [
-    grant["id"] for grant in (apps if isinstance(apps, list) else [])
-    if isinstance(grant, dict) and type(grant.get("id")) is int and grant["id"] >= 1
-  ]
 
 
 def _agent_changes(existing: dict, body: dict) -> list[str]:
@@ -203,10 +199,12 @@ async def put_key(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),
 ) -> dict:
+  # Each app grant names the app's installation (``install``, from the apps
+  # list), and the vault matches app callers by it, so a page loaded before
+  # an app was removed and its id reused can only write a grant no app can use.
   allowed = {
     k: body[k] for k in ("value", "inject", "grants", "revision", "create_only") if k in body
   }
-  installations = body.get("installations")
   caller = _caller(principal)
   existing = next(
     (key for key in (await _relay("GET", "/keys"))["keys"] if key["name"] == name), None,
@@ -228,20 +226,7 @@ async def put_key(
       allowed["create_only"] = True
     elif allowed.get("revision") is None:
       allowed["revision"] = existing["revision"]
-  try:
-    with vault_outcomes_as_http():
-      async with key_vault.for_granted_apps(
-        name, _granted_app_ids(allowed.get("grants")),
-        installations if isinstance(installations, dict) else {},
-      ):
-        result = await key_vault.vault_call(
-          "PUT", f"/keys/{quote(name, safe='')}", allowed, caller=caller,
-        )
-  except key_vault.AppGone as gone:
-    raise HTTPException(
-      409, f"App {gone.args[0]} is not the installation you chose; it may have been "
-      "removed or replaced. Reload and choose it again.",
-    ) from None
+  result = await _relay("PUT", f"/keys/{quote(name, safe='')}", allowed, caller=caller)
   changes = _agent_changes(existing, allowed) if existing and _is_agent(principal) else []
   if changes:
     # Agents may set keys up, but a silent change could point every grantee
@@ -346,12 +331,14 @@ async def request_key(
   if app is None:
     raise HTTPException(404, "App not found.")
   payload["app_name"] = app.name
-  # Queued under the app's lock, for the installation the token names: a
-  # request left behind by a removed app would otherwise grant its key to an
-  # unrelated app that reuses the id.
+  caller = _caller(principal)
+  # Queued under the app's lock while the token's installation is still the
+  # app, so a removed app leaves no request behind (the vault would never let
+  # another installation use what approving it grants, but the owner would
+  # still see it over the app that reused the id).
   try:
     async with key_vault.for_live_app(app.id, authorized_app_nonce(principal, app)):
-      answer = await _relay("POST", "/requests", payload, caller=f"app:{app.id}")
+      answer = await _relay("POST", "/requests", payload, caller=caller)
   except key_vault.AppGone:
     raise HTTPException(404, "App not found.") from None
   if answer.pop("created", False):
@@ -411,9 +398,8 @@ async def use_key(
   target = "/use/" + rest.decode("ascii") + ("?" + query.decode("ascii") if query else "")
   headers = _relayed_request_headers(request)
   body = await _bounded_body(request)
-  # The vault knows apps by their reusable id. An app's borrow is checked once
-  # its body has arrived, for the installation its token names, and the app
-  # cannot be purged (freeing the id) while the vault could still act on it.
+  # An app's borrow is checked once its body has arrived: the app its token
+  # names must still be installed, and the vault matches its installation.
   try:
     if principal.app_id is not None:
       answer = await key_vault.borrow(

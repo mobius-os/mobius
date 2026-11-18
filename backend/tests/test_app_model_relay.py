@@ -291,10 +291,11 @@ def test_an_anthropic_provider_is_available_only_on_its_own_endpoint(monkeypatch
   adapter = providers.AppModelProvider(4242, _manifest()["model_provider"])
   asked = []
   monkeypatch.setattr(providers, "provider_enabled", lambda *_: True)
+  monkeypatch.setattr(providers, "_usable_app_model_install", lambda *_: "a" * 32)
   monkeypatch.setattr(key_vault, "model_provider_key_sync",
                       lambda *args, **destination: asked.append(destination) or "k")
   assert adapter.read_relay_key("/unused", authorize=False).unavailable is None
-  assert asked == [{"protocol": "anthropic_messages", "endpoint": None}]
+  assert asked == [{"install": "a" * 32, "protocol": "anthropic_messages", "endpoint": None}]
 
 
 @pytest.mark.parametrize("inherited", ["ultracode", "xhigh"])

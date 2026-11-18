@@ -118,14 +118,15 @@ export function usedByLine(key, names) {
 
 /**
  * When each user last used the key, from the usage log (newest first):
- * ``app:<id>`` per app and ``agent`` for all the owner's agents together.
+ * ``app:<id>`` per app (the log names its installation too, ``app:<id>:<install>``)
+ * and ``agent`` for all the owner's agents together.
  */
 export function lastUseByCaller(usage) {
   const last = {}
   for (const entry of usage || []) {
     if (entry.outcome !== 'used' && entry.outcome !== 'revealed') continue
-    const [kind] = String(entry.caller || '').split(':')
-    const who = kind === 'agent' ? 'agent' : kind === 'app' ? entry.caller : null
+    const [kind, id] = String(entry.caller || '').split(':')
+    const who = kind === 'agent' ? 'agent' : kind === 'app' ? `app:${id}` : null
     if (who && !last[who]) last[who] = entry.ts
   }
   return last

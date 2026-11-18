@@ -321,49 +321,39 @@ def test_purge_after_ttl_hard_deletes(client, auth, db, bypass_url_validation, m
   assert forgotten == [app_id]
 
 
-def test_purge_waits_for_a_key_borrow_before_removing_anything(
-  client, auth, db, bypass_url_validation, monkeypatch,
+def test_trash_then_recover_keeps_the_installation_its_key_grants_name(
+  client, auth, db, bypass_url_validation, tmp_path,
 ):
-  """A borrow the app started is still on its way to the vault, which knows
-  the app only by its reusable id. The sweep leaves the tombstone and its
-  storage intact, then purges once the borrow has its answer."""
+  """Trash and recovery rotate the app's tokens but keep its installation,
+  so a key grant given before the trash holds for the recovered app's new
+  token, never for the token from before."""
   from app import key_vault
-  monkeypatch.setattr(key_vault, "forget_app", lambda app_id: _noop())
+  from app.deps import get_principal
+  from app.routes import keys as keys_routes
+  kv = key_vault._vault_rules()
+  store = kv.Vault(tmp_path / "vault")
   app = _install(client, auth)
   app_id = app["id"]
-  data_file = _seed_data(app_id)
+  row = db.get(models.App, app_id)
+  install, nonce = row.install_id, row.token_nonce
+  assert app["install_id"] == install
+  site = {"host": "api.example.com", "methods": ["GET"], "paths": ["/*"]}
+  store.put_key("lent", {"value": "dummy-lent-0123456789", "inject": {"type": "header", "name": "X-Key"},
+                         "grants": {"apps": [{"id": app_id, "install": install, "sites": [site]}]}})
+
+  def borrows(token):
+    caller = kv.parse_caller(keys_routes._caller(get_principal(token=token, db=db)))
+    return store.authorize("lent", caller, "GET", "api.example.com", "/x")[1] == "dummy-lent-0123456789"
+
+  assert borrows(_app_token(client, auth, app_id))
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
-  row = db.query(models.App).filter(models.App.id == app_id).first()
-  row.deleted_at = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
-  db.commit()
-
-  monkeypatch.setitem(key_vault._borrows_in_flight, app_id, 1)
-  client.get("/api/apps/", headers=auth)
   db.expire_all()
-  assert db.query(models.App).filter(models.App.id == app_id).first() is not None
-  assert data_file.exists()
-
-  monkeypatch.delitem(key_vault._borrows_in_flight, app_id)
-  client.get("/api/apps/", headers=auth)
+  assert db.get(models.App, app_id).install_id == install
+  assert client.post(f"/api/apps/{app_id}/recover", headers=auth).status_code == 200
   db.expire_all()
-  assert db.query(models.App).filter(models.App.id == app_id).first() is None
-  assert not data_file.exists()
-
-
-def test_permanent_delete_asks_to_retry_while_a_key_borrow_is_in_flight(
-  client, auth, db, bypass_url_validation, monkeypatch,
-):
-  from app import key_vault
-  monkeypatch.setattr(key_vault, "forget_app", lambda app_id: _noop())
-  app_id = _install(client, auth)["id"]
-  assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
-  monkeypatch.setitem(key_vault._borrows_in_flight, app_id, 1)
-  response = client.delete(f"/api/apps/{app_id}/permanent", headers=auth)
-  assert response.status_code == 409 and "Try again" in response.json()["detail"]
-  db.expire_all()
-  assert db.query(models.App).filter(models.App.id == app_id).first() is not None
-  monkeypatch.delitem(key_vault._borrows_in_flight, app_id)
-  assert client.delete(f"/api/apps/{app_id}/permanent", headers=auth).status_code == 204
+  row = db.get(models.App, app_id)
+  assert row.install_id == install and row.token_nonce != nonce
+  assert borrows(_app_token(client, auth, app_id))
 
 
 def test_permanent_delete_keeps_the_apps_data_while_the_vault_is_down(
@@ -381,10 +371,6 @@ def test_permanent_delete_keeps_the_apps_data_while_the_vault_is_down(
   db.expire_all()
   assert db.query(models.App).filter(models.App.id == app_id).first() is not None
   assert data_file.exists(), "nothing is removed before the vault forgets the app"
-
-
-async def _noop():
-  return None
 
 
 def test_provider_app_purge_detaches_but_preserves_native_project(

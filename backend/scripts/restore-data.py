@@ -100,8 +100,8 @@ SECRET_FILES = ("service-token.txt", ".secret-key")
 SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push", ".vault")
 
 # The key vault program: a restore whose backup carries no vault keeps the
-# current vault and withdraws every app grant not proven to name the same app
-# after the restore (KeptVault), keeping every key's value. It resolves to
+# current vault and withdraws every app grant whose installation the restored
+# database does not hold (KeptVault), keeping every key's value. It resolves to
 # /app/vault/keyvault.py in the image (the Dockerfile ships backend/vault
 # beside backend/scripts), never to agent-editable /data, because a restore
 # runs as root; --vault-program overrides it deliberately.
@@ -242,14 +242,13 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
-def app_identities(db_path):
-  """App id -> its installation (slug and token nonce) in a Möbius database,
-  or None when it can't be read.
+def app_installs(db_path):
+  """App id -> its installation id (``apps.install_id``) in a Möbius
+  database, or None when it can't be read.
 
-  The nonce changes when an id is reused by a new installation, so a purged
-  app whose id went to a new app with the same slug still counts as another
-  app. A database from before nonces existed reads every nonce as None, which
-  matches no installation that has one, so its grants are withdrawn.
+  An installation id is never reused and never changes, so a vault grant
+  naming one is for that app in any database that holds it. A database from
+  before installation ids reads every one as None, which matches no grant.
   """
   if not os.path.isfile(db_path):
     return None
@@ -257,30 +256,30 @@ def app_identities(db_path):
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     try:
       columns = {row[1] for row in conn.execute("PRAGMA table_info(apps)")}
-      nonce = "token_nonce" if "token_nonce" in columns else "NULL"
-      rows = conn.execute(f"SELECT id, slug, {nonce} FROM apps").fetchall()
+      install = "install_id" if "install_id" in columns else "NULL"
+      rows = conn.execute(f"SELECT id, {install} FROM apps").fetchall()
     finally:
       conn.close()
   except sqlite3.Error:
     return None
-  return {int(app_id): (slug, token_nonce) for app_id, slug, token_nonce in rows}
+  return {int(app_id): install_id for app_id, install_id in rows}
 
 
-def unproven_app_ids(named, before, after):
-  """The app ids among ``named`` whose grants the kept vault must withdraw:
-  every id the databases from before and after the restore don't both give
-  to the same installation (slug and token nonce).
+def installs_not_held(named, installs):
+  """The ``(app id, install)`` pairs among ``named`` (what the kept vault's
+  grants and requests name) that the restored database (``installs``) does
+  not hold.
 
-  App ids are reused, so a grant naming an id would let whichever app holds
-  it now borrow the key. A grant is kept only when it provably still names
-  the app it was given to; an unreadable database, or an id one of them
-  lacks, proves nothing and withdraws it.
+  A grant is kept only when the restored database gives its id the very
+  installation it was given to. One that names no installation (a store from
+  before installation ids, not yet stamped by a server start), and every one
+  when the database can't be read, proves nothing and is withdrawn.
   """
-  if before is None or after is None:
-    return sorted(named)
-  return sorted(app_id for app_id in named
-                if app_id not in before or app_id not in after
-                or before[app_id] != after[app_id])
+  return sorted(
+    (pair for pair in named
+     if installs is None or pair[1] is None or installs.get(pair[0]) != pair[1]),
+    key=lambda pair: (pair[0], pair[1] or ""),
+  )
 
 
 class VaultBusy(RuntimeError):
@@ -327,21 +326,22 @@ class KeptVault:
       return None
     return cls(vault_dir, program)
 
-  def withdraw_unproven_grants(self, before, after):
-    """Withdraw, in one vault change, the grants and requests of every app id
-    not proven to be the same app (``unproven_app_ids``); return those ids.
+  def withdraw_grants_not_held(self, installs):
+    """Withdraw, in one vault change, the grants and requests of every app
+    installation the restored database does not hold (``installs_not_held``);
+    return those app ids.
 
     Values are kept: a key an app saved for itself becomes the owner's, so the
     owner can let an app use it again. The agents' requests name no app and
     stay.
     """
-    named = {r["app"] for r in self._vault.list_requests() if r["app"] is not None}
+    named = {(r["app"], r.get("install")) for r in self._vault.list_requests() if r["app"] is not None}
     for key in self._vault.list_keys():
-      named.update(grant["id"] for grant in key["grants"]["apps"])
-    stale = unproven_app_ids(named, before, after)
+      named.update((grant["id"], grant.get("install")) for grant in key["grants"]["apps"])
+    stale = installs_not_held(named, installs)
     if stale:
-      self._vault.withdraw_apps(stale, actor="platform:restore", why="not proven the same app after a restore")
-    return stale
+      self._vault.withdraw_apps(stale, actor="platform:restore", why="not installed after a restore")
+    return sorted({app_id for app_id, _install in stale})
 
   def close(self):
     os.close(self._lock)
@@ -354,26 +354,24 @@ def restored_database(staging, data_dir):
   return os.path.join(root, DB_RELPATH)
 
 
-def reconcile_kept_vault(kept_vault, before, after_db):
+def reconcile_kept_vault(kept_vault, after_db):
   """Before the swap of a restore that keeps the current vault: withdraw every
-  app grant not proven to name the same app afterwards, keeping every value,
-  and tell the owner to review. Returns the withdrawn ids; raises when the
-  vault can't be updated, which can leave grants withdrawn but never a value
-  lost."""
+  app grant whose installation the restored database does not hold, keeping
+  every value, and tell the owner to review. Returns the withdrawn ids;
+  raises when the vault can't be updated, which can leave grants withdrawn
+  but never a value lost."""
   log("WARNING: the backup has no key vault, so the key vault (/data/.vault) "
-      "is KEPT from the current install. Its app grants refer to app ids "
-      "of the current install, which the restored database may give to "
-      "other apps.")
-  after = app_identities(after_db)
-  if before is None or after is None:
-    log("WARNING: could not read the apps from "
-        f"{'before' if before is None else 'after'} the restore, so no app "
-        "grant can be proven to name the same app; withdrawing every one.")
-  stale = kept_vault.withdraw_unproven_grants(before, after)
+      "is KEPT from the current install. Its app grants name app "
+      "installations, which the restored database may not hold.")
+  installs = app_installs(after_db)
+  if installs is None:
+    log("WARNING: could not read the apps from the restored database, so no "
+        "app grant can be kept; withdrawing every one.")
+  stale = kept_vault.withdraw_grants_not_held(installs)
   if stale:
-    log(f"withdrew key grants and requests for app ids {stale}: not proven "
-        "to be the same app after the restore. Every key is kept, with its "
-        "value; one an app saved for itself is now yours.")
+    log(f"withdrew key grants and requests for app ids {stale}: the restored "
+        "database does not hold the installations they were given to. Every "
+        "key is kept, with its value; one an app saved for itself is now yours.")
   log("Review the app grants in Settings › Keys, and allow an app again "
       "there if it needs a key.")
   return stale
@@ -504,11 +502,6 @@ def main():
     die(f"insufficient space to stage restore: need ~{need}, have {free}",
         code=3)
 
-  # Which app each id names now, before the restored database replaces it.
-  # Read whatever the backup holds: only the swap tells whether a vault came
-  # with it (a secrets archive from before the vault has none).
-  apps_before = app_identities(os.path.join(data_dir, DB_RELPATH))
-
   ts = lib.format_ts(datetime.now(timezone.utc))
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
   rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
@@ -535,10 +528,10 @@ def main():
           "may need to re-authenticate and JWTs will be re-signed")
 
     # A backup without a vault (no secrets, or secrets from before the vault)
-    # keeps the current one, whose app grants name this install's app ids.
-    # Withdraw those not proven to name the same app before swapping: if that
-    # fails nothing changed, and if the swap then fails only grants the owner
-    # can allow again are gone.
+    # keeps the current one, whose app grants name app installations.
+    # Withdraw those the restored database does not hold before swapping: if
+    # that fails nothing changed, and if the swap then fails only grants the
+    # owner can allow again are gone.
     withdrawn = []
     if ".vault" not in os.listdir(staging):
       try:
@@ -557,8 +550,7 @@ def main():
             f"vault program with --vault-program; /data unchanged.", code=4)
       if kept_vault is not None:
         try:
-          withdrawn = reconcile_kept_vault(
-            kept_vault, apps_before, restored_database(staging, data_dir))
+          withdrawn = reconcile_kept_vault(kept_vault, restored_database(staging, data_dir))
         except Exception as exc:  # noqa: BLE001 - nothing restored, no value lost
           die(f"could not update the key vault ({exc}); /data unchanged and "
               f"no key erased. If some app grants were withdrawn, allow those "

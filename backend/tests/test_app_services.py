@@ -988,7 +988,7 @@ def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
   # which is stubbed so the gate, not vault I/O, decides the answer.
   saved = []
 
-  async def save_app_key(app_id, name, value):
+  async def save_app_key(app_id, install, name, value):
     saved.append((app_id, name))
     return name
 
