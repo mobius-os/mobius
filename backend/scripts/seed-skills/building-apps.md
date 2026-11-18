@@ -1090,6 +1090,28 @@ works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
 
+## Sharing — `navigator.share` from a tap
+
+App frames in the shell, standalone, and public-link hosts, and web-service
+apps, are delegated `web-share`, so a Share button calls the ordinary Web Share
+API. The browser requires a live user gesture and shows its own share sheet.
+Many desktop browsers have no `navigator.share`, so feature-detect it and keep
+the clipboard as the fallback. A dismissed sheet rejects with `AbortError`;
+treat that as a cancel, not a failure:
+
+```jsx
+async function onShare() {
+  if (!navigator.share) return onCopy() // the clipboard path above
+  try {
+    await navigator.share({ title, text, url })
+  } catch (err) {
+    if (err.name !== 'AbortError') onCopy()
+  }
+}
+```
+
+Before sharing files, check `navigator.canShare?.({ files })`.
+
 ## Owner confirmation — `window.mobius.ownerGrant.request`
 
 A few actions must be the owner's own decision, not just something the app's

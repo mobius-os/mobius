@@ -1970,7 +1970,7 @@ const AppCanvas = forwardRef(function AppCanvas({
             src={serviceSurfaceFrameUrl(serviceSurface.url, serviceSurface.correlation)}
             title={appName || serviceSurface.slug}
             sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-downloads allow-same-origin allow-top-navigation-by-user-activation"
-            allow="clipboard-read; clipboard-write; fullscreen; gamepad"
+            allow="clipboard-read; clipboard-write; fullscreen; gamepad; web-share"
           />
         )}
         {!loaded && (

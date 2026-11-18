@@ -62,8 +62,38 @@ test('frame suspension cancels compositor momentum without changing the resting 
   assert.match(frame, /suspendedScrollFrame = window\.__mobiusNativeFrame\(holdSuspendedScroll\)/)
 })
 
+function allowListAfter(source, marker) {
+  const at = source.indexOf(marker)
+  assert.ok(at >= 0, `missing frame marker ${marker}`)
+  // Whitespace-led so a quoted `allow="feature"` in a comment is skipped.
+  const allow = source.slice(at).match(/\sallow="([^"]*)"/)
+  assert.ok(allow, `no allow list after ${marker}`)
+  return allow[1].split(';').map(entry => entry.trim()).filter(Boolean)
+}
+
+const appFrameAllow = allowListAfter(canvas, 'data-frame-version={v}')
+
 test('ordinary app frames may open the device share sheet from a tap', () => {
-  assert.match(canvas, /allow="[^"]*\bweb-share \*[^"]*"/)
+  assert.ok(appFrameAllow.includes('web-share *'), appFrameAllow.join('; '))
+})
+
+test('web-service app frames may open the device share sheet from a tap', () => {
+  // The service surface is a real origin (allow-same-origin), so the bare
+  // entry targets it the same way its other features do.
+  const serviceAllow = allowListAfter(canvas, 'src={serviceSurfaceFrameUrl(')
+  assert.ok(serviceAllow.includes('web-share'), serviceAllow.join('; '))
+})
+
+test('the public-link host delegates every feature the shell delegates to the opaque app document', () => {
+  // Only `*` entries reach the opaque app document; a bare entry such as
+  // `clipboard-write` targets the src origin, which that document never has.
+  const publicHost = readFileSync(
+    resolve(src, '../../backend/app/routes/public_apps.py'),
+    'utf8',
+  )
+  const publicAllow = allowListAfter(publicHost, '<iframe id="app"')
+  const reachesApp = list => list.filter(entry => entry.endsWith(' *')).sort()
+  assert.deepEqual(reachesApp(publicAllow), reachesApp(appFrameAllow))
 })
 
 const SHELL_ORIGIN = 'https://mobius.test'
