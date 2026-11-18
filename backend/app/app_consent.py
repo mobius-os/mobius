@@ -124,31 +124,40 @@ def _row(row_id: str, title: str, text: str, *, level: str | None = None,
 
 
 def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
-  """The one "AI agents" row: the app's role, its own reason and agent tools.
+  """The one "AI agents" row: the agents' access scope, what it grants, the
+  app's own reason and the tools it asks for.
 
-  An Owner role, and an app that declares no role but runs agents, keep full
-  access and use the critical ``agent_start`` row. A confined role's scope
-  names what it reaches, so an update asks again only when it adds reach
-  (Viewer to Editor, a new tool) and never when it narrows.
+  Admin, and an app that declares no scope but runs agents, keep full access
+  and use the critical ``agent_start`` row. A confined scope names what it
+  reaches, so an update asks again only when it adds reach (Read to Edit, a
+  new tool) and never when it narrows. ``grant`` is the platform's own words:
+  an app's reason cannot be trusted to state its own risk. ``declared`` says
+  whether ``text`` is the app's reason or the platform's note for an app that
+  declares nothing.
   """
-  from app.agent_roles import role_from_contract
+  from app.agent_roles import ROLES, role_from_contract
 
   role = role_from_contract({"agent": agent})
   if role is None and not agent.get("embeds_agent"):
     return None
   if role is None or not role.confined:
-    text = role.why if role is not None else (
+    text = role.reason if role is not None else (
       "Can open agent chats on its own. Commands in those chats run on your "
       "Möbius without asking you first."
     )
-    row = _row("agent_start", "Run AI agents", text, level="Owner")
-    return {**row, "group": "agent", "tools": []}
+    row = _row("agent_start", "Run AI agents", text, level=ROLES["admin"].label)
+    return {
+      **row, "group": "agent", "grant": ROLES["admin"].grants,
+      "declared": role is not None, "tools": [],
+    }
   data = role.spec.data
   reach = {"read": ["data:read"], "write": ["data:read", "data:write"], None: []}[data]
   return {
-    **_row("agent_role", "Run AI agents", role.why, level=role.spec.label,
+    **_row("agent_role", "Run AI agents", role.reason, level=role.spec.label,
            scope=[*reach, *(f"tool:{name}" for name in role.tools)]),
     "group": "agent",
+    "grant": role.spec.grants,
+    "declared": True,
     "tools": [_agent_tool(name, role.reads_private_data) for name in role.tools],
   }
 
@@ -594,16 +603,17 @@ def _note(row: dict[str, Any], held: dict[str, list[tuple[str, int]]]) -> str:
 def _agent_update(
   row: dict[str, Any], accepted: dict[str, dict[str, Any]] | None,
 ) -> dict[str, Any]:
-  """The AI agents block on an update: only the tools it adds, and the role it
+  """The AI agents block on an update: only the tools it adds, and the scope it
   replaces. It speaks otherwise only in the app's own reason."""
+  from app.agent_roles import ROLES
+
   held = (accepted or {}).get("agent_role") if row["id"] == "agent_role" else None
   if held is None:
     return {**row, "note": None}
   scope = held["scope"]
-  before = (
-    "Editor" if "data:write" in scope else "Viewer" if "data:read" in scope
-    else "Operator"
-  )
+  before = ROLES[
+    "edit" if "data:write" in scope else "read" if "data:read" in scope else "tools"
+  ].label
   return {
     **row,
     "tools": [tool for tool in row["tools"] if f"tool:{tool['id']}" not in scope],

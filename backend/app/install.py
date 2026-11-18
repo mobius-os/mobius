@@ -3927,7 +3927,7 @@ async def install_from_manifest(
   from app.agent_roles import stop_runs_outside_grant
   if not await stop_runs_outside_grant(db, result.app.id):
     result.warnings.append(
-      "Some of this app's running agents did not stop after its agent role changed."
+      "Some of this app's running agents did not stop after its agent access changed."
     )
   return result
 

@@ -602,7 +602,7 @@ def _apply_local_manifest_runtime(
     service=service,
     tools=list(manifest.get("tools") or []),
     model_provider=manifest.get("model_provider"),
-    agent_role=manifest.get("agent_role"),
+    agent_access=manifest.get("agent"),
   )
 
 

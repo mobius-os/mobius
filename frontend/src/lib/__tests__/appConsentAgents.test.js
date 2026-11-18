@@ -12,37 +12,54 @@ after(() => vite.close())
 
 const render = row => renderToStaticMarkup(createElement(AppConsentAgents, { row }))
 
-test('a confined role shows its chip, the app’s own reason and its agent tools', () => {
+test('a confined scope shows its label, what it grants, the app’s reason and its tools', () => {
   const html = render({
-    id: 'agent_role', level: 'Editor', critical: false, text: 'Builds the sites you make here.',
+    id: 'agent_role', level: 'Edit', critical: false, declared: true,
+    grant: 'Can read and change this app’s files and data.',
+    text: 'Builds the sites you make here.',
     tools: [
       { id: 'notify', title: 'Notifications', text: 'Send you notifications.', warning: false },
       { id: 'web', title: 'Web access', text: 'Search the web and open public pages.', warning: true },
     ],
   })
-  assert.match(html, /app-consent__chip">Editor</)
-  assert.match(html, /Builds the sites you make here\./)
-  assert.match(html, /Agent tools/)
+  assert.match(html, /app-consent__chip">Edit</)
+  assert.match(html, /app-consent__agents-grant">Can read and change this app’s files and data\.</)
+  assert.match(html, /App’s reason<\/p><p class="app-consent__agents-reason">Builds the sites you make here\./)
+  assert.match(html, /Tools requested/)
   assert.match(html, /app-consent__tool--warning"><strong>Web access<\/strong><span>Search the web and open public pages\. App data may reach the web\./)
   assert.doesNotMatch(html, /Full access to your Möbius/)
-  assert.doesNotMatch(html, /app-consent__dot/)
 })
 
-test('an update names the role it replaces', () => {
+test('a Tools scope without tools lists none, and an update names the scope it replaces', () => {
   const html = render({
-    id: 'agent_role', level: 'Editor', critical: false, text: 'Edits your notes.',
-    note: 'Previously Viewer.', tools: [],
+    id: 'agent_role', level: 'Tools', critical: false, declared: true,
+    grant: 'No access to this app’s data or the rest of your Möbius.',
+    text: 'Looks up public sources.', note: 'Previously Read.', tools: [],
   })
-  assert.match(html, /app-consent__agents-note">Previously Viewer\.</)
-  assert.doesNotMatch(html, /Agent tools/)
+  assert.match(html, /app-consent__chip">Tools</)
+  assert.match(html, /app-consent__agents-note">Previously Read\.</)
+  assert.doesNotMatch(html, /Tools requested/)
 })
 
-test('an owner role adds the fixed full-access line and the critical dot, with no tools list', () => {
+test('Admin leads with the fixed full-access callout', () => {
   const html = render({
-    id: 'agent_start', level: 'Owner', critical: true, text: 'Manages your apps.', tools: [],
+    id: 'agent_start', level: 'Admin', critical: true, declared: true,
+    grant: 'Can read and change every app, your data and your settings without asking.',
+    text: 'Manages your apps.', tools: [],
   })
-  assert.match(html, /app-consent__chip app-consent__chip--critical">Owner</)
-  assert.match(html, /Full access to your Möbius\./)
-  assert.match(html, /app-consent__dot/)
-  assert.doesNotMatch(html, /Agent tools/)
+  assert.match(html, /app-consent__agents app-consent__agents--admin/)
+  assert.match(html, /app-consent__chip app-consent__chip--critical">Admin</)
+  assert.match(html, /role="note"[^>]*>.*<strong>Full access to your Möbius<\/strong>/s)
+  assert.doesNotMatch(html, /Tools requested/)
+})
+
+test('an app that declares nothing shows the platform’s note, not an app reason', () => {
+  const html = render({
+    id: 'agent_start', level: 'Admin', critical: true, declared: false,
+    grant: 'Can read and change every app, your data and your settings without asking.',
+    text: 'Can open agent chats on its own.', tools: [],
+  })
+  assert.match(html, /Full access to your Möbius/)
+  assert.doesNotMatch(html, /App’s reason/)
+  assert.match(html, /Can open agent chats on its own\./)
 })

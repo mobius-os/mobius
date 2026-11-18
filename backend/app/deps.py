@@ -549,7 +549,7 @@ def _enforce_app_scope(payload: dict, db: Session) -> models.App | None:
   if key is not None and not key.matches(confined_role_for_app(app)):
     # A narrower role (or none) applies from the next request of a run that
     # started under a wider one, not from its next run.
-    raise HTTPException(status_code=401, detail="This app's agent role has changed.")
+    raise HTTPException(status_code=401, detail="This app's agent access has changed.")
   return app
 
 

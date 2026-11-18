@@ -2299,7 +2299,7 @@ async def apply_app_source(
   from app.agent_roles import stop_runs_outside_grant
   if not await stop_runs_outside_grant(db, result.app.id):
     warnings.append(
-      "Some of this app's running agents did not stop after its agent role changed."
+      "Some of this app's running agents did not stop after its agent access changed."
     )
   return schemas.AppApplyOut(mode=result.mode, app=result.app, warnings=warnings)
 
