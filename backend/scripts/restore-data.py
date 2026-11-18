@@ -265,6 +265,21 @@ def app_installs(db_path):
   return {int(app_id): install_id for app_id, install_id in rows}
 
 
+def predates_installs(installs):
+  """Whether a readable restored database is from before apps had
+  installation ids, so none of its apps can keep a key grant."""
+  return bool(installs) and all(install is None for install in installs.values())
+
+
+# Said where the kept vault is checked and again at the very end, so it is
+# not lost in the output between: such a backup withdraws every app's grants.
+OLD_BACKUP_NOTICE = (
+  "NOTE: this backup is from before Möbius gave each app an installation id, "
+  "so no app's key permissions could be matched and every one was withdrawn. "
+  "Your keys are all kept. In Settings › Keys, let each app use its keys "
+  "again, or open the app: it asks again when it next needs a key.")
+
+
 def installs_not_held(named, installs):
   """The ``(app id, install)`` pairs among ``named`` (what the kept vault's
   grants and requests name) that the restored database (``installs``) does
@@ -372,6 +387,8 @@ def reconcile_kept_vault(kept_vault, after_db):
     log(f"withdrew key grants and requests for app ids {stale}: the restored "
         "database does not hold the installations they were given to. Every "
         "key is kept, with its value; one an app saved for itself is now yours.")
+  if stale and predates_installs(installs):
+    log(OLD_BACKUP_NOTICE)
   log("Review the app grants in Settings › Keys, and allow an app again "
       "there if it needs a key.")
   return stale
@@ -532,7 +549,7 @@ def main():
     # Withdraw those the restored database does not hold before swapping: if
     # that fails nothing changed, and if the swap then fails only grants the
     # owner can allow again are gone.
-    withdrawn = []
+    withdrawn, old_backup = [], False
     if ".vault" not in os.listdir(staging):
       try:
         kept_vault = KeptVault.open_if_any(data_dir, args.vault_program)
@@ -550,7 +567,9 @@ def main():
             f"vault program with --vault-program; /data unchanged.", code=4)
       if kept_vault is not None:
         try:
-          withdrawn = reconcile_kept_vault(kept_vault, restored_database(staging, data_dir))
+          after_db = restored_database(staging, data_dir)
+          withdrawn = reconcile_kept_vault(kept_vault, after_db)
+          old_backup = bool(withdrawn) and predates_installs(app_installs(after_db))
         except Exception as exc:  # noqa: BLE001 - nothing restored, no value lost
           die(f"could not update the key vault ({exc}); /data unchanged and "
               f"no key erased. If some app grants were withdrawn, allow those "
@@ -601,6 +620,8 @@ def main():
   log("hardened secret perms (600/700)")
   log("restore complete. Start uvicorn / the container now so it opens "
       "the restored DB fresh.")
+  if old_backup:
+    log(OLD_BACKUP_NOTICE)
 
 
 if __name__ == "__main__":

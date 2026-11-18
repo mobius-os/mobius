@@ -958,6 +958,38 @@ def test_a_restore_keeps_the_keys_apps_saved_for_themselves(tmp_path, why, kept)
     assert key["grants"]["apps"] == [] and not key.get("origin")
 
 
+def test_restoring_a_backup_from_before_installation_ids_says_to_allow_apps_again(tmp_path):
+  """A backup from before installation ids names no app's installation, so
+  every app grant is withdrawn (values kept), and the restore says plainly,
+  at its end too, that the owner lets each app use its keys again."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes"}, install_ids=False)
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes"})
+  _vault_granting(data, kv, [1])
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  out = restored.stdout
+  assert out.count("from before Möbius gave each app an installation id") == 2
+  assert out.rstrip().endswith("it asks again when it next needs a key.")
+  assert kv.Vault(data / ".vault").list_keys()[0]["grants"]["apps"] == []
+
+
+def test_a_current_backup_says_nothing_about_installation_ids(tmp_path):
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: "chess"})
+  _vault_granting(data, kv, [1, 2])
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "withdrew" in restored.stdout and "installation id, so" not in restored.stdout
+
+
 def test_a_vault_store_the_restore_cannot_read_is_named_as_such(tmp_path):
   """A store newer than the restore's vault program is refused with that
   reason (and the way round it), not as a running vault."""

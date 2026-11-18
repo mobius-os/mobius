@@ -576,17 +576,17 @@ def test_the_owner_hears_once_which_apps_imported_keys_need_sites(client, auth, 
   _legacy_secret(ready.id, "api_key", "ready-secret")
   _legacy_secret(needs.id, "token", "needs-secret")
 
-  asyncio.run(key_vault._settle_vault_when_ready())
+  asyncio.run(key_vault._import_when_ready())
   assert len(pushes) == 1
   [notice] = pushes
   assert notice["target"] == "/shell/?settings=keys" and notice["source_type"] == "system"
   assert "Needs" in notice["body"] and "Ready" not in notice["body"]
   # A later start imports nothing new and says nothing again.
-  asyncio.run(key_vault._settle_vault_when_ready())
+  asyncio.run(key_vault._import_when_ready())
   assert len(pushes) == 1
   # Nor does a start that moves nothing, such as one retrying an unreadable value.
   (Path(key_vault._legacy_root()) / str(ready.id) / "late").write_bytes(b"not a token")
-  asyncio.run(key_vault._settle_vault_when_ready())
+  asyncio.run(key_vault._import_when_ready())
   assert len(pushes) == 1
 
 
@@ -613,7 +613,7 @@ def test_a_server_start_names_each_apps_installation_to_a_vault_from_before_them
   use = "/api/keys/use/shared/api.example.com/v1/x"
   assert client.get(use, headers=_app_auth(db, weather)).status_code == 403
 
-  asyncio.run(key_vault._settle_vault_when_ready())
+  asyncio.run(key_vault._name_app_installs())
 
   db.refresh(older)
   assert older.install_id is not None and older.install_id != weather.install_id
@@ -625,6 +625,69 @@ def test_a_server_start_names_each_apps_installation_to_a_vault_from_before_them
   assert client.get(use, headers=_app_auth(db, older)).status_code == 200
   # Naming them again changes nothing.
   assert asyncio.run(key_vault.adopt_app_installs()) == {"stamped": 0, "keys": [], "requests": 0}
+
+
+def test_naming_installations_retries_until_the_vault_takes_them(client, db, vault, monkeypatch):
+  """A vault that refuses or can't take the names leaves every app without
+  its keys, so naming retries by itself rather than waiting for the server's
+  next start."""
+  import asyncio
+  weather = _app(db, "weather")
+  vault.put_key("shared", {"value": DUMMY, "inject": ASK["inject"], "grants": {"apps": [
+    {"id": weather.id, "install": weather.install_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
+  for grant in vault._records["shared"]["grants"]["apps"]:
+    grant["install"] = None
+  real = key_vault.adopt_app_installs
+  calls = []
+
+  async def flaky():
+    calls.append(1)
+    if len(calls) < 3:
+      raise key_vault.VaultUnavailable("The key vault did not answer.")
+    return await real()
+  monkeypatch.setattr(key_vault, "adopt_app_installs", flaky)
+  monkeypatch.setattr(key_vault, "_NAME_INSTALLS_RETRY_SECS", (0,))
+  asyncio.run(asyncio.wait_for(key_vault._name_app_installs(), timeout=5))
+  assert len(calls) == 3
+  [record] = vault.list_keys()
+  assert [(g["id"], g["install"]) for g in record["grants"]["apps"]] == [(weather.id, weather.install_id)]
+
+
+def test_each_vault_start_names_installations_again(monkeypatch, tmp_path):
+  """The supervisor names installations to every vault it starts, not only
+  the first, so a vault that restarts is named without a server restart."""
+  import asyncio
+  started = []
+
+  async def name():
+    started.append(1)
+  monkeypatch.setattr(key_vault, "_name_app_installs", name)
+  monkeypatch.setattr(key_vault, "_import_when_ready", lambda: asyncio.sleep(0))
+  monkeypatch.setattr(key_vault, "VAULT_PROGRAM", Path(__file__))
+  monkeypatch.setattr(key_vault, "_RESTART_BACKOFF_SECS", (0,))
+
+  class Exited:
+    returncode = 0
+    async def wait(self):
+      await asyncio.sleep(0)
+      return 0
+  runs = []
+
+  async def spawn(*args, **kwargs):
+    runs.append(1)
+    if len(runs) > 3:
+      raise asyncio.CancelledError
+    return Exited()
+  monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+  monkeypatch.setattr(key_vault.get_settings(), "data_dir", str(tmp_path), raising=False)
+
+  async def run():
+    try:
+      await key_vault.supervise_key_vault()
+    except asyncio.CancelledError:
+      pass
+  asyncio.run(asyncio.wait_for(run(), timeout=5))
+  assert len(started) == 3
 
 
 def test_a_purged_apps_unimported_secrets_never_reach_an_app_reusing_its_id(client, auth, db, vault):

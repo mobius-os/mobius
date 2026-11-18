@@ -798,37 +798,60 @@ async def adopt_app_installs() -> dict:
   )
 
 
-async def _settle_vault_when_ready() -> None:
-  """Once the vault answers after the server starts: name every app's
-  installation to it (``adopt_app_installs``), then run the one-time legacy
-  import.
-
-  An instance whose vault never stored anything, with nothing left to move
-  (the usual case for a new one), never waits on the vault or touches it.
-  """
-  root = _legacy_root()
-  pending_import = bool(_pending_legacy_secrets(root, _read_ledger(root)))
-  if not (_vault_ever_used() or pending_import):
-    return
-  for _ in range(60):
+async def _vault_answers(attempts: int = 60) -> bool:
+  """Wait, up to ``attempts`` seconds, until the vault answers."""
+  for _ in range(attempts):
     try:
       await vault_call("GET", "/health")
-      break
+      return True
     except VaultUnavailable:
       await asyncio.sleep(1)
-  else:
-    log.warning("key vault did not start; app installations and legacy app secrets wait for the next start")
+  return False
+
+
+# Seconds between attempts to name app installations to a vault that has
+# not taken them yet, the last repeated: the vault's own restart schedule.
+_NAME_INSTALLS_RETRY_SECS = (5, 15, 60)
+
+
+async def _name_app_installs() -> None:
+  """Name every app's installation to the vault that just started, retrying
+  until it succeeds (``adopt_app_installs``).
+
+  Started each time the supervisor starts the vault, so a vault that failed
+  to take them, or restarted, is named again without waiting for the server
+  to restart: until then entries from an older store let no app use its keys.
+  Naming again is harmless, since entries already naming an installation are
+  never changed. An instance whose vault never stored anything has nothing
+  to name.
+  """
+  if not _vault_ever_used():
     return
-  try:
-    adopted = await adopt_app_installs()
-  except Exception:
-    log.exception("key vault: could not name app installations; retried on the next start")
-  else:
-    if adopted.get("stamped") or adopted.get("keys") or adopted.get("requests"):
-      log.info("key vault: named installations on %d grant(s) and request(s); withdrew %d key grant(s) "
-               "and %d request(s) of ids no app holds", adopted["stamped"], len(adopted["keys"]),
-               adopted["requests"])
-  if not pending_import:
+  attempt = 0
+  while True:
+    try:
+      if await _vault_answers():
+        adopted = await adopt_app_installs()
+        if adopted.get("stamped") or adopted.get("keys") or adopted.get("requests"):
+          log.info("key vault: named installations on %d grant(s) and request(s); withdrew %d key "
+                   "grant(s) and %d request(s) of ids no app holds", adopted["stamped"],
+                   len(adopted["keys"]), adopted["requests"])
+        return
+    except Exception:
+      log.warning("key vault: could not name app installations yet; retrying", exc_info=True)
+    await asyncio.sleep(_NAME_INSTALLS_RETRY_SECS[min(attempt, len(_NAME_INSTALLS_RETRY_SECS) - 1)])
+    attempt += 1
+
+
+async def _import_when_ready() -> None:
+  """Once per server start, import values still in the retired per-app
+  secret store, once the vault answers. An instance with nothing left to move
+  (the usual case) never waits on the vault."""
+  root = _legacy_root()
+  if not _pending_legacy_secrets(root, _read_ledger(root)):
+    return
+  if not await _vault_answers():
+    log.warning("key vault did not start; legacy app secrets wait for the next start")
     return
   from app import models
   from app.database import SessionLocal
@@ -895,13 +918,14 @@ async def supervise_key_vault() -> None:
 
   The vault exits on its own when this server's pid stops being its parent,
   so a crashed server never leaves an orphan holding the socket. Once per
-  server start, every app's installation is named to the vault and values
-  from the retired per-app secret store are imported.
+  vault start, every app's installation is named to it (``_name_app_installs``,
+  retried until it succeeds); once per server start, values from the retired
+  per-app secret store are imported.
   """
   if not VAULT_PROGRAM.is_file():
     log.warning("key vault program missing at %s; Keys stay unavailable", VAULT_PROGRAM)
     return
-  importer = asyncio.create_task(_settle_vault_when_ready())
+  importer = asyncio.create_task(_import_when_ready())
   failures = 0
   log_dir = Path(get_settings().data_dir) / "logs"
   log_dir.mkdir(parents=True, exist_ok=True)
@@ -919,12 +943,15 @@ async def supervise_key_vault() -> None:
           **{k: os.environ[k] for k in ("SSL_CERT_FILE", "SSL_CERT_DIR") if k in os.environ},
         },
       )
+    namer = asyncio.create_task(_name_app_installs())
     try:
       code = await process.wait()
     except asyncio.CancelledError:
       importer.cancel()
+      namer.cancel()
       await _stop(process)
       raise
+    namer.cancel()
     if asyncio.get_running_loop().time() - started >= _HEALTHY_RUN_SECS:
       failures = 0
     delay = _RESTART_BACKOFF_SECS[min(failures, len(_RESTART_BACKOFF_SECS) - 1)]
