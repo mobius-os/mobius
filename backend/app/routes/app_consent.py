@@ -112,9 +112,17 @@ async def revoke_consent(
     raise HTTPException(status_code=409, detail="This app does not use first-open consent.")
   app_consent.revoke(app)
   db.commit()
+  from app.agent_roles import stop_runs_outside_grant
+  agents_stopped = await stop_runs_outside_grant(db, app.id)
   await deactivate_app_skills(app.id)
   activity.log_event("app_consent", app_id=app.id, slug=app.slug, action="revoked")
   get_system_broadcast().publish({"type": "app_updated", "appId": str(app.id)})
+  if not agents_stopped:
+    # Revoking again retries only the Stop: the app is already dormant.
+    raise HTTPException(
+      status_code=503,
+      detail="Access was taken back, but some of the app's agents did not stop. Try again.",
+    )
   return {"status": app_consent.status(app), "app_id": app.id}
 
 

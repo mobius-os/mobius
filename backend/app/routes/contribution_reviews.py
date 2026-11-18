@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, load_only
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
 from app import contribution_review_list as list_view
 from app import contribution_review_presets as presets
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
 from app.contribution_review_public_actions import post_public_review
@@ -56,7 +57,7 @@ REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
                        "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
-                       "pr_machine": True, "owner_confirm": True,
+                       "pr_machine": True, "owner_confirm": True, "post_findings_now": True,
                        # Following (the autopilot grant) can start on a sent PR, and can ask before each push.
                        "follow_after_send": True, "follow_ask_mode": True}
 PUBLISHING_MODES = {"review", "review_merge"}
@@ -143,6 +144,22 @@ class ReviewOutcome(PullIdentity):
   tests_passed: bool | None = None
   reviewed_base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
   independent_receipt_id: str | None = Field(default=None, max_length=64)
+  # False when no finding should hold the PR up: a verdict proposal is then a plain comment.
+  blocking: bool = Field(default=True, strict=True)
+  # The obstacle outside the reviewer's control that ended this review early. Never a verdict.
+  blocked: str | None = Field(default=None, min_length=1, max_length=2000)
+
+  @model_validator(mode="after")
+  def only_findings_can_be_non_blocking(self):
+    if not self.blocking and self.state != "needs_you":
+      raise ValueError("blocking:false describes findings (needs_you); an all_clear result has none.")
+    return self
+
+  @model_validator(mode="after")
+  def a_blocked_review_is_private(self):
+    if self.blocked and (self.state != "needs_you" or self.publish):
+      raise ValueError("blocked names why a review could not finish: send it as needs_you without publish.")
+    return self
 
 
 def _row(db, app_id, run_id, principal):
@@ -239,6 +256,8 @@ def _saved_options_input(row):
 
 
 def _snapshot(db, body, principal):
+  """The options and model one preview or new grant freezes, for this caller."""
+  _refuse_agent_enabled_auto_send(body.options, principal)
   choice = resolve_round_choice(db)
   requested = getattr(body, "agent", None)
   if requested:
@@ -269,8 +288,32 @@ def _snapshot(db, body, principal):
     raise HTTPException(422, str(exc)) from exc
 
 
+AGENT_ENABLED_AUTO_SEND = (
+  "Only the owner can let a review send its verdict by itself, by choosing \"Agent posts\" when starting it "
+  "in Contribute. Start this review without agent_submits_verdict: its verdict then waits for the owner's Send.")
+
+
+def _is_agent(principal) -> bool:
+  return principal.chat_id is not None or principal.run_id is not None
+
+
+def _refuse_agent_enabled_auto_send(options, principal) -> None:
+  """Sending a verdict unseen is the owner's own choice in the review window.
+
+  A chat approval is the agent's attestation, so it never grants this: the owner
+  would learn what was posted in their name only after it was public. An app
+  token an agent minted carries the same provenance (``via_agent_chat``) even
+  though it drops the agent's chat/run identity, so it is refused too; the
+  owner's own browser mints an app token with no such provenance and keeps its
+  legitimate access.
+  """
+  agent_backed = _is_agent(principal) or principal.via_agent_chat is not None
+  if options is not None and options.agent_submits_verdict is True and agent_backed:
+    raise HTTPException(403, AGENT_ENABLED_AUTO_SEND)
+
+
 def _chat_approval(db, body, principal):
-  is_agent = principal.chat_id is not None or principal.run_id is not None
+  is_agent = _is_agent(principal)
   if body.source_chat_id is not None and (not is_agent or body.source_chat_id != principal.chat_id):
     raise HTTPException(403, "A source chat may only name the current authenticated owning conversation.")
   if principal.delegation_id is not None:
@@ -576,11 +619,17 @@ def _list_run_view(db, row, app_id, view="full"):
   return value
 
 
+UNFINISHED_IS_NOT_A_RESULT = (
+  "This review publishes what it finds: send findings with publish:true. A private needs_you is only for an "
+  "obstacle outside your control, named in \"blocked\". An unfinished review is not a result: finish it first.")
+
+
 def _reported_outcome(previous, body, row, principal):
   """Build private review evidence once; callers add only transition facts."""
   return {**previous, "state": body.state, "summary": body.summary, "scope": body.scope,
     "tests": body.tests, "tests_passed": body.tests_passed,
-    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha,
+    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha, "blocking": body.blocking,
+    "blocked": body.blocked,
     "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
 
 
@@ -703,6 +752,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       raise HTTPException(422, "Record the complete review scope and test evidence before all clear.")
     if body.publish and not _posts_review(row):
       raise HTTPException(403, "This grant does not authorize a public review.")
+    if _posts_review(row) and body.state == "needs_you" and not body.publish and not body.blocked:
+      raise HTTPException(422, UNFINISHED_IS_NOT_A_RESULT)
     if row.mode == "review_merge" and _posts_review(row) and body.state == "all_clear" and not body.publish:
       raise HTTPException(422, "This grant posts its review before merging. Send the all-clear outcome with publish:true.")
     if row.mode == "review" and not attempted and not body.publish:
@@ -1252,6 +1303,50 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
 async def core_decide_verdict(run_id: str, body: VerdictDecision, db: Session = Depends(get_db),
                               principal: Principal = Depends(get_principal)):
   return await decide_verdict(None, run_id, body, db, principal)
+
+
+class PostFindings(PullIdentity):
+  # A public tap: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+  preview_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _saved_item(row, body):
+  """The run's pinned target and saved item for the pull request a request names, at its exact version."""
+  item_key = reviews.key(body.model_dump())
+  original = next((t for t in row.targets_json if reviews.key(t) == item_key), None)
+  target = reviews.effective_target(row, original) if original else None
+  if target is None or target["head_sha"] != body.head_sha:
+    raise HTTPException(409, "This review is of another version. Nothing was posted.")
+  return item_key, target, (row.outcomes_json or {}).get(item_key) or {}
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post-preview", dependencies=[Depends(reject_cross_site)])
+def preview_posted_findings(app_id: int, run_id: str, body: PullIdentity, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """Read-only: the exact words Post to GitHub would send for this private review, and their hash."""
+  _item_key, target, item = _saved_item(_row(db, app_id, run_id, principal), body)
+  return post_findings.preview(item, target)
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def post_findings_now(app_id: int, run_id: str, body: PostFindings, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """The owner's own tap: post a finished private review's previewed words, once, as a plain comment review.
+
+  200 {state: posted, url, review_id}; 409 with a plain reason when nothing was posted;
+  502 post_unconfirmed when GitHub may have taken it. See contribution_review_post_findings.
+  """
+  _require_owner_hands(principal, "Only you can post a review from here. An agent cannot press Post.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "post_findings", body, run_id=run_id)
+  row = _row(db, app_id, run_id, principal)
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    _owner_decision_authority(db, row)
+    item_key, target, _item = _saved_item(row, body)
+    cwd = Path(get_settings().data_dir) / "platform"
+    return await post_findings.post(db, row, item_key, target, body.preview_sha256, principal, cwd, gh=_gh,
+                                    authorize=lambda: _owner_decision_authority(db, row))
 
 
 class DirectMerge(PullIdentity):

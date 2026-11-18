@@ -36,9 +36,16 @@ def _sha256(text: str) -> str:
   return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def proposed_event(outcome) -> str:
+  """Findings the reviewer does not hold the PR for are a plain comment, never a change request."""
+  if outcome["state"] == "needs_you" and outcome.get("blocking") is False:
+    return "COMMENT"
+  return EVENTS[outcome["state"]]
+
+
 def propose(outcome, target) -> dict:
   """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
-  event = EVENTS[outcome["state"]]
+  event = proposed_event(outcome)
   proposal_id = uuid.uuid4().hex
   # The marker is part of the frozen wording: GitHub's body limit is applied to
   # exactly what will be posted, so submitting can never overflow it.

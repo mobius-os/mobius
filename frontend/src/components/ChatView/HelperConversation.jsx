@@ -1,8 +1,9 @@
-/* HelperConversation shows one helper agent's own conversation, read-only, over its parent chat. */
+/* HelperConversation shows one helper agent's own conversation, read-only, beside or over its parent chat. */
 
 import { useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { apiFetch } from '../../api/client.js'
+import useHelperPreviewDocked from './hooks/useHelperPreviewDocked.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import ToolBlock from './ToolBlock.jsx'
@@ -31,11 +32,19 @@ async function readConversation(chatId, taskId, signal) {
   }
 }
 
-// The dialog draws its own overlay (HelperConversation.css); `host` is the
-// chat pane it covers.
+// The dialog draws its own overlay (HelperConversation.css). `host` is the chat
+// pane it belongs to: a pane wide enough for two columns keeps its chat usable
+// with the preview docked beside it; a narrower one is covered and blocked.
 export default function HelperConversation({
-  chatId, taskId, name, status, host, onClose, onInternalNav,
+  chatId, taskId, name, status, host, opener, onClose, onInternalNav,
 }) {
+  const docked = useHelperPreviewDocked(host)
+  const hostRef = useRef(host)
+  hostRef.current = host
+  // Closing returns focus to the row that opened this preview. Recorded at the
+  // tap, not when the dialog mounts: a preview replacing another mounts just
+  // after the old one handed focus back to its own row.
+  const openerRef = useRef(opener)
   const [state, setState] = useState({ phase: 'loading' })
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
@@ -47,7 +56,10 @@ export default function HelperConversation({
   const refresh = !!currentStatus && !isTerminalHelperStatus(currentStatus) && state.phase !== 'unavailable'
   const running = presentation.state === 'working'
 
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, onClose })
+  // Without a host the dialog is modal over the whole page. Docking only swaps
+  // what it blocks, so crossing the width threshold keeps focus where it is.
+  useDialogFocus({ containerRef: dialogRef, initialFocusRef: closeRef, restoreFocusRef: openerRef, onClose,
+    modal: !host, inertBoundaryRef: docked ? undefined : hostRef })
 
   useEffect(() => {
     const controller = new AbortController()
@@ -81,12 +93,15 @@ export default function HelperConversation({
     .filter(Boolean).join(' · ')
 
   return createPortal(
-    <div className="helper-convo__overlay" role="presentation" onClick={onClose}>
+    <div className={`helper-convo__overlay${docked ? ' helper-convo__overlay--docked' : ''}`} role="presentation" onClick={docked ? undefined : onClose}>
       <div
         ref={dialogRef}
         className="helper-convo"
         role="dialog"
-        aria-modal="true"
+        // Focusable but not a tab stop: a click on the transcript keeps focus
+        // inside, so Escape still closes this non-modal preview.
+        tabIndex={-1}
+        aria-modal={host ? undefined : true}
         aria-labelledby={titleId}
         onClick={event => event.stopPropagation()}
       >
@@ -118,6 +133,11 @@ export default function HelperConversation({
         <div
           ref={bodyRef}
           className="helper-convo__body"
+          // Focusable so a click on the transcript keeps keyboard scrolling
+          // (arrows, Page Down, Space) on the element that scrolls.
+          tabIndex={0}
+          role="region"
+          aria-label="Helper transcript"
           onScroll={event => {
             const el = event.currentTarget
             followRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48

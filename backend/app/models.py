@@ -10,7 +10,7 @@ adding to `Chat.agent_settings_json` (a JSON column intentionally
 included as the no-migration escape hatch). For non-secret app-scoped data
 you'd otherwise add a column for, use per-app storage at
 `/data/apps/<app_id>/...` via the storage API. Credentials belong in the
-separate encrypted app-secrets API.
+key vault (app/key_vault.py), which apps use without reading.
 """
 
 import logging
@@ -1144,6 +1144,16 @@ class App(Base):
   # existed fall back to row-existence only.
   token_nonce = Column(
     String(32), nullable=True, default=lambda: secrets.token_hex(16)
+  )
+  # This installation's identity, set when the row is created and never
+  # changed: trash, recover, a data wipe and updates keep it, unlike
+  # ``token_nonce``. The key vault stores it in every app grant, and the server
+  # attests it with each app caller (``app:<id>:<install_id>``), so a grant can
+  # only ever be used by the installation it was given to, even after SQLite
+  # reuses the id. Nullable only so a release without the column can still
+  # insert rows; key_vault gives such a row one at the next start.
+  install_id = Column(
+    String(32), nullable=True, unique=True, index=True, default=lambda: secrets.token_hex(16)
   )
   # URL the app was installed from (manifest URL passed to
   # POST /api/apps/install). Null for user-built apps that didn't

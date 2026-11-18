@@ -311,7 +311,8 @@ test('external update instructions come from the activation owner, not a second 
 
 test('only top provider actions are pills; Updates inherits standard Settings corners', () => {
   const providerCss = readFileSync(new URL('../../components/ProviderAuth/ProviderAuth.css', import.meta.url), 'utf8')
-  assert.match(css, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
+  const buttonCss = readFileSync(new URL('../../components/SettingsView/settingsButtons.css', import.meta.url), 'utf8')
+  assert.match(buttonCss, /\.settings__btn\s*\{[^}]*border-radius:\s*8px;/s)
   assert.doesNotMatch(updateCss, /border-radius:\s*999px/)
   assert.match(providerCss, /\.provider-row__action\s*\{[^}]*border-radius:\s*999px;/s)
 })

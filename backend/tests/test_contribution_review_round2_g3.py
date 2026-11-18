@@ -178,7 +178,7 @@ def test_public_review_brief_keeps_exact_dispatch_freeze_guidance(setup):
   assert "Evidence freezes once dispatch is armed; identical retry is read-only." in reviews.brief(row)
   # #1919's public guidance: posting is opt-in per verdict, never per report.
   assert "Keep owner-only questions and private data out of public evidence." in reviews.brief(row)
-  assert "publish:false (the default) and stay private" in reviews.brief(row)
+  assert 'publish:false (the default) with "blocked" and stay private' in reviews.brief(row)
 
 
 def test_frozen_and_live_scopes_use_one_file_reader(monkeypatch):

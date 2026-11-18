@@ -132,6 +132,17 @@ export function providerOrderFor(registry) {
   ]
 }
 
+/**
+ * Where a provider is set up. Built-ins have their own Settings page; an app
+ * provider (`app-<id>`) is connected inside its app, which Settings has no page
+ * for. Anything else has no setup destination.
+ */
+export function providerSetupTarget(id) {
+  if (PROVIDER_ORDER.includes(id)) return { kind: 'settings', page: id }
+  const app = /^app-(\d+)$/.exec(id || '')
+  return app ? { kind: 'app', appId: Number(app[1]) } : null
+}
+
 export function providerInfoFor(id, status) {
   if (PROVIDER_INFO[id]) return PROVIDER_INFO[id]
   const label = status?.[id]?.name || id

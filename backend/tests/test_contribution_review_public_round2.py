@@ -50,7 +50,7 @@ def test_private_report_waiting_for_admission_cannot_erase_public_receipt(setup,
     return real_parent(session, run, principal)
   monkeypatch.setattr(routes, '_parent', parent)
   with pytest.raises(HTTPException) as error:
-    report(setup, state='needs_you', summary='Private owner question', publish=False)
+    report(setup, state='needs_you', summary='Private owner question', publish=False, blocked='Needs the owner')
   assert error.value.status_code == 409
   db.refresh(row)
   assert row.outcomes_json[item_key] == concurrent
@@ -61,7 +61,8 @@ def test_owner_question_stays_private_until_explicit_public_verdict(setup, monke
   opted_in(setup)
   sent = []
   monkeypatch.setattr(public, 'post_review', lambda *args: sent.append(args[-1]) or public.DispatchResult.confirmed({'id': 7}))
-  result = report(setup, state='needs_you', summary='Can I access the private fixture?', publish=False)
+  result = report(setup, state='needs_you', summary='Can I access the private fixture?', publish=False,
+                  blocked='The private fixture is not readable')
   assert result['run']['state'] == 'needs_you'
   assert not sent and 'public_review' not in row.outcomes_json[domain.key(ITEM)]
   report(setup, state='needs_you', summary='A concrete public correctness finding.', publish=True)
@@ -102,7 +103,9 @@ def test_route_preview_start_freeze_opt_in_and_publish_requires_explicit_signal(
   monkeypatch.setattr(public, 'post_review', lambda *args: calls.append(args[-1]) or
     public.DispatchResult.confirmed({'id': 7}))
   def outcome(summary, publish):
-    return routes.ReviewOutcome(**ITEM, state='needs_you', summary=summary, publish=publish)
+    # A private needs_you in a publishing review names what stops it; a finding is published.
+    return routes.ReviewOutcome(**ITEM, state='needs_you', summary=summary, publish=publish,
+                                blocked=None if publish else 'Needs the owner')
   asyncio.run(routes.report_outcome(1, row.id, outcome('Private owner question', False), db, reporter))
   assert not calls and not row.outcomes_json[domain.key(ITEM)].get('public_review')
   asyncio.run(routes.report_outcome(1, row.id, outcome('Public correctness finding', True), db, reporter))
@@ -247,5 +250,6 @@ def test_report_builder_preserves_transition_facts_without_mutating_saved_eviden
   result = routes._reported_outcome(previous, body, row, principal)
   assert result == {**previous, "summary": "new", "scope": body.scope, "tests": "verified",
     "tests_passed": body.tests_passed, "reviewed_base_sha": body.reviewed_base_sha,
-    "head_sha": body.head_sha, "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
+    "head_sha": body.head_sha, "blocking": True, "blocked": None, "review_chat_id": row.chat_id,
+    "review_run_id": principal.run_id}
   assert previous["summary"] == "old"

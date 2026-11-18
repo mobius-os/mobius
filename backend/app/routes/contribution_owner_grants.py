@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app import contribution_direct_merge as direct_merge
 from app import contribution_pr_machine as machine
 from app import contribution_pull_status as pull_status
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_runs as reviews
 from app import models, owner_grants
 from app.config import get_settings
@@ -179,6 +180,22 @@ async def _describe_verdict(ask: Ask) -> dict:
   return _sheet(f"Post {words} on {pr}", [*facts, _fact("Posted exactly as", text)], verb, "caution")
 
 
+async def _describe_post_findings(ask: Ask) -> dict:
+  """A finished private review going out as a plain comment: the sheet quotes the exact words."""
+  body = ask.body
+  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
+  _item_key, target, item = routes._saved_item(row, body)
+  words = post_findings.preview(item, target)
+  if words["preview_sha256"] != body.preview_sha256:
+    raise HTTPException(409, post_findings.CHANGED)
+  pr = f"{body.repo}#{body.number}"
+  return _sheet(f"Post a comment on {pr}", [
+    _fact("Pull request", pr), _fact("Version", body.head_sha[:7]),
+    _fact("Result", "A plain comment review from your connected account. Not an approval or a change request."),
+    _fact("Posted exactly as", words["body"]),
+  ], REVIEW_EVENTS["COMMENT"][0], "caution")
+
+
 async def _describe_repair(ask: Ask) -> dict:
   body = ask.body
   pr = f"{body.repo}#{body.number}"
@@ -270,6 +287,7 @@ GUARDED = {
   "ask_approval": Guarded(routes.ApprovalRequest, partial(_describe_status, name="ask-approval")),
   "verdict": Guarded(routes.VerdictDecision, _describe_verdict, ("run_id",)),
   "repair": Guarded(routes.RepairDecision, _describe_repair, ("run_id",)),
+  "post_findings": Guarded(routes.PostFindings, _describe_post_findings, ("run_id",)),
   "respond_post": Guarded(RespondPost, _describe_respond_post),
   "follow": Guarded(publication.AutopilotToggleBody, _describe_follow, ("record_id",)),
 }

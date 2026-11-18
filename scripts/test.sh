@@ -128,7 +128,7 @@ run_backend() {
   if [ "${mode}" = "fast" ]; then
     summary="hermetic host contract suite (${#FAST_TESTS[@]} files)"
   else
-    summary="pytest (full backend suite, currently ~2,450 tests)"
+    summary="pytest (full backend suite)"
   fi
 
   log "backend: ${summary}"
