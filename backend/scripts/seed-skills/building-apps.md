@@ -1492,12 +1492,16 @@ the app's permission popup, and Möbius enforces it outside the agent:
     the owner, outside the room;
   - `helpers`: start helper agents; they run in a room with the same scope
     and tools, never more;
+  - `keys`: use the keys the owner lets this app use, on the sites approved
+    for it, through `$API_BASE_URL/api/keys/use/<key>/<host>/<path>` with
+    `$AGENT_TOKEN`; the agent never sees a value and cannot ask for a new key
+    (the app asks from its own window);
   - `<app>.<tool>`: one tool another installed app offers agents, such as
     `memory.search`.
 
-  `web` may be declared for any scope. Beside private data (the app's files,
-  its screens or another app's tool) the popup tells the owner that app data
-  may reach the web.
+  `web` and `keys` may be declared for any scope. Beside private data (the
+  app's files, its screens or another app's tool) the popup tells the owner
+  that app data may reach the web, or the sites approved for the app's keys.
 - `reason` is the app's own reason, 1–80 characters. The popup shows it beside
   the platform's own description of what the scope grants.
 - Tools, Read and Edit agents run in a room the kernel locks: their folder is

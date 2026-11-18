@@ -864,6 +864,14 @@ def is_installation_owner_control(principal: Principal) -> bool:
   return principal.delegation_id is None and not acts_for_guest(principal)
 
 
+def refuse_app_agent(principal: Principal, action: str) -> None:
+  """A confined app agent's key reaches only the routes its declared tools open
+  (agent_roles.AgentKeyScope). A route that hands out keys or secrets refuses
+  it itself too, so a looser allow-list can never open it by accident."""
+  if principal.app_agent is not None:
+    raise HTTPException(status_code=403, detail=f"An app's agent cannot {action}.")
+
+
 def require_installation_owner_control(principal: Principal) -> None:
   """Shared collaborators may use the workspace, not mint installation authority."""
   if is_installation_owner_control(principal):

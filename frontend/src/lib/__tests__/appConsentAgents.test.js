@@ -18,8 +18,8 @@ test('a confined scope shows its label, what it grants, the app’s reason and i
     grant: 'Can read and change this app’s files and data.',
     text: 'Builds the sites you make here.',
     tools: [
-      { id: 'notify', title: 'Notifications', text: 'Send you notifications.', warning: false },
-      { id: 'web', title: 'Web access', text: 'Search the web and open public pages.', warning: true },
+      { id: 'notify', title: 'Notifications', text: 'Send you notifications.', warning: null },
+      { id: 'web', title: 'Web access', text: 'Search the web and open public pages.', warning: 'App data may reach the web.' },
     ],
   })
   assert.match(html, /app-consent__chip">Edit</)

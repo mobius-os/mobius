@@ -832,7 +832,13 @@ every agent it starts can reach (manifest shape in the `building-apps` skill). S
   is signed in as the owner, so the app's page could navigate it; the popup's
   consent covers this, and a capture sign-in limited to the app is a planned
   narrowing. `helpers` is `spawn_agent` and its siblings for the run's own chat's
-  helpers. Every agent an app owns runs at the app's scope: a helper's chat
+  helpers. `keys` opens only the vault's borrow route (`/api/keys/use/...`):
+  the vault attests the app from the agent's key, so the agent uses exactly
+  the keys and sites the owner approved for that app, never reads a value and
+  never asks for a key; each use is recorded as an `app_agent_web` activity
+  (key and site). Routes that hand out keys or secrets (agent and app key
+  requests, sealed secret cards) also refuse a confined key themselves
+  (`deps.refuse_app_agent`). Every agent an app owns runs at the app's scope: a helper's chat
   belongs to the app that owns the delegation, so its runs get a room and an
   agent key with the same grant (never a delegation token).
   `<app>.<tool>` (such as `memory.search`) offers that one installed-app tool

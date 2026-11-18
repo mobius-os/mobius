@@ -140,10 +140,10 @@ def test_each_confined_role_is_one_agent_row_with_the_apps_own_reason():
   assert row["grant"] == "Can read and change this app's files and data."
   assert row["text"] == "Answers questions about your notes." and row["declared"]
   assert [(tool["id"], tool["warning"]) for tool in row["tools"]] == [
-    ("notify", False),
-    ("web", True),
+    ("notify", None),
+    ("web", "App data may reach the web."),
   ]
-  assert _agent_row(_role("tools", "web"))["tools"][0]["warning"] is False
+  assert _agent_row(_role("tools", "web"))["tools"][0]["warning"] is None
 
 
 def test_owner_role_and_undeclared_agents_are_the_critical_full_access_row():
@@ -1134,7 +1134,7 @@ def test_another_apps_tool_is_declared_as_app_dot_tool(name, ok):
 def test_another_apps_tool_counts_as_private_data_beside_web():
   row = _agent_row(_role("tools", "memory.search", "web"))
   tools = {tool["id"]: tool for tool in row["tools"]}
-  assert tools["web"]["warning"] is True and tools["memory.search"]["warning"] is False
+  assert tools["web"]["warning"] and tools["memory.search"]["warning"] is None
   assert "search tool of your memory app" in tools["memory.search"]["text"]
   assert "tool:memory.search" in row["scope"]
 
@@ -1457,7 +1457,7 @@ def test_screenshot_shows_only_the_apps_own_page_and_counts_as_private_data(
     headers={"Authorization": f"Bearer {plain}"},
   )
   assert refused.status_code in (401, 403)
-  assert _agent_row(_role("tools", "screenshot", "web"))["tools"][1]["warning"] is True
+  assert _agent_row(_role("tools", "screenshot", "web"))["tools"][1]["warning"]
   assert seen[0].pixelRatio == 3.75
 
 
@@ -1541,3 +1541,107 @@ def test_update_review_ranks_agent_roles(before, after, widens):
     )
 
   assert diff_contracts(contract(before), contract(after))["widens"] is widens
+
+
+# --- keys: the vault ---------------------------------------------------------------
+
+
+def test_keys_lets_an_agent_borrow_through_its_app_and_nothing_more():
+  with_keys, without = _key("read", "keys"), _key("read", "web")
+  borrow = "/api/keys/use/openweather/api.openweathermap.org/data/2.5/weather"
+  assert with_keys.may_call("GET", borrow) and with_keys.may_call("POST", borrow)
+  assert not without.may_call("GET", borrow)
+  for method, path in [
+    ("GET", "/api/keys"),
+    ("GET", "/api/keys/openweather/value"),
+    ("POST", "/api/keys/requests"),
+    ("PUT", "/api/keys/openweather"),
+    ("GET", "/api/apps/7/secrets/openweather"),
+  ]:
+    assert not with_keys.may_call(method, path), path
+
+
+def test_keys_beside_app_data_says_where_data_may_go():
+  [read_keys] = _agent_row(_role("read", "keys"))["tools"]
+  [tools_keys] = _agent_row(_role("tools", "keys"))["tools"]
+  assert read_keys["warning"] == (
+    "App data may reach the sites you approved for this app's keys."
+  )
+  assert tools_keys["warning"] is None
+
+
+def test_admin_says_it_reaches_your_saved_keys():
+  assert "your saved keys" in _agent_row(_role("admin"))["grant"]
+
+
+def test_a_confined_agent_borrows_exactly_as_its_app(
+  client, owner_token, db, monkeypatch
+):
+  from app import activity, key_vault
+
+  app = _local_app(db, "weather", _role("tools", "keys"))
+  key, run = _agent_key_for(db, app, role="tools", tools=("keys",))
+  borrowed, logged = [], []
+
+  async def fake_borrow(app_id, nonce, method, target, **kwargs):
+    borrowed.append((app_id, nonce, method, target, kwargs["caller"]))
+    raise key_vault.AppGone()
+
+  monkeypatch.setattr(key_vault, "borrow", fake_borrow)
+  monkeypatch.setattr(activity, "log_event", lambda *a, **kw: logged.append((a, kw)))
+  answer = client.get(
+    "/api/keys/use/openweather/api.openweathermap.org/data/2.5/weather?q=x",
+    headers={"Authorization": f"Bearer {key}"},
+  )
+  assert answer.status_code == 404  # the fake vault's answer
+  assert borrowed == [
+    (
+      app.id,
+      app.token_nonce,
+      "GET",
+      "/use/openweather/api.openweathermap.org/data/2.5/weather?q=x",
+      f"app:{app.id}:{app.install_id}",  # the app's exact installation
+    )
+  ]
+  assert (
+    ("app_agent_web",),
+    {
+      "app_id": app.id,
+      "chat_id": run.chat_id,
+      "kind": "use_key",
+      "key": "openweather",
+      "site": "api.openweathermap.org",
+    },
+  ) in logged
+
+
+@pytest.mark.asyncio
+async def test_routes_that_hand_out_keys_or_secrets_refuse_an_app_agent(
+  client, owner_token, db
+):
+  from fastapi import HTTPException
+
+  from app.deps import get_agent_run_principal
+  from app.routes import keys, secure_inputs
+
+  app = _local_app(db, "weather", _role("tools", "keys", "ask"))
+  key, run = _agent_key_for(db, app, role="tools", tools=("keys", "ask"))
+  principal = get_agent_run_principal(key, db)
+  ask = {"key": "openweather", "reason": "Weather.", "sites": []}
+  for attempt in (
+    keys.agent_asks(ask, principal),
+    keys.request_key(body=ask, principal=principal, db=db),
+    secure_inputs.create_saved_secure_input(run.chat_id, None, principal, db),
+  ):
+    with pytest.raises(HTTPException) as refused:
+      await attempt
+    assert refused.value.status_code == 403
+    assert "An app's agent cannot" in refused.value.detail
+
+
+def test_the_prompt_says_how_to_use_the_apps_keys(tmp_path):
+  room = _room(tmp_path, "tools", "keys")
+  prompt = agent_roles.system_prompt(
+    room.role, app_id=7, app_name="Weather", room=room, app_prompt=None
+  )
+  assert "/api/keys/use/<key>/<host>/<path>" in prompt and "never see it" in prompt

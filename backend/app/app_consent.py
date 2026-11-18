@@ -163,17 +163,18 @@ def _agent_row(agent: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _agent_tool(name: str, private_data: bool) -> dict[str, Any]:
-  """One declared tool as the popup lists it. Web beside private data is the
-  one combination that lets app data reach the internet; the popup marks it."""
+  """One declared tool as the popup lists it. A tool that sends things outside
+  Möbius (web, keys) beside private data could carry app data out; ``warning``
+  then says where, and the popup marks it."""
   from app.agent_roles import TOOLS
 
   tool = TOOLS.get(name)
   if tool is None:  # another app's tool, ``<app>.<tool>``
     app, _, action = name.partition(".")
-    return {"id": name, "title": name, "warning": False,
+    return {"id": name, "title": name, "warning": None,
             "text": f"Use the {action} tool of your {app} app, with the data it reaches."}
   return {"id": name, "title": tool.label, "text": tool.text,
-          "warning": bool(tool.provider_web and private_data)}
+          "warning": tool.sends_out if tool.sends_out and private_data else None}
 
 
 def rows_from_contract(

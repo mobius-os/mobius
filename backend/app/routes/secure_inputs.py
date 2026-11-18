@@ -17,6 +17,7 @@ from app.deps import (
   get_chat_view_principal,
   get_current_owner,
   get_current_owner_for_lifecycle_control,
+  refuse_app_agent,
   require_chat_embed_operation,
   reject_cross_site,
 )
@@ -34,6 +35,8 @@ async def create_saved_secure_input(
 ):
   """Save a sealed prompt and pre-authored consumer; acknowledge, never wait."""
   from app.saved_secure_inputs import validate_consumer_spec
+
+  refuse_app_agent(principal, "ask for a password or key")
   from app.routes.owner_approvals import save_owner_question
 
   payload = await _json_object(request)

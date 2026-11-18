@@ -1,11 +1,11 @@
 /* The "AI agents" block of the permission request: the agents' access scope
    (Tools, Read, Edit or Admin), what it grants in the platform's own words,
-   the app's reason, and the tools it asks for. Admin (full access) leads with
+   the app's reason, and the tools it asks for (a tool that could carry app
+   data outside Möbius says where, in amber). Admin (full access) leads with
    a fixed platform callout, because an app's reason cannot be trusted to state
    its own risk. The rows come from backend app_consent._agent_row. */
 
 const ADMIN_LINE = 'Full access to your Möbius'
-const WEB_WARNING = 'App data may reach the web.'
 
 function AgentIcon() {
   return <svg className="app-consent__agents-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -50,7 +50,7 @@ export default function AppConsentAgents({ row }) {
       <ul className="app-consent__agents-tools">
         {tools.map(tool => <li key={tool.id} className={tool.warning ? 'app-consent__tool--warning' : undefined}>
           <strong>{tool.title}</strong>
-          <span>{tool.text}{tool.warning ? ` ${WEB_WARNING}` : ''}</span>
+          <span>{tool.text}{tool.warning ? ` ${tool.warning}` : ''}</span>
         </li>)}
       </ul>
     </div>}
