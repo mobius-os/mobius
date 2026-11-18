@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
@@ -26,12 +26,21 @@ class AppToolCall(BaseModel):
   meta: dict[str, Any] = Field(default_factory=dict)
 
 
+def _offered(principal: Principal, tools: list[app_tools.AppTool]) -> list[app_tools.AppTool]:
+  """Every live tool for an ordinary run; for a confined app agent, only the
+  other apps' tools its app declared (agent_roles.AgentKey.app_tools)."""
+  if principal.app_agent is None:
+    return tools
+  declared = principal.app_agent.app_tools
+  return [tool for tool in tools if (tool.app_slug, tool.name) in declared]
+
+
 @router.get("/")
 def list_app_tools(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-  return {"tools": [tool.listing() for tool in app_tools.live_app_tools(db)]}
+  return {"tools": [tool.listing() for tool in _offered(principal, app_tools.live_app_tools(db))]}
 
 
 @router.post("/call", dependencies=[Depends(reject_cross_site)])
@@ -40,6 +49,10 @@ async def call_app_tool(
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+  if principal.app_agent is not None and body.name not in {
+    tool.exposed_name for tool in _offered(principal, app_tools.live_app_tools(db))
+  }:
+    raise HTTPException(status_code=403, detail="That tool is not one of this app's agent tools.")
   moment = app_tools.call_moment(
     db, chat_id=principal.chat_id, run_id=principal.run_id, meta=body.meta,
   )

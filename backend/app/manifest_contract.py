@@ -821,6 +821,18 @@ def validate_manifest_contract(manifest) -> None:
   for field in ("offline_capable", "embeds_agent", "shell_shortcuts", "owner_confirm"):
     if field in manifest and not isinstance(manifest[field], bool):
       _fail(f"Manifest `{field}` must be a boolean.")
+  if "agent_role" in manifest:
+    # Ignoring it would leave the app undeclared, which is full access.
+    _fail(
+      "Manifest `agent_role` is now `agent`: "
+      '{"scope": "tools|read|edit|admin", "allow_tools": [...], "reason": "..."}.'
+    )
+  if manifest.get("agent") is not None:
+    from app.agent_roles import normalize_declaration
+    try:
+      normalize_declaration(manifest["agent"])
+    except ValueError as exc:
+      _fail(str(exc))
 
   permissions = manifest.get("permissions", {})
   if not isinstance(permissions, Mapping):

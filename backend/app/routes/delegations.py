@@ -102,9 +102,37 @@ class DelegationSubmit(BaseModel):
     return value
 
 
+def _require_confined_submitter(
+  db: Session, principal: Principal, body: DelegationSubmit,
+) -> models.Delegation | None:
+  """A confined app agent starts helpers only from its own live run, under its
+  own app-owned chat. Returns the delegation that chat belongs to when the
+  agent is itself a helper, so nested helpers keep their lineage."""
+  if body.parent_chat_id != principal.chat_id or body.app_id != principal.app_id:
+    raise HTTPException(
+      status_code=403, detail="Helpers must stay under this agent's own chat.",
+    )
+  chat = db.get(models.Chat, principal.chat_id)
+  run = db.get(models.ChatRun, principal.run_id)
+  if (chat is None or chat.created_by_app_id != principal.app_id or run is None
+      or run.chat_id != chat.id or run.status not in models.NONTERMINAL_RUN_STATUSES):
+    raise HTTPException(status_code=403, detail="This agent's run has ended.")
+  parent = db.query(models.Delegation).filter(
+    models.Delegation.child_chat_id == chat.id,
+    models.Delegation.cancelled_at.is_(None),
+  ).first()
+  if parent is not None and parent.app_id != principal.app_id:
+    raise HTTPException(status_code=403, detail="Delegated work must keep its parent app owner.")
+  if parent is not None and (parent.scope != "write" or parent.interrupted_at is not None):
+    raise HTTPException(status_code=409, detail="Legacy helper cannot delegate new work.")
+  return parent
+
+
 def _require_submitter(
   db: Session, principal: Principal, body: DelegationSubmit,
 ) -> models.Delegation | None:
+  if principal.app_agent is not None:
+    return _require_confined_submitter(db, principal, body)
   if principal.delegation_id is None:
     if principal.scope == "owner" and principal.app_id is None:
       return None
@@ -161,6 +189,12 @@ def _row_for_principal(
   )
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
+  elif principal.app_agent is not None:
+    # A confined app agent reaches only its own chat's helpers.
+    query = query.filter(
+      models.Delegation.parent_chat_id == principal.chat_id,
+      models.Delegation.app_id == principal.app_id,
+    )
   elif principal.app_id is not None and not (
     observe and _app_reads_all_helpers(db, principal)
   ):
@@ -192,6 +226,16 @@ async def submit_or_attach(
   db: Session = Depends(get_db),
 ):
   """Create once per (parent logical run, task key), otherwise attach."""
+  if principal.app_agent is not None:
+    # A confined app agent's helpers belong to its app and its own chat, and
+    # run in a room with the app's role (chat._run_chat_impl_with_db).
+    from app.agent_roles import ROOM_PROVIDERS
+    if body.provider not in ROOM_PROVIDERS:
+      raise HTTPException(
+        status_code=422,
+        detail="This app's helpers run confined, on Claude, Codex or Möbius models.",
+      )
+    body = body.model_copy(update={"app_id": principal.app_id})
   parent_delegation = _require_submitter(db, principal, body)
   owner_app_id = parent_delegation.app_id if parent_delegation else body.app_id
   parent = get_active_chat_or_404(db, body.parent_chat_id)
@@ -381,7 +425,9 @@ async def delegation_capabilities(
       ).first()
       if owner_app is None:
         raise HTTPException(status_code=403, detail="Delegation owner app is unavailable.")
-  elif principal.scope != "owner" or principal.app_id is not None:
+  elif principal.app_agent is None and (
+    principal.scope != "owner" or principal.app_id is not None
+  ):
     raise HTTPException(status_code=403, detail="Owner agent or delegated child required.")
   app = db.query(models.App).filter(
     models.App.slug == "subagents", models.App.deleted_at.is_(None),
@@ -452,6 +498,12 @@ def list_delegations(
   query = db.query(models.Delegation)
   if principal.delegation_id is not None:
     query = query.filter(models.Delegation.parent_chat_id == principal.chat_id)
+  elif principal.app_agent is not None:
+    # A confined app agent sees only its own chat's helpers.
+    query = query.filter(
+      models.Delegation.parent_chat_id == principal.chat_id,
+      models.Delegation.app_id == principal.app_id,
+    )
   elif principal.app_id is not None and not _app_reads_all_helpers(db, principal):
     query = query.filter(models.Delegation.app_id == principal.app_id)
   elif app_id is not None:

@@ -35,7 +35,7 @@ from app import activity, key_vault, models, push
 from app.database import get_db
 from app.deps import (
   Principal, get_current_owner, get_principal, is_owner_input_principal,
-  reject_cross_site, require_installation_owner_control,
+  refuse_app_agent, reject_cross_site, require_installation_owner_control,
 )
 from app.resource_access import authorized_app_nonce
 
@@ -319,6 +319,8 @@ async def request_key(
   """
   if principal.browser is not None:
     raise HTTPException(403, _SHARED_BROWSER_REFUSAL)
+  # The app itself asks, from its own window, where the owner answers.
+  refuse_app_agent(principal, "ask for keys; it uses the keys its app may use")
   if principal.app_id is None:
     # An agent's ask is saved as a card in its chat, so it never waits where
     # the owner can't answer it.
@@ -354,6 +356,7 @@ async def agent_asks(payload: dict, principal: Principal) -> dict:
   started them."""
   if principal.delegation_id is not None:
     raise HTTPException(403, "Delegated helpers cannot ask for keys; the agent that started you can.")
+  refuse_app_agent(principal, "ask for keys; it uses the keys its app may use")
   # Never work a shared-browser guest started: the ask would act for the owner.
   require_installation_owner_control(principal)
   if is_owner_input_principal(principal):

@@ -1461,6 +1461,61 @@ useEffect(() => {
 - Keep the chat as the interaction surface; it gives the user a persistent
   transcript, normal agent tooling, and follow-up questions in one place.
 
+### What the app's agents can reach — `agent`
+
+Declare one access scope for every agent the app starts. The owner sees it in
+the app's permission popup, and Möbius enforces it outside the agent:
+
+```json
+"agent": {
+  "scope": "edit",
+  "allow_tools": ["web"],
+  "reason": "Builds and edits the sites you make here."
+}
+```
+
+| Scope | The app's files and data | Use it for |
+|---|---|---|
+| `tools` | none (an empty folder) | work done only through its tools, with no private data |
+| `read` | read | summaries, insights, answers |
+| `edit` | read and change | building and editing the app's own work |
+| `admin` | everything the owner can do | trusted apps that manage Möbius |
+
+- Every agent keeps its AI program's own tools (shell, reading and editing
+  files, planning), which work inside its room. `allow_tools` adds Möbius
+  tools that reach beyond the room:
+  - `web`: search the web and open public pages;
+  - `notify`: send the owner push notifications;
+  - `ask`: ask the owner a question or for approval before a key step (the
+    card ends the turn; the answer starts the next);
+  - `screenshot`: see this app's own screens; Möbius opens the app's page as
+    the owner, outside the room;
+  - `helpers`: start helper agents; they run in a room with the same scope
+    and tools, never more;
+  - `keys`: use the keys the owner lets this app use, on the sites approved
+    for it, through `$API_BASE_URL/api/keys/use/<key>/<host>/<path>` with
+    `$AGENT_TOKEN`; the agent never sees a value and cannot ask for a new key
+    (the app asks from its own window);
+  - `<app>.<tool>`: one tool another installed app offers agents, such as
+    `memory.search`.
+
+  `web` and `keys` may be declared for any scope. Beside private data (the
+  app's files, its screens or another app's tool) the popup tells the owner
+  that app data may reach the web, or the sites approved for the app's keys.
+- `reason` is the app's own reason, 1–80 characters. The popup shows it beside
+  the platform's own description of what the scope grants.
+- Tools, Read and Edit agents run in a room the kernel locks: their folder is
+  the app's storage directory (`APP_STORAGE_DIR`), the app's stored data is
+  reachable with `$AGENT_TOKEN` at `$API_BASE_URL/api/storage/apps/<id>/`, and
+  everything else (other apps, the owner's accounts, the internet) is refused
+  with a short reason. They run on Claude, Codex or Möbius models.
+- `admin` omits `allow_tools`: its agents keep full access, as do apps that
+  declare no scope. Prefer the narrowest scope that does the job; Admin is
+  shown to the owner as full access to their Möbius.
+- An update that adds reach (Read to Edit, a new tool) asks the owner again;
+  one that narrows asks nothing. Removing an accepted scope counts as asking
+  for full access. The older `agent_role` field is refused, never ignored.
+
 ---
 
 ## Pausing work while the app is hidden
