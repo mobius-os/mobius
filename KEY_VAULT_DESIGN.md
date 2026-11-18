@@ -185,14 +185,18 @@ was replaced by a newer ask under the same id.
 
 A store from before installations (version 2 or 1) loads with every app grant,
 request and origin unstamped (`install` null), which matches no app caller.
-Once the vault answers after each server start, the server names every app it
+Each time the server starts the vault, once it answers, the server names every app it
 holds, trashed ones included, with its installation (`POST /apps/installs`,
 platform callers only; `Vault.adopt_installs`): unstamped entries of those ids
 are stamped, those of ids no app holds are withdrawn as a purge would (values
 kept), requests the stamped grants now cover are settled, and stamped entries
 are never changed. Until that call lands on the first start after the update,
-those apps borrow nothing and their asks wait. An app row a release without
-the column created (a rollback) gets its installation id in the same step.
+those apps borrow nothing and their asks wait; a call the vault can't take
+yet is retried (after 5, 15, then every 60 seconds), a call it refuses is
+logged and left until it restarts, and a vault that restarts is named again.
+The one-time import of the retired per-app secrets gives app rows their
+installation ids first, so it never depends on naming having run. An app row a release without the column
+created (a rollback) gets its installation id in the same step.
 
 Purging an app erases the keys it saved for itself, as its other data, and
 drops its id from every grant and request. That is tidying, not the boundary:
@@ -348,7 +352,9 @@ grant and request is withdrawn (`Vault.withdraw_apps`): those naming an
 installation the restored database lacks, those never stamped with one (a
 store no server start has adopted), and all of them when the restored
 database, or its apps, can't be read (a backup from before installation ids
-names none). Only the restored database is read, so a lost or corrupt current
+names none, and a backup taken after a rollback can hold rows an older
+release wrote: the restore then names those apps, as it checks the vault and
+again at its end, and says how to let each use its keys again). Only the restored database is read, so a lost or corrupt current
 database withdraws nothing it holds, nor does an app recovered from the trash
 since the backup. Values are never erased: a key an app saved for itself
 stays, as the owner's, and the owner can let an app use it again. It withdraws before the swap, reading
