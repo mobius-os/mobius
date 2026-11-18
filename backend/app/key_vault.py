@@ -763,13 +763,10 @@ async def withdraw_request(request_id: str, ticket: str | None) -> None:
     log.warning("Could not withdraw key request %s whose card was not saved", request_id, exc_info=True)
 
 
-def _app_installs() -> dict[int, str]:
-  """Every app the platform holds (trashed ones included: recovering keeps
-  the installation), by id, with its installation id.
-
-  A row written by a release without ``install_id`` (one the platform ran
-  after this column was added, then left again) gets one here, once.
-  """
+def _give_apps_installation_ids() -> None:
+  """Give an installation id to each app row a release without the column
+  wrote (one the platform ran after it was added, then left again), once.
+  Everything that names an app to the vault needs it first."""
   import secrets
   from app import models
   from app.database import SessionLocal
@@ -779,6 +776,15 @@ def _app_installs() -> dict[int, str]:
       app.install_id = secrets.token_hex(16)
     if unnamed:
       db.commit()
+
+
+def _app_installs() -> dict[int, str]:
+  """Every app the platform holds (trashed ones included: recovering keeps
+  the installation), by id, with its installation id."""
+  from app import models
+  from app.database import SessionLocal
+  _give_apps_installation_ids()
+  with SessionLocal() as db:
     return dict(db.query(models.App.id, models.App.install_id).all())
 
 
@@ -837,8 +843,17 @@ async def _name_app_installs() -> None:
                    "grant(s) and %d request(s) of ids no app holds", adopted["stamped"],
                    len(adopted["keys"]), adopted["requests"])
         return
-    except Exception:
-      log.warning("key vault: could not name app installations yet; retrying", exc_info=True)
+      if attempt == 0:
+        log.warning("key vault did not answer; naming app installations waits for it")
+    except VaultRefused:
+      # The vault refuses the call itself: asking again changes nothing until
+      # it restarts, which starts naming again.
+      log.exception("key vault refused the app installations; apps from an older store "
+                    "can't use their keys until it restarts")
+      return
+    except (VaultUnavailable, VaultTimeout) as exc:
+      if attempt == 0:
+        log.warning("key vault: could not name app installations yet (%s); retrying", exc)
     await asyncio.sleep(_NAME_INSTALLS_RETRY_SECS[min(attempt, len(_NAME_INSTALLS_RETRY_SECS) - 1)])
     attempt += 1
 
@@ -850,6 +865,9 @@ async def _import_when_ready() -> None:
   root = _legacy_root()
   if not _pending_legacy_secrets(root, _read_ledger(root)):
     return
+  # An imported secret is saved for its app's installation, so every app
+  # needs one before the import, whether or not naming has run yet.
+  await asyncio.to_thread(_give_apps_installation_ids)
   if not await _vault_answers():
     log.warning("key vault did not start; legacy app secrets wait for the next start")
     return

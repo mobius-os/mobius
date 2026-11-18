@@ -653,14 +653,22 @@ def test_naming_installations_retries_until_the_vault_takes_them(client, db, vau
   assert [(g["id"], g["install"]) for g in record["grants"]["apps"]] == [(weather.id, weather.install_id)]
 
 
-def test_each_vault_start_names_installations_again(monkeypatch, tmp_path):
+def test_each_vault_start_names_installations_again_and_stops_with_it(monkeypatch, tmp_path):
   """The supervisor names installations to every vault it starts, not only
-  the first, so a vault that restarts is named without a server restart."""
+  the first, so a vault that restarts is named without a server restart, and
+  each vault's naming stops when that vault exits."""
   import asyncio
-  started = []
+  started, cancelled = [], []
+  running = None
 
   async def name():
     started.append(1)
+    running.set()
+    try:
+      await asyncio.Event().wait()
+    except asyncio.CancelledError:
+      cancelled.append(1)
+      raise
   monkeypatch.setattr(key_vault, "_name_app_installs", name)
   monkeypatch.setattr(key_vault, "_import_when_ready", lambda: asyncio.sleep(0))
   monkeypatch.setattr(key_vault, "VAULT_PROGRAM", Path(__file__))
@@ -669,14 +677,17 @@ def test_each_vault_start_names_installations_again(monkeypatch, tmp_path):
   class Exited:
     returncode = 0
     async def wait(self):
-      await asyncio.sleep(0)
+      # This vault exits only once its naming is under way.
+      await running.wait()
       return 0
   runs = []
 
   async def spawn(*args, **kwargs):
+    nonlocal running
     runs.append(1)
     if len(runs) > 3:
       raise asyncio.CancelledError
+    running = asyncio.Event()
     return Exited()
   monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
   monkeypatch.setattr(key_vault.get_settings(), "data_dir", str(tmp_path), raising=False)
@@ -686,8 +697,41 @@ def test_each_vault_start_names_installations_again(monkeypatch, tmp_path):
       await key_vault.supervise_key_vault()
     except asyncio.CancelledError:
       pass
+    await asyncio.sleep(0)
   asyncio.run(asyncio.wait_for(run(), timeout=5))
-  assert len(started) == 3
+  assert len(started) == 3 and len(cancelled) == 3
+
+
+def test_naming_stops_when_the_vault_refuses_it(client, db, vault, monkeypatch):
+  """A refusal is the vault's answer, not a hiccup: asking again every minute
+  would change nothing, so naming stops until the vault restarts."""
+  import asyncio
+  calls = []
+
+  async def refused():
+    calls.append(1)
+    raise key_vault.VaultRefused(400, "Name the installs.")
+  monkeypatch.setattr(key_vault, "_vault_ever_used", lambda: True)
+  monkeypatch.setattr(key_vault, "adopt_app_installs", refused)
+  monkeypatch.setattr(key_vault, "_NAME_INSTALLS_RETRY_SECS", (0,))
+  asyncio.run(asyncio.wait_for(key_vault._name_app_installs(), timeout=5))
+  assert len(calls) == 1
+
+
+def test_a_saved_secret_of_an_app_without_an_installation_id_is_still_imported(client, db, vault):
+  """An app row an older release wrote after a rollback has no installation
+  id; the import gives it one first, whether or not naming has run, so its
+  saved secret moves into the vault for that installation."""
+  import asyncio
+  older = _app(db, "older")
+  older.install_id = None
+  db.commit()
+  _legacy_secret(older.id, "token", "older-secret")
+  asyncio.run(key_vault._import_when_ready())
+  db.refresh(older)
+  assert older.install_id is not None
+  [key] = [k for k in vault.list_keys() if k.get("origin")]
+  assert key["origin"]["app"] == older.id and key["origin"]["install"] == older.install_id
 
 
 def test_a_purged_apps_unimported_secrets_never_reach_an_app_reusing_its_id(client, auth, db, vault):

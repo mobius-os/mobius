@@ -977,6 +977,26 @@ def test_restoring_a_backup_from_before_installation_ids_says_to_allow_apps_agai
   assert kv.Vault(data / ".vault").list_keys()[0]["grants"]["apps"] == []
 
 
+def test_a_backup_mixing_apps_with_and_without_installation_ids_names_those_without(tmp_path):
+  """A backup taken after a rollback can hold app rows an older release
+  wrote: only those apps' grants can't be matched, and the notice names them."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"})
+  db = sqlite3.connect(str(data / "db" / "ultimate.db"))
+  db.execute("UPDATE apps SET install_id = NULL WHERE id = 2")
+  db.commit()
+  db.close()
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: "weather"})
+  _vault_granting(data, kv, [1, 2])
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert restored.stdout.count("NOTE: apps [2] in this backup are from before") == 2
+  assert _granted_ids(kv, data) == [1]
+
+
 def test_a_current_backup_says_nothing_about_installation_ids(tmp_path):
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
