@@ -36,6 +36,10 @@ export default function OwnerConfirmSheet({ appName, themeColor, request, onCanc
   // appears or is revealed under a finger or a key cannot be confirmed.
   const guard = useKeyAnswerGuard({ enabled: phase === 'ready' })
   const armed = phase === 'ready' && guard.active
+  // Asleep is only aria-disabled, as on a key request card: every press on the
+  // card restarts the guard's wait, so a real `disabled` would switch the verb
+  // off under the owner's own held press and the browser would drop its click.
+  // guard.counts decides whether a click answers.
   useDialogFocus({ containerRef: guard.cardProps.ref, initialFocusRef: cancelRef, onClose: onCancel })
   const title = showsFacts ? preview.headline : TITLES[phase]
   const verb = WAITING_VERBS[phase] || preview?.verb
@@ -60,8 +64,8 @@ export default function OwnerConfirmSheet({ appName, themeColor, request, onCanc
             {phase === 'error' ? 'Close' : 'Cancel'}
           </button>
           {phase !== 'error' && (
-            <button type="button" disabled={!armed} aria-disabled={!armed}
-              onClick={event => { if (guard.counts(event)) onConfirm() }}
+            <button type="button" disabled={phase !== 'ready'} aria-disabled={armed ? undefined : 'true'}
+              onClick={event => { if (phase === 'ready' && guard.counts(event)) onConfirm() }}
               className={`canvas-file-export__primary${cautious ? ' canvas-owner-confirm__caution' : ''}`}>
               {verb}
             </button>
