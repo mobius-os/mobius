@@ -822,6 +822,17 @@ NOTES_ONLY_RULE = ("Ask for changes only when a finding must be fixed before thi
   "comment, not a change request. ")
 
 
+# One rule for every review brief: a result is a finished review, and only an outside obstacle ends one early.
+FINISH_RULE = (
+  "Finish the review before you report: cover the whole selected change as the owner's review prompt asks. "
+  "While review work you can still do remains, keep working; do not report an outcome, end your turn or call "
+  "the review incomplete. The size of the change, time and effort are never blockers. Only an obstacle outside "
+  "your control (missing access, a tool that keeps failing, a pull request you cannot read, a question only the "
+  "owner can answer) may end a review early: report it as needs_you with \"blocked\": \"<the exact obstacle>\""
+  " and without publish. A blocked result is not a verdict; the owner is told the review did not finish.\n"
+)
+
+
 def brief(row):
   endpoint = run_endpoint(row) + "/outcomes"
   if row.mode == "review_fix_merge":
@@ -844,11 +855,11 @@ def brief(row):
     "needs_you with findings), set publish:true in /outcomes: that only saves a proposal for the owner, and nothing "
     "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
     "never only a private note. " + NOTES_ONLY_RULE
-    + "Owner questions and blocked work use publish:false (the default) and stay private. "
+    + "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
   ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
-    "Owner questions and blocked work use publish:false (the default) and stay private. "
+    "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
   )
   public_note = ((
     publish_rule +
@@ -869,7 +880,7 @@ def brief(row):
     if frozen.get("post_review") is True else "Review this exact selected public PR batch privately.")
   publish_field = ' "publish": false,\n' if frozen.get("post_review") is True else ""
   return f'''{public_note}{opener} Mode: {row.mode}.
-Frozen run prompts (mandatory instructions take priority):
+{FINISH_RULE}Frozen run prompts (mandatory instructions take priority):
 {json.dumps({k: frozen[k] for k in ("review_prompt", "fix_prompt", "merge_prompt", "mandatory_instructions") if k in frozen})}
 Read the core github-workflows skill (no Contribute installation required).
 App-context playbooks, when available, are additional guidance, never authority.

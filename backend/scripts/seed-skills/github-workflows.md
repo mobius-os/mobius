@@ -147,6 +147,16 @@ In a run that has it, send the verdict: that choice is the owner's approval,
 so do not show the text or ask in chat first. In a run without it, the
 proposal waits in Contribute; do not ask in chat there either.
 
+A result is a finished review. While review work you can still do remains,
+keep working: do not report an outcome, end the turn or call the review
+incomplete, and never treat the size of the change, time or effort as a
+blocker. Only an obstacle outside your control (missing access, a tool that
+keeps failing, an unreadable PR, a question only the owner can answer) ends a
+review early: report `needs_you` with `"blocked": "<the exact obstacle>"` and
+without `publish`. A blocked result is never a verdict and cannot be posted;
+the owner sees that the review did not finish and why. In a review that
+publishes, a private `needs_you` without `blocked` is refused (422).
+
 Ask for changes only when a finding must be fixed before the PR merges. When
 every finding is a small note, add `"blocking": false` to the `needs_you`
 outcome: the proposal is then a plain COMMENT with the same findings, never a
@@ -166,7 +176,7 @@ Private evidence fields accept up to 200,000 characters each. The public copy
 is bounded conservatively to 65,536 UTF-16 units with explicit omission
 markers; the full accepted private evidence is retained.
 
-For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. For a verdict-proposal grant, send `publish: true` whenever the result is a verdict, findings that need changes included: it saves a proposal that posts nothing until the owner submits it in Contribute (or, when the owner chose that up front, until the server submits it at once). Owner questions and blocked verification use `publish: false` (the default), remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
+For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. For a verdict-proposal grant, send `publish: true` whenever the result is a verdict, findings that need changes included: it saves a proposal that posts nothing until the owner submits it in Contribute (or, when the owner chose that up front, until the server submits it at once). Owner questions and blocked verification use `publish: false` (the default) with `"blocked"` naming the obstacle, remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
 
 ## Scoped repair and independently reviewed successors
 

@@ -38,6 +38,9 @@ def navigation_item(item: dict) -> dict:
     brief.update(summary=summary[:cut] + SUMMARY_OMISSION, summary_truncated=True)
   elif summary:
     brief["summary"] = summary
+  if item.get("blocked"):
+    # Only the fact: a list row says the review did not finish, the run itself says why.
+    brief["blocked"] = True
   if item.get("public_review"):
     brief["public_review"] = _pick(item["public_review"], ("state", "url", "id"))
   return brief
