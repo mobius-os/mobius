@@ -6,7 +6,7 @@ An app declares one role for all the agents it starts, in ``mobius.json``::
                  "why": "Builds and edits the sites you make here."}
 
 The owner accepts that once in the app's permission popup. Every agent of a
-Viewer, Editor or Explorer app then runs whole (the AI program and everything
+Operator, Viewer or Editor app then runs whole (the AI program and everything
 it starts) in a *room* the Linux kernel locks before it starts
 (``scripts/mobius_fence.py``). Its only way out is Möbius itself, reached with
 an *agent key*: the app's own credential bound to one live run. Each kind of
@@ -24,7 +24,7 @@ they work inside the room, which limits them. ``tools`` adds Möbius tools
 that reach beyond the room.
 
 Private data or the internet, never both, unless the owner allows it: an
-Explorer starts with no data, and ``web`` beside Viewer or Editor data is
+Operator starts with no data, and ``web`` beside Viewer or Editor data is
 shown to the owner as such. Owner apps declare no tools: their agents keep the
 full access every app agent had before roles existed, as do apps that declare
 no role at all.
@@ -65,9 +65,9 @@ class Role:
 
 
 ROLES: dict[str, Role] = {
+  "operator": Role("Operator", None),
   "viewer": Role("Viewer", "read"),
   "editor": Role("Editor", "write"),
-  "explorer": Role("Explorer", None),
   "owner": Role("Owner", None, confined=False),
 }
 
@@ -137,6 +137,13 @@ TOOLS: dict[str, Tool] = {
     ),
   ),
 }
+
+
+def provider_web(tools: Any) -> bool:
+  """Whether these declared tools let the provider run its own web search."""
+  return any(TOOLS[tool].provider_web for tool in tools if tool in TOOLS)
+
+
 # Another installed app's agent tool, declared as ``<app slug>.<tool name>``
 # (``memory.search``). The app that serves it already offered it to agents in
 # its own popup; declaring it here offers it to this app's agents.
@@ -251,7 +258,7 @@ def role_from_contract(contract: Any) -> AgentRole | None:
     norm = normalize_declaration(value)
   except ValueError:
     # A stored role this Möbius cannot read never falls back to more reach.
-    return AgentRole("explorer", (), "")
+    return AgentRole("operator", (), "")
   return AgentRole(norm["role"], tuple(norm["tools"]), norm["why"])
 
 
@@ -520,7 +527,7 @@ class Room:
 
   @property
   def web(self) -> bool:
-    return any(TOOLS[tool].provider_web for tool in self.role.tools if tool in TOOLS)
+    return provider_web(self.role.tools)
 
   def fence_args(self) -> list[str]:
     port = _port(self.api_base_url)
@@ -567,8 +574,9 @@ class Room:
       "DISABLE_TELEMETRY": "1",
     }
 
-  def claude_launcher(self, path: Path, claude_cli: str) -> str:
-    """The Claude SDK runs this instead of the CLI; it lives outside the room."""
+  def claude_launcher(self, claude_cli: str) -> str:
+    """The Claude SDK runs this instead of the CLI; it starts the room."""
+    path = self.config / "claude"
     path.write_text(
       "#!/bin/sh\nexec "
       + shlex.join(["setsid", *self.fence_args(), claude_cli])

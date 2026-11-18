@@ -602,7 +602,7 @@ def _agent_update(
   scope = held["scope"]
   before = (
     "Editor" if "data:write" in scope else "Viewer" if "data:read" in scope
-    else "Explorer"
+    else "Operator"
   )
   return {
     **row,

@@ -789,10 +789,10 @@ An app's `agent_role` decides what every agent it starts can reach (manifest
 shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
 `backend/app/agent_gateway.py` and `backend/scripts/mobius_fence.py`.
 
-- **Roles.** `viewer` reads the app's files and data, `editor` reads and changes
-  them, `explorer` starts in an empty folder, and `owner` has full access and
-  declares no tools. An app that declares no role keeps full access.
-- **The room.** A Viewer, Editor or Explorer agent runs whole in a room built
+- **Roles.** `operator` starts in an empty folder and reaches only what its
+  tools give it, `viewer` reads the app's files and data, `editor` reads and
+  changes them, and `owner` has full access and declares no tools. An app that declares no role keeps full access.
+- **The room.** An Operator, Viewer or Editor agent runs whole in a room built
   before it starts: Landlock walls (system folders read-only, the app's storage
   directory read-only or writable by role with ordinary files only, nothing
   else), a seccomp connect guard that admits only the Möbius API address (only

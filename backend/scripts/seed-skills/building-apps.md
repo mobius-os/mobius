@@ -1476,9 +1476,9 @@ app's permission popup, and Möbius enforces it outside the agent:
 
 | Role | The app's files and data | Use it for |
 |---|---|---|
+| `operator` | none (an empty folder) | work done only through its tools, with no private data |
 | `viewer` | read | summaries, insights, answers |
 | `editor` | read and change | building and editing the app's own work |
-| `explorer` | none (an empty folder) | research that needs no private data |
 | `owner` | everything the owner can do | trusted apps that manage Möbius |
 
 - Every agent keeps its AI program's own tools (shell, reading and editing
@@ -1500,7 +1500,7 @@ app's permission popup, and Möbius enforces it outside the agent:
   may reach the web.
 - `why` is the app's own reason, 1–80 characters, shown as the role's only
   description.
-- Viewer, Editor and Explorer agents run in a room the kernel locks: their
+- Operator, Viewer and Editor agents run in a room the kernel locks: their
   folder is the app's storage directory (`APP_STORAGE_DIR`), the app's stored
   data is reachable with `$AGENT_TOKEN` at `$API_BASE_URL/api/storage/apps/<id>/`,
   and everything else (other apps, the owner's accounts, the internet) is

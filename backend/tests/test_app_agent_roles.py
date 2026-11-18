@@ -82,7 +82,7 @@ def test_a_malformed_agent_role_is_refused_with_its_reason(declaration, problem)
     validate_manifest_contract(_manifest(agent_role=declaration))
 
 
-@pytest.mark.parametrize("role", ["viewer", "editor", "explorer"])
+@pytest.mark.parametrize("role", ["operator", "viewer", "editor"])
 def test_web_may_be_declared_for_any_confined_role(role):
   validate_manifest_contract(_manifest(agent_role=_role(role, "web", "notify")))
   assert contract_from_manifest(_manifest(agent_role=_role(role, "web")))["agent"][
@@ -100,7 +100,7 @@ def test_an_unreadable_stored_role_never_gains_reach():
   role = agent_roles.role_from_contract(
     {"agent": {"role": {"role": "superuser", "tools": [], "why": "x"}}}
   )
-  assert role == AgentRole("explorer", (), "")
+  assert role == AgentRole("operator", (), "")
   assert role.confined and role.spec.data is None
 
 
@@ -115,7 +115,7 @@ def test_each_confined_role_is_one_agent_row_with_the_apps_own_reason():
     ("notify", False),
     ("web", True),
   ]
-  assert _agent_row(_role("explorer", "web"))["tools"][0]["warning"] is False
+  assert _agent_row(_role("operator", "web"))["tools"][0]["warning"] is False
 
 
 def test_owner_role_and_undeclared_agents_are_the_critical_full_access_row():
@@ -143,9 +143,9 @@ def _asks_again(before, after):
 def test_updates_ask_again_only_when_they_add_reach():
   assert _asks_again(_role("viewer"), _role("editor")) == ["agent_role"]
   assert _asks_again(_role("viewer"), _role("viewer", "web")) == ["agent_role"]
-  assert _asks_again(_role("explorer", "web"), _role("viewer", "web")) == ["agent_role"]
+  assert _asks_again(_role("operator", "web"), _role("viewer", "web")) == ["agent_role"]
   assert _asks_again(_role("editor", "web"), _role("viewer")) == []
-  assert _asks_again(_role("viewer", "web"), _role("explorer", "web")) == []
+  assert _asks_again(_role("viewer", "web"), _role("operator", "web")) == []
   assert _asks_again(_role("viewer"), _role("viewer", why="Reworded reason.")) == []
 
 
@@ -164,7 +164,7 @@ def _key(role, *tools, app_id=7, provider="claude"):
     (_key("editor"), "PUT", "/api/storage/apps/7/notes.json", True),
     (_key("editor"), "GET", "/api/storage/apps-list/7/", True),
     (_key("editor"), "GET", "/api/storage/apps/8/notes.json", False),
-    (_key("explorer"), "GET", "/api/storage/apps/7/notes.json", False),
+    (_key("operator"), "GET", "/api/storage/apps/7/notes.json", False),
     (_key("viewer"), "POST", "/api/agent-gateway/v1/messages", True),
     (_key("viewer"), "GET", "/api/proxy", False),
     (_key("viewer", "web"), "GET", "/api/proxy", True),
@@ -376,7 +376,7 @@ def _room(tmp_path, role, *tools):
 
 
 @pytest.mark.parametrize(
-  "role, flag", [("viewer", "--ro"), ("editor", "--rw"), ("explorer", None)]
+  "role, flag", [("viewer", "--ro"), ("editor", "--rw"), ("operator", None)]
 )
 def test_the_rooms_walls_follow_the_role(tmp_path, role, flag):
   room = _room(tmp_path, role)
@@ -403,7 +403,7 @@ def test_the_room_never_carries_a_login(tmp_path):
 
 
 def test_codex_reaches_its_model_through_the_gateway(tmp_path):
-  web = _room(tmp_path, "explorer", "web").codex_overrides([])
+  web = _room(tmp_path, "operator", "web").codex_overrides([])
   assert 'model_provider="mobius_gateway"' in web
   assert (
     'model_providers.mobius_gateway.base_url="http://localhost:8080/api/agent-gateway/v1"'
@@ -625,7 +625,7 @@ def test_codex_searches_and_opened_pages_are_recorded_per_app(monkeypatch):
       "open": [{"ref_id": "https://kernel.org/"}],
     }
   )
-  key = AgentKey(7, "explorer", frozenset({"web"}), "codex", "chat-1")
+  key = AgentKey(7, "operator", frozenset({"web"}), "codex", "chat-1")
   gateway_routes._record_search(key, body)
   [(event, fields)] = events
   assert event == "app_agent_web" and fields["kind"] == "search"
@@ -681,8 +681,8 @@ def test_moebius_never_writes_where_the_agent_may_have_planted_a_link(tmp_path):
 def test_a_narrower_role_never_finds_what_a_wider_one_left(tmp_path):
   viewer = _room(tmp_path, "viewer", "web")
   (viewer.home / "cache.txt").write_text("FAKE-SECRET")
-  explorer = _room(tmp_path, "explorer", "web")
-  assert explorer.home != viewer.home and not (explorer.home / "cache.txt").exists()
+  operator = _room(tmp_path, "operator", "web")
+  assert operator.home != viewer.home and not (operator.home / "cache.txt").exists()
 
 
 def test_a_running_agents_key_follows_the_apps_current_role(client, owner_token, db):
@@ -802,7 +802,7 @@ def test_pages_open_only_through_moebius_where_each_is_recorded():
   hosted_fetch = {"type": "web_fetch_20250910", "name": "web_fetch"}
   search = {"type": "web_search_20250305", "name": "web_search"}
   body, removed = agent_gateway.prepare_body(
-    _key("explorer", "web"), _body(tools=[hosted_fetch, search])
+    _key("operator", "web"), _body(tools=[hosted_fetch, search])
   )
   assert json.loads(body)["tools"] == [search] and removed == ["web_fetch_20250910"]
 
@@ -857,7 +857,7 @@ async def test_only_runs_whose_grant_changed_are_stopped(owner_token, db, monkey
   monkeypatch.setattr(registry, "all_alive_chat_ids", lambda: set(chats))
   assert await agent_roles.stop_runs_outside_grant(db, app.id) and stopped == []
   app.capability_contract = contract_from_manifest(
-    _manifest(agent_role=_role("explorer"))
+    _manifest(agent_role=_role("operator"))
   )
   db.commit()
   assert await agent_roles.stop_runs_outside_grant(db, app.id) and stopped == chats
@@ -953,7 +953,7 @@ def test_applying_a_narrower_role_stops_a_running_agent(
 @pytest.mark.parametrize(
   "provider_id,provider_name", [("claude", "Claude Code"), ("codex", "Codex")]
 )
-@pytest.mark.parametrize("role", ["viewer", "editor", "explorer"])
+@pytest.mark.parametrize("role", ["operator", "viewer", "editor"])
 async def test_a_confined_agent_never_inherits_history_from_another_grant(
   db, owner_token, monkeypatch, provider_id, provider_name, role
 ):
@@ -1096,7 +1096,7 @@ def test_ask_makes_the_room_end_its_turn_on_cards(tmp_path):
   ],
 )
 def test_another_apps_tool_is_declared_as_app_dot_tool(name, ok):
-  manifest = _manifest(agent_role=_role("explorer", name))
+  manifest = _manifest(agent_role=_role("operator", name))
   if ok:
     validate_manifest_contract(manifest)
   else:
@@ -1105,7 +1105,7 @@ def test_another_apps_tool_is_declared_as_app_dot_tool(name, ok):
 
 
 def test_another_apps_tool_counts_as_private_data_beside_web():
-  row = _agent_row(_role("explorer", "memory.search", "web"))
+  row = _agent_row(_role("operator", "memory.search", "web"))
   tools = {tool["id"]: tool for tool in row["tools"]}
   assert tools["web"]["warning"] is True and tools["memory.search"]["warning"] is False
   assert "search tool of your memory app" in tools["memory.search"]["text"]
@@ -1113,11 +1113,11 @@ def test_another_apps_tool_counts_as_private_data_beside_web():
 
 
 def test_another_apps_tool_routes_open_only_when_declared():
-  declared = AgentKey(7, "explorer", frozenset({"memory.search"}), "claude", "c", "r")
+  declared = AgentKey(7, "operator", frozenset({"memory.search"}), "claude", "c", "r")
   assert declared.app_tools == {("memory", "search")}
   assert declared.may_call("POST", "/api/agent/app-tools/call")
   assert declared.may_call("GET", "/api/agent/app-tools/")
-  assert not _key("explorer", "web").may_call("POST", "/api/agent/app-tools/call")
+  assert not _key("operator", "web").may_call("POST", "/api/agent/app-tools/call")
 
 
 def test_the_app_tools_routes_serve_a_confined_agent_only_its_declared_tools(
@@ -1145,9 +1145,9 @@ def test_the_app_tools_routes_serve_a_confined_agent_only_its_declared_tools(
     )
   ]
   monkeypatch.setattr(app_tools, "live_app_tools", lambda db: tools)
-  app = _local_app(db, "reader", _role("explorer", "memory.search", "foo.bar_baz"))
+  app = _local_app(db, "reader", _role("operator", "memory.search", "foo.bar_baz"))
   key, _run = _agent_key_for(
-    db, app, role="explorer", tools=("memory.search", "foo.bar_baz")
+    db, app, role="operator", tools=("memory.search", "foo.bar_baz")
   )
   bearer = {"Authorization": f"Bearer {key}"}
   listed = client.get("/api/agent/app-tools/", headers=bearer)
@@ -1173,7 +1173,7 @@ def test_a_confined_agent_is_offered_only_its_declared_app_tools(monkeypatch):
   assert [tool["name"] for tool in control._tools_list_result()["tools"]] == [
     "memory_search"
   ]
-  room = AgentRole("explorer", ("memory.search",), "why")
+  room = AgentRole("operator", ("memory.search",), "why")
   assert room.app_tools == ("memory_search",) and room.reads_private_data
 
 
@@ -1431,7 +1431,7 @@ def test_screenshot_shows_only_the_apps_own_page_and_counts_as_private_data(
   )
   assert refused.status_code in (401, 403)
   assert (
-    _agent_row(_role("explorer", "screenshot", "web"))["tools"][1]["warning"] is True
+    _agent_row(_role("operator", "screenshot", "web"))["tools"][1]["warning"] is True
   )
   assert seen[0].pixelRatio == 3.75
 
@@ -1497,11 +1497,11 @@ def test_a_confined_approval_claims_only_inside_its_own_app_and_chat(
   "before, after, widens",
   [
     (_role("editor", "web"), _role("viewer", "web"), False),
-    (_role("owner"), _role("explorer", "notify"), False),
+    (_role("owner"), _role("operator", "notify"), False),
     (_role("viewer"), _role("viewer", why="Reworded reason."), False),
-    (_role("viewer"), _role("explorer"), False),
+    (_role("viewer"), _role("operator"), False),
     (_role("viewer"), _role("editor"), True),
-    (_role("explorer"), _role("viewer"), True),
+    (_role("operator"), _role("viewer"), True),
     (_role("viewer", "web"), _role("viewer", "notify"), True),
     (_role("editor"), _role("owner"), True),
     (_role("viewer"), None, True),

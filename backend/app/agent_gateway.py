@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.agent_roles import TOOLS, AgentKey
+from app.agent_roles import AgentKey, provider_web
 
 # The wire format each room provider speaks, and the endpoints it may use.
 WIRE = {"claude": "anthropic", "codex": "responses", "mobius": "responses"}
@@ -72,10 +72,6 @@ class Upstream:
   headers: dict[str, str]
 
 
-def _web(key: AgentKey) -> bool:
-  return any(TOOLS[name].provider_web for name in key.tools if name in TOOLS)
-
-
 def endpoint(key: AgentKey, path: str) -> str:
   """The checked endpoint for this run's provider, or a refusal."""
   path = path.strip("/")
@@ -84,7 +80,7 @@ def endpoint(key: AgentKey, path: str) -> str:
     raise GatewayError(
       404, "Only this run's model requests are available through the gateway."
     )
-  if path in WEB_ENDPOINTS and not _web(key):
+  if path in WEB_ENDPOINTS and not provider_web(key.tools):
     raise GatewayError(403, "Web access is not one of this app's agent tools.")
   return path
 
@@ -194,7 +190,7 @@ def prepare_body(key: AgentKey, raw: bytes) -> tuple[bytes, list[str]]:
   if not isinstance(body, dict):
     raise GatewayError(400, "The request body must be a JSON object.")
   _refuse_provider_fetches(body)
-  web = _web(key)
+  web = provider_web(key.tools)
   removed = [field for field in _SERVER_FIELDS if body.pop(field, None) is not None]
   if "tools" in body:
     if not isinstance(body["tools"], list):

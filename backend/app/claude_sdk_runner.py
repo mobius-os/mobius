@@ -1595,10 +1595,7 @@ async def run_claude_sdk_turn(
       # The room limits a confined agent, and Möbius serves its web: Claude's
       # own page fetch runs inside the room, which has no internet.
       options_kwargs["setting_sources"] = None
-      launcher = Path(base_env.get("TMPDIR") or tempfile.gettempdir())
-      options_kwargs["cli_path"] = app_room.claude_launcher(
-        launcher / "mobius-room-claude", _CLAUDE_CLI,
-      )
+      options_kwargs["cli_path"] = app_room.claude_launcher(_CLAUDE_CLI)
       options_kwargs["disallowed_tools"] += [
         "WebFetch", *(() if app_room.web else ("WebSearch",)),
       ]
