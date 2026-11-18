@@ -114,6 +114,7 @@ app_secrets_compat_router = _load("app_secrets_compat")
 browser_access_router = _load("browser_access")
 projects_router = _load("projects")
 project_copies_router = _load("project_copies")
+project_handle_invites_router = _load("project_handle_invites")
 shared_apps_router = _load("shared_apps")
 
 __all__ = [
@@ -178,5 +179,6 @@ __all__ = [
   "browser_access_router",
   "projects_router",
   "project_copies_router",
+  "project_handle_invites_router",
   "shared_apps_router",
 ]

@@ -18,6 +18,7 @@
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
 //   /shell/?chat=<id>[&focus=question]      → { view: 'chat', chatId, focusQuestion }
 //   /shell/?settings[=<section>]            → { view: 'settings', section }
+//   /shell/?projects=1                      → { view: 'projects' }
 //
 // A settings target only navigates. Its section is narrowed to the known ids
 // (settingsSections.js); an unknown one opens Settings with no focus, so a
@@ -79,6 +80,7 @@ export function parseNotificationTarget(target) {
     if (!app && !chat && params.has('settings')) {
       return { view: 'settings', section: settingsSectionOrNull(params.get('settings')) }
     }
+    if (params.get('projects') === '1') return { view: 'projects' }
     return null
   }
 

@@ -1368,6 +1368,23 @@ export const api = {
       `/projects/${encodeURIComponent(projectId)}/invites/${encodeURIComponent(inviteId)}`,
       { method: 'DELETE' },
     ),
+    // Invitations by Möbius @handle: sent to, and received from, other Möbius.
+    sendHandleInvite: (payload) => apiFetch('/project-invites/send', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+    receivedInvites: () => apiFetch('/project-invites'),
+    acceptReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/accept`, { method: 'POST' },
+    ),
+    openReceivedProject: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/open`, { method: 'POST' },
+    ),
+    declineReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/decline`, { method: 'POST' },
+    ),
+    removeReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}`, { method: 'DELETE' },
+    ),
     updateMember: (projectId, memberId, payload) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberId)}`,
       { method: 'PATCH', body: JSON.stringify(payload) },

@@ -33,6 +33,18 @@ function sessionKey(projectId) {
   return `mobius:project-session:${projectId}`
 }
 
+// A member's own Möbius opens their accepted project as
+// `/shared/project/<id>#access=<token>`. Move that pass into this tab's
+// session at once so it leaves the address bar and history.
+function adoptHandedAccess(projectId) {
+  try {
+    const match = /^#access=([A-Za-z0-9._-]{20,4096})$/.exec(window.location.hash)
+    if (!projectId || !match) return
+    sessionStorage.setItem(sessionKey(projectId), match[1])
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  } catch { /* the tab falls back to the ordinary expired-session screen */ }
+}
+
 function initials(name) {
   return String(name || '?').trim().split(/\s+/).slice(0, 2).map(part => part[0]).join('').toUpperCase()
 }
@@ -58,6 +70,7 @@ export default function ProjectShare() {
 
   useEffect(() => {
     if (initialProjectId) {
+      adoptHandedAccess(initialProjectId)
       let token = ''
       try { token = sessionStorage.getItem(sessionKey(initialProjectId)) || '' } catch { /* ignore */ }
       if (token) {

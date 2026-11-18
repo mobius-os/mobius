@@ -239,6 +239,9 @@ def create_app_token(
   )
 
 
+PROJECT_COLLABORATOR_TTL = timedelta(days=30)
+
+
 def create_project_collaborator_token(
   *,
   owner_username: str,
@@ -246,7 +249,7 @@ def create_project_collaborator_token(
   project_id: str,
   member_id: str,
   member_epoch: int,
-  expires_delta: timedelta = timedelta(days=30),
+  expires_delta: timedelta = PROJECT_COLLABORATOR_TTL,
 ) -> str:
   """Mint a bearer confined to one revocable Project membership."""
   return create_access_token(

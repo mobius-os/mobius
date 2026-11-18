@@ -3003,6 +3003,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       )
       if (project) openProjectRef.current(project)
       else navToRef.current('projects')
+    } else if (target?.view === 'projects') {
+      navToRef.current('projects')
     }
   }, [openAppWithIntent, openSettingsSection, requestComposer])
 

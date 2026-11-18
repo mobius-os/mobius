@@ -132,6 +132,8 @@ function _safeTarget(raw) {
           ? `/shell/?settings=${section}`
           : '/shell/?settings'
       }
+      // The Projects list, where invitations from other people wait.
+      if (params.get('projects') === '1') return '/shell/?projects=1'
     } catch { /* fall through */ }
     return '/shell/'
   }
