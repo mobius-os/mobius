@@ -245,7 +245,6 @@ def _identical_armed_wait_from_run(
       models.ChatWait.status == "armed",
       models.ChatWait.kind == kind,
     )
-    .populate_existing()
     .all()
   )
 
@@ -307,6 +306,7 @@ def declare_wait(
   condition_owner = (condition_owner or "").strip() or None
   if kind == "command" and condition_owner is None:
     raise WaitValidationError("command waits need a condition owner")
+  condition_owner = condition_owner or ("Time" if kind == "timer" else "External system")
   if kind in ("command", "github_checks") and deadline_secs is None:
     raise WaitValidationError("command and GitHub waits need an explicit deadline")
 
@@ -362,14 +362,14 @@ def declare_wait(
     # row and receives it rather than arming a duplicate that wakes twice.
     already_armed = _identical_armed_wait_from_run(
       db, chat_id=chat_id, run_id=created_by_run_id, description=description,
-      condition_owner=(
-        condition_owner or ("Time" if kind == "timer" else "External system")
-      ),
-      kind=kind, command=command, condition=condition, interval=interval,
+      condition_owner=condition_owner, kind=kind, command=command,
+      condition=condition, interval=interval,
       delay_secs=delay_secs if kind == "timer" else None, deadline=deadline,
     )
     if already_armed is not None:
-      db.rollback()
+      # Commit like the arming path does, so the caller's session keeps the
+      # same outcome either way and the fence is released.
+      db.commit()
       return already_armed
 
   armed = (
@@ -397,9 +397,7 @@ def declare_wait(
     root_run_id=(source.root_run_id or source.id) if source else None,
     goal_id=source.goal_id if source else None,
     description=description[:500],
-    condition_owner=(
-      condition_owner or ("Time" if kind == "timer" else "External system")
-    ),
+    condition_owner=condition_owner,
     kind=kind,
     command=command,
     condition_json=condition,

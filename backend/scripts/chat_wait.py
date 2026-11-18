@@ -56,10 +56,14 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
     if isinstance(reason, TimeoutError):
       # The server may have committed before the reply was lost; never
       # report that as a plain failure the caller would answer with a new one.
+      retry = (
+        " Retrying an identical declare_wait in the same turn returns the wait"
+        " it already armed, with its original deadline."
+        if (method, path) == ("POST", "/api/chat-waits") else ""
+      )
       raise SystemExit(
         f"no reply within 30 seconds; the {method} {path} request may "
-        "already have taken effect, so do not treat it as failed. Retrying an "
-        "identical declare_wait in the same turn returns the wait it already armed."
+        f"already have taken effect, so do not treat it as failed.{retry}"
       )
     raise SystemExit(f"request failed: {reason}")
 

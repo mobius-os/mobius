@@ -215,6 +215,41 @@ def test_a_different_declaration_or_another_run_still_arms_its_own_wait(
   assert len({first.id, *(row.id for row in changed)}) == 4
 
 
+def test_an_identical_retry_keeps_the_callers_unsaved_changes(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  settled = _command_wait(db, chat_id=chat_id, description="checks pass",
+                          command="true", created_by_run_id=run_id)
+  first = _command_wait(db, chat_id=chat_id, description="PR merged",
+                        command="true", created_by_run_id=run_id)
+  settled.status = "met"
+  retried = _command_wait(db, chat_id=chat_id, description="PR merged",
+                          command="true", created_by_run_id=run_id)
+
+  assert retried.id == first.id
+  db.expire_all()
+  assert db.get(models.ChatWait, settled.id).status == "met"
+
+
+def test_an_identical_retry_at_the_armed_wait_cap_returns_the_armed_wait(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  waits = [
+    _command_wait(db, chat_id=chat_id, description=f"wait {index}",
+                  command="true", created_by_run_id=run_id)
+    for index in range(chat_waits_mod.MAX_ARMED_WAITS_PER_CHAT)
+  ]
+  retried = _command_wait(db, chat_id=chat_id, description="wait 0",
+                          command="true", created_by_run_id=run_id)
+
+  assert retried.id == waits[0].id
+  assert db.query(models.ChatWait).filter_by(chat_id=chat_id).count() == len(waits)
+
+
 def test_active_wait_context_is_compact_safe_lifecycle_data(
   client, owner_token, db,
 ):
