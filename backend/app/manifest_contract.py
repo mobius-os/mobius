@@ -13,6 +13,9 @@ import shlex
 # stays below the API's request body cap.
 STORE_LISTING_IMAGE_MAX_BYTES = 6 * 1024 * 1024
 MAX_STORE_SCREENSHOTS = 5
+# A Store category id (store.category), a slug the Store app defines. The
+# listing editor shows and saves only this shape.
+STORE_CATEGORY = re.compile(r"[a-z][a-z0-9-]{0,39}")
 
 REQUIRED_STRING_FIELDS = ("id", "name", "version", "description", "entry")
 BOOLEAN_PERMISSIONS = (

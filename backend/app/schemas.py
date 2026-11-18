@@ -11,7 +11,11 @@ from pydantic import (
   field_validator, model_validator,
 )
 
-from app.manifest_contract import MAX_STORE_SCREENSHOTS, STORE_LISTING_IMAGE_MAX_BYTES
+from app.manifest_contract import (
+  MAX_STORE_SCREENSHOTS,
+  STORE_CATEGORY,
+  STORE_LISTING_IMAGE_MAX_BYTES,
+)
 from app.manifest_identity import requested_manifest_source
 from app.providers import PROVIDERS, _model_belongs_to_other_provider
 from app.update_chat import UpdateAgentChoice
@@ -156,7 +160,7 @@ class StoreListingIn(BaseModel):
   )
   # A Store category slug the Store app defines. Omitted keeps the current one;
   # an empty string removes it.
-  category: str | None = Field(default=None, max_length=40, pattern=r"^(?:[a-z][a-z0-9-]*)?$")
+  category: str | None = Field(default=None, pattern=rf"^(?:{STORE_CATEGORY.pattern})?$")
   # An SPDX id from store_licenses.OFFERED_LICENSES. Omitted keeps the
   # current license; the save refuses any other value.
   license: str | None = Field(default=None, max_length=40)

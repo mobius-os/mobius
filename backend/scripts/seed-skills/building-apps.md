@@ -207,6 +207,11 @@ of the app's source, so it is reviewed, versioned and published with the code:
   don't pick one for them. Never overwrite or
   delete license text that is already there: a remix must keep its
   upstream copyright notices.
+- `store.category` is optional and places the app on a Store shelf. It is a
+  category id from the Store's own list: lowercase letters, digits and
+  hyphens, at most 40 characters (`productivity`, not `Productivity`). The
+  choice is the owner's, made in the Store editor's category picker, so don't
+  pick one for them; the editor treats any other value as no category.
 - Screenshots must be truthful and private: capture the app's real UI in an
   empty, demo, or fixture state, never the owner's own records, names,
   accounts, chats, or machines. Build a small demo state if the app has none.

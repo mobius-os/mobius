@@ -23,6 +23,7 @@ from app.manifest_contract import (
   MANIFEST_MAX_BYTES,
   MAX_STORE_SCREENSHOTS,
   PACKAGE_MAX_BYTES,
+  STORE_CATEGORY,
   STORE_LISTING_IMAGE_MAX_BYTES,
   ManifestContractError,
   package_bytes,
@@ -849,13 +850,16 @@ def _listing_draft(manifest: dict, store: dict, by_path: dict[str, dict]) -> dic
       "alt": item.get("alt") if isinstance(item.get("alt"), str) else "",
       "label": item.get("label") if isinstance(item.get("label"), str) else "",
     })
+  category = text("category")
   return {
     "tagline": text("tagline"),
     "description": text("description"),
     "icon": tracked(manifest.get("icon")),
     "hero": tracked(store.get("hero")),
     "screenshots": screenshots,
-    "category": text("category"),
+    # Only a category the save accepts, so sending the draft back as it is
+    # never fails; the editor shows any other value as no category.
+    "category": category if STORE_CATEGORY.fullmatch(category) else "",
     # The choice the editor shows (only an offered one), and what the
     # source declares now, so the owner can see a license the Store doesn't
     # offer, including one an already listed app keeps.
