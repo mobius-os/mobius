@@ -180,6 +180,11 @@ MERGE_DISPATCH_WINDOW_SECONDS = 3600
 _LOADED_AT = time.time()
 
 
+def process_loaded_at() -> float:
+  """Epoch seconds when this process loaded: an attempt that records no arm time was armed before it."""
+  return _LOADED_AT
+
+
 def dispatch_window_closed(armed_at, read_at: float) -> bool:
   """Whether a read started at ``read_at`` follows every possible evaluation
   of the requests issued for an attempt armed at ``armed_at`` (UTC ISO)."""
