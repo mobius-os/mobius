@@ -4,12 +4,14 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { InfiniteQueryObserver, QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import WalletSection, { ActivityRow, WalletBuyForm, WalletConnect } from '../../components/SettingsView/WalletSection.jsx'
-import ActivityWindow, { ACTIVITY_KEY, RecentActivity } from '../../components/SettingsView/ActivityWindow.jsx'
+import ActivityWindow, {
+  ACTIVITY_KEY, RecentActivity, activityHistory, restartHistory,
+} from '../../components/SettingsView/ActivityWindow.jsx'
 import {
   activityDays, activityLabel, activityTime, canReconnect, checkoutPage, creditsSection,
-  openStripeWindow, settleTopup, termsFor, walletGlance,
+  openStripeWindow, settleTopup, showsCreditsRow, termsFor, walletGlance,
 } from '../creditsWallet.js'
 
 const SUMMARY = {
@@ -81,18 +83,94 @@ test('recent activity is a scrolling window of the whole history, grouped by day
   assert.doesNotMatch(render(), /Recent activity/)
 })
 
-test('a failed older page waits for Try again instead of retrying in a loop', () => {
-  const client = new QueryClient()
-  const query = client.getQueryCache().build(client, { queryKey: [ACTIVITY_KEY, 'p1'] })
-  query.setState({
-    status: 'error',
-    error: new Error('service unavailable'),
-    data: { pageParams: [null], pages: [{ next_cursor: 'c', transactions: [
-      { id: 'a', at: new Date(2026, 10, 10, 12).toISOString(), kind: 'topup', amount: '5.00', description: 'Bought credits' },
-    ] }] },
-    fetchStatus: 'idle',
-    fetchMeta: { fetchMore: { direction: 'forward' } },
-  })
+/**
+ * A credits service holding `pages` pages of history, 50 lines each, that
+ * pages with `next_cursor`. `reads` lists every history request; `failFrom`
+ * makes reads of that page and later ones fail; `name` marks its lines.
+ */
+function stubHistory(t, { pages = 3, failFrom = Infinity } = {}) {
+  const service = { reads: [], name: 'credits' }
+  const realFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = realFetch })
+  globalThis.fetch = async url => {
+    const before = new URL(String(url), 'http://localhost').searchParams.get('before')
+    const page = before ? Number(before.slice(1)) : 0
+    service.reads.push(page)
+    if (page >= failFrom) {
+      return new Response(JSON.stringify({ detail: 'service unavailable' }), { status: 503 })
+    }
+    const transactions = [{
+      id: `t${page}`, at: new Date(2026, 10, 10 - page, 12).toISOString(),
+      kind: 'topup', amount: '5.00', description: `Bought ${service.name} ${page}`,
+    }]
+    return new Response(JSON.stringify({ transactions, next_cursor: page + 1 < pages ? `p${page + 1}` : null }), {
+      headers: { 'Content-Type': 'application/json' },
+    })
+  }
+  return service
+}
+
+async function openHistory(client, pairing = 'p1') {
+  const observer = new InfiniteQueryObserver(client, activityHistory(pairing))
+  const close = observer.subscribe(() => {})
+  await client.getQueryCache().find({ queryKey: [ACTIVITY_KEY, pairing] }).promise
+  return { observer, close }
+}
+
+const quietClient = () => new QueryClient({ defaultOptions: { queries: { retry: false } } })
+
+test('a changed balance reads the history again from its newest page, however far it was scrolled', async t => {
+  const service = stubHistory(t, { pages: 4 })
+  const client = quietClient()
+  const { observer, close } = await openHistory(client)
+  await observer.fetchNextPage()
+  await observer.fetchNextPage()
+  assert.deepEqual(service.reads, [0, 1, 2])
+
+  await restartHistory(client, 'p1')
+  // One request, not one per page scrolled in; scrolling on resumes from there.
+  assert.deepEqual(service.reads, [0, 1, 2, 0])
+  assert.equal(observer.getCurrentResult().data.pages.length, 1)
+  assert.equal(observer.getCurrentResult().hasNextPage, true)
+  close()
+})
+
+test('closing the Credits page drops the history, so reopening reads only the newest page', async t => {
+  const service = stubHistory(t, { pages: 4 })
+  const client = quietClient()
+  const first = await openHistory(client)
+  await first.observer.fetchNextPage()
+  await first.observer.fetchNextPage()
+  first.close()
+  await new Promise(resolve => setTimeout(resolve, 5))
+  assert.equal(client.getQueryData([ACTIVITY_KEY, 'p1']), undefined)
+
+  service.reads.length = 0
+  const again = await openHistory(client)
+  assert.deepEqual(service.reads, [0])
+  again.close()
+})
+
+test('another credits service shows its own history, and the last one\'s is dropped', async t => {
+  const service = stubHistory(t, { pages: 2 })
+  const client = quietClient()
+  const { observer, close } = await openHistory(client, 'p-old')
+  service.name = 'elsewhere'
+  observer.setOptions(activityHistory('p-new'))
+  await client.getQueryCache().find({ queryKey: [ACTIVITY_KEY, 'p-new'] }).promise
+  await new Promise(resolve => setTimeout(resolve, 5))
+  const lines = observer.getCurrentResult().data.pages.flatMap(page => page.transactions)
+  assert.deepEqual(lines.map(line => line.description), ['Bought elsewhere 0'])
+  assert.equal(client.getQueryData([ACTIVITY_KEY, 'p-old']), undefined)
+  close()
+})
+
+test('a failed older page waits for Try again instead of retrying in a loop', async t => {
+  stubHistory(t, { pages: 3, failFrom: 1 })
+  const client = quietClient()
+  const { observer, close } = await openHistory(client)
+  await observer.fetchNextPage()
+  assert.equal(observer.getCurrentResult().isFetchNextPageError, true)
   const window = renderToStaticMarkup(createElement(QueryClientProvider, { client },
     createElement(ActivityWindow, { pairing: 'p1' })))
   // The lines already read stay; the end of the window is no longer watched.
@@ -100,6 +178,7 @@ test('a failed older page waits for Try again instead of retrying in a loop', ()
   assert.match(window, /More activity could not be loaded/)
   assert.match(window, />Try again</)
   assert.doesNotMatch(window, /wallet-activity__sentinel/)
+  close()
 })
 
 test('the full history groups under day headings, newest first, one group per day across pages', () => {
@@ -124,6 +203,15 @@ test('the account page row shows the spendable balance, a debt, or that credits 
   assert.equal(walletGlance(undefined), null)
   assert.equal(walletGlance({ mode: 'customer', error: { message: 'Offline' } }), null)
   assert.equal(walletGlance({ mode: 'unknown' }), null)
+})
+
+test('the account page keeps its Credits row when the wallet could not be read, so the Credits page can say why', () => {
+  assert.equal(showsCreditsRow(SUMMARY), true)
+  assert.equal(showsCreditsRow({ mode: 'unpaired', can_pair_with_account: true }), true)
+  assert.equal(showsCreditsRow({ mode: 'unknown' }), true)
+  // A Möbius without credits shows none; nor does one still reading them.
+  assert.equal(showsCreditsRow({ mode: 'unpaired', can_pair_with_account: false }), false)
+  assert.equal(showsCreditsRow(null), false)
 })
 
 test('without the service terms no amounts are offered', () => {

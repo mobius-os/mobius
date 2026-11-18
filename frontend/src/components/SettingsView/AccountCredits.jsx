@@ -3,17 +3,16 @@
  * wallet (or Connect credits for a Möbius launched from mobius.you that is not
  * connected yet), then the whole history last, in a scrolling window.
  *
- * Mounted only while the Credits page is open, so these reads run only then.
- * The caller renders it for the owner only: a shared-browser guest neither
- * sees nor reads credits.
+ * `wallet` is useWallet's state. Settings owns it rather than this page, so a
+ * Stripe checkout is still watched, and the payment confirmed, when the owner
+ * steps back to the account page meanwhile. The caller renders this for the
+ * owner only: a shared-browser guest neither sees nor reads credits.
  */
 import { creditsSection } from '../../lib/creditsWallet.js'
 import ActivityWindow, { RecentActivity } from './ActivityWindow.jsx'
 import WalletSection, { WalletConnect } from './WalletSection.jsx'
-import { useWallet } from './useWallet.js'
 
-export default function AccountCredits({ active = true }) {
-  const wallet = useWallet({ active })
+export default function AccountCredits({ wallet }) {
   const section = creditsSection(wallet.summary)
 
   if (section === 'connect') {

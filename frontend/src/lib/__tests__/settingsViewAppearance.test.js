@@ -197,7 +197,7 @@ test('provider usage is read for connected providers on the overview and only th
 })
 
 test('the Möbius account lives in Settings, with no hand-off to an app', () => {
-  assert.match(view, /<MobiusAccountPage\s+active=\{active\}\s+onOpenCredits=\{showOwnerAccounts \? \(\) => openDetailPage\(CREDITS_PAGE\) : null\}\s+onOpenModels=\{\(\) => openDetailPage\('mobius'\)\}\s+\/>/)
+  assert.match(view, /<MobiusAccountPage\s+active=\{active\}\s+creditsSummary=\{wallet\.summary\}\s+onOpenCredits=\{showOwnerAccounts \? \(\) => openDetailPage\(CREDITS_PAGE\) : null\}\s+onOpenModels=\{\(\) => openDetailPage\('mobius'\)\}\s+\/>/)
   assert.match(view, /onClick=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}/)
   assert.match(view, /useMobiusAccountSummary\(\)/)
   assert.doesNotMatch(view, /onOpenApp\?\.\('identity'\)|openMobiusYou|Möbius · You|Möbius account<\/strong>/)
@@ -207,9 +207,14 @@ test('credits open as their own page from a row between Profile and Möbius mode
   const accountPage = readFileSync(new URL('../../components/SettingsView/MobiusAccountPage.jsx', import.meta.url), 'utf8')
   const credits = readFileSync(new URL('../../components/SettingsView/AccountCredits.jsx', import.meta.url), 'utf8')
   // The Settings overview no longer carries the wallet itself.
-  assert.doesNotMatch(view, /<WalletSection|<WalletConnect|useWallet\(/)
-  assert.match(accountPage, /\{editable && <ProfileSection identity=\{identity\} \/>\}\s*<CreditsLink onOpenCredits=\{onOpenCredits\} \/>\s*<ModelsLink/)
-  assert.match(view, /creditsOpen\) \{[\s\S]*?title="Credits"[\s\S]*?onBack=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}[\s\S]*?detailBody = <AccountCredits active=\{active\} \/>/)
+  assert.doesNotMatch(view, /<WalletSection|<WalletConnect/)
+  assert.match(accountPage, /\{editable && <ProfileSection identity=\{identity\} \/>\}\s*<CreditsLink summary=\{creditsSummary\} onOpen=\{onOpenCredits\} \/>\s*<ModelsLink/)
+  assert.match(view, /creditsOpen\) \{[\s\S]*?title="Credits"[\s\S]*?backLabel="Back to Möbius"\s+onBack=\{\(\) => openDetailPage\(MOBIUS_ACCOUNT_PAGE\)\}[\s\S]*?detailBody = <AccountCredits wallet=\{wallet\} \/>/)
+  // Settings owns the one wallet both pages share, read only while one is
+  // open; the Credits page does not, so stepping back mid-checkout keeps it.
+  assert.match(view, /const wallet = useWallet\(\{ active: active && showOwnerAccounts && \(mobiusAccountOpen \|\| creditsOpen\) \}\)/)
+  assert.doesNotMatch(credits, /useWallet\(/)
+  assert.doesNotMatch(accountPage, /\/identity\/credits/)
   // Recent activity can run long, so it comes last on the Credits page.
   assert.match(credits, /<WalletSection[\s\S]*\/>[\s\S]*<RecentActivity>[\s\S]*<ActivityWindow[\s\S]*<\/RecentActivity>/)
 })

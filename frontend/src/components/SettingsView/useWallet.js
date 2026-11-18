@@ -57,7 +57,7 @@ export function useWallet({ active }) {
     try {
       next = await read('/identity/credits')
     } catch {
-      // Unreadable: Settings then leaves the section out.
+      // Unreadable: the Credits page says so (showsCreditsRow keeps its row).
       next = { mode: 'unknown' }
     }
     if (!mounted.current || mine !== generation.current) return

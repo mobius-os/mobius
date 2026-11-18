@@ -7,9 +7,15 @@
  * Pages follow the service's `next_cursor`; a service that does not page yet
  * sends none, and the window simply ends after its first answer. The query is
  * keyed by pairing, so another service's history never shows under this one.
+ *
+ * TanStack reads an infinite query again by re-reading every page it holds,
+ * so the pages scrolled in are not kept: they are dropped when the Credits
+ * page closes and trimmed to the newest page before a changed balance reads
+ * the history again. Reopening or a purchase then costs one request, however
+ * far the owner had scrolled.
  */
 import { useEffect, useRef } from 'react'
-import { useInfiniteQuery } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { apiFetch, jsonOrThrow } from '../../api/client.js'
 import { activityDays, activityTime } from '../../lib/creditsWallet.js'
 import { ActivityRow } from './WalletSection.jsx'
@@ -21,6 +27,27 @@ export const ACTIVITY_KEY = 'credits-activity'
 async function readPage({ pageParam, signal }) {
   const before = pageParam ? `&before=${encodeURIComponent(pageParam)}` : ''
   return jsonOrThrow(await apiFetch(`/identity/credits/transactions?limit=${PAGE}${before}`, { signal }))
+}
+
+export function activityHistory(pairing) {
+  return {
+    queryKey: [ACTIVITY_KEY, pairing],
+    queryFn: readPage,
+    initialPageParam: null,
+    getNextPageParam: last => last?.next_cursor || undefined,
+    staleTime: 0,
+    gcTime: 0,
+  }
+}
+
+/** Read the history again from its newest page, dropping the older pages scrolled in. */
+export function restartHistory(client, pairing) {
+  const { queryKey } = activityHistory(pairing)
+  client.setQueryData(queryKey, data => data && {
+    pages: data.pages.slice(0, 1),
+    pageParams: data.pageParams.slice(0, 1),
+  })
+  return client.refetchQueries({ queryKey, exact: true })
 }
 
 /** The Recent activity group around the window, last on the Credits page. */
@@ -42,16 +69,11 @@ export function RecentActivity({ children }) {
  * window then reads its history again so the new line appears at the top.
  */
 export default function ActivityWindow({ pairing = null, refreshKey = null }) {
-  const history = useInfiniteQuery({
-    queryKey: [ACTIVITY_KEY, pairing],
-    queryFn: readPage,
-    initialPageParam: null,
-    getNextPageParam: last => last?.next_cursor || undefined,
-    staleTime: 0,
-  })
+  const client = useQueryClient()
+  const history = useInfiniteQuery(activityHistory(pairing))
   const frame = useRef(null)
   const sentinel = useRef(null)
-  const { hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage, refetch } = history
+  const { hasNextPage, isFetchingNextPage, isFetchNextPageError, fetchNextPage } = history
   const seen = useRef({ pairing, refreshKey })
 
   useEffect(() => {
@@ -59,8 +81,8 @@ export default function ActivityWindow({ pairing = null, refreshKey = null }) {
     seen.current = { pairing, refreshKey }
     // A new pairing is a new query that reads on its own; only a changed
     // balance under the same pairing needs the history read again.
-    if (last.pairing === pairing && last.refreshKey !== refreshKey) void refetch()
-  }, [pairing, refreshKey, refetch])
+    if (last.pairing === pairing && last.refreshKey !== refreshKey) void restartHistory(client, pairing)
+  }, [client, pairing, refreshKey])
 
   // Load the next page a little before the window is scrolled to its end.
   // After a failed page the window waits for Try again: a fresh observer would

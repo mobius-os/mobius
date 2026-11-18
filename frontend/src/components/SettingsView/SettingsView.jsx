@@ -31,6 +31,7 @@ import GithubConnection from './GithubConnection.jsx'
 import KeysSummary, { KeyPage, KeyPageSubtitle, KeysPage } from './KeysSection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
 import AccountCredits from './AccountCredits.jsx'
+import { useWallet } from './useWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -284,6 +285,9 @@ export default function SettingsView({
   const creditsOpen = detailPage === CREDITS_PAGE
   const keysOpen = detailPage === KEYS_PAGE
   const selectedProvider = keyPage !== null || keysOpen || sharedFoldersOpen || mobiusAccountOpen || creditsOpen || notificationsElsewhereOpen ? null : detailPage
+  // One wallet for the account page's Credits row and the Credits page: read
+  // once per visit, and a checkout keeps being watched across the two pages.
+  const wallet = useWallet({ active: active && showOwnerAccounts && (mobiusAccountOpen || creditsOpen) })
   const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
@@ -979,6 +983,7 @@ export default function SettingsView({
     detailBody = (
       <MobiusAccountPage
         active={active}
+        creditsSummary={wallet.summary}
         onOpenCredits={showOwnerAccounts ? () => openDetailPage(CREDITS_PAGE) : null}
         onOpenModels={() => openDetailPage('mobius')}
       />
@@ -993,7 +998,7 @@ export default function SettingsView({
         onBack={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)}
       />
     )
-    detailBody = <AccountCredits active={active} />
+    detailBody = <AccountCredits wallet={wallet} />
   } else if (keysOpen) {
     subhead = <SettingsSubhead title="Keys" mark={<Key width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = (

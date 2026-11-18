@@ -126,6 +126,15 @@ export function canReconnect(summary) {
 }
 
 /**
+ * Whether the account page shows its Credits row. A Möbius without credits
+ * shows none, as Settings showed no wallet before; a wallet that could not be
+ * read keeps its row, so the Credits page can say so.
+ */
+export function showsCreditsRow(summary) {
+  return creditsSection(summary) !== null || summary?.mode === 'unknown'
+}
+
+/**
  * What the account page's Credits row shows at a glance: the spendable
  * balance, a debt, or that credits are not connected yet. Null when there is
  * nothing trustworthy to show (still loading or unreadable).
