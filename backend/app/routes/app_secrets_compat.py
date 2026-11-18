@@ -74,8 +74,18 @@ def _only_the_apps_own_token(principal: Principal) -> None:
     )
 
 
-async def _owned(app_id: int, name: str) -> dict:
-  key = key_vault.owned_key_in(await _keys(), app_id, name)
+def _install(principal: Principal, app: models.App) -> str:
+  """The installation a call is for: the one an app token was checked
+  against, or for the owner and agents the app row the route just selected."""
+  if principal.app_id is None:
+    return app.install_id
+  if principal.app_install_id is None:
+    raise HTTPException(status_code=401, detail="App token is not bound to an installation.")
+  return principal.app_install_id
+
+
+async def _owned(app_id: int, install: str, name: str) -> dict:
+  key = key_vault.owned_key_in(await _keys(), app_id, install, name)
   if key is None:
     raise HTTPException(status_code=404, detail="Secret not found.")
   return key
@@ -95,7 +105,7 @@ async def put_secret(
   try:
     with keys_routes.vault_outcomes_as_http():
       async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
-        await key_vault.store_app_key(app_id, name, body.value)
+        await key_vault.store_app_key(app_id, _install(principal, app), name, body.value)
   except key_vault.AppGone:
     raise HTTPException(status_code=404, detail="App not found.") from None
   return Response(status_code=204, headers=_DEPRECATION)
@@ -106,8 +116,8 @@ async def secret_exists(
   app_id: int, name: str,
   db: Session = Depends(get_db), principal: Principal = Depends(get_principal),
 ):
-  _authorize_app(db, principal, app_id)
-  await _owned(app_id, name)
+  app = _authorize_app(db, principal, app_id)
+  await _owned(app_id, _install(principal, app), name)
   return Response(status_code=204, headers=_DEPRECATION)
 
 
@@ -126,8 +136,8 @@ async def get_secret(
   # a delegated helper never reads a key, and the read is logged as the agent
   # or owner it is.
   caller = keys_routes.reader_caller(principal)
-  _authorize_app(db, principal, app_id)
-  key = await _owned(app_id, name)
+  app = _authorize_app(db, principal, app_id)
+  key = await _owned(app_id, app.install_id, name)
   with keys_routes.vault_outcomes_as_http():
     value = (await key_vault.vault_call("GET", f"/keys/{key['name']}/value", caller=caller))["value"]
   return Response(content=value, media_type="text/plain", headers=_DEPRECATION)
@@ -155,7 +165,7 @@ async def delete_secret(
     # reused the id.
     with keys_routes.vault_outcomes_as_http():
       async with key_vault.for_live_app(app_id, authorized_app_nonce(principal, app)):
-        released = await key_vault.release_app_key(app_id, name)
+        released = await key_vault.release_app_key(app_id, _install(principal, app), name)
         withdrawn = key_vault.withdraw_legacy_secret(app_id, name)
   except key_vault.AppGone:
     raise HTTPException(status_code=404, detail="App not found.") from None

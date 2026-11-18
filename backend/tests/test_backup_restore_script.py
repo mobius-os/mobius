@@ -556,39 +556,63 @@ def _vault_program():
   return module
 
 
-def _set_apps(data, apps):
+def _installation(slug, generation=1):
+  """The installation id an app ``slug`` got (a reinstall is another generation)."""
+  import hashlib
+  return hashlib.md5(f"{slug}-{generation}".encode()).hexdigest()
+
+
+def _set_apps(data, apps, *, install_ids=True):
   """The apps table of the fake /data database: id -> slug, or id -> (slug,
-  token nonce) for an installation that differs only by its nonce."""
-  rows = sorted(
-    (app_id, *(app if isinstance(app, tuple) else (app, f"nonce-{app}")))
-    for app_id, app in apps.items()
-  )
+  installation id) for an app installed again under the same slug, or
+  (slug, installation id, token nonce) for one whose nonce rotated (a trash
+  and recovery, a data wipe). ``install_ids`` False writes a database from
+  before installation ids."""
+  rows = []
+  for app_id, app in sorted(apps.items()):
+    slug, install, nonce = (*((app,) if isinstance(app, str) else app), None, None)[:3]
+    rows.append((app_id, slug, nonce or f"nonce-{slug}", install or _installation(slug)))
   db = sqlite3.connect(str(Path(data) / "db" / "ultimate.db"))
-  db.execute("CREATE TABLE IF NOT EXISTS apps (id INTEGER PRIMARY KEY, slug TEXT, token_nonce TEXT)")
-  db.execute("DELETE FROM apps")
-  db.executemany("INSERT INTO apps (id, slug, token_nonce) VALUES (?, ?, ?)", rows)
+  db.execute("DROP TABLE IF EXISTS apps")
+  if install_ids:
+    db.execute("CREATE TABLE apps (id INTEGER PRIMARY KEY, slug TEXT, token_nonce TEXT, install_id TEXT)")
+    db.executemany("INSERT INTO apps (id, slug, token_nonce, install_id) VALUES (?, ?, ?, ?)", rows)
+  else:
+    db.execute("CREATE TABLE apps (id INTEGER PRIMARY KEY, slug TEXT, token_nonce TEXT)")
+    db.executemany("INSERT INTO apps (id, slug, token_nonce) VALUES (?, ?, ?)", [r[:3] for r in rows])
   db.commit()
   db.close()
 
 
+def _current_installs(data):
+  db = sqlite3.connect(str(Path(data) / "db" / "ultimate.db"))
+  try:
+    return dict(db.execute("SELECT id, install_id FROM apps").fetchall())
+  finally:
+    db.close()
+
+
 def _vault_granting(data, kv, app_ids):
-  """A real vault in the fake /data: one key granted to ``app_ids``, and an
-  open request from the last of them."""
+  """A real vault in the fake /data: one key granted to ``app_ids``, each in
+  the installation the current database gives it, and an open request from
+  the last of them."""
+  installs = _current_installs(data)
   shutil.rmtree(Path(data) / ".vault")
   vault = kv.Vault(Path(data) / ".vault")
   site = {"host": "api.example.com", "methods": ["GET"], "paths": ["/v1/*"]}
   vault.put_key("shared", {
     "value": "dummy-restore-key-0123456789",
     "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
-    "grants": {"apps": [{"id": i, "sites": [site]} for i in app_ids], "agents": True, "sites": []},
+    "grants": {"apps": [{"id": i, "install": installs[i], "sites": [site]} for i in app_ids],
+               "agents": True, "sites": []},
   })
-  vault.request_access(app_ids[-1], {"key": "other", "reason": "x", "sites": [site]})
+  vault.request_access(app_ids[-1], installs[app_ids[-1]], {"key": "other", "reason": "x", "sites": [site]})
 
 
 def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_path):
   """The backup has no secrets, so the current vault stays. Its grants name
-  this install's app ids: those the restored database lacks, or gives to
-  another app, are withdrawn, and the owner is told to review the rest."""
+  this install's app installations: those the restored database lacks are
+  withdrawn, and the owner is told to review the rest."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
   _set_apps(data, {1: "notes", 2: "weather"})
@@ -617,7 +641,7 @@ def test_a_restore_without_secrets_withdraws_grants_its_apps_do_not_match(tmp_pa
 def test_a_secrets_archive_from_before_the_vault_still_withdraws_stale_grants(tmp_path):
   """A backup made before the vault existed has secrets but no `.vault`, so
   the current vault is kept just as when the backup has no secrets at all:
-  grants to ids the restored database gives to other apps are withdrawn."""
+  grants to installations the restored database lacks are withdrawn."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
   shutil.rmtree(data / ".vault")
@@ -639,14 +663,14 @@ def test_a_secrets_archive_from_before_the_vault_still_withdraws_stale_grants(tm
 
 def test_a_reused_id_with_the_same_slug_is_still_another_app_after_a_restore(tmp_path):
   """A purged app's id can go to a new installation of an app with the same
-  slug; its nonce differs, so the kept vault's grant to that id is withdrawn."""
+  slug; its installation id differs, so the kept vault's grant is withdrawn."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
-  _set_apps(data, {1: "notes", 2: ("weather", "first-install")})
+  _set_apps(data, {1: "notes", 2: ("weather", _installation("weather", 1))})
   target = tmp_path / "backups"
   _backup("--data-dir", str(data), "--target-dir", str(target))
   bdir = str(next(target.glob("mobius-backup-*")))
-  _set_apps(data, {1: "notes", 2: ("weather", "second-install")})
+  _set_apps(data, {1: "notes", 2: ("weather", _installation("weather", 2))})
   _vault_granting(data, kv, [1, 2])
 
   restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
@@ -717,11 +741,13 @@ def test_a_restore_that_cannot_update_a_running_vault_changes_nothing(tmp_path):
   assert not list(data.glob(".restore-*"))
 
 
-@pytest.mark.parametrize("old_database", ["missing", "unreadable"])
-def test_a_grant_is_withdrawn_when_the_apps_before_the_restore_are_unknown(tmp_path, old_database):
-  """Without the old apps, no grant can be proven to name the same app after
-  the restore, so every app grant is withdrawn, even to an id the restored
-  database has."""
+@pytest.mark.parametrize("current_database", ["missing", "unreadable"])
+def test_a_restore_keeps_grants_the_restored_database_holds_even_without_the_current_one(
+  tmp_path, current_database,
+):
+  """Only the restored database is needed: a grant names its installation,
+  so a current database that is lost or corrupt (the disaster a restore is
+  for) withdraws nothing the restored one holds."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
   _set_apps(data, {1: "notes", 2: "weather"})
@@ -731,41 +757,99 @@ def test_a_grant_is_withdrawn_when_the_apps_before_the_restore_are_unknown(tmp_p
   _vault_granting(data, kv, [1, 2])
   db = data / "db" / "ultimate.db"
   db.unlink()
-  if old_database == "unreadable":
+  if current_database == "unreadable":
     db.write_bytes(b"not a database")
 
   restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
-  assert "withdrawing every one" in restored.stdout and "app ids [1, 2]" in restored.stdout
-  assert _granted_ids(kv, data) == []
+  assert "is KEPT" in restored.stdout and "withdrew" not in restored.stdout
+  assert _granted_ids(kv, data) == [1, 2]
   vault = kv.Vault(data / ".vault")
-  assert vault.list_requests() == []
-  assert vault.reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+  assert [r["id"] for r in vault.list_requests()] == ["2-other"]
 
 
-def test_a_grant_to_an_id_the_old_apps_lack_is_withdrawn(tmp_path):
-  """The restored database gives id 2 to an app, but nothing shows the kept
-  vault's grant to id 2 was given to that app."""
+def test_a_grant_to_an_app_recovered_from_the_trash_since_the_backup_is_kept(tmp_path):
+  """Trash and recovery rotate an app's token nonce but keep its
+  installation, so its grants survive a restore of a backup from before."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: ("weather", None, "nonce-before-the-trash")})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _set_apps(data, {1: "notes", 2: ("weather", None, "nonce-after-the-recovery")})
+  _vault_granting(data, kv, [1, 2])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "withdrew" not in restored.stdout
+  assert _granted_ids(kv, data) == [1, 2]
+
+
+def test_a_restored_database_from_before_installation_ids_proves_no_grant(tmp_path):
+  """A backup from before installation ids names no installation, so no grant
+  of the kept vault can be shown to be for an app it holds."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes", 2: "weather"}, install_ids=False)
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
   _set_apps(data, {1: "notes", 2: "weather"})
+  _vault_granting(data, kv, [1, 2])
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "app ids [1, 2]" in restored.stdout
+  assert _granted_ids(kv, data) == []
+  assert kv.Vault(data / ".vault").reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+
+
+def test_a_restored_database_whose_apps_cannot_be_read_withdraws_every_grant(tmp_path):
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  db = sqlite3.connect(str(data / "db" / "ultimate.db"))
+  db.execute("DROP TABLE IF EXISTS apps")
+  db.commit()
+  db.close()
   target = tmp_path / "backups"
   _backup("--data-dir", str(data), "--target-dir", str(target))
   bdir = str(next(target.glob("mobius-backup-*")))
   _set_apps(data, {1: "notes"})
-  _vault_granting(data, kv, [1, 2])
+  _vault_granting(data, kv, [1])
 
   restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
-  assert "app ids [2]" in restored.stdout
-  assert _granted_ids(kv, data) == [1]
+  assert "withdrawing every one" in restored.stdout and "app ids [1]" in restored.stdout
+  assert _granted_ids(kv, data) == []
 
 
-def test_unproven_app_ids_keeps_only_the_same_installation():
+def test_a_kept_vault_from_before_installation_ids_has_its_grants_withdrawn(tmp_path):
+  """A store a server start never stamped names apps by id alone, which proves
+  nothing, so the restore withdraws those grants (values kept)."""
+  kv = _vault_program()
+  data = _seed_data_dir(tmp_path / "data")
+  _set_apps(data, {1: "notes"})
+  target = tmp_path / "backups"
+  _backup("--data-dir", str(data), "--target-dir", str(target))
+  bdir = str(next(target.glob("mobius-backup-*")))
+  _vault_granting(data, kv, [1])
+  store = json.loads((data / ".vault" / "keys.json").read_text())
+  store["version"] = 2
+  for grant in store["keys"]["shared"]["grants"]["apps"]:
+    del grant["install"]
+  (data / ".vault" / "keys.json").write_text(json.dumps(store))
+
+  restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
+  assert "app ids [1]" in restored.stdout
+  assert _granted_ids(kv, data) == []
+  assert kv.Vault(data / ".vault").reveal("shared", ("owner", "")) == "dummy-restore-key-0123456789"
+
+
+def test_installs_not_held_keeps_only_installations_the_database_holds():
   restore = _load_restore()
-  before = {1: ("notes", "a"), 2: ("weather", "b"), 3: ("maps", "c")}
-  after = {1: ("notes", "a"), 2: ("weather", "other"), 4: ("chess", "d")}
-  assert restore.unproven_app_ids({1, 2, 3, 4, 5}, before, after) == [2, 3, 4, 5]
-  assert restore.unproven_app_ids({1}, None, after) == [1]
-  assert restore.unproven_app_ids({1}, before, None) == [1]
+  one, two, three = "1" * 32, "2" * 32, "3" * 32
+  named = {(1, one), (2, two), (2, None), (3, three), (4, "4" * 32)}
+  installs = {1: one, 2: "other", 4: "f" * 32}
+  assert restore.installs_not_held(named, installs) == [(2, None), (2, two), (3, three), (4, "4" * 32)]
+  assert restore.installs_not_held({(1, one)}, None) == [(1, one)]
+  assert restore.installs_not_held({(1, None)}, {1: None}) == [(1, None)]
 
 
 def test_a_vault_update_that_fails_changes_nothing(tmp_path, monkeypatch, capsys):
@@ -811,7 +895,7 @@ def test_a_swap_that_fails_after_the_withdrawal_keeps_every_value(tmp_path, monk
   bdir = str(next(target.glob("mobius-backup-*")))
   _set_apps(data, {1: "notes", 2: "maps"})
   _vault_granting(data, kv, [1])
-  kv.Vault(data / ".vault").save_owned(2, "MAPS_KEY", "dummy-maps-key-0123456789")
+  kv.Vault(data / ".vault").save_owned(2, _current_installs(data)[2], "MAPS_KEY", "dummy-maps-key-0123456789")
   restore = _load_restore()
 
   def swap_fails(*_args):
@@ -830,37 +914,48 @@ def test_a_swap_that_fails_after_the_withdrawal_keeps_every_value(tmp_path, monk
 
 def _app_saves_its_own_key(data, kv, app_id, secret):
   vault = kv.Vault(Path(data) / ".vault")
-  name = vault.save_owned(app_id, secret, f"dummy-{secret.lower()}-0123456789")["name"]
+  install = _current_installs(data)[app_id]
+  name = vault.save_owned(app_id, install, secret, f"dummy-{secret.lower()}-0123456789")["name"]
   return name
 
 
-@pytest.mark.parametrize("why", ["corrupt database", "recovered from the trash", "id reused"])
-def test_a_restore_keeps_the_keys_apps_saved_for_themselves(tmp_path, why):
-  """Withdrawing a grant the restore can't prove never erases a value: a key
-  an app saved for itself stays, as the owner's, whether the current database
-  was unreadable, the app was recovered from the trash after the backup
-  (its nonce rotated), or its id went to another app."""
+@pytest.mark.parametrize("why, kept", [
+  ("corrupt database", True), ("recovered from the trash", True), ("id reused", False),
+])
+def test_a_restore_keeps_the_keys_apps_saved_for_themselves(tmp_path, why, kept):
+  """A key an app saved for itself stays its own when the restored database
+  holds the app's installation: when the current database is corrupt, or the
+  app was recovered from the trash after the backup (its nonce rotated).
+  When its id went to another app, the grant is withdrawn but no value is
+  erased: the key stays, as the owner's."""
   kv = _vault_program()
   data = _seed_data_dir(tmp_path / "data")
-  _set_apps(data, {1: "notes", 2: ("weather", "first")})
+  _set_apps(data, {1: "notes", 2: ("weather", None, "first")})
   target = tmp_path / "backups"
   _backup("--data-dir", str(data), "--target-dir", str(target))
   bdir = str(next(target.glob("mobius-backup-*")))
   if why == "recovered from the trash":
-    _set_apps(data, {1: "notes", 2: ("weather", "rotated-by-the-trash")})
+    _set_apps(data, {1: "notes", 2: ("weather", None, "rotated-by-the-trash")})
   elif why == "id reused":
-    _set_apps(data, {1: "notes", 2: ("chess", "other")})
+    _set_apps(data, {1: "notes", 2: "chess"})
   shutil.rmtree(data / ".vault")
   name = _app_saves_its_own_key(data, kv, 2, "WEATHER_KEY")
+  install = _current_installs(data)[2]
   if why == "corrupt database":
     (data / "db" / "ultimate.db").write_bytes(b"not a database")
 
   restored = _restore(bdir, "--data-dir", str(data), "--i-understand-this-overwrites", "--force")
-  assert "app ids [2]" in restored.stdout and "Every key is kept" in restored.stdout
   vault = kv.Vault(data / ".vault")
   [key] = vault.list_keys()
-  assert key["name"] == name and key["grants"]["apps"] == [] and not key.get("origin")
+  assert key["name"] == name
   assert vault.reveal(name, ("owner", "")) == "dummy-weather_key-0123456789"
+  if kept:
+    assert "withdrew" not in restored.stdout
+    assert [(g["id"], g["install"]) for g in key["grants"]["apps"]] == [(2, install)]
+    assert key["origin"] == {"app": 2, "install": install, "name": "WEATHER_KEY"}
+  else:
+    assert "app ids [2]" in restored.stdout and "Every key is kept" in restored.stdout
+    assert key["grants"]["apps"] == [] and not key.get("origin")
 
 
 def test_a_vault_store_the_restore_cannot_read_is_named_as_such(tmp_path):

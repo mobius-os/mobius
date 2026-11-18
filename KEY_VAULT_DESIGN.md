@@ -136,9 +136,10 @@ Status: draft for review.
    out, but not a local process on its socket (see *Contract*).
 3. **Borrow.** The app sends an ordinary request to
    `/api/keys/use/<key>/<host>/<path>?<query>` with its app token. The server
-   attests the caller as `app:<id>`, drops Möbius credentials and routing
-   headers, and relays the request to the vault, which checks the app's grant
-   and that grant's sites, adds the key and sends it. The answer streams back
+   attests the caller as `app:<id>:<install>` (see *App installations*),
+   drops Möbius credentials and routing headers, and relays the request to
+   the vault, which checks the app's grant and that grant's sites, adds the
+   key and sends it. The answer streams back
    as it arrives (server events and streamed model output work), with echoes
    of the key redacted even when they straddle two pieces. To do that the
    vault always holds back the last few hundred bytes of each piece (the
@@ -155,25 +156,58 @@ Status: draft for review.
 Approving, denying and changing keys is refused to apps, shared-browser
 guests and delegated helpers. An edit carries the revision of the key it was
 made from, and the vault refuses it if the key changed since, so a stale page
-cannot write back old grants. App ids can be reused after a purge, so purging
-an app removes it from every grant and request. A purge also waits until every
-borrow the app started has been answered, even one whose caller gave up: the
-vault knows the app only by its id, so a borrow still on its way could
-otherwise use the grant of an app that reuses the id. A borrow whose answer
-never came back keeps the app until the server restarts, which ends the vault
-process and anything it was still doing; one that failed before it was sent
-releases the app at once. A header the relay cannot carry (a name that is not
-an HTTP token, a value that is not printable ASCII) is refused with 400
+cannot write back old grants. A header the relay cannot carry (a name that is
+not an HTTP token, a value that is not printable ASCII) is refused with 400
 before the borrow starts.
+
+## App installations
+
+SQLite reuses app ids once an app is purged, so an id alone never names an
+app to the vault. Each app row has an installation id (`apps.install_id`, 32
+random hex characters) set when the row is created and never changed: trash,
+recovery, a data wipe, a reinstall over the same row and updates all keep it,
+unlike the token nonce, which rotates on trash and wipe. Every app grant
+(`grants.apps[]`: `id`, `install`, `sites`, `paused`), every app request and
+a key's `origin` name the installation beside the id, and the server attests
+an app caller as `app:<id>:<install>`, with the installation of the row the
+app's token was checked against. The vault refuses an app caller that names
+no installation, and an entry matches an app caller only when both match, so
+a grant can only ever be used by the installation it was given to. A key
+grants an app id once: approving a request replaces any other installation's
+grant for that id, which no app can use any more.
+
+The owner's save (`PUT /api/keys/<name>`) names the installation in each app
+grant: Settings › Keys saves the grants it lists back as they are, and the
+apps list carries each app's `install_id` for a new one. A grant naming an installation no
+app holds (a page loaded before its app was purged) is stored but used by no
+one. A request card's ticket still guards a card left open while its request
+was replaced by a newer ask under the same id.
+
+A store from before installations (version 2 or 1) loads with every app grant,
+request and origin unstamped (`install` null), which matches no app caller.
+Once the vault answers after each server start, the server names every app it
+holds, trashed ones included, with its installation (`POST /apps/installs`,
+platform callers only; `Vault.adopt_installs`): unstamped entries of those ids
+are stamped, those of ids no app holds are withdrawn as a purge would (values
+kept), requests the stamped grants now cover are settled, and stamped entries
+are never changed. Until that call lands on the first start after the update,
+those apps borrow nothing and their asks wait. An app row a release without
+the column created (a rollback) gets its installation id in the same step.
+
+Purging an app erases the keys it saved for itself, as its other data, and
+drops its id from every grant and request. That is tidying, not the boundary:
+a borrow still on its way when the app is purged names the purged
+installation, so the purge does not wait for it.
 
 ## Where it lives
 
 - `backend/vault/keyvault.py`: the standalone vault, which imports nothing
   from the server. Its folder `/data/.vault/` (mode 0700, reasserted at
   start, with its own `.gitignore`) holds `master.key`, `keys.json` (AES-GCM
-  per value, the key name as associated data; store version 2 gives each app
-  grant its own sites, and a version 1 store is migrated at start with each
-  app keeping the sites it could reach), `requests.json`, `stats.json` (use
+  per value, the key name as associated data; store version 2 gave each app
+  grant its own sites, a version 1 store migrating with each app keeping the
+  sites it could reach; version 3 names each app's installation, see *App
+  installations*), `requests.json`, `stats.json` (use
   counters), `usage.jsonl` (use traffic, rotated at 512 KiB), `audit.jsonl`
   (reads, changes, grants and requests, rotated at 2 MiB, kept apart so
   refused traffic cannot push it out; neither log holds values or unbounded
@@ -187,8 +221,9 @@ before the borrow starts.
   stopping.
   Every change names its caller; an app caller cannot change keys. There is
   no TCP port. The vault trusts any process that can open the socket: the
-  server, which states the attested caller in `X-Vault-Caller` (`app:<id>`,
-  `agent:<chat>`, `owner`, `platform:<purpose>`), and every other local
+  server, which states the attested caller in `X-Vault-Caller`
+  (`app:<id>:<install>`, `agent:<chat>`, `owner`, `platform:<purpose>`), and
+  every other local
   process that can open it, which can state any caller and meets none of the
   routes' rules (see *Contract*). The peer check under *Future work* narrows
   that.
@@ -227,10 +262,8 @@ connection then), and a caller that takes
 60 seconds to accept the next piece is cut off. At most 32 borrows run at
 once, and at most 8 for one caller (an app, one agent's chat); beyond either
 the vault answers 429. The server waits 30 seconds longer than a borrow can
-take, so it never gives up on one the vault is still working on; a borrow
-that may still be with the vault keeps its app from being purged only until
-that time has passed. A use whose caller hung up before the answer is still
-logged. Headers
+take, so it never gives up on one the vault is still working on. A use whose
+caller hung up before the answer is still logged. Headers
 sites log as metadata (`User-Agent`, `Referer` and similar) cannot carry a
 key. An app without a grant gets the same refusal whether or not a key
 exists. A site slower than the relay is reported as a timeout (504), not as a
@@ -273,7 +306,7 @@ model-provider key starts on its provider's site. When a start imports keys
 that have no sites, the owner gets one notification naming their apps, which
 cannot use them until the owner adds sites in Settings › Keys; the ledger
 below keeps a later start from repeating it. Each key records its
-origin (the app and its exact old name), set at creation. The vault
+origin (the app, its installation and its exact old name), set at creation. The vault
 finds or creates that key in one locked step (`Vault.save_owned`), at the
 first free name scoped to the app (`api.key` → `app<id>-api-key`, then
 numbered): never a plain name another app could later ask for. Distinct old
@@ -290,8 +323,8 @@ stays for them), as the per-app store did. A ledger
 (`.vault-import.json`) next to the old files means a key the owner deletes is
 never re-imported, unreadable values are retried, and values of an app id no
 app holds (a purge, or a restore that dropped the app) are settled as skipped
-for good, because the id may be reused. The old ciphertext stays in
-place for one release.
+for good, because the id may be reused and the value was never that app's.
+The old ciphertext stays in place for one release.
 
 **Transition.** For one release, `/api/apps/{id}/secrets/{name}`
 (`routes/app_secrets_compat.py`, marked `Deprecation: true`) answers from the
@@ -308,16 +341,21 @@ lets the app borrow, can never be replaced through them.
 default, or readable by anyone holding a `--plaintext-secrets` backup, which
 then holds every key (`.vault/master.key` beside `.vault/keys.json`).
 A restore that brings no vault (a backup without secrets, or with secrets from
-before the vault) keeps the current vault, whose grants name this install's
-app ids. `restore-data.py` warns and keeps a grant only when the databases
-from before and after the restore both give its id to the same installation
-(slug and token nonce): every other app grant and request is withdrawn, all
-of them when either database can't be read (`Vault.withdraw_apps`). Values
-are never erased: a key an app saved for itself stays, as the owner's, and
-the owner can let an app use it again. It withdraws before the swap, reading
+before the vault) keeps the current vault, whose grants name app
+installations. `restore-data.py` warns and keeps a grant or request only when
+the restored database gives its id the installation it names; every other app
+grant and request is withdrawn (`Vault.withdraw_apps`): those naming an
+installation the restored database lacks, those never stamped with one (a
+store no server start has adopted), and all of them when the restored
+database, or its apps, can't be read (a backup from before installation ids
+names none). Only the restored database is read, so a lost or corrupt current
+database withdraws nothing it holds, nor does an app recovered from the trash
+since the backup. Values are never erased: a key an app saved for itself
+stays, as the owner's, and the owner can let an app use it again. It withdraws before the swap, reading
 the restored database from staging, so a vault that can't be opened (a vault
-still running, or a store newer than the restore's vault program) or
-updated stops the restore with `/data` unchanged, and a swap that fails
+still running, or a store newer than the restore's vault program: a store
+this release wrote, for an older image's restore) or updated stops the
+restore with `/data` unchanged, and a swap that fails
 afterwards leaves only grants withdrawn. It runs as root from `/app/scripts`,
 so the image ships the vault program beside it (`/app/vault/keyvault.py`),
 never loading it from the editable checkout; `--vault-program` names another

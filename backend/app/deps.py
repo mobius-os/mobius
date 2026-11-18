@@ -102,6 +102,10 @@ class Principal:
   owner: models.Owner
   app_id: int | None
   app_instance_id: str | None = None
+  # The installation (``App.install_id``) of the row an app token's nonce was
+  # checked against; None for any other caller and for a token that names no
+  # nonce. The key vault matches app callers by it (routes/keys.py).
+  app_install_id: str | None = None
   scope: str = "owner"
   chat_id: str | None = None
   run_id: str | None = None
@@ -495,11 +499,11 @@ def authorize_current_owner_detached(
     db.close()
 
 
-def _enforce_app_scope(payload: dict, db: Session) -> int | None:
-  """Validates an app-scoped token's app identity; returns its app_id.
+def _enforce_app_scope(payload: dict, db: Session) -> models.App | None:
+  """Validates an app-scoped token's app identity; returns its app row.
 
-  Returns the int app_id for an app-scoped token, or None for an owner
-  token. Raises 401 when the token is app-scoped but:
+  Returns the live app row an app-scoped token was checked against, or None
+  for an owner token. Raises 401 when the token is app-scoped but:
     - it carries no integer app_id (malformed — it would otherwise read
       as an owner caller downstream), or
     - the app no longer exists (uninstalled: the token must stop working
@@ -537,7 +541,7 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
   if not app_consent.session_valid(app, payload.get("consent")):
     raise HTTPException(status_code=401, detail="App has not been approved.")
-  return app_id
+  return app
 
 
 def _enforce_chat_embed_scope(
@@ -748,11 +752,14 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
   # error or dropping the caller's restrictions. Refuse it at resolution.
   if (payload.get("delegation_id") is None) != (payload.get("delegation_chat") is None):
     raise HTTPException(status_code=401, detail="Incomplete delegation lineage.")
-  app_id = _enforce_app_scope(payload, db)
+  app = _enforce_app_scope(payload, db)
+  app_id = app.id if app is not None else None
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    # Only a token bound to its installation's nonce names the installation.
+    app_install_id=app.install_id if app is not None and payload.get("app_nonce") is not None else None,
     scope="app" if app_id is not None else "owner",
     # App tokens retain the initiating helper's restrictions, never its agent
     # identity. Consumers of chat_id/run_id must not mistake an app for it.

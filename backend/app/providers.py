@@ -1555,8 +1555,8 @@ class AppModelProvider(BaseProvider):
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
-    # Availability only: the registry already omits apps whose consent is
-    # inactive, and the relay re-checks consent on every request.
+    # Availability only: the key's value is never read. The relay re-checks
+    # everything on every request.
     return self.read_relay_key(data_dir, authorize=False).unavailable
 
   def read_relay_key(
@@ -1571,14 +1571,17 @@ class AppModelProvider(BaseProvider):
     """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
-    if authorize and not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
+    # The installation whose accepted declaration this provider serves: a
+    # grant given to another installation that had the same id never counts.
+    install = _usable_app_model_install(self.app_id, self.declaration, self.consent_scope)
+    if install is None:
       return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
     from app import key_vault
     # The declared secret name is the vault key the app asked for; the owner's
     # grant to this app, for the provider's own site, makes the models
     # available. An availability check never reads the value itself.
     secret, base_url = self.declaration["secret_name"], self.declaration["base_url"]
-    destination = {"protocol": self.protocol, "endpoint": endpoint}
+    destination = {"install": install, "protocol": self.protocol, "endpoint": endpoint}
     if not authorize:
       if key_vault.model_provider_key_sync(self.app_id, secret, base_url, **destination):
         return RelayKeyRead(None, None)
@@ -1792,27 +1795,33 @@ async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> 
       _apply_app_model_declarations(declarations)
 
 
-def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
-  """``(app_id, declaration, relay scope)`` for each app whose consent is active.
+def _usable_app_model_rows(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app row, declaration, relay scope)`` for each app whose consent is active.
 
-  Loads only the contract and consent columns, never app source or icon blobs:
-  the registry refresh runs about once a second and the relay on every request.
+  Loads only the contract, consent and installation columns, never app source
+  or icon blobs: the registry refresh runs about once a second and the relay
+  on every request.
   """
   from sqlalchemy.orm import load_only
   from app import app_consent, models
   query = db.query(models.App).options(load_only(
-    models.App.id, models.App.capability_contract, models.App.manifest_url,
+    models.App.id, models.App.install_id, models.App.capability_contract, models.App.manifest_url,
     models.App.accepted_consent, models.App.project_templates_json,
   )).filter(models.App.deleted_at.is_(None))
   if app_id is not None:
     query = query.filter(models.App.id == app_id)
   return [
-    (app.id, app.capability_contract["model_provider"], _app_model_relay_scope(app))
+    (app, app.capability_contract["model_provider"], _app_model_relay_scope(app))
     for app in query.all()
     if isinstance(app.capability_contract, dict)
     and isinstance(app.capability_contract.get("model_provider"), dict)
     and not app_consent.dormant(app)
   ]
+
+
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app_id, declaration, relay scope)`` for each app whose consent is active."""
+  return [(app.id, declaration, scope) for app, declaration, scope in _usable_app_model_rows(db, app_id)]
 
 
 def _read_app_model_declarations() -> list[tuple[Any, dict, str]] | None:
@@ -1835,10 +1844,12 @@ def _app_model_relay_scope(app) -> str:
   return f"{accepted_id or ''}:{fingerprint}"
 
 
-def _app_model_declaration_usable(
+def _usable_app_model_install(
   app_id: int, declaration: dict, consent_scope: str,
-) -> bool:
-  """Fail closed for stale provider objects, consent changes, and read errors.
+) -> str | None:
+  """The installation of the app whose accepted ``declaration`` a provider
+  serves, read with the consent check; None (fail closed) for stale provider
+  objects, consent changes, and read errors.
 
   A registry snapshot is deliberately throttled; it cannot authorize a new
   relay request after revocation or contract replacement.
@@ -1846,10 +1857,13 @@ def _app_model_declaration_usable(
   try:
     from app.database import SessionLocal
     with SessionLocal() as db:
-      return (app_id, declaration, consent_scope) in _usable_app_model_declarations(db, app_id)
+      return next((
+        app.install_id for app, usable, scope in _usable_app_model_rows(db, app_id)
+        if (usable, scope) == (declaration, consent_scope)
+      ), None)
   except Exception as exc:
     _model_registry_log.warning("app model authorization read failed: %s", exc)
-    return False
+    return None
 
 
 def _apply_app_model_declarations(

@@ -274,13 +274,17 @@ test('an app that was never used says whether it has websites yet', () => {
 })
 
 test('last use per user comes from the newest use, with all agents together', () => {
+  // The vault logs an app by its id and installation.
+  const install = '0123456789abcdef0123456789abcdef'
   const last = lastUseByCaller([
-    { caller: 'app:8', outcome: 'used', ts: '3' },
+    { caller: `app:8:${install}`, outcome: 'used', ts: '3' },
     { caller: 'agent:chat-a', outcome: 'revealed', ts: '2' },
-    { caller: 'app:8', outcome: 'used', ts: '1' },
-    { caller: 'app:9', outcome: 'denied', ts: '1' },
+    { caller: `app:8:${install}`, outcome: 'used', ts: '1' },
+    { caller: `app:9:${install}`, outcome: 'denied', ts: '1' },
   ])
   assert.deepEqual(last, { 'app:8': '3', agent: '2' })
+  assert.equal(usageWhat({ caller: `app:8:${install}`, outcome: 'used', host: 'api.x', ts: '3' }, appNames),
+    'Weather used it')
 })
 
 test('recent activity reads as sentences, including refusals of a switched-off app', () => {

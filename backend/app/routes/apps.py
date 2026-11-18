@@ -520,10 +520,7 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
     raise AppPurgeBlocked(
       "Agents are still working for this app. Try again when they finish."
     )
-  # A key borrow on its way to the vault must have its answer before the id
-  # is freed; refuse now rather than after storage is already gone.
   from app import key_vault
-  key_vault.refuse_purge_while_borrowing(deleted_app_id)
   # Project recovery includes linked source, not only legacy imports. Provider
   # metadata alone is not ownership: native projects can detach safely.
   from app.project_retention import projects_using_app_files
@@ -540,8 +537,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
 
   # Remove the ID-KEYED trees, and fail loudly if any survives, BEFORE the row
   # is deleted. App.id has no AUTOINCREMENT, so SQLite can hand a freed id to
-  # the next install; a silently-orphaned /data/apps/<id>/ tree (or a key grant)
-  # would then be readable by that unrelated replacement app under its own valid
+  # the next install; a silently-orphaned /data/apps/<id>/ tree would then be
+  # readable by that unrelated replacement app under its own valid
   # credentials. Keeping the row — hence the id — claimed until the storage is
   # gone closes that window: a persistent failure leaves the tombstone for the
   # next purge rather than exposing data. The compiled bundle is id-keyed too;
@@ -550,7 +547,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   apps_root = (Path(settings.data_dir) / "apps").resolve()
   storage_dir = apps_root / str(deleted_app_id)
   from app.compiler import purge_app_bundles
-  # The id can be reused after the purge, so no key grant may outlive it. The
+  # The app's own keys are its data, erased with it; its grants go too, though
+  # they name its installation, which an app reusing the id never is. The
   # vault goes first: if it is unavailable, nothing is removed yet and the
   # tombstone stays for the next attempt.
   await key_vault.forget_app(deleted_app_id)
@@ -3380,11 +3378,6 @@ async def delete_uninstalled_app_permanently(
       )
     except AppPurgeBlocked as exc:
       raise HTTPException(status_code=409, detail=str(exc))
-    except key_vault.BorrowInFlight:
-      raise HTTPException(
-        status_code=409,
-        detail="This app is still waiting on a key. Try again in a moment.",
-      ) from None
     except key_vault.VaultUnavailable:
       raise HTTPException(
         status_code=503,

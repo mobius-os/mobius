@@ -42,8 +42,7 @@ export function useAppNames() {
   const appsQuery = appQueries.list.useQuery()
   const apps = distinctAppNames((appsQuery.data || [])
     .filter(app => Number.isInteger(app.id))
-    // The installation, because a removed app's id can be reused.
-    .map(app => ({ id: app.id, name: app.name || app.slug || `App ${app.id}`, installation: app.storage_generation })))
+    .map(app => ({ id: app.id, name: app.name || app.slug || `App ${app.id}` })))
     .sort((a, b) => a.name.localeCompare(b.name))
   return { apps, names: Object.fromEntries(apps.map(app => [app.id, app.name])) }
 }

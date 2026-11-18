@@ -13,7 +13,11 @@ state any caller. The server authenticates every caller with its own
 platform-issued token and passes the attested identity in ``X-Vault-Caller``
 (the owner-only rules and notifications are the server routes'):
 
-    app:<app-id> | agent:<chat-id> | owner | platform:<purpose>
+    app:<app-id>:<install-id> | agent:<chat-id> | owner | platform:<purpose>
+
+An app is named by its id and its installation: SQLite reuses app ids, so a
+grant, a request or a key's origin names both, and matches an app caller only
+when both match.
 
     METHOD /use/<key>/<host>/<path>?<query>    use a key (apps, agents, owner)
     GET    /keys/<key>/value                   reveal (never for app callers)
@@ -23,6 +27,7 @@ platform-issued token and passes the attested identity in ``X-Vault-Caller``
     DELETE /chats/<chat-id>/requests?before=<time>
                                                a deleted chat's waiting asks go, those
                                                it made up to its deletion
+    POST   /apps/installs                      the platform names each app's installation
 
 For a use, the vault checks the caller and the destination against the key's
 grants (default deny), injects the key into its one configured slot (a header
@@ -73,13 +78,19 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # 2: each app grant carries its own sites ({"id", "sites", "paused"}); version 1
 # stores are migrated at load, each app keeping the key's sites it could reach
 # then. ``paused`` arrived later within version 2: a grant without it is live.
-STORE_VERSION = 2
+# 3: each app grant and a key's origin name the app's installation
+# (``install``). An older store is migrated at load with ``install`` None
+# ("unstamped"), which matches no app caller until the platform names the
+# installation (``Vault.adopt_installs``).
+STORE_VERSION = 3
 SOCKET_NAME = "vault.sock"
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 HOST_RE = re.compile(
   r"^(\*\.)?(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$"
 )
 TOKEN_RE = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]{1,64}$")
+# An app's installation id (the server's ``apps.install_id``).
+INSTALL_RE = re.compile(r"[0-9a-f]{32}")
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 MIN_VALUE_LENGTH = 1
 MAX_VALUE_LENGTH = 8192
@@ -247,16 +258,27 @@ def validate_site(raw) -> dict:
 LEGACY_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 
+def validate_app_id(raw, what: str = "Invalid app id.") -> int:
+  if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+    raise VaultError(400, what)
+  return raw
+
+
+def validate_install(raw, app_id) -> str:
+  """An app's installation id, which every app grant, request and origin names."""
+  if not isinstance(raw, str) or not INSTALL_RE.fullmatch(raw):
+    raise VaultError(400, f"App {app_id} needs its installation id (install).")
+  return raw
+
+
 def validate_origin(raw) -> dict:
-  """The app and the app's own secret name a key was created for."""
+  """The app (id and installation) and the app's own secret name a key was created for."""
   if not isinstance(raw, dict):
-    raise VaultError(400, "A key's origin names an app id and its secret name.")
-  app_id, name = raw.get("app"), raw.get("name")
-  if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
-    raise VaultError(400, "Invalid origin app id.")
+    raise VaultError(400, "A key's origin names an app id, its installation and its secret name.")
+  app_id, name = validate_app_id(raw.get("app"), "Invalid origin app id."), raw.get("name")
   if not isinstance(name, str) or not LEGACY_NAME_RE.fullmatch(name):
     raise VaultError(400, "Invalid origin secret name.")
-  return {"app": app_id, "name": name}
+  return {"app": app_id, "install": validate_install(raw.get("install"), app_id), "name": name}
 
 
 def owned_name_candidates(app_id: int, secret_name: str):
@@ -288,7 +310,8 @@ def validate_grants(raw) -> dict:
   ``sites`` are where the owner and agents may send it; each app grant has
   its own ``sites``, so approving sites for one app never widens another app
   or the agents. A ``paused`` app keeps its grant and sites but may not use
-  the key until it is switched back on.
+  the key until it is switched back on. Each app grant names the app's
+  ``install``ation as well as its id, and a key grants an app id once.
   """
   if raw is None:
     raw = {}
@@ -300,14 +323,15 @@ def validate_grants(raw) -> dict:
   clean_apps = {}
   for grant in apps:
     app_id = grant.get("id") if isinstance(grant, dict) else None
-    # Apps are granted by numeric id: names and slugs can be reused.
-    if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
-      raise VaultError(400, f"'{app_id if isinstance(grant, dict) else grant}' is not an app id.")
+    # Apps are granted by numeric id and installation: names and slugs, and
+    # ids alone, can be reused.
+    validate_app_id(app_id, f"'{app_id if isinstance(grant, dict) else grant}' is not an app id.")
     paused = grant.get("paused")
     if paused is not None and not isinstance(paused, bool):
       raise VaultError(400, f"App {app_id} is paused or not: true or false.")
     clean_apps[app_id] = {
-      "id": app_id, "sites": validate_sites(grant.get("sites"), "An app"), "paused": bool(paused),
+      "id": app_id, "install": validate_install(grant.get("install"), app_id),
+      "sites": validate_sites(grant.get("sites"), "An app"), "paused": bool(paused),
     }
   return {
     "apps": [clean_apps[app_id] for app_id in sorted(clean_apps)],
@@ -316,15 +340,31 @@ def validate_grants(raw) -> dict:
   }
 
 
-def app_grant(grants: dict, app_id: int) -> dict | None:
-  return next((grant for grant in grants.get("apps") or [] if grant["id"] == app_id), None)
+def app_grant(grants: dict, app_id: int, install: str | None) -> dict | None:
+  """The grant for app ``app_id`` in installation ``install``, or None.
+
+  A grant not yet stamped with its installation (``install`` None, from a
+  store before installations were recorded) names no installation, so it
+  matches no app until ``Vault.adopt_installs`` stamps it.
+  """
+  if install is None:
+    return None
+  return next((grant for grant in grants.get("apps") or []
+               if grant["id"] == app_id and grant.get("install") == install), None)
 
 
-def app_ids(grants: dict) -> list[int]:
-  return [grant["id"] for grant in grants.get("apps") or []]
+def origin_holds_grant(record: dict) -> bool:
+  """Whether the app that created a key (its ``origin``: id and installation)
+  still holds its grant on it, which is what makes the key that app's own."""
+  origin = record.get("origin")
+  return bool(origin) and any(
+    grant["id"] == origin["app"] and grant.get("install") == origin.get("install")
+    for grant in record["grants"].get("apps") or []
+  )
 
 
 def without_app(grants: dict, app_id: int) -> list[dict]:
+  """Every app grant but app id ``app_id``'s, whatever its installation."""
   return [grant for grant in grants.get("apps") or [] if grant["id"] != app_id]
 
 
@@ -337,7 +377,7 @@ def widened_apps(before: dict | None, after: dict) -> list[int]:
   """
   widened = []
   for grant in after.get("apps") or []:
-    old = app_grant(before, grant["id"]) if before else None
+    old = app_grant(before, grant["id"], grant["install"]) if before else None
     if (old is None or sites_outside(old["sites"], grant["sites"])
         or (old.get("paused") and not grant.get("paused"))):
       widened.append(grant["id"])
@@ -349,21 +389,42 @@ def widened_apps(before: dict | None, after: dict) -> list[int]:
 # ---------------------------------------------------------------------------
 
 CALLER_RE = re.compile(r"(app|agent|owner|platform)(?::([A-Za-z0-9_.-]{1,128}))?")
+# ``app:<id>:<install>``: an app caller always names its installation.
+APP_CALLER_RE = re.compile(r"app:([1-9][0-9]{0,17}):([0-9a-f]{32})")
 
 
 def parse_caller(header: str | None) -> tuple[str, str]:
-  """Return (kind, id) for the caller the server attested, or raise."""
-  match = CALLER_RE.fullmatch((header or "").strip())
+  """Return (kind, id) for the caller the server attested, or raise.
+
+  An app's id is ``<app-id>:<install>`` (``app_caller`` splits it): an app
+  caller without its installation is refused, so it can never match a grant
+  given to another installation that had the same id.
+  """
+  text = (header or "").strip()
+  app = APP_CALLER_RE.fullmatch(text)
+  if app:
+    return "app", f"{app.group(1)}:{app.group(2)}"
+  match = CALLER_RE.fullmatch(text)
   if not match:
     raise VaultError(403, "The caller is not identified.")
-  kind, ident = match.group(1), match.group(2) or ""
-  if kind == "app" and not ident.isdigit():
-    raise VaultError(403, "App callers are identified by app id.")
-  return kind, ident
+  if match.group(1) == "app":
+    raise VaultError(403, "App callers are identified by app id and installation.")
+  return match.group(1), match.group(2) or ""
+
+
+def app_caller(ident: str) -> tuple[int, str]:
+  """An app caller's (app id, installation), from ``parse_caller``'s id."""
+  app_id, _, install = ident.partition(":")
+  return int(app_id), install
 
 
 def caller_text(caller: tuple[str, str]) -> str:
   return f"{caller[0]}:{caller[1]}" if caller[1] else caller[0]
+
+
+def caller_name(caller: tuple[str, str]) -> str:
+  """How a refusal names its caller: an app by its id (the log keeps its installation)."""
+  return f"app:{app_caller(caller[1])[0]}" if caller[0] == "app" else caller_text(caller)
 
 
 def caller_allowed(grants: dict, kind: str, ident: str) -> bool:
@@ -372,7 +433,7 @@ def caller_allowed(grants: dict, kind: str, ident: str) -> bool:
   if kind == "agent":
     return bool(grants.get("agents"))
   if kind == "app":
-    grant = app_grant(grants, int(ident))
+    grant = app_grant(grants, *app_caller(ident))
     return grant is not None and not grant.get("paused")
   return False
 
@@ -380,7 +441,7 @@ def caller_allowed(grants: dict, kind: str, ident: str) -> bool:
 def caller_sites(grants: dict, kind: str, ident: str) -> list[dict]:
   """Where this caller may send the key: an app only to its own grant's sites."""
   if kind == "app":
-    grant = app_grant(grants, int(ident))
+    grant = app_grant(grants, *app_caller(ident))
     return grant["sites"] if grant else []
   return grants.get("sites") or []
 
@@ -880,14 +941,20 @@ class Vault:
       return {}, False
     payload = json.loads(self.store_path.read_text())
     records = payload.get("keys") or {}
-    if payload.get("version") == 1:
-      return {name: _migrated_from_version_one(name, record) for name, record in records.items()}, True
-    if payload.get("version") != STORE_VERSION:
+    version = payload.get("version")
+    if version == 1:
+      records = {name: _migrated_from_version_one(name, record) for name, record in records.items()}
+    elif version not in (2, STORE_VERSION):
       raise SystemExit("key vault: unknown store version; refusing to start")
     for record in records.values():
       for grant in (record.get("grants") or {}).get("apps") or []:
         grant.setdefault("paused", False)
-    return records, False
+        # Before version 3 a grant named only an app id: unstamped until the
+        # platform names the installation that id belongs to.
+        grant.setdefault("install", None)
+      if record.get("origin"):
+        record["origin"].setdefault("install", None)
+    return records, version != STORE_VERSION
 
   def _load_requests(self) -> dict:
     """Open requests. A damaged file is set aside rather than stopping the vault:
@@ -901,6 +968,8 @@ class Vault:
         raise ValueError("unexpected shape")
       for item in requests.values():
         item.setdefault("requester", "app")  # stored before agents could ask
+        if item["requester"] == "app":
+          item.setdefault("install", None)  # unstamped, as a store's grants (STORE_VERSION)
     except ValueError as exc:
       aside = self.requests_path.with_name(f"{self.requests_path.name}.damaged-{int(time.time())}")
       os.replace(self.requests_path, aside)
@@ -1040,8 +1109,9 @@ class Vault:
     made from a stale copy, such as a grant to an app that has since been
     purged, is refused instead of written back.
 
-    ``origin`` records the app and the app's own secret name a key was created
-    for. It is set at creation and an update never moves it to another app. A
+    ``origin`` records the app (id and installation) and the app's own secret
+    name a key was created for. It is set at creation and an update never
+    moves it to another app. A
     new value from anyone but that app's own save (``save_owned``, which states
     the same origin) clears it and withdraws the app's grant, which it gave
     itself by creating the key: once the owner or an agent supplies the value,
@@ -1113,33 +1183,36 @@ class Vault:
     """The key the app in ``origin`` created for that secret and still holds."""
     return next(
       (n for n, r in self._records.items()
-       if r.get("origin") == origin and origin["app"] in app_ids(r["grants"])),
+       if r.get("origin") == origin and origin_holds_grant(r)),
       None,
     )
 
-  def save_owned(self, app_id: int, secret_name: str, value: str, sites=None) -> dict:
+  def save_owned(self, app_id: int, install: str, secret_name: str, value: str, sites=None) -> dict:
     """Save an app's own secret by its origin, in one locked step.
 
-    The key ``app_id`` created for ``secret_name`` and still holds is
-    replaced, keeping the owner's choices; otherwise a new key is created at
-    the first free app-scoped name (``app<id>-<name>``, then numbered), granted to
-    the app and the owner's agents, sent as a bearer token, on ``sites`` (none
-    unless the server names the app's model-provider site). An app holds at
-    most ``MAX_OWNED_PER_APP`` such keys, as in the per-app store. Doing both
-    in one change means simultaneous saves can never leave two keys for one
-    app secret.
+    The key app ``app_id`` (installation ``install``) created for
+    ``secret_name`` and still holds is replaced, keeping the owner's choices;
+    otherwise a new key is created at the first free app-scoped name
+    (``app<id>-<name>``, then numbered), granted to the app and the owner's
+    agents, sent as a bearer token, on ``sites`` (none unless the server
+    names the app's model-provider site). An app holds at most
+    ``MAX_OWNED_PER_APP`` such keys, as in the per-app store. Doing both in
+    one change means simultaneous saves can never leave two keys for one app
+    secret.
     """
-    origin = validate_origin({"app": app_id, "name": secret_name})
+    origin = validate_origin({"app": app_id, "install": install, "name": secret_name})
     value = validate_value(value)
+    actor = f"app:{app_id}:{install}"
     with self._change():
       name = self._owned_name(origin)
       if name is not None:
         record = self._records[name]
         self.put_key(name, {"value": value, "inject": record["inject"],
-                            "grants": record["grants"], "origin": origin}, actor=f"app:{app_id}")
+                            "grants": record["grants"], "origin": origin}, actor=actor)
         return {"name": name, "created": False}
       owned = sum(1 for r in self._records.values()
-                  if (r.get("origin") or {}).get("app") == app_id and app_id in app_ids(r["grants"]))
+                  if (r.get("origin") or {}).get("app") == app_id
+                  and r["origin"].get("install") == install and origin_holds_grant(r))
       if owned >= MAX_OWNED_PER_APP:
         raise VaultError(413, f"An app may store at most {MAX_OWNED_PER_APP} secrets.")
       for name in owned_name_candidates(app_id, secret_name):
@@ -1147,14 +1220,15 @@ class Vault:
           self.put_key(name, {
             "value": value,
             "inject": dict(DEFAULT_INJECT),
-            "grants": {"apps": [{"id": app_id, "sites": sites or []}], "agents": True, "sites": sites or []},
+            "grants": {"apps": [{"id": app_id, "install": install, "sites": sites or []}],
+                       "agents": True, "sites": sites or []},
             "origin": origin,
             "create_only": True,
-          }, actor=f"app:{app_id}")
+          }, actor=actor)
           return {"name": name, "created": True}
     raise VaultError(409, f"No free vault name for {secret_name}.")
 
-  def release_owned(self, app_id: int, secret_name: str) -> dict | None:
+  def release_owned(self, app_id: int, install: str, secret_name: str) -> dict | None:
     """Let an app give up its own secret, in one locked step.
 
     The app's grant is withdrawn from the key it created for ``secret_name``.
@@ -1164,13 +1238,13 @@ class Vault:
     same lock means a grant the owner adds meanwhile is never lost or deleted.
     Returns None when the app owns no such key.
     """
-    origin = validate_origin({"app": app_id, "name": secret_name})
+    origin = validate_origin({"app": app_id, "install": install, "name": secret_name})
     with self._change():
       name = self._owned_name(origin)
       if name is None:
         return None
       deleted = self._release_locked(name, app_id)
-      self._audit_change(name, caller_text(("app", str(app_id))), "revoked" if deleted else "released")
+      self._audit_change(name, f"app:{app_id}:{install}", "revoked" if deleted else "released")
     return {"name": name, "deleted": deleted}
 
   @staticmethod
@@ -1183,12 +1257,10 @@ class Vault:
     """Forget the creating app once it no longer holds a grant on the key.
 
     ``origin`` makes its app the key's owner (it may replace and release the
-    key, and use it for its own model provider without the key's sites). App
-    ids are reused after a purge, so an origin that outlived its app's grant
-    would hand that ownership to an unrelated app the owner later grants.
+    key). Once that installation no longer holds a grant on the key, the key
+    is the owner's.
     """
-    origin = record.get("origin")
-    if origin and origin["app"] not in app_ids(record["grants"]):
+    if record.get("origin") and not origin_holds_grant(record):
       del record["origin"]
 
   def _release_locked(self, name: str, app_id: int) -> bool:
@@ -1208,19 +1280,19 @@ class Vault:
     return not others
 
   def erase_owned(self, app_id: int) -> list[str]:
-    """Release every key ``app_id`` created for itself and still holds.
+    """Release every key app id ``app_id`` created for itself and still holds.
 
     Erasing an app's data (or purging the app) erases its secrets, as the
     per-app store did: each such key is deleted, or kept only for the other
     apps the owner shared it with. Keys the app merely borrows, and keys whose
     value the owner or an agent supplied (no longer the app's), are untouched.
+    The platform erases by id: the app being wiped or purged holds it now.
     Returns the names of the deleted keys.
     """
-    if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
-      raise VaultError(400, "Invalid app id.")
+    validate_app_id(app_id)
     with self._change():
       owned = [n for n, r in self._records.items()
-               if (r.get("origin") or {}).get("app") == app_id and app_id in app_ids(r["grants"])]
+               if (r.get("origin") or {}).get("app") == app_id and origin_holds_grant(r)]
       deleted = [name for name in owned if self._release_locked(name, app_id)]
       for name in owned:
         self._audit_change(name, "platform", "revoked" if name in deleted else "released",
@@ -1263,8 +1335,9 @@ class Vault:
 
   # -- access requests (the handshake) ---------------------------------------
 
-  def request_access(self, app_id: int, body: dict) -> dict:
-    """An app asks to use a key; answer granted, paused, pending or denied.
+  def request_access(self, app_id: int, install: str, body: dict) -> dict:
+    """App ``app_id`` (installation ``install``) asks to use a key; answer
+    granted, paused, pending or denied.
 
     Asking is idempotent, so an app checks its status by asking again. The
     first ask for a key returns ``created`` so the server tells the owner
@@ -1277,10 +1350,10 @@ class Vault:
     hears ``paused`` where it would hear ``granted``: asking changes nothing
     until the owner switches it back on.
     """
-    if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
-      raise VaultError(400, "Invalid app id.")
-    asker = {"requester": "app", "app": app_id, "app_name": str(body.get("app_name") or "")[:100]}
-    return self._ask(body, asker, id_prefix=str(app_id), caller=f"app:{app_id}")
+    validate_app_id(app_id)
+    asker = {"requester": "app", "app": app_id, "install": validate_install(install, app_id),
+             "app_name": str(body.get("app_name") or "")[:100]}
+    return self._ask(body, asker, id_prefix=str(app_id), caller=f"app:{app_id}:{install}")
 
   def request_for_agents(self, body: dict, *, actor: str) -> dict:
     """The owner's agents ask to send a key to sites, as an app asks.
@@ -1323,6 +1396,12 @@ class Vault:
       record = self._records.get(name)
       grant = asker_grant(record["grants"], asker) if record is not None else None
       existing = self._requests.get(request_id)
+      if existing is not None and existing.get("install") != asker.get("install"):
+        # Another installation's ask under the same id (one gone, or one from
+        # before installations were recorded): never this asker's to inherit.
+        # Its ticket goes with it, so a card still showing it answers nothing.
+        del self._requests[request_id]
+        existing = None
       if grant is not None:
         status = "paused" if grant.get("paused") else "granted"
         missing = sites_outside(grant["sites"], sites)
@@ -1419,9 +1498,11 @@ class Vault:
     time (always as a bearer token) gets the slot its first user needs.
     Approving more sites for a paused app leaves it paused.
 
-    The answer names the request's ``ticket``: a request id is the app id and
-    key name, so a request card left open while its app was purged would
-    otherwise approve the same ask from an unrelated app that reused the id.
+    The answer names the request's ``ticket``, so a card left open while the
+    request was replaced (a newer ask under the same id: the app id and key
+    name) never approves the newer one. The grant goes to the installation
+    that asked; a request not yet stamped with one (see ``adopt_installs``)
+    can't be approved until it is.
 
     Only the owner's own answer approves (``actor`` ``owner``); the server
     refuses everyone else too.
@@ -1436,6 +1517,8 @@ class Vault:
         raise VaultError(409, "That request changed since it was shown; review it again.")
       name = request["key"]
       for_agents = request["requester"] == "agent"
+      if not for_agents and request.get("install") is None:
+        raise VaultError(409, "That app's request is still being checked; try again in a moment.")
       sites = validate_sites(body.get("sites"), "You and your agents" if for_agents else "An app")
       existing = self._records.get(name)
       if existing is not None:
@@ -1458,7 +1541,10 @@ class Vault:
       if for_agents:
         grants = {**grants, "agents": True, "sites": _with_sites(grants["sites"], sites)}
       else:
-        grant = app_grant(grants, request["app"]) or {"id": request["app"], "sites": []}
+        grant = (app_grant(grants, request["app"], request["install"])
+                 or {"id": request["app"], "install": request["install"], "sites": []})
+        # A key grants an app id once: this installation's grant replaces any
+        # other's for the same id, which no app can use any more.
         grants = {**grants, "apps": [*without_app(grants, request["app"]),
                                      {**grant, "sites": _with_sites(grant["sites"], sites)}]}
       put = {"grants": grants, "inject": inject}
@@ -1471,7 +1557,8 @@ class Vault:
 
   def deny_request(self, request_id: str, body: dict | None = None, *, actor: str = "owner") -> dict:
     """Refuse an ask. A ``ticket`` in ``body`` must be the request's, as when
-    approving, so a card left open across an id reuse can't deny the new ask.
+    approving, so a card left open while the request was replaced can't deny
+    the newer ask.
 
     A refusal is the owner's answer about the key, so only the owner refuses
     (``actor`` ``owner``), as only the owner approves.
@@ -1491,47 +1578,102 @@ class Vault:
     return {"denied": request_id}
 
   def forget_app(self, app_id: int, *, actor: str = "platform") -> dict:
-    """Erase a purged app's own keys and drop it from every grant and request.
+    """Erase a purged app's own keys and drop its id from every grant and request.
 
-    App ids can be reused once an app is purged, so a grant must never outlive
-    the app it was given to.
+    Erasing its keys is the purge's data deletion. Dropping its grants and
+    requests is tidying: they name the purged installation, which no other
+    app can ever be, even one that reuses the id.
     """
+    validate_app_id(app_id)
     with self._change():
       deleted = self.erase_owned(app_id)
-      withdrawn = self.withdraw_apps([app_id], actor=actor, why="app purged")
+      withdrawn = self._withdraw(lambda entry_id, _install: entry_id == app_id, actor=actor, why="app purged")
     return {"keys": withdrawn["keys"], "deleted": deleted, "requests": withdrawn["requests"]}
 
-  def withdraw_apps(self, apps, *, actor: str = "platform", why: str) -> dict:
-    """Drop the app ids ``apps`` from every grant and request, in one change.
+  def withdraw_apps(self, installs, *, actor: str = "platform", why: str) -> dict:
+    """Drop the app installations ``installs`` (``(app id, install)`` pairs;
+    ``install`` None for entries not yet stamped with one) from every grant and
+    request, in one change.
 
     Nothing is erased: a key one of them saved for itself stays, with its
     value, as the owner's (its origin goes with its app's grant), so the owner
     can let an app use it again. Whatever fails part way can therefore only
-    leave grants withdrawn, which the owner can allow again. A restore that
-    can't prove an id still names the same app uses this; ``why`` says so in
+    leave grants withdrawn, which the owner can allow again. A restore uses
+    this for the installations its database does not have; ``why`` says so in
     the audit log.
     """
-    ids = set()
-    for app_id in apps:
-      if isinstance(app_id, bool) or not isinstance(app_id, int) or app_id < 1:
-        raise VaultError(400, "Invalid app id.")
-      ids.add(app_id)
+    pairs = set()
+    for app_id, install in installs:
+      validate_app_id(app_id)
+      pairs.add((app_id, None if install is None else validate_install(install, app_id)))
+    return self._withdraw(lambda app_id, install: (app_id, install) in pairs, actor=actor, why=why)
+
+  def _withdraw(self, names, *, actor: str, why: str) -> dict:
+    """Drop every app grant and request ``names(app id, install)`` is true for."""
     with self._change():
       keys = []
       for name, record in self._records.items():
-        gone = sorted(ids.intersection(app_ids(record["grants"])))
+        gone = [g for g in record["grants"]["apps"] if names(g["id"], g.get("install"))]
         if not gone:
           continue
-        record["grants"]["apps"] = [g for g in record["grants"]["apps"] if g["id"] not in ids]
+        record["grants"]["apps"] = [g for g in record["grants"]["apps"] if g not in gone]
         self._drop_orphaned_origin(record)
         self._touch(record)
         keys.append(name)
-        for app_id in gone:
-          self._audit_change(name, actor, f"revoked app:{app_id} ({why})")
-      requests = [rid for rid, item in self._requests.items() if item["app"] in ids]
+        for grant in gone:
+          self._audit_change(name, actor, f"revoked app:{grant['id']} ({why})")
+      requests = [rid for rid, item in self._requests.items()
+                  if item["requester"] == "app" and names(item["app"], item.get("install"))]
       for rid in requests:
         del self._requests[rid]
     return {"keys": keys, "requests": len(requests)}
+
+  def adopt_installs(self, installs: dict, *, actor: str = "platform") -> dict:
+    """Stamp every app grant, request and key origin that names no
+    installation yet with the installation ``installs`` (app id to install,
+    every app the platform holds) gives its id, and withdraw those whose id
+    no app holds, as a purge would (values kept).
+
+    Only entries from a store before installations were recorded lack one;
+    they match no app caller until stamped. Their ids named the apps the
+    platform held then, as purges kept them, so the server calls this once
+    it starts, before such an app could ask anew. Stamped entries are never
+    changed here: one naming another installation is already unusable, and a
+    purge or restore tidies it. A request its asker's grant now covers is
+    settled, as when the owner widens a grant.
+    """
+    if actor.split(":", 1)[0] != "platform":
+      raise VaultError(403, "Only the platform names app installations.")
+    if not isinstance(installs, dict):
+      raise VaultError(400, "Name each app id's installation.")
+    known = {}
+    for raw_id, install in installs.items():
+      app_id = validate_app_id(int(raw_id) if isinstance(raw_id, str) and raw_id.isdigit() else raw_id)
+      known[app_id] = validate_install(install, app_id)
+    with self._change():
+      withdrawn = self._withdraw(lambda app_id, install: install is None and app_id not in known,
+                                 actor=actor, why="no app holds this id")
+      stamped = 0
+      for record in self._records.values():
+        unstamped = [g for g in record["grants"]["apps"] if g.get("install") is None]
+        for grant in unstamped:
+          grant["install"] = known[grant["id"]]
+        origin = record.get("origin")
+        if origin and origin.get("install") is None and origin["app"] in known:
+          origin["install"] = known[origin["app"]]
+        self._drop_orphaned_origin(record)
+        if unstamped:
+          self._touch(record)
+          stamped += len(unstamped)
+      for item in self._requests.values():
+        if item["requester"] == "app" and item.get("install") is None:
+          item["install"] = known[item["app"]]
+          stamped += 1
+      for rid, item in list(self._requests.items()):
+        record = self._records.get(item["key"])
+        if record is not None and _sites_covered(asker_grant(record["grants"], item), item["sites"]):
+          del self._requests[rid]
+    return {"stamped": stamped, **withdrawn}
 
   def forget_chat(self, chat: str, *, before: str, actor: str = "platform") -> int:
     """Withdraw the waiting requests the agent of deleted chat ``chat`` made
@@ -1579,7 +1721,7 @@ class Vault:
     """Return (inject, value) for an allowed use, or raise the denial."""
     with self._lock:
       record = self._records.get(name)
-      refused = f"{caller_text(caller)} may not use this key"
+      refused = f"{caller_name(caller)} may not use this key"
       if record is None:
         # An app without a grant learns nothing, including whether the name exists.
         if caller[0] == "app":
@@ -1588,8 +1730,8 @@ class Vault:
       if not caller_allowed(record["grants"], *caller):
         # A paused app is told what any app without a grant is told; the
         # owner's log says why.
-        paused = caller[0] == "app" and app_grant(record["grants"], int(caller[1])) is not None
-        raise GrantRefusal(403, refused, logged=f"{caller_text(caller)} is paused for this key" if paused else None)
+        paused = caller[0] == "app" and app_grant(record["grants"], *app_caller(caller[1])) is not None
+        raise GrantRefusal(403, refused, logged=f"{caller_name(caller)} is paused for this key" if paused else None)
       reason = site_allows(caller_sites(record["grants"], *caller), host, method, path)
       if reason:
         raise GrantRefusal(403, reason)
@@ -1717,7 +1859,7 @@ def asker_grant(grants: dict, asker: dict) -> dict | None:
   Agents switch is on."""
   if asker["requester"] == "agent":
     return {"sites": grants.get("sites") or []} if grants.get("agents") else None
-  return app_grant(grants, asker["app"])
+  return app_grant(grants, asker["app"], asker.get("install"))
 
 
 def _asked(request: dict) -> dict:
@@ -1766,19 +1908,22 @@ def _migrated_from_version_one(name: str, record: dict) -> dict:
   """A version 1 record with each app keeping exactly the sites it could reach.
 
   Validated like any new grant (duplicate app ids merge, a missing ``sites``
-  is no sites), and an origin whose app no longer holds a grant is dropped,
-  as every later change would.
+  is no sites), each app grant unstamped (see ``STORE_VERSION``), and an
+  origin whose app no longer holds a grant is dropped, as every later change
+  would.
   """
   grants = record.get("grants") or {}
-  sites = grants.get("sites") or []
   try:
-    migrated = {**record, "grants": validate_grants({
-      "apps": [{"id": app_id, "sites": sites} for app_id in grants.get("apps") or []],
-      "agents": grants.get("agents"),
-      "sites": sites,
-    })}
+    clean = validate_grants({"agents": grants.get("agents"), "sites": grants.get("sites") or []})
+    app_ids = sorted({validate_app_id(app_id, f"'{app_id}' is not an app id.")
+                      for app_id in grants.get("apps") or []})
   except VaultError as exc:
     raise SystemExit(f"key vault: version 1 key {name} can't be migrated ({exc.reason}); refusing to start")
+  clean["apps"] = [{"id": app_id, "install": None, "sites": copy.deepcopy(clean["sites"]), "paused": False}
+                   for app_id in app_ids]
+  migrated = {**record, "grants": clean}
+  if migrated.get("origin"):
+    migrated["origin"] = {**migrated["origin"], "install": None}
   Vault._drop_orphaned_origin(migrated)
   return migrated
 
@@ -1789,7 +1934,8 @@ def _is_stored_request(item) -> bool:
   if item.get("requester") == "agent":
     asker_ok = item.get("app") is None
   else:
-    asker_ok = item.get("requester") in (None, "app") and isinstance(item.get("app"), int)
+    asker_ok = (item.get("requester") in (None, "app") and isinstance(item.get("app"), int)
+                and (item.get("install") is None or isinstance(item["install"], str)))
   return (
     asker_ok and isinstance(item.get("key"), str)
     and isinstance(item.get("sites"), list) and isinstance(item.get("status"), str)
@@ -1878,8 +2024,9 @@ class BorrowDeadline:
 
 
 class BorrowSlots:
-  """Borrows running at once: at most ``per_caller`` for one caller (``app:<id>``,
-  ``agent:<chat>``, ``owner``) and ``total`` in all; beyond either, 429."""
+  """Borrows running at once: at most ``per_caller`` for one caller
+  (``app:<id>:<install>``, ``agent:<chat>``, ``owner``) and ``total`` in all;
+  beyond either, 429."""
 
   def __init__(self, total: int, per_caller: int) -> None:
     self._lock = threading.Lock()
@@ -2012,7 +2159,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     elif method == "POST" and parts == ["requests"]:
       caller = parse_caller(self.headers.get("X-Vault-Caller"))
       if caller[0] == "app":
-        self._send_json(200, vault.request_access(int(caller[1]), self._json_body()))
+        self._send_json(200, vault.request_access(*app_caller(caller[1]), self._json_body()))
       elif caller[0] == "agent":
         self._send_json(200, vault.request_for_agents(self._json_body(), actor=caller_text(caller)))
       else:
@@ -2024,18 +2171,20 @@ class VaultHandler(BaseHTTPRequestHandler):
     elif method == "POST" and parts == ["owned"]:
       body = self._json_body()
       if not isinstance(body.get("app"), int) or not isinstance(body.get("name"), str):
-        raise VaultError(400, "Name the app id and its secret name.")
+        raise VaultError(400, "Name the app id, its installation and its secret name.")
       self._send_json(200, vault.save_owned(
-        body["app"], body["name"], body.get("value"), sites=body.get("sites"),
+        body["app"], body.get("install"), body["name"], body.get("value"), sites=body.get("sites"),
       ))
     elif method == "POST" and parts == ["owned", "release"]:
       body = self._json_body()
       if not isinstance(body.get("app"), int) or not isinstance(body.get("name"), str):
-        raise VaultError(400, "Name the app id and its secret name.")
-      released = vault.release_owned(body["app"], body["name"])
+        raise VaultError(400, "Name the app id, its installation and its secret name.")
+      released = vault.release_owned(body["app"], body.get("install"), body["name"])
       if released is None:
         raise VaultError(404, "That app owns no such key.")
       self._send_json(200, released)
+    elif method == "POST" and parts == ["apps", "installs"]:
+      self._send_json(200, vault.adopt_installs(self._json_body().get("installs"), actor=self._manager()))
     elif method == "DELETE" and len(parts) == 2 and parts[0] == "apps" and parts[1].isdigit():
       self._send_json(200, vault.forget_app(int(parts[1]), actor=self._manager()))
     elif method == "DELETE" and len(parts) == 3 and parts[0] == "apps" and parts[1].isdigit() and parts[2] == "owned":

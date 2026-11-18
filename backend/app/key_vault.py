@@ -2,10 +2,13 @@
 
 The vault itself is ``backend/vault/keyvault.py``: a standalone program that
 holds keys encrypted. Only this server talks to it, over one mode-0600 Unix
-socket, and it states who each call is for (``app:<id>``, ``agent:<chat>``,
-``owner`` or ``platform:<purpose>``) after authenticating the caller with its
-own platform-issued token. That attestation is the handshake: an app cannot
-name itself, and no app ever receives a value.
+socket, and it states who each call is for (``app:<id>:<install>``,
+``agent:<chat>``, ``owner`` or ``platform:<purpose>``) after authenticating the
+caller with its own platform-issued token. That attestation is the handshake:
+an app cannot name itself, and no app ever receives a value. An app is named
+by its id and its installation (``apps.install_id``), which never changes and
+is never reused, so a grant can only be used by the installation it was given
+to.
 
 This module starts and supervises the vault (from
 ``RuntimeSupervisors.start_process_services``) and gives routes and the
@@ -33,7 +36,6 @@ from pathlib import Path
 
 import httpx
 
-from app import settled
 from app.config import get_settings
 
 
@@ -48,8 +50,7 @@ _STOP_GRACE_SECS = 5
 # The vault ends every borrow by its own deadline (BORROW_DEADLINE_SECS, from
 # when its handler starts) and answers by then, so the server waits that long
 # plus this margin: it never gives up on a borrow the vault is still working
-# on. The same margin bounds how long a borrow that may still be with the vault
-# keeps its app from being purged.
+# on.
 _BORROW_GRACE_SECS = 30
 
 
@@ -206,40 +207,52 @@ async def close_use(answer: tuple[httpx.Response, httpx.AsyncClient]) -> None:
 # Before the vault, each app had its own secret namespace, so two apps could
 # both save "api_key", and one app could hold both "api.key" and "api-key".
 # Vault names are shared, so each such secret becomes its own key, recorded
-# with its origin (the app and the exact original name). That origin, not the
-# vault name, is how the platform finds it again, and only a key the app itself
-# created that way can be written through the deprecated secret routes: a key
-# the owner merely lets the app borrow is never the app's to replace.
+# with its origin (the app, its installation and the exact original name).
+# That origin, not the vault name, is how the platform finds it again, and only
+# a key the app itself created that way can be written through the deprecated
+# secret routes: a key the owner merely lets the app borrow is never the app's
+# to replace.
 
-def owned_key_in(keys: list[dict], app_id: int, name: str) -> dict | None:
-  """The key ``app_id`` created for its own secret ``name`` and still holds.
+def app_caller(app_id: int, install: str) -> str:
+  """How the vault names an app caller: its id and its installation."""
+  return f"app:{int(app_id)}:{install}"
+
+
+def owned_key_in(keys: list[dict], app_id: int, install: str, name: str) -> dict | None:
+  """The key app ``app_id`` (installation ``install``) created for its own
+  secret ``name`` and still holds.
 
   An app that gave up a key the owner shares with others no longer owns it,
   and saving that name again creates a fresh key of its own.
   """
-  want = {"app": int(app_id), "name": name}
+  want = {"app": int(app_id), "install": install, "name": name}
   return next(
-    (k for k in keys if k.get("origin") == want and _grant_of(k, app_id) is not None),
+    (k for k in keys if k.get("origin") == want and _grant_of(k, app_id, install) is not None),
     None,
   )
 
 
-def _grant_of(key: dict, app_id: int) -> dict | None:
-  """``app_id``'s own grant on a listed key: its id and the sites it may reach."""
-  return next((g for g in key["grants"]["apps"] if g["id"] == int(app_id)), None)
+def _grant_of(key: dict, app_id: int, install: str | None) -> dict | None:
+  """The app's own grant on a listed key (its id, installation and the sites
+  it may reach), matched as the vault matches an app caller: a grant not yet
+  stamped with an installation matches none."""
+  if install is None:
+    return None
+  return next((g for g in key["grants"]["apps"]
+               if g["id"] == int(app_id) and g.get("install") == install), None)
 
 
-def resolve_key_in(keys: list[dict], app_id: int, name: str) -> str | None:
+def resolve_key_in(keys: list[dict], app_id: int, install: str, name: str) -> str | None:
   """The granted key an app means by ``name``.
 
   The app's own key for that name comes first; otherwise a key with exactly
   that vault name, as an app asks for through the handshake.
   """
-  owned = owned_key_in(keys, app_id, name)
+  owned = owned_key_in(keys, app_id, install, name)
   if owned is not None:
     return owned["name"]
   exact = next((k for k in keys if k["name"] == name), None)
-  if exact is not None and _grant_of(exact, app_id) is not None:
+  if exact is not None and _grant_of(exact, app_id, install) is not None:
     return exact["name"]
   return None
 
@@ -343,7 +356,7 @@ def provider_site(base_url: str, protocol: str = "responses") -> dict | None:
 
 
 def model_provider_key_in(
-  keys: list[dict], app_id: int, name: str, base_url: str,
+  keys: list[dict], app_id: int, install: str, name: str, base_url: str,
   protocol: str = "responses", endpoint: str | None = None,
 ) -> str | None:
   """The key an app's declared model provider may be sent with to ``endpoint``.
@@ -358,12 +371,12 @@ def model_provider_key_in(
   """
   endpoints = PROVIDER_ENDPOINTS.get(protocol, ())
   endpoint = endpoint if endpoint is not None else next(iter(endpoints), None)
-  key = resolve_key_in(keys, app_id, name)
+  key = resolve_key_in(keys, app_id, install, name)
   site = provider_site(base_url, protocol)
   if key is None or site is None or endpoint not in endpoints:
     return None
   record = next(k for k in keys if k["name"] == key)
-  grant = _grant_of(record, app_id)
+  grant = _grant_of(record, app_id, install)
   if record.get("multiline") or grant.get("paused"):
     return None
   allowed = _vault_rules().site_allows(
@@ -374,26 +387,28 @@ def model_provider_key_in(
 
 
 def model_provider_key_sync(
-  app_id: int, name: str, base_url: str,
+  app_id: int, name: str, base_url: str, *, install: str,
   protocol: str = "responses", endpoint: str | None = None,
 ) -> str | None:
+  """``model_provider_key_in`` for app ``app_id`` in installation ``install``."""
   try:
     keys = vault_call_sync("GET", "/keys")["keys"]
   except (VaultUnavailable, VaultRefused):
     return None
-  return model_provider_key_in(keys, app_id, name, base_url, protocol, endpoint)
+  return model_provider_key_in(keys, app_id, install, name, base_url, protocol, endpoint)
 
 
 def reveal_model_provider_key(
-  app_id: int, name: str, base_url: str,
+  app_id: int, name: str, base_url: str, *, install: str,
   protocol: str = "responses", endpoint: str | None = None,
 ) -> str | None:
   """The value an app's declared model runtime sends to ``endpoint`` under ``base_url``.
 
-  The platform itself (not the app's code) reads it; the vault logs the read
-  as ``platform:app-<id>``.
+  The platform itself (not the app's code) reads it, for installation
+  ``install`` of the app, so a grant given to another installation that had
+  the same id never counts; the vault logs the read as ``platform:app-<id>``.
   """
-  key = model_provider_key_sync(app_id, name, base_url, protocol, endpoint)
+  key = model_provider_key_sync(app_id, name, base_url, install=install, protocol=protocol, endpoint=endpoint)
   if key is None:
     return None
   try:
@@ -412,12 +427,12 @@ class AppGone(LookupError):
 async def for_live_app(app_id: int, expected_nonce: str | None = None):
   """Hold ``app_id``'s storage lock and confirm the app is still installed.
 
-  Anything that grants a key to an app, or queues a request an approval would
-  turn into a grant, runs inside this block. App removal holds the same lock
-  while ``forget_app`` withdraws the app from the vault, so a change that was
-  authorized before the removal can never land after it and be inherited by
-  an unrelated app that reuses the id. ``expected_nonce`` additionally
-  refuses a reinstall that happened since the caller was authorized.
+  An app's request and its own saved keys are written inside this block. App
+  removal and a data wipe hold the same lock, so a write authorized before
+  either never lands after it: a purged app leaves no request behind, and a
+  wiped one no key saved before the wipe. ``expected_nonce`` (the token's
+  nonce, which a trash or a wipe rotates) refuses a caller authorized before
+  such a change.
   """
   from app import fs_locks, models
   from app.database import SessionLocal
@@ -432,151 +447,30 @@ async def for_live_app(app_id: int, expected_nonce: str | None = None):
     yield
 
 
-# Borrows each app has on their way through the vault, by app id.
-_borrows_in_flight: dict[int, int] = {}
-
-
 def _borrow_wait_secs() -> int:
   """How long the vault can still act on a borrow it has taken, and then some."""
   return _vault_rules().BORROW_DEADLINE_SECS + _BORROW_GRACE_SECS
 
 
-def _release_borrow(app_id: int) -> None:
-  left = _borrows_in_flight.pop(app_id, 0) - 1
-  if left > 0:
-    _borrows_in_flight[app_id] = left
-
-
-def _may_still_be_with_vault(error: BaseException) -> bool:
-  """Whether a relay that failed with ``error`` may have left its request
-  with the vault: only a failure after sending began (``vault_use``) does."""
-  if isinstance(error, VaultTimeout):
-    return True
-  return isinstance(error, VaultUnavailable) and error.may_have_reached_vault
-
-
 async def borrow(
-  app_id: int, installation: str | None, method: str, target: str, *,
+  app_id: int, nonce: str | None, method: str, target: str, *,
   caller: str, headers: list[tuple[str, str]], body: bytes | None,
 ) -> tuple[httpx.Response, httpx.AsyncClient]:
-  """Relay an app's use request, keeping the app from being forgotten until
-  the vault can no longer act on it.
+  """Relay an app's use request once the app is confirmed still installed.
 
-  The check runs under ``app_id``'s lock: ``installation`` (the token nonce
-  the app's token names) must still be the app. The vault knows an app only
-  by its reusable id, so the purge must not free the id while the vault could
-  still authorize this request, or it could be sent with the grant of an
-  unrelated app that reuses the id. The lock is held only for the check, never
-  across the relay, so borrows run side by side and storage writes do not
-  wait on a third party; ``forget_app`` refuses while any borrow is out.
-
-  A borrow is out until the vault has answered. A cancelled caller does not
-  end it: the relay is settled first. When the relay fails after the request
-  may have reached the vault, the vault could still act on it, so the borrow
-  stays out until the vault's own deadline for it has surely passed
-  (``_borrow_wait_secs`` from now): the vault authorizes a borrow only when
-  its handler starts and ends every borrow by that deadline. The vault process
-  also ends with the server, so a restart ends any such borrow sooner. Any
-  failure before the request was sent releases the borrow at once.
+  ``nonce`` is the one the app's token names: a trashed app, or one whose
+  data was wiped since the token was checked, borrows nothing. The lock is
+  held only for that check, never across the relay, so borrows run side by
+  side and storage writes do not wait on a third party. ``caller`` names the
+  app's installation, so a borrow still on its way when the app is purged can
+  only ever match that installation's grants, which the purge withdraws: an
+  app that later reuses the id never inherits it.
   """
-  if not installation:
+  if not nonce:
     raise AppGone(app_id)
-  app_id = int(app_id)
-  async with for_live_app(app_id, installation):
-    _borrows_in_flight[app_id] = _borrows_in_flight.get(app_id, 0) + 1
-  # Stays out only when the relay was itself cancelled or may still be with
-  # the vault.
-  released = False
-
-  def after_cancel(task: asyncio.Future) -> None:
-    nonlocal released
-    error = None if task.cancelled() else task.exception()
-    released = not task.cancelled() and not (error is not None and _may_still_be_with_vault(error))
-    if error is not None:
-      settled.log_abandoned_failure(task, "Key borrow")
-    elif not task.cancelled():
-      # Nobody will read the answer: close its stream.
-      asyncio.ensure_future(close_use(task.result()))
-
-  try:
-    answer = await settled.settle(
-      vault_use(method, target, caller=caller, headers=headers, body=body),
-      what="Key borrow", abandoned=after_cancel,
-    )
-  except asyncio.CancelledError:
-    # ``after_cancel`` has judged the relay that ran on without its caller.
-    raise
-  except BaseException as exc:
-    released = not _may_still_be_with_vault(exc)
-    raise
-  else:
-    # The vault has authorized and answered; what remains is the site's body
-    # streaming through, which the caller reads and closes (``close_use``).
-    released = True
-    return answer
-  finally:
-    if released:
-      _release_borrow(app_id)
-    else:
-      wait = _borrow_wait_secs()
-      log.warning(
-        "app %s: a key borrow may still be with the vault; "
-        "its purge waits %s seconds for the vault's deadline", app_id, wait,
-      )
-      asyncio.get_running_loop().call_later(wait, _release_borrow, app_id)
-
-
-class BorrowInFlight(RuntimeError):
-  """A purge must wait: a key borrow the app started has no answer yet.
-
-  A RuntimeError, so the TTL sweep leaves the tombstone for its next pass;
-  the owner's permanent delete answers 409 and asks them to try again.
-  """
-
-
-def refuse_purge_while_borrowing(app_id: int) -> None:
-  """Raise while a borrow ``app_id`` started has not had its answer yet.
-
-  The purge holds the app's lock, so no new borrow can start; it checks this
-  before removing anything, and ``forget_app`` checks it again.
-  """
-  if _borrows_in_flight.get(int(app_id)):
-    raise BorrowInFlight(f"app {app_id} has a key borrow in flight; purge it later")
-
-
-@contextlib.asynccontextmanager
-async def for_granted_apps(key_name: str, app_ids: list[int], installations: dict):
-  """Hold the lock of every app a save of ``key_name`` grants, and confirm
-  each app it newly grants is the installation the owner chose.
-
-  An app id alone cannot name an app: one removed after the owner's page
-  loaded can be reused by an unrelated app, and the key's revision does not
-  change when the removed app held no grant on it. So a new grant names its
-  app's installation (``installations``: id to the app's non-secret
-  ``storage_generation``). A grant the key already holds stays valid: app
-  removal withdraws it under the same lock before the id is freed.
-  """
-  from app import fs_locks, models
-  from app.app_compile_contract import app_storage_generation
-  from app.database import SessionLocal
-  async with contextlib.AsyncExitStack() as locks:
-    wanted = sorted(set(app_ids))
-    for app_id in wanted:
-      await locks.enter_async_context(fs_locks.app_storage_lock(app_id))
-    if wanted:
-      key = next((k for k in (await vault_call("GET", "/keys"))["keys"] if k["name"] == key_name), None)
-      added = set(wanted) - {g["id"] for g in (key["grants"]["apps"] if key else [])}
-      with SessionLocal() as db:
-        live = {
-          app.id: app_storage_generation(app.token_nonce)
-          for app in db.query(models.App).filter(
-            models.App.id.in_(added), models.App.deleted_at.is_(None),
-          )
-        }
-      for app_id in sorted(added):
-        if app_id not in live or installations.get(str(app_id)) != live[app_id]:
-          raise AppGone(app_id)
-    yield
+  async with for_live_app(int(app_id), nonce):
+    pass
+  return await vault_use(method, target, caller=caller, headers=headers, body=body)
 
 
 def _provider_declaration(app_id: int) -> dict | None:
@@ -601,8 +495,9 @@ def _own_provider_sites(provider: dict | None, name: str) -> list[dict]:
   return [site] if site else []
 
 
-async def store_app_key(app_id: int, name: str, value: str) -> str:
-  """Save ``value`` as ``app_id``'s own secret ``name``; return the vault name.
+async def store_app_key(app_id: int, install: str, name: str, value: str) -> str:
+  """Save ``value`` as app ``app_id``'s (installation ``install``) own secret
+  ``name``; return the vault name.
 
   The vault finds or creates the key by its origin in one locked step
   (``Vault.save_owned``), keeping the owner's choices for an existing key. A
@@ -611,21 +506,22 @@ async def store_app_key(app_id: int, name: str, value: str) -> str:
   """
   provider = await asyncio.to_thread(_provider_declaration, app_id)
   saved = await vault_call("POST", "/owned", {
-    "app": int(app_id), "name": name, "value": value,
+    "app": int(app_id), "install": install, "name": name, "value": value,
     "sites": _own_provider_sites(provider, name),
   })
   return saved["name"]
 
 
-async def release_app_key(app_id: int, name: str) -> dict | None:
-  """Withdraw ``app_id``'s own secret ``name``; None when it owns no such key.
+async def release_app_key(app_id: int, install: str, name: str) -> dict | None:
+  """Withdraw app ``app_id``'s (installation ``install``) own secret ``name``;
+  None when it owns no such key.
 
   The vault checks ownership and deletes the key, or only withdraws this
   app's grant when the owner shares it with other apps, in one locked step
   (``Vault.release_owned``).
   """
   try:
-    return await vault_call("POST", "/owned/release", {"app": int(app_id), "name": name})
+    return await vault_call("POST", "/owned/release", {"app": int(app_id), "install": install, "name": name})
   except VaultRefused as exc:
     if exc.status == 404:
       return None
@@ -719,7 +615,7 @@ def _pending_legacy_secrets(root: Path, ledger: dict) -> list[tuple[int, Path]]:
   return pending
 
 
-async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
+async def import_legacy_app_secrets(live_app_ids) -> dict:
   """Move ``/data/app-secrets/<app>/<name>`` values into the vault, once each.
 
   Each value becomes that app's own key for the name (``store_app_key``), so
@@ -755,12 +651,13 @@ async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
       async with for_live_app(app_id):
         if not secret.is_file() or entry in _read_ledger(root):
           continue
-        newer = owned_key_in((await vault_call("GET", "/keys"))["keys"], app_id, secret.name)
+        install = _install_of(app_id)
+        newer = owned_key_in((await vault_call("GET", "/keys"))["keys"], app_id, install, secret.name)
         if newer is not None:
           _record_in_ledger(root, entry, {"superseded_by": newer["name"]})
           continue
         value = fernet.decrypt(secret.read_bytes()).decode()
-        name = await store_app_key(app_id, secret.name, value)
+        name = await store_app_key(app_id, install, secret.name, value)
         _record_in_ledger(root, entry, name)
     except AppGone:
       continue
@@ -771,6 +668,14 @@ async def import_legacy_app_secrets(live_app_ids: set[int]) -> dict:
   if moved:
     log.info("key vault: imported %d app secret(s) into the vault", len(moved))
   return moved
+
+
+def _install_of(app_id: int) -> str | None:
+  """The installation of the app holding ``app_id`` now; read under its lock."""
+  from app import models
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    return db.query(models.App.install_id).filter(models.App.id == int(app_id)).scalar()
 
 
 def _remove_legacy_secrets(app_id: int) -> None:
@@ -810,16 +715,11 @@ async def erase_app_keys(app_id: int) -> None:
 async def forget_app(app_id: int) -> None:
   """Erase a purged app's own keys and drop it from every grant and request.
 
-  Raises if that fails. Its values still waiting in the retired per-app store
-  are deleted first. An instance whose vault never stored anything has
-  nothing else to forget, so a purge does not depend on a vault that was
-  never used.
-
-  The caller holds the app's lock. A borrow the app started before then
-  (``borrow``) may not have reached the vault yet; the purge is
-  refused until it has its answer, and the next sweep retries it.
+  Raises if that fails, so the purge keeps the app's data until it can erase
+  its keys too. Its values still waiting in the retired per-app store are
+  deleted first. An instance whose vault never stored anything has nothing
+  else to forget, so a purge does not depend on a vault that was never used.
   """
-  refuse_purge_while_borrowing(app_id)
   await asyncio.to_thread(_remove_legacy_secrets, app_id)
   if _vault_ever_used():
     await vault_call("DELETE", f"/apps/{int(app_id)}", caller="platform:app-purge")
@@ -863,14 +763,52 @@ async def withdraw_request(request_id: str, ticket: str | None) -> None:
     log.warning("Could not withdraw key request %s whose card was not saved", request_id, exc_info=True)
 
 
-async def _import_when_ready() -> None:
-  """Run the one-time legacy import once the vault answers.
+def _app_installs() -> dict[int, str]:
+  """Every app the platform holds (trashed ones included: recovering keeps
+  the installation), by id, with its installation id.
 
-  Installations with nothing left to move (the usual case) never wait on the
-  vault or touch it.
+  A row written by a release without ``install_id`` (one the platform ran
+  after this column was added, then left again) gets one here, once.
+  """
+  import secrets
+  from app import models
+  from app.database import SessionLocal
+  with SessionLocal() as db:
+    unnamed = db.query(models.App).filter(models.App.install_id.is_(None)).all()
+    for app in unnamed:
+      app.install_id = secrets.token_hex(16)
+    if unnamed:
+      db.commit()
+    return dict(db.query(models.App.id, models.App.install_id).all())
+
+
+async def adopt_app_installs() -> dict:
+  """Name each app's installation to the vault, which stamps the grants,
+  requests and key origins a store from before installations left unnamed,
+  and withdraws those whose id no app holds (``Vault.adopt_installs``).
+
+  Until then such an entry lets no app use the key: it fails closed. Entries
+  already naming an installation are never changed, so an app installed or
+  purged meanwhile is safe.
+  """
+  installs = await asyncio.to_thread(_app_installs)
+  return await vault_call(
+    "POST", "/apps/installs", {"installs": {str(app_id): install for app_id, install in installs.items()}},
+    caller="platform:app-installs",
+  )
+
+
+async def _settle_vault_when_ready() -> None:
+  """Once the vault answers after the server starts: name every app's
+  installation to it (``adopt_app_installs``), then run the one-time legacy
+  import.
+
+  An instance whose vault never stored anything, with nothing left to move
+  (the usual case for a new one), never waits on the vault or touches it.
   """
   root = _legacy_root()
-  if not _pending_legacy_secrets(root, _read_ledger(root)):
+  pending_import = bool(_pending_legacy_secrets(root, _read_ledger(root)))
+  if not (_vault_ever_used() or pending_import):
     return
   for _ in range(60):
     try:
@@ -879,7 +817,18 @@ async def _import_when_ready() -> None:
     except VaultUnavailable:
       await asyncio.sleep(1)
   else:
-    log.warning("key vault did not start; legacy app secrets stay where they are")
+    log.warning("key vault did not start; app installations and legacy app secrets wait for the next start")
+    return
+  try:
+    adopted = await adopt_app_installs()
+  except Exception:
+    log.exception("key vault: could not name app installations; retried on the next start")
+  else:
+    if adopted.get("stamped") or adopted.get("keys") or adopted.get("requests"):
+      log.info("key vault: named installations on %d grant(s) and request(s); withdrew %d key grant(s) "
+               "and %d request(s) of ids no app holds", adopted["stamped"], len(adopted["keys"]),
+               adopted["requests"])
+  if not pending_import:
     return
   from app import models
   from app.database import SessionLocal
@@ -910,7 +859,8 @@ async def _tell_owner_which_imported_keys_need_sites(moved: dict) -> None:
   app_ids = set()
   for entry, name in moved.items():
     app_id = int(entry.split("/", 1)[0])
-    grant = _grant_of(keys[name], app_id) if name in keys else None
+    origin = keys[name].get("origin") if name in keys else None
+    grant = _grant_of(keys[name], app_id, origin.get("install")) if origin else None
     if grant is not None and not grant["sites"]:
       app_ids.add(app_id)
   if not app_ids:
@@ -945,12 +895,13 @@ async def supervise_key_vault() -> None:
 
   The vault exits on its own when this server's pid stops being its parent,
   so a crashed server never leaves an orphan holding the socket. Once per
-  server start, values from the retired per-app secret store are imported.
+  server start, every app's installation is named to the vault and values
+  from the retired per-app secret store are imported.
   """
   if not VAULT_PROGRAM.is_file():
     log.warning("key vault program missing at %s; Keys stay unavailable", VAULT_PROGRAM)
     return
-  importer = asyncio.create_task(_import_when_ready())
+  importer = asyncio.create_task(_settle_vault_when_ready())
   failures = 0
   log_dir = Path(get_settings().data_dir) / "logs"
   log_dir.mkdir(parents=True, exist_ok=True)

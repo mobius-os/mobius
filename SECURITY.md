@@ -137,8 +137,9 @@ app or the agents use a key on more sites (an agent asks on a card, as an app
 does), or switch a paused app back on; each app's sites belong to
 its own grant, so approving one app never widens another. Apps never receive a value: an app
 asks once for a key by name, the owner approves it, and the app then sends
-requests through `/api/keys/use/…`, where the server identifies the app from
-its own platform-issued token and the vault adds the key on the way out
+requests through `/api/keys/use/…`, where the server identifies the app (its
+id and its installation) from its own platform-issued token and the vault adds
+the key on the way out
 (default-deny sites, methods and paths, with method- and path-override
 headers dropped and paths a site could decode differently refused;
 public-address pinning; no redirects; echoed values redacted in their common
@@ -164,10 +165,13 @@ including when the platform sends it to the app's model provider (a new
 provider key starts on the paths that provider's protocol calls). It stops
 being the app's, and the app loses its grant, once the owner or an agent
 stores a new value in it.
-App ids are reused after a purge, so a purge removes that app's grants and,
-like a data wipe, erases the keys it saved for itself; a restore that can't
-prove an id still names the same app only withdraws its grants, keeping every
-value. Backups carry the vault only in the secrets archive (skipped when no
+App ids are reused after a purge, so every grant, request and saved key's
+origin names the app's installation as well as its id: an id that never
+changes through trash, recovery, a data wipe or an update, and is never
+reused. A grant is used only by the installation it was given to. A purge
+still removes that app's grants and, like a data wipe, erases the keys it
+saved for itself; a restore keeps the grants whose installation the restored
+database holds and withdraws the rest, keeping every value. Backups carry the vault only in the secrets archive (skipped when no
 backup recipient is configured): encrypted by default, but a
 `--plaintext-secrets` backup holds every key in readable form. Agents are guided to borrow keys through the vault rather than read them,
 so values stay out of chat logs.
