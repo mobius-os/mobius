@@ -766,14 +766,21 @@ async def withdraw_request(request_id: str, ticket: str | None) -> None:
 def _give_apps_installation_ids() -> None:
   """Give an installation id to each app row a release without the column
   wrote (one the platform ran after it was added, then left again), once.
-  Everything that names an app to the vault needs it first."""
+  Everything that names an app to the vault needs it first.
+
+  Each row is written only while it still has none, so the import and the
+  naming doing this at once never give one app two ids: the later write
+  changes nothing.
+  """
   import secrets
   from app import models
   from app.database import SessionLocal
   with SessionLocal() as db:
-    unnamed = db.query(models.App).filter(models.App.install_id.is_(None)).all()
-    for app in unnamed:
-      app.install_id = secrets.token_hex(16)
+    unnamed = [app_id for (app_id,) in db.query(models.App.id).filter(models.App.install_id.is_(None))]
+    for app_id in unnamed:
+      db.query(models.App).filter(models.App.id == app_id, models.App.install_id.is_(None)).update(
+        {models.App.install_id: secrets.token_hex(16)}, synchronize_session=False,
+      )
     if unnamed:
       db.commit()
 
@@ -854,6 +861,11 @@ async def _name_app_installs() -> None:
     except (VaultUnavailable, VaultTimeout) as exc:
       if attempt == 0:
         log.warning("key vault: could not name app installations yet (%s); retrying", exc)
+    except Exception:
+      # Anything else (the database, say) may pass too; until it does, apps
+      # from an older store can't use their keys, so keep trying.
+      if attempt == 0:
+        log.exception("key vault: could not name app installations; retrying")
     await asyncio.sleep(_NAME_INSTALLS_RETRY_SECS[min(attempt, len(_NAME_INSTALLS_RETRY_SECS) - 1)])
     attempt += 1
 
