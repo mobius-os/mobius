@@ -119,7 +119,7 @@ def test_a_lost_reply_is_reported_as_possibly_applied_not_as_a_failure(monkeypat
   with pytest.raises(SystemExit) as lost:
     waits.declare_wait("Ready", delay_secs=60)
   assert "may already have taken effect" in str(lost.value)
-  assert "identical declare_wait in the same turn returns the wait it already armed" in str(lost.value)
+  assert "identical declare_wait in the same turn returns the wait it already declared" in str(lost.value)
   with pytest.raises(SystemExit) as lost_cancel:
     waits.cancel_wait("wait-1")
   assert "may already have taken effect" in str(lost_cancel.value)

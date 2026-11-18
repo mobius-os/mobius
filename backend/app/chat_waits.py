@@ -231,18 +231,27 @@ class WaitValidationError(ValueError):
   """A declare request that cannot become a well-formed wait."""
 
 
-def _identical_armed_wait_from_run(
+def _identical_wait_from_run(
   db: Session, *, chat_id: str, run_id: str, description: str,
   condition_owner: str, kind: str, command: str | None, condition: dict | None,
   interval: int, delay_secs: int | None, deadline: int,
 ) -> models.ChatWait | None:
-  """Return this run's armed wait with exactly this declaration, if any."""
+  """Return this run's wait with exactly this declaration unless withdrawn.
+
+  A wait that already fired is still the one the retry asked for. The next
+  sweep probes a command or GitHub wait at once, so an already-true condition
+  often fires before a lost-reply retry arrives, and its result reaches the
+  chat only in a later run. A withdrawn wait (cancelled while armed, or its
+  result withdrawn) stays withdrawn, so declaring it again arms a new one.
+  """
   candidates = (
     db.query(models.ChatWait)
     .filter(
       models.ChatWait.chat_id == chat_id,
       models.ChatWait.created_by_run_id == run_id,
-      models.ChatWait.status == "armed",
+      models.ChatWait.status != "cancelled",
+      models.ChatWait.result_disposition.is_(None)
+      | models.ChatWait.result_disposition.not_in(tuple(_WITHDRAWN_DISPOSITIONS)),
       models.ChatWait.kind == kind,
     )
     .all()
@@ -359,18 +368,19 @@ def declare_wait(
     fence_owner(db)
     # A client that timed out cannot know whether its declaration committed.
     # Behind the fence, an identical retry from the same run sees the earlier
-    # row and receives it rather than arming a duplicate that wakes twice.
-    already_armed = _identical_armed_wait_from_run(
+    # row and receives it, armed or already fired, rather than arming a
+    # duplicate that wakes twice.
+    already_declared = _identical_wait_from_run(
       db, chat_id=chat_id, run_id=created_by_run_id, description=description,
       condition_owner=condition_owner, kind=kind, command=command,
       condition=condition, interval=interval,
       delay_secs=delay_secs if kind == "timer" else None, deadline=deadline,
     )
-    if already_armed is not None:
+    if already_declared is not None:
       # Commit like the arming path does, so the caller's session keeps the
       # same outcome either way and the fence is released.
       db.commit()
-      return already_armed
+      return already_declared
 
   armed = (
     db.query(models.ChatWait)

@@ -58,7 +58,7 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
       # report that as a plain failure the caller would answer with a new one.
       retry = (
         " Retrying an identical declare_wait in the same turn returns the wait"
-        " it already armed, with its original deadline."
+        " it already declared, with its original deadline and current status."
         if (method, path) == ("POST", "/api/chat-waits") else ""
       )
       raise SystemExit(
