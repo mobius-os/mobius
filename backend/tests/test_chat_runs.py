@@ -265,6 +265,8 @@ def test_continuation_recovers_only_its_exact_legacy_pending_row():
   with SessionLocal() as db:
     chat = db.get(models.Chat, "continuation-recovery")
     assert chat.pending_messages == []
+    # The append is revision 1 and the continuation that consumed it 2.
+    assert started["promoted"]["_pending_revision"] == chat.pending_revision == 2
     assert [
       message.get("cid") for message in list(transcript_rows.history(chat))
       if message.get("cid") == "recovery-stable-cid"

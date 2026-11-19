@@ -229,6 +229,7 @@ def active_sink_memory_diagnostics(*, include_payloads: bool = True) -> list[dic
 def steered_into_turn_event(
   stored_messages: list[dict],
   *,
+  pending_revision: int,
   assistant_message_id: str | None = None,
   sealed_items: list[dict] | None = None,
   next_assistant_message_id: str | None = None,
@@ -250,9 +251,13 @@ def steered_into_turn_event(
   path publishes NOTHING at arrival — the 202's own `pending_messages` is what
   keeps the accepted row visible until the cut, so there is no second channel
   reconciling the same tray.
+
+  ``pending_revision`` is the queue revision this cut committed, so the client
+  ignores any queue list read before it.
   """
   return {
     "type": "steered_into_turn",
+    "pending_revision": pending_revision,
     "messages": [
       {
         **copy.deepcopy(msg),
@@ -1539,6 +1544,7 @@ class ChatEventSink:
     try:
       self.bc.publish(steered_into_turn_event(
         stored_messages,
+        pending_revision=stored_result["pending_revision"],
         assistant_message_id=sealed_message_id,
         sealed_items=sealed_items,
         next_assistant_message_id=self.assistant_message_id,
@@ -1762,7 +1768,9 @@ async def commit_steer_cut(
     if not isinstance(stored_messages, list) or not stored_messages:
       stored_messages = user_msgs
     try:
-      raw_bc.publish(steered_into_turn_event(stored_messages))
+      raw_bc.publish(steered_into_turn_event(
+        stored_messages, pending_revision=stored_result["pending_revision"],
+      ))
     except Exception:
       _get_logger().exception(
         "publishing the fallback steer cut failed chat_id=%s; the split "

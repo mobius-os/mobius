@@ -209,7 +209,7 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
  *   Fired when the backend is about to promote queued follow-ups; `ts`
  *   identifies the first pending entry in the promoted group and `message`
  *   is the backend-authoritative combined user message when available.
- * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
+ * @param {(info: {ts: number|null, content: string, pendingRevision?: number}) => void} [callbacks.onSteeredIntoTurn]
  *   Fired when the steer's transcript split has COMMITTED. The caller seals the
  *   live stream into its own message, drops the queued-tray entry, and renders
  *   the steered message inline.
@@ -1439,6 +1439,7 @@ export default function useStreamConnection(chatId, {
                 items: Array.isArray(event.items)
                   ? event.items.filter(Boolean)
                   : [],
+                pendingRevision: event.pending_revision,
               })
               // The callback seals A1 synchronously. Re-base the hook onto the
               // server's A2 snapshot before any later deltas are reduced.

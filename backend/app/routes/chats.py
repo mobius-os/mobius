@@ -1018,6 +1018,7 @@ def _chat_detail_response(
       db, chat.id, runtime_revision, include_foreign_context=expose_session,
     ),
     "pending_messages": list(chat.pending_messages or []),
+    "pending_revision": chat.pending_revision,
     "total": total,
     "offset": start,
     "running": running,
@@ -2174,6 +2175,7 @@ def get_chat_runtime(
     load_fields=(
       models.Chat.deleted_at,
       models.Chat.pending_messages,
+      models.Chat.pending_revision,
       models.Chat.pending_question_id,
       models.Chat.active_assistant_message_id,
       models.Chat.updated_at,
@@ -2198,6 +2200,7 @@ def get_chat_runtime(
     "active_goal_objective": running_goal_objective(db, chat.id),
     "goal": goal,
     "pending_messages": list(chat.pending_messages or []),
+    "pending_revision": chat.pending_revision,
     "pending_question_id": _open_question_id_for(chat),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     "waits": [

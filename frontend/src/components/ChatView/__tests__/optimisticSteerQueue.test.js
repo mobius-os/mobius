@@ -132,3 +132,16 @@ test('ChatView routes queued edits, cancels, and Send now through one per-messag
     'Send now runs on the per-message chain too',
   )
 })
+
+test('every queue write the server acknowledges hands its revision to the queue', () => {
+  for (const [pattern, message] of [
+    [/pendingQueue\.confirmQueued\(cid, \{[^}]*revision: result\.pending_revision,\s*\}\)/,
+      'a queued send confirms its row at the acknowledged revision'],
+    [/Queued-message cancellation failed'\)\s*pendingQueue\.cancelByCid\(cid, \{ revision: data\.pending_revision \}\)/,
+      'a confirmed cancel retires its row at the acknowledged revision'],
+    [/pendingQueue\.confirmQueued\(cid, \{ serverMsg, revision: data\.pending_revision \}\)/,
+      'a saved queued edit confirms its row at the acknowledged revision'],
+    [/pendingQueue\.hydrate\(serverPending, \{ revision: data\.pending_revision \}\)/,
+      'the runtime poll applies its list only at its own revision'],
+  ]) assert.match(source, pattern, message)
+})
