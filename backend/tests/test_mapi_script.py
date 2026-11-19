@@ -22,10 +22,20 @@ def _run_mapi(
   bin_dir.mkdir()
   capture = tmp_path / "curl-arguments"
   stdin_capture = tmp_path / "curl-stdin"
+  header_capture = tmp_path / "curl-piped-header"
   fake_curl = bin_dir / "curl"
+  # A header read from a file (-H @/dev/fd/N) is recorded apart from argv,
+  # where it shows as "@pipe": argv is what other processes can read.
   fake_curl.write_text(
     "#!/usr/bin/env bash\n"
-    "printf '%s\\0' \"$@\" > \"$MAPI_CAPTURE\"\n"
+    "args=(); previous=\n"
+    "for argument in \"$@\"; do\n"
+    "  if [[ \"$previous\" == -H && \"$argument\" == @/dev/fd/* ]]; then\n"
+    "    cat \"${argument#@}\" > \"$MAPI_HEADER_CAPTURE\"; args+=(@pipe)\n"
+    "  else args+=(\"$argument\"); fi\n"
+    "  previous=$argument\n"
+    "done\n"
+    "printf '%s\\0' \"${args[@]}\" > \"$MAPI_CAPTURE\"\n"
     "for argument in \"$@\"; do\n"
     "  if [[ \"$argument\" == '@-' ]]; then\n"
     "    cat > \"$MAPI_STDIN_CAPTURE\"\n"
@@ -42,6 +52,7 @@ def _run_mapi(
     "API_BASE_URL": "https://mobius.example/",
     "MAPI_CAPTURE": str(capture),
     "MAPI_STDIN_CAPTURE": str(stdin_capture),
+    "MAPI_HEADER_CAPTURE": str(header_capture),
     "PATH": f"{bin_dir}:{os.environ['PATH']}",
   }
   result = subprocess.run(
@@ -56,6 +67,7 @@ def _run_mapi(
     capture.read_bytes().split(b"\0")[:-1] if capture.exists() else None
   )
   result.curl_stdin = stdin_capture.read_bytes() if stdin_capture.exists() else None
+  result.piped_header = header_capture.read_bytes() if header_capture.exists() else None
   return result
 
 
@@ -68,9 +80,9 @@ def test_mapi_resolves_api_paths_and_adds_json_for_data(tmp_path: Path):
   assert result.returncode == 0, result.stderr
   assert result.curl_arguments == [
     b"-q",
+    b"-H", b"@pipe",
     b"--globoff",
     b"-sS",
-    b"-H", b"Authorization: Bearer owner-token",
     b"-H", b"Content-Type: application/json",
     b"--fail-with-body",
     b"-w", b"%{stderr}mapi-status:%{exitcode} %{http_code} %{size_download}\\n",
@@ -86,7 +98,7 @@ def test_mapi_disables_curl_url_globbing_after_validating_one_api_target(
   result = _run_mapi(tmp_path, "/api/{../outside,ready}")
 
   assert result.returncode == 0, result.stderr
-  assert result.curl_arguments[:2] == [b"-q", b"--globoff"]
+  assert result.curl_arguments[:4] == [b"-q", b"-H", b"@pipe", b"--globoff"]
   assert result.curl_arguments[-1] == b"https://mobius.example/api/{../outside,ready}"
 
 
@@ -478,9 +490,9 @@ def test_mapi_normalizes_joined_long_options_for_older_curl_versions(
   assert result.returncode == 0, result.stderr
   assert result.curl_arguments == [
     b"-q",
+    b"-H", b"@pipe",
     b"--globoff",
     b"-sS",
-    b"-H", b"Authorization: Bearer owner-token",
     b"--fail-with-body",
     b"-w", b"%{stderr}mapi-status:%{exitcode} %{http_code} %{size_download}\\n",
     b"https://mobius.example/api/chats",
@@ -558,3 +570,14 @@ def test_mapi_guidance_describes_the_safe_curl_subset():
   for path in [platform / "skill" / "core.md", *(SCRIPT.parent / "seed-skills").glob("*.md")]:
     text = path.read_text(encoding="utf-8")
     assert "Everything else passes straight through to curl" not in text, path.name
+
+
+def test_mapi_never_puts_the_bearer_on_a_command_line(tmp_path: Path):
+  # Every process's argv is readable by every other process, agent rooms
+  # included (GHSA-3354-mq8m-hfv3); the bearer goes through a pipe instead.
+  result = _run_mapi(tmp_path, "/api/apps/")
+
+  assert result.returncode == 0, result.stderr
+  assert result.curl_arguments[0] == b"-q"  # curl reads ~/.curlrc otherwise
+  assert not any(b"owner-token" in argument for argument in result.curl_arguments)
+  assert result.piped_header == b"Authorization: Bearer owner-token\n"

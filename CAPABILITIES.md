@@ -798,8 +798,8 @@ every agent it starts can reach (manifest shape in the `building-apps` skill). S
 - **The room.** A Tools, Read or Edit agent runs whole in a room built
   before it starts: Landlock walls (system folders read-only, the app's storage
   directory read-only or writable by scope with ordinary files only, nothing
-  else), a seccomp connect guard that admits only the Möbius API address (only
-  TCP sockets, plus route netlink to list interfaces; no TCP Fast Open), and
+  else), a seccomp connect guard that admits only the room's door (only TCP
+  sockets, plus route netlink to list interfaces; no TCP Fast Open), and
   `no_new_privs`, with signals scoped to the room. Each grant (scope and tools)
   has its own durable home in the chat's folder, holding its sessions, and
   Möbius never writes into it: what it hands the runtime sits in a read-only
@@ -809,7 +809,12 @@ every agent it starts can reach (manifest shape in the `building-apps` skill). S
   live run (`auth.create_app_agent_token`), carrying its scope, tools and
   provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
   app's own storage by scope, and the routes of declared tools; route checks
-  still apply after it. The key stops working as soon as the app's scope
+  still apply after it. The room's door is this server on its own loopback
+  address (`agent_roles.ROOM_HOST`, 127.0.0.2), and a request that arrives on
+  that address must carry only agent keys, so a credential a room finds
+  anywhere else (another process's command line, a file) is refused there.
+  The server tells a room's request by the address it arrived on, which no
+  header can change. The key stops working as soon as the app's scope
   differs from its grant. Any change of scope, tools or consent (apply, Store
   update, revoke) also ends the app's running agent turns through the
   ordinary chat Stop; a Stop that fails is reported.
@@ -856,7 +861,9 @@ every agent it starts can reach (manifest shape in the `building-apps` skill). S
 - **History.** A confined agent continues only its own grant's session. The
   chat transcript is never reseeded into a room, because it may hold what a
   wider grant (or the era before scopes) read.
-- **Not yet covered:** app jobs and services still run unconfined; searches
+- **Not yet covered:** a room can read other processes' command lines, so
+  nothing secret may be passed as an argument (`mapi` and platform scripts send
+  bearers through a pipe); app jobs and services still run unconfined; searches
   that run at Anthropic are not recorded one by one; the screenshot capture
   browser holds the owner's sign-in rather than one limited to the app.
 

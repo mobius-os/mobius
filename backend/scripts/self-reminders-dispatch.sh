@@ -50,8 +50,10 @@ TOKEN=$(cat "$SERVICE_TOKEN_FILE")
 # (the endpoint only marks done after a successful resume) is picked up
 # again then.
 mkdir -p "$LOG_DIR" 2>/dev/null
+# The token goes through a pipe, never curl's argv, which every process can
+# read; printf is a builtin, so it is never an argument of any program.
 if ! curl -fsS -X POST \
-  -H "Authorization: Bearer $TOKEN" \
+  -H @<(printf 'Authorization: Bearer %s\n' "$TOKEN") \
   -H "Content-Type: application/json" \
   "$API_BASE_URL/api/self-reminders/dispatch" \
   >> "$LOG_DIR/self-reminders.log" 2>&1; then

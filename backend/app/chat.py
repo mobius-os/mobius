@@ -6464,7 +6464,7 @@ async def _run_chat_impl_with_db(
     from app.generated_files import chat_folder
     app_room = Room.for_run(
       room_role, chat_dir=chat_folder(settings.data_dir, chat_id),
-      scratch=scratch, api_base_url=settings.api_base_url,
+      scratch=scratch,
       storage_dir=Path(app_context_env.get("APP_STORAGE_DIR")
                        or Path(settings.data_dir) / "apps" / str(room_app.id)),
     )

@@ -1,14 +1,11 @@
 #!/bin/sh
 set -e
 
-NOTIFY_URL="${API_BASE_URL:-http://localhost:8000}/api/notify"
-AUTH="Authorization: Bearer ${AGENT_TOKEN}"
-CT="Content-Type: application/json"
+MAPI="$(dirname "$0")/mapi"
 
-# best-effort notification — curl failure should not abort rebuild
+# best-effort notification — a failure should not abort rebuild
 notify() {
-  curl -s -X POST "$NOTIFY_URL" \
-    -H "$AUTH" -H "$CT" -d "$1" >/dev/null 2>&1 || true
+  "$MAPI" -X POST /api/notify -d "$1" >/dev/null 2>&1 || true
 }
 
 notify_failed() {
