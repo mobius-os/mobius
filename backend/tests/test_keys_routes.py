@@ -1636,7 +1636,7 @@ def test_a_vault_that_cannot_write_or_decrypt_says_so(client, auth, db, vault, m
   assert vault.reveal("k", ("owner", "")) == DUMMY
 
   for name in ("k", owned["name"]):
-    vault._records[name]["sealed"] = vault._records[name]["sealed"][::-1]
+    vault._records[name]["parts"][0]["sealed"] = vault._records[name]["parts"][0]["sealed"][::-1]
   for path in ("/api/keys/k/value", old_route):
     unreadable = client.get(path, headers=auth)
     assert unreadable.status_code == 500 and "can't be decrypted" in unreadable.json()["detail"]
@@ -2164,3 +2164,67 @@ def test_a_key_an_app_saved_with_no_site_takes_the_slot_its_first_request_needs(
   sent = client.get(f"/api/keys/use/{name}/api.example.com/v1/forecast", headers=headers)
   assert sent.status_code == 200, sent.text
   assert "api_key=" in sent.json()["path"] and "Authorization" not in sent.json()["headers"]
+
+
+# -- keys with several parts ------------------------------------------------------
+
+PAIR_PARTS = [
+  {"name": "account", "value": "AC-fake-route-account", "secret": False, "label": "Account SID"},
+  {"name": "token", "value": DUMMY, "label": "Auth token"},
+]
+BASIC = {"type": "basic", "username": "account", "password": "token"}
+
+
+def test_an_app_borrows_a_basic_key_without_seeing_either_part(client, auth, db, vault):
+  weather = _app(db, "weather-pair")
+  saved = client.put("/api/keys/pair", headers=auth, json={
+    "parts": PAIR_PARTS, "inject": BASIC,
+    "grants": {"apps": [{"id": weather.id, "install": weather.install_id, "sites": [SITE]}], "agents": False, "sites": []},
+  })
+  assert saved.status_code == 200, saved.text
+  used = client.get("/api/keys/use/pair/api.example.com/v1/today", headers=_app_auth(db, weather))
+  assert used.status_code == 200
+  assert used.json()["headers"]["Authorization"] == "Basic [redacted by key vault]"
+  assert DUMMY not in used.text
+  [listed] = client.get("/api/keys", headers=auth).json()["keys"]
+  assert [part.get("text") for part in listed["parts"]] == ["AC-fake-route-account", None]
+
+
+def test_reading_a_part_follows_the_read_rules(client, auth, db, vault):
+  client.put("/api/keys/pair", headers=auth, json={
+    "parts": PAIR_PARTS, "inject": BASIC, "grants": {"apps": [], "agents": True, "sites": []},
+  })
+  assert client.get("/api/keys/pair/value?part=token", headers=auth).json() == {
+    "name": "pair", "value": DUMMY, "part": "token",
+  }
+  assert client.get("/api/keys/pair/value?part=token", headers=_agent_auth(db)).json()["value"] == DUMMY
+  assert client.get("/api/keys/pair/value?part=token", headers=_helper_auth(db)).status_code == 403
+  assert client.get("/api/keys/pair/value", headers=auth).status_code == 404
+
+
+def test_an_agent_replacing_a_part_tells_the_owner(client, auth, db, vault, pushes):
+  client.put("/api/keys/pair", headers=auth, json={
+    "parts": PAIR_PARTS, "inject": BASIC, "grants": {"apps": [], "agents": True, "sites": []},
+  })
+  changed = client.put("/api/keys/pair", headers=_agent_auth(db), json={
+    "parts": [{"name": "token", "value": "dummy-rotated-token"}],
+  })
+  assert changed.status_code == 200, changed.text
+  assert len(pushes) == 1 and "replaced token" in pushes[0]["body"]
+  assert client.get("/api/keys/pair/value?part=account", headers=auth).json()["value"] == "AC-fake-route-account"
+
+
+def test_an_agent_asks_for_a_key_of_several_parts_and_the_owner_pastes_each(client, auth, db, vault):
+  # The request_key card route relays exactly this ask (owner_approvals.KeyRequest).
+  vault.request_for_agents({
+    "key": "twilio", "reason": "Send texts", "sites": [SITE], "inject": BASIC,
+    "parts": [{"name": "account", "label": "Account SID", "secret": False}, {"name": "token", "label": "Auth token"}],
+  }, actor="agent:chat-keys")
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert [part["name"] for part in request["parts"]] == ["account", "token"]
+  approved = client.post(f"/api/keys/requests/{request['id']}/approve", headers=auth, json={
+    "ticket": request["ticket"], "sites": [SITE], "inject": request["inject"],
+    "parts": {"account": "AC-fake-route-account", "token": DUMMY},
+  })
+  assert approved.status_code == 200, approved.text
+  assert client.get("/api/keys/twilio/value?part=token", headers=_agent_auth(db)).json()["value"] == DUMMY

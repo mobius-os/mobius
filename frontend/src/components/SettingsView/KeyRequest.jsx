@@ -4,7 +4,9 @@ import { Alert } from '@openai/apps-sdk-ui/components/Alert'
 import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
-import { approvalBody, requestWording, sentAs, siteLine } from '../../lib/keysSettingsText.js'
+import {
+  approvalBody, newKeyParts, partLabel, partsFilled, requestWording, sentAs, siteLine,
+} from '../../lib/keysSettingsText.js'
 import './settingsButtons.css'
 import './KeysSection.css'
 
@@ -15,20 +17,31 @@ import './KeysSection.css'
  * answers the vault through the owner-only routes with the request's ticket:
  * ``'allow'`` grants exactly what the card shows, ``'deny'`` refuses it. A
  * pasted value goes only to the approve route, never anywhere else; it throws
- * when the vault refuses. ``request`` is null while there is nothing to
- * answer, and the guard then sleeps.
+ * when the vault refuses. A new key of several parts (``parts``) is pasted
+ * one field per part (``partValues``); ``filled`` says every field it needs
+ * has text. ``request`` is null while there is nothing to answer, and the
+ * guard then sleeps.
  */
 export function useKeyAnswer(request, names) {
   const [value, setValue] = useState('')
+  const [partValues, setPartValues] = useState({})
   const guard = useKeyAnswerGuard({ enabled: Boolean(request) })
+  const parts = request ? newKeyParts(request) : null
   async function send(kind) {
     const response = kind === 'allow'
-      ? await api.keys.approve(request.id, approvalBody(request, value))
+      ? await api.keys.approve(request.id, approvalBody(request, parts ? partValues : value))
       : await api.keys.deny(request.id, request.ticket)
     await jsonOrThrow(response, kind === 'allow' ? 'Allow' : 'Not now')
     setValue('')
+    setPartValues({})
   }
-  return { words: request ? requestWording(request, names) : null, guard, value, setValue, send }
+  return {
+    words: request ? requestWording(request, names) : null, guard, value, setValue, send,
+    parts,
+    partValues,
+    setPartValue: (name, text) => setPartValues(current => ({ ...current, [name]: text })),
+    filled: parts ? partsFilled(parts, partValues) : Boolean(value),
+  }
 }
 
 /**
@@ -52,6 +65,7 @@ export function KeyRequestBody({ request, words, note = true }) {
         <ul className="settings-keys__details-list">
           {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
           {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
+          {newKeyParts(request) && <li>In {request.parts.length} parts: {request.parts.map(partLabel).join(', ')}</li>}
           {words.keptSlot && (
             <li>
               Sent as <code>{sentAs(words.keptSlot.kept)}</code>, not <code>{sentAs(words.keptSlot.asked)}</code> as
@@ -78,9 +92,37 @@ export function KeyAnyway({ anyway, onOpen, children }) {
   )
 }
 
-/** Where the owner pastes the value of a key they have not saved yet. */
+/**
+ * Where the owner pastes the value of a key they have not saved yet: one
+ * field, or one per part for a key of several parts (a plain part, such as
+ * an account id, is typed in the open).
+ */
 export function KeyPasteField({ answer, disabled, autoFocus = false }) {
   const id = useId()
+  if (answer.parts) {
+    return (
+      <div className="settings-keys__paste" role="group" aria-labelledby={id}>
+        <p className="settings-keys__request-lead" id={id}><strong>{answer.words.pasteTitle}</strong></p>
+        {answer.parts.map((part, index) => (
+          <label key={part.name} className="settings-keys__part">
+            <span className="settings-keys__muted">{partLabel(part)}</span>
+            <input
+              className="settings-keys__input"
+              type={part.secret ? 'password' : 'text'}
+              value={answer.partValues[part.name] || ''}
+              onChange={event => answer.setPartValue(part.name, event.target.value)}
+              placeholder={part.secret ? 'Paste it here' : 'Type or paste it'}
+              autoComplete={part.secret ? 'new-password' : 'off'}
+              spellCheck={false}
+              disabled={disabled}
+              autoFocus={autoFocus && index === 0}
+            />
+          </label>
+        ))}
+        <p className="settings-keys__muted">{answer.words.pasteNote}</p>
+      </div>
+    )
+  }
   return (
     <div className="settings-keys__paste">
       <label className="settings-keys__request-lead" htmlFor={id}><strong>{answer.words.pasteTitle}</strong></label>
@@ -164,7 +206,7 @@ export default function KeyRequest({ request, names, onAnswered, dialog = false,
       className={`settings__btn settings__btn--sm${primary ? '' : ' settings__btn--outline'}`}
       aria-disabled={guard.active ? undefined : 'true'}
       onClick={event => { if (guard.counts(event)) respond('allow') }}
-      disabled={Boolean(busy) || (words.needsValue && !answer.value)}
+      disabled={Boolean(busy) || (words.needsValue && !answer.filled)}
     >
       {busy === 'allow' ? 'Allowing…' : label}
     </button>

@@ -211,7 +211,8 @@ installation, so the purge does not wait for it.
   per value, the key name as associated data; store version 2 gave each app
   grant its own sites, a version 1 store migrating with each app keeping the
   sites it could reach; version 3 names each app's installation, see *App
-  installations*), `requests.json`, `stats.json` (use
+  installations*; version 4 holds each key as named parts, see *Keys with
+  several parts*), `requests.json`, `stats.json` (use
   counters), `usage.jsonl` (use traffic, rotated at 512 KiB), `audit.jsonl`
   (reads, changes, grants and requests, rotated at 2 MiB, kept apart so
   refused traffic cannot push it out; neither log holds values or unbounded
@@ -366,6 +367,182 @@ afterwards leaves only grants withdrawn. It runs as root from `/app/scripts`,
 so the image ships the vault program beside it (`/app/vault/keyvault.py`),
 never loading it from the editable checkout; `--vault-program` names another
 trusted copy deliberately.
+
+## Keys with several parts
+
+Status: phase 1 (parts, `basic`, `slots`, the multi-field card) is built;
+the signers in phases 2 and 3 are not.
+
+**The gap.** A key today is one value sent in one slot, and a borrow uses one
+key. Many services need more than that:
+
+| Shape | Examples | Today |
+|---|---|---|
+| Secret plus an identifier that isn't secret | Algolia app id, Twilio account SID in the path, a version header | Works: the caller sends the identifier itself. |
+| Username and password (Basic) | Twilio SID:token, Atlassian email:token, Mailgun, OAuth `client_secret_basic` | Only if the owner pastes base64 of `user:pass` and the slot has a `Basic ` prefix. |
+| Two secrets in two places | Trello key and token, Discogs consumer key and secret | Impossible: one key per borrow. |
+| Secret in the body | Plaid `client_id`/`secret`, OAuth `client_secret_post` | Impossible: only headers and query parameters. |
+| A signature over the request | AWS SigV4 and every S3-compatible store, exchange HMACs, OAuth 1.0a | Impossible: the vault adds a fixed value. |
+| A private key that mints short-lived tokens | Google service accounts, GitHub Apps, App Store Connect | Stored and readable, never sent (multiline). |
+| A refresh token | OAuth 2 APIs | Impossible: values never change by themselves. |
+
+For the impossible rows the only path is a top-level agent reading the value
+and doing the work itself. That puts the secret in the agent's processes,
+and apps and delegated helpers, which never receive values, cannot use these
+services at all.
+
+**Approach.** A key holds up to eight named **parts**, and its slot becomes a
+**send recipe** that says how the vault builds the request from them. Every
+recipe is platform code in the vault: nothing an app or agent supplies runs
+there, so a recipe cannot carry a value out. The vault never returns a part,
+a signature or a minted token to the caller, and it adds each secret part and
+each minted token to the key's redaction set.
+
+### Parts
+
+- A part has a name (`NAME_RE`), a label the card shows, and whether it is
+  `secret`. Secret parts are sealed one by one under the key name and part
+  name as associated data. Plain parts (a client id, an access key id, an
+  account SID, a region) are stored in clear, shown in Settings, never
+  redacted, and may be short.
+- Every key that exists today becomes a key with one secret part named
+  `value`, migrated with the store (version 4). The part `value` stays sealed
+  under the key name alone, exactly as before, so migrating re-encrypts
+  nothing; any other part is sealed under `<key>#<part>`. The file it
+  migrated from is kept once as `keys.v<version>.json`, for an older vault
+  (the recovery fallback, `restore-data.py` from an older image) that can't
+  read version 4. Each single-value route keeps
+  its meaning for a one-part key; for others, reading names the part
+  (`GET /api/keys/<name>/value?part=<part>`), and the same read rules apply
+  (owner and top-level agents unless the Agents switch is off; never helpers
+  or apps).
+- Replacing one part keeps the others, so rotating a secret never retypes its
+  id. Settings › Keys can replace or delete a part. It still only narrows:
+  adding a part, or changing the recipe, comes from a request card.
+- A multiline part (a PEM key, a service-account JSON) is never placed in a
+  header or query; only the signing recipes below read it.
+
+### Send recipes
+
+`inject` keeps its name and gains types. `header` and `query` stay as they are
+(using the part `value`).
+
+- **`basic`** `{username: <part>, password: <part>}`: the vault sends
+  `Authorization: Basic base64(username:password)`, so the owner pastes the two
+  halves as two fields. The redaction set includes the encoded pair as well as
+  the secret halves.
+- **`slots`** `[slot, ...]` with at most eight slots. Each slot is one of:
+  - `{type: header, name, template}`: `template` is fixed text with `{part}`
+    placeholders, so `Token {id}:{secret}` and `Bearer {token}` both fit. A
+    header slot obeys today's rules: the forbidden names, one line, latin-1.
+  - `{type: query, name, part}`.
+  - `{type: body, format: json|form, field, part}`: `field` is a top-level
+    JSON member or form field. The vault already buffers the whole body
+    (10 MiB). It parses the caller's body as the declared `Content-Type`,
+    refuses a body that doesn't parse, replaces any value the caller gave for
+    that field, serializes again and sets `Content-Length`. JSON with a
+    duplicate member at the top level is refused, so a parser difference
+    between the vault and the site can't decide which value wins. No nested
+    paths in this step.
+
+  As today, the caller's own header with a slot's name is dropped, and the
+  caller cannot name a slot's field or part: both come from the approved
+  recipe.
+- **Signers**, each a small, self-contained module beside the vault with
+  published test vectors:
+  - **`aws_sigv4`** `{access_key_id: <part>, secret_access_key: <part>,
+    session_token?: <part>, region, service}`: the vault signs last, over the
+    request it is about to send (the pinned host, the method, the path and
+    query it checked, `x-amz-date`, `x-amz-content-sha256` of the buffered
+    body, and every caller `x-amz-*` header). The caller can't send its own
+    `Authorization`, `X-Amz-Date` or `X-Amz-Security-Token`. This covers S3,
+    R2, B2, Wasabi, MinIO and Spaces with one module. The vault never
+    produces presigned URLs: a presigned URL is a portable credential.
+  - **`jwt_bearer`** `{private_key: <part>, alg: RS256|ES256, claims,
+    exchange?}`: the vault signs a short-lived JWT with fixed claims from the
+    recipe (`iss`, `sub`, `aud`, `scope`, and `iat`/`exp` it sets itself),
+    then either sends it as `Authorization: Bearer` (App Store Connect, a
+    GitHub App's own endpoints) or exchanges it at a fixed token endpoint
+    (Google's `oauth2.googleapis.com/token`, GitHub's installation-token
+    route) and sends the access token it gets back. For a Google
+    service-account JSON pasted whole, the vault reads `client_email` and
+    `private_key` out of it, but the token endpoint is the scheme's, never
+    the file's `token_uri`.
+  - **`oauth2_refresh`** `{client_id: <part>, client_secret: <part>,
+    refresh_token: <part>, token_endpoint}`: the vault exchanges the refresh
+    token for an access token and sends that. When the provider rotates the
+    refresh token, the vault saves the new one as a change by
+    `platform:oauth-refresh`, audited like any other. Getting the first
+    refresh token (the browser consent flow) is out of scope here; the owner
+    pastes one or a later connect flow writes it.
+
+  Minted access tokens live only in the vault's memory, cached until about a
+  minute before they expire, keyed by key, recipe revision and scope, and
+  dropped when any part or the recipe changes. The exchange endpoint is
+  part of the recipe the owner approves and is checked like a site (HTTPS,
+  443, public address, pinned), but it is not a site the caller can borrow
+  against. A failed exchange answers 502 with the provider's error, redacted.
+- **Exchange HMACs and OAuth 1.0a** have no common shape (which fields are
+  signed, in what order, how the signature is encoded and named), so they are
+  added one provider at a time when someone needs one, not as a generic
+  template. A generic HMAC recipe would let a caller choose the string to be
+  signed, which makes the vault a signing oracle.
+
+### Asking and approving
+
+- `POST /api/keys/requests` and the agent's `request_key` tool carry the
+  proposed parts (name, label, `secret`) and the recipe in `inject`. Proposed
+  parts apply only to a key the request creates; approving takes `parts` as a
+  map of part name to pasted value. A recipe that doesn't fit an existing
+  key's parts is never set: the card says the key keeps its own. The rules
+  that decide when a request's slot applies stay the same: a recipe applies
+  only to a key that nothing can send yet, and a key in use keeps its recipe,
+  with the card saying so.
+- The card shows the recipe in plain words ("sent as a username and
+  password", "signs requests to AWS S3 in eu-central-1", "gets a Google
+  access token for the Drive read-only scope") and, for a new key, one paste
+  field per part, labelled by the request. Plain parts are visible as typed;
+  secret parts are password fields, and a multiline part gets a text area
+  that accepts a dropped file. Saving is still paste and save: no extra
+  settings.
+- `store-key.py` maps the sealed card's fields (at most eight, matching
+  `request_secret`) onto parts one to one, with `--part NAME[:plain]`, and
+  takes `--basic USER_PART PASS_PART`, `--slots JSON` or `--scheme NAME
+  --param K=V` for the recipe.
+- Sites, methods and paths are unchanged and still checked first; a recipe
+  only decides what the vault adds to a request that is already allowed.
+
+### Security notes
+
+- Redaction covers every secret part, every composite the vault builds from
+  them (the Basic pair, each header template's output) and every minted token.
+  Plain parts are not redacted, so a short id never mangles answers.
+- A signature or minted token never leaves the vault. A caller can make a site
+  act within the approved sites, as with any key today, but it cannot obtain a
+  credential it could use elsewhere.
+- Body injection widens what a caller can steer only by the declared field.
+  A site that stores a request body and shows it later can leak that field,
+  just as one that stores headers can leak a header today. The defence is the
+  same: approve only the paths that need the key.
+- The vault gains no new trust: it already holds the values and sends
+  requests. The extra code (body rewriting, three signers) is in the vault
+  process and keeps its rule of importing nothing from the server.
+
+### Phases and done-when
+
+1. **Parts, `basic`, `slots` (header template, query, body), the multi-field
+   card, `store-key.py`, the store migration.** Done when an existing vault
+   migrates with every key and grant unchanged; Twilio-style Basic, a
+   two-header key, a JSON body key and a form body key each work for the
+   owner, an agent, a helper and an app through a live borrow; echoes of each
+   part and of the Basic pair come back redacted; and Settings can replace one
+   part without touching the others.
+2. **`aws_sigv4` and `jwt_bearer`.** Done when the signer passes AWS's SigV4
+   test suite, a real S3-compatible store and a Google service account work
+   from an app that never sees a value, and the minted token never appears in
+   any answer or log.
+3. **`oauth2_refresh`**, then any per-provider signers that are actually
+   asked for.
 
 ## Future work: sandbox for app server code
 

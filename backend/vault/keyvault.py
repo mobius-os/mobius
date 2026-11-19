@@ -82,7 +82,12 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # (``install``). An older store is migrated at load with ``install`` None
 # ("unstamped"), which matches no app caller until the platform names the
 # installation (``Vault.adopt_installs``).
-STORE_VERSION = 3
+# 4: a key holds named parts (``parts``) instead of one sealed value; an older
+# value becomes the secret part ``value``, sealed exactly as before. The file
+# it migrated from is kept beside the store (``keys.v<version>.json``) for an
+# older vault (the recovery fallback, a restore from the image) that can't
+# read version 4.
+STORE_VERSION = 4
 SOCKET_NAME = "vault.sock"
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 HOST_RE = re.compile(
@@ -94,6 +99,17 @@ INSTALL_RE = re.compile(r"[0-9a-f]{32}")
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 MIN_VALUE_LENGTH = 1
 MAX_VALUE_LENGTH = 8192
+# A key's parts: the one most keys have is ``value``; others name themselves.
+# Eight matches the fields one sealed owner card can carry.
+VALUE_PART = "value"
+MAX_PARTS = 8
+MAX_PART_LABEL = 80
+MAX_SLOTS = 8
+MAX_TEMPLATE = 256
+TEMPLATE_PART_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9_-]{0,63})\}")
+QUERY_NAME_RE = re.compile(r"[A-Za-z0-9_.~-]{1,64}")
+BODY_FIELD_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
+BODY_FORMATS = {"json": "application/json", "form": "application/x-www-form-urlencoded"}
 MAX_KEYS = 200
 # What the per-app secret store allowed; apps' own keys keep that bound.
 MAX_OWNED_PER_APP = 16
@@ -209,7 +225,65 @@ def validate_value(value) -> str:
 DEFAULT_INJECT = {"type": "header", "name": "Authorization", "prefix": "Bearer "}
 
 
+def _slot_header_name(raw) -> str:
+  name = str(raw or "").strip()
+  if not TOKEN_RE.fullmatch(name) or name.lower() in FORBIDDEN_SLOT_HEADERS:
+    raise VaultError(400, f"The header {name or '(empty)'} can't carry a key.")
+  return name
+
+
+def _part_name(raw, what: str) -> str:
+  name = str(raw or "").strip()
+  if not NAME_RE.fullmatch(name):
+    raise VaultError(400, f"{what} must name one of the key's parts.")
+  return name
+
+
+def _template(raw) -> str:
+  template = str(raw or "")
+  literal = TEMPLATE_PART_RE.sub("", template)
+  if not TEMPLATE_PART_RE.search(template):
+    raise VaultError(400, "A header template names at least one part, like Token {secret}.")
+  if len(template) > MAX_TEMPLATE or any(ch in literal for ch in "{}\r\n\x00"):
+    raise VaultError(400, f"A header template is one line of at most {MAX_TEMPLATE} characters, "
+                     "with braces only around part names.")
+  try:
+    literal.encode("latin-1")
+  except UnicodeEncodeError:
+    raise VaultError(400, "A header template has characters a header can't carry.")
+  return template
+
+
+def _validate_slot(raw) -> dict:
+  if not isinstance(raw, dict):
+    raise VaultError(400, "Each slot is a header, a query parameter or a body field.")
+  kind = raw.get("type")
+  if kind == "header":
+    return {"type": "header", "name": _slot_header_name(raw.get("name")), "template": _template(raw.get("template"))}
+  if kind == "query":
+    name = str(raw.get("name") or "").strip()
+    if not QUERY_NAME_RE.fullmatch(name):
+      raise VaultError(400, f"The query parameter {name or '(empty)'} can't carry a key.")
+    return {"type": "query", "name": name, "part": _part_name(raw.get("part"), "A query slot")}
+  if kind == "body":
+    fmt = raw.get("format")
+    if fmt not in BODY_FORMATS:
+      raise VaultError(400, "A body slot's format is json or form.")
+    field = str(raw.get("field") or "").strip()
+    if not BODY_FIELD_RE.fullmatch(field):
+      raise VaultError(400, f"The body field {field or '(empty)'} can't carry a key.")
+    return {"type": "body", "format": fmt, "field": field, "part": _part_name(raw.get("part"), "A body slot")}
+  raise VaultError(400, "Each slot is a header, a query parameter or a body field.")
+
+
 def validate_inject(raw) -> dict:
+  """How a key is sent: its send recipe.
+
+  ``header`` and ``query`` send the part ``value`` in one slot. ``basic``
+  sends two parts as ``Authorization: Basic``. ``slots`` places several parts,
+  each in a header (a template naming parts), a query parameter or a field of
+  a JSON or form body. Which parts a recipe uses is ``recipe_parts``.
+  """
   if not isinstance(raw, dict):
     raise VaultError(400, "Choose where the key is sent: a header or a query parameter.")
   kind = raw.get("type")
@@ -222,10 +296,82 @@ def validate_inject(raw) -> dict:
       raise VaultError(400, "The header prefix must be short and on one line.")
     return {"type": "header", "name": name, "prefix": prefix}
   if kind == "query":
-    if not re.fullmatch(r"[A-Za-z0-9_.~-]{1,64}", name):
+    if not QUERY_NAME_RE.fullmatch(name):
       raise VaultError(400, "That query parameter name can't carry a key.")
     return {"type": "query", "name": name}
-  raise VaultError(400, "The key slot must be a header or a query parameter.")
+  if kind == "basic":
+    username = _part_name(raw.get("username"), "Basic's username")
+    password = _part_name(raw.get("password"), "Basic's password")
+    if username == password:
+      raise VaultError(400, "Basic's username and password are two different parts.")
+    return {"type": "basic", "username": username, "password": password}
+  if kind == "slots":
+    slots = raw.get("slots")
+    if not isinstance(slots, list) or not 1 <= len(slots) <= MAX_SLOTS:
+      raise VaultError(400, f"A key is sent in between one and {MAX_SLOTS} slots.")
+    slots = [_validate_slot(slot) for slot in slots]
+    headers = [slot["name"].lower() for slot in slots if slot["type"] == "header"]
+    queries = [slot["name"] for slot in slots if slot["type"] == "query"]
+    bodies = [slot for slot in slots if slot["type"] == "body"]
+    if len(set(headers)) != len(headers) or len(set(queries)) != len(queries):
+      raise VaultError(400, "Two slots name the same header or query parameter.")
+    if len({slot["field"] for slot in bodies}) != len(bodies):
+      raise VaultError(400, "Two slots name the same body field.")
+    if len({slot["format"] for slot in bodies}) > 1:
+      raise VaultError(400, "A key's body slots all use one format: json or form.")
+    return {"type": "slots", "slots": slots}
+  raise VaultError(400, "A key is sent in a header or a query parameter, as basic, or in slots.")
+
+
+def recipe_parts(inject: dict) -> list[str]:
+  """The parts a validated recipe sends, in the order it names them."""
+  kind = inject["type"]
+  if kind in ("header", "query"):
+    return [VALUE_PART]
+  if kind == "basic":
+    return [inject["username"], inject["password"]]
+  names = []
+  for slot in inject["slots"]:
+    names += TEMPLATE_PART_RE.findall(slot["template"]) if slot["type"] == "header" else [slot["part"]]
+  return list(dict.fromkeys(names))
+
+
+def recipe_fits(inject: dict, part_names) -> list[str]:
+  """The parts ``inject`` sends that ``part_names`` lacks (empty when it fits)."""
+  have = set(part_names)
+  return [name for name in recipe_parts(inject) if name not in have]
+
+
+def validate_part_specs(raw) -> list[dict]:
+  """The parts a request proposes for a new key: names, labels and whether
+  each is secret, never values (the owner pastes those on the card)."""
+  if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_PARTS:
+    raise VaultError(400, f"A key has between one and {MAX_PARTS} parts.")
+  specs = []
+  for item in raw:
+    if not isinstance(item, dict):
+      raise VaultError(400, "Each part names itself and says whether it is secret.")
+    specs.append(_part_meta(item, None))
+  if len({spec["name"] for spec in specs}) != len(specs):
+    raise VaultError(400, "Two parts have the same name.")
+  if not any(spec["secret"] for spec in specs):
+    raise VaultError(400, "A key has at least one secret part.")
+  return specs
+
+
+def _part_meta(item: dict, existing: dict | None) -> dict:
+  """A part's name, label and secrecy; an existing part keeps what ``item`` omits."""
+  name = _part_name(item.get("name"), "A part")
+  label = item.get("label")
+  label = (existing or {}).get("label", "") if label is None else str(label).strip()
+  if len(label) > MAX_PART_LABEL or any(ch in label for ch in "\r\n\x00"):
+    raise VaultError(400, f"A part's label is one line of at most {MAX_PART_LABEL} characters.")
+  secret = item.get("secret")
+  if secret is None:
+    secret = (existing or {}).get("secret", True)
+  if not isinstance(secret, bool):
+    raise VaultError(400, f"Part {name} is secret or not: true or false.")
+  return {"name": name, "label": label, "secret": secret}
 
 
 def validate_site(raw) -> dict:
@@ -634,32 +780,40 @@ class SecretEchoes:
   longest: int
 
 
-def secret_echoes(value: str) -> SecretEchoes:
-  """Match the key wherever a site echoes it, however the site escaped it.
+def secret_echoes(*values: str) -> SecretEchoes:
+  """Match each secret wherever a site echoes it, however the site escaped it.
 
   Escaping is matched per character, so mixed and partial escaping is caught
   too: raw, percent-encoding, JSON ``\\u`` and short escapes, HTML numeric and
   named entities, ``+`` for a space. Letters match in either case, which also
   catches hex digits written either way and an upper-cased echo. Hex, UTF-16
   (either byte order) and base64 at every alignment cover a key the site
-  re-encoded whole.
+  re-encoded whole. A key with several secret parts passes each of them (and
+  whatever the vault composed from them); longer secrets are tried first, so
+  one that contains another is redacted whole.
   """
-  per_char, longest, groups = [], 0, {}
-  for ch in value:
-    if ch not in groups:
-      forms = _char_echoes(ch)
-      groups[ch] = (b"(?:" + b"|".join(re.escape(form) for form in forms) + b")", len(forms[0]))
-    group, size = groups[ch]
-    per_char.append(group)
-    longest += size
-  data = value.encode()
-  whole = [data.hex().encode(), value.encode("utf-16-le"), value.encode("utf-16-be")]
-  whole = [form for form in whole if len(form) >= MIN_ENCODED_FORM]
-  cores = _base64_cores(data)
-  alternatives = [b"(?i:" + b"".join(per_char) + b")", *(b"(?i:" + re.escape(form) + b")" for form in whole),
-                  *(re.escape(core) for core in sorted(cores, key=len, reverse=True))]
-  longest = max([longest, *map(len, whole), *map(len, cores)])
-  return SecretEchoes(re.compile(b"|".join(alternatives)), longest)
+  groups: dict[str, tuple[bytes, int]] = {}
+  alternatives: list[tuple[int, bytes]] = []
+  longest = 0
+  for value in dict.fromkeys(values):
+    per_char, size_sum = [], 0
+    for ch in value:
+      if ch not in groups:
+        forms = _char_echoes(ch)
+        groups[ch] = (b"(?:" + b"|".join(re.escape(form) for form in forms) + b")", len(forms[0]))
+      group, size = groups[ch]
+      per_char.append(group)
+      size_sum += size
+    data = value.encode()
+    whole = [data.hex().encode(), value.encode("utf-16-le"), value.encode("utf-16-be")]
+    whole = [form for form in whole if len(form) >= MIN_ENCODED_FORM]
+    cores = _base64_cores(data)
+    alternatives.append((len(value), b"(?i:" + b"".join(per_char) + b")"))
+    alternatives += [(len(form), b"(?i:" + re.escape(form) + b")") for form in whole]
+    alternatives += [(len(core), re.escape(core)) for core in cores]
+    longest = max([longest, size_sum, *map(len, whole), *map(len, cores)])
+  ordered = [pattern for _, pattern in sorted(alternatives, key=lambda item: item[0], reverse=True)]
+  return SecretEchoes(re.compile(b"|".join(ordered)), longest)
 
 
 def redact(data: bytes, echoes: SecretEchoes) -> bytes:
@@ -790,12 +944,153 @@ class UpstreamRequest:
   headers: list[tuple[str, str]]
 
 
+@dataclass(frozen=True)
+class Loan:
+  """What one allowed use sends: the recipe, the parts it uses, and which of
+  them are secret (redacted from the answer; plain parts are not)."""
+  inject: dict
+  values: dict
+  secret: frozenset
+
+  def echoes(self) -> SecretEchoes:
+    secrets_sent = [self.values[name] for name in self.values if name in self.secret]
+    if self.inject["type"] == "basic":
+      # The pair as it travels, should a site echo the header back whole.
+      secrets_sent.append(_basic_credentials(self.inject, self.values))
+    return secret_echoes(*secrets_sent)
+
+
+def _basic_credentials(inject: dict, values: dict) -> str:
+  pair = f"{values[inject['username']]}:{values[inject['password']]}"
+  return base64.b64encode(pair.encode()).decode()
+
+
+def recipe_headers(inject: dict, values: dict) -> list[tuple[str, str]]:
+  """The headers a recipe adds, refused (400) when one can't carry its parts."""
+  kind = inject["type"]
+  if kind == "header":
+    added = [(inject["name"], f"{inject.get('prefix', '')}{values[VALUE_PART]}")]
+  elif kind == "basic":
+    added = [("Authorization", "Basic " + _basic_credentials(inject, values))]
+  elif kind == "slots":
+    added = [(slot["name"], TEMPLATE_PART_RE.sub(lambda m: values[m.group(1)], slot["template"]))
+             for slot in inject["slots"] if slot["type"] == "header"]
+  else:
+    added = []
+  for name, header_value in added:
+    if any(ch in header_value for ch in "\r\n"):
+      raise VaultError(400, f"A part sent in {name} has line breaks, so it can't be sent in a header.")
+    try:
+      header_value.encode("latin-1")
+    except UnicodeEncodeError:
+      raise VaultError(400, f"A part sent in {name} has characters a header can't carry.")
+  return added
+
+
+def _recipe_queries(inject: dict, values: dict) -> list[tuple[str, str]]:
+  if inject["type"] == "query":
+    return [(inject["name"], values[VALUE_PART])]
+  if inject["type"] == "slots":
+    return [(slot["name"], values[slot["part"]]) for slot in inject["slots"] if slot["type"] == "query"]
+  return []
+
+
+class _JsonNumber(str):
+  """A JSON number kept exactly as the caller wrote it."""
+
+
+def _refuse_constant(name: str):
+  raise ValueError(f"{name} is not JSON")
+
+
+def _json_text(item) -> str:
+  if isinstance(item, _JsonNumber):
+    return str(item)
+  if isinstance(item, str):
+    return json.dumps(item, ensure_ascii=False)
+  if item is True:
+    return "true"
+  if item is False:
+    return "false"
+  if item is None:
+    return "null"
+  if isinstance(item, _JsonObject):
+    return "{" + ",".join(f"{json.dumps(k, ensure_ascii=False)}:{_json_text(v)}" for k, v in item) + "}"
+  return "[" + ",".join(_json_text(v) for v in item) + "]"
+
+
+class _JsonObject(list):
+  """A JSON object as the pairs the caller wrote, in order."""
+
+
+def _media_type(headers: list[tuple[str, str]]) -> str | None:
+  value = next((v for k, v in headers if k.lower() == "content-type"), None)
+  return value.split(";", 1)[0].strip().lower() if value is not None else None
+
+
+def recipe_body(
+  inject: dict, values: dict, body: bytes | None, headers: list[tuple[str, str]],
+) -> tuple[bytes | None, str | None]:
+  """The body with the recipe's fields set, and a Content-Type to add (or None).
+
+  The caller's body must be in the slots' format (JSON with a top-level
+  object, or a form). No body is an empty one, and then the vault names the
+  format itself. A field the caller already gave is replaced, and a JSON body
+  with a duplicate top-level member is refused, so how the site resolves a
+  duplicate can never decide which value it reads. JSON is written back
+  member for member, numbers exactly as given.
+  """
+  slots = [slot for slot in inject["slots"] if slot["type"] == "body"] if inject["type"] == "slots" else []
+  if not slots:
+    return body, None
+  fmt = slots[0]["format"]
+  wanted = BODY_FORMATS[fmt]
+  media = _media_type(headers)
+  empty = not body
+  add_type = None
+  if media is None:
+    if not empty:
+      raise VaultError(400, f"This key goes in a {fmt} body; send it with Content-Type: {wanted}.")
+    add_type = wanted
+  elif not (media == wanted or (fmt == "json" and media.endswith("+json"))):
+    raise VaultError(400, f"This key goes in a {fmt} body; send it with Content-Type: {wanted}.")
+  fields = [(slot["field"], values[slot["part"]]) for slot in slots]
+  names = {name for name, _ in fields}
+  if fmt == "json":
+    try:
+      parsed = _JsonObject() if empty else json.loads(
+        body.decode("utf-8"), object_pairs_hook=_JsonObject,
+        parse_float=_JsonNumber, parse_int=_JsonNumber, parse_constant=_refuse_constant,
+      )
+    except (UnicodeDecodeError, ValueError):
+      raise VaultError(400, "The request body is not valid JSON (UTF-8).")
+    if not isinstance(parsed, _JsonObject):
+      raise VaultError(400, "This key goes in a JSON body whose top level is an object.")
+    members = [k for k, _ in parsed]
+    if len(set(members)) != len(members):
+      raise VaultError(400, "The JSON body names a member twice; send each once.")
+    kept = _JsonObject((k, v) for k, v in parsed if k not in names)
+    kept += fields
+    return _json_text(kept).encode("utf-8"), add_type
+  try:
+    pairs = [] if empty else urllib.parse.parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=True)
+  except (UnicodeDecodeError, ValueError):
+    raise VaultError(400, "The request body is not a valid form; percent-encode it.")
+  pairs = [(k, v) for k, v in pairs if k not in names] + fields
+  return urllib.parse.urlencode(pairs).encode("ascii"), add_type
+
+
 def build_upstream_request(
   *, method: str, host: str, raw_path: str, raw_query: str,
-  caller_headers: list[tuple[str, str]], inject: dict, value: str,
-) -> UpstreamRequest:
-  """Place the key in its one slot and drop anything that could displace it."""
-  slot = inject["name"].lower() if inject["type"] == "header" else None
+  caller_headers: list[tuple[str, str]], loan: Loan, body: bytes | None = None,
+) -> tuple[UpstreamRequest, bytes | None]:
+  """Place the key's parts as its recipe says and drop anything that could
+  displace them: the caller's own header or query parameter with a slot's
+  name never travels, nor a body field a slot fills."""
+  inject, values = loan.inject, loan.values
+  added_headers = recipe_headers(inject, values)
+  slots = {name.lower() for name, _ in added_headers}
+  body, content_type = recipe_body(inject, values, body, caller_headers)
   headers = []
   for name, header_value in caller_headers:
     lowered = name.lower()
@@ -809,25 +1104,27 @@ def build_upstream_request(
       # which matches the whole value, would never recognise.
       or lowered in ("host", "content-length", "accept-encoding", "range", "if-range")
       or lowered.startswith("x-vault-") or lowered.startswith("proxy-")
-      or lowered == slot
+      or lowered in slots
     ):
       continue
     headers.append((name, header_value))
   headers.append(("Host", host))
   # Identity encoding keeps an echoed key visible to redaction.
   headers.append(("Accept-Encoding", "identity"))
+  if content_type is not None:
+    headers.append(("Content-Type", content_type))
+  headers += added_headers
   query = raw_query
-  if inject["type"] == "header":
-    headers.append((inject["name"], f"{inject.get('prefix', '')}{value}"))
-  else:
+  queries = _recipe_queries(inject, values)
+  if queries:
+    names = {name for name, _ in queries}
     pairs = [
       (k, v) for k, v in urllib.parse.parse_qsl(raw_query, keep_blank_values=True)
-      if k != inject["name"]
+      if k not in names
     ]
-    pairs.append((inject["name"], value))
-    query = urllib.parse.urlencode(pairs)
+    query = urllib.parse.urlencode(pairs + queries)
   target = raw_path + (f"?{query}" if query else "")
-  return UpstreamRequest(method=method, host=host, target=target, headers=headers)
+  return UpstreamRequest(method=method, host=host, target=target, headers=headers), body
 
 
 # ---------------------------------------------------------------------------
@@ -939,13 +1236,14 @@ class Vault:
     """The stored keys, and whether an older store was migrated."""
     if not self.store_path.exists():
       return {}, False
-    payload = json.loads(self.store_path.read_text())
+    raw = self.store_path.read_bytes()
+    payload = json.loads(raw)
     records = payload.get("keys") or {}
     version = payload.get("version")
+    if version not in (1, 2, 3, STORE_VERSION):
+      raise SystemExit("key vault: unknown store version; refusing to start")
     if version == 1:
       records = {name: _migrated_from_version_one(name, record) for name, record in records.items()}
-    elif version not in (2, STORE_VERSION):
-      raise SystemExit("key vault: unknown store version; refusing to start")
     for record in records.values():
       for grant in (record.get("grants") or {}).get("apps") or []:
         grant.setdefault("paused", False)
@@ -954,7 +1252,14 @@ class Vault:
         grant.setdefault("install", None)
       if record.get("origin"):
         record["origin"].setdefault("install", None)
-    return records, version != STORE_VERSION
+    if version == STORE_VERSION:
+      return records, False
+    # An older vault (the recovery fallback, a restore from the image) can't
+    # read version 4: keep the file this one migrated from, once.
+    backup = self.dir / f"keys.v{version}.json"
+    if not backup.exists():
+      _atomic_write(backup, raw)
+    return {name: _migrated_to_parts(record) for name, record in records.items()}, True
 
   def _load_requests(self) -> dict:
     """Open requests. A damaged file is set aside rather than stopping the vault:
@@ -1055,22 +1360,46 @@ class Vault:
     """Audit what the running ``_change`` does, once it is saved."""
     self._audit_after_save.append(_audit_fields(key, caller, outcome, reason=reason))
 
-  def _seal(self, name: str, value: str) -> dict:
-    nonce = secrets.token_bytes(12)
-    sealed = self._aead.encrypt(nonce, value.encode(), name.encode())
-    return {"nonce": base64.b64encode(nonce).decode(), "sealed": base64.b64encode(sealed).decode()}
+  @staticmethod
+  def _sealed_for(name: str, part: str) -> bytes:
+    """What a part is sealed under: the key's name, and the part's name for any
+    part but ``value`` (sealed as a single value always was, so migrating
+    rewrites nothing). ``#`` is in no name, so no two parts share one."""
+    return (name if part == VALUE_PART else f"{name}#{part}").encode()
 
-  def _open(self, name: str, record: dict) -> str:
+  def _seal_part(self, name: str, meta: dict, value: str) -> dict:
+    """A stored part: a secret one sealed, a plain one as text."""
+    if not meta["secret"]:
+      if "\n" in value or "\r" in value:
+        raise VaultError(400, f"Part {meta['name']} isn't secret, so it is one line.")
+      return {**meta, "text": value}
+    nonce = secrets.token_bytes(12)
+    sealed = self._aead.encrypt(nonce, value.encode(), self._sealed_for(name, meta["name"]))
+    return {**meta, "nonce": base64.b64encode(nonce).decode(), "sealed": base64.b64encode(sealed).decode(),
+            # Marked so the owner sees it, and the platform never puts it in a header.
+            "multiline": "\n" in value or "\r" in value}
+
+  def _open_part(self, name: str, part: dict) -> str:
+    if not part.get("secret"):
+      return part["text"]
     try:
-      nonce = base64.b64decode(record["nonce"])
-      sealed = base64.b64decode(record["sealed"])
-      return self._aead.decrypt(nonce, sealed, name.encode()).decode()
+      nonce = base64.b64decode(part["nonce"])
+      sealed = base64.b64decode(part["sealed"])
+      return self._aead.decrypt(nonce, sealed, self._sealed_for(name, part["name"])).decode()
     except (InvalidTag, binascii.Error, KeyError, TypeError, ValueError):
       raise VaultError(500, "This key can't be decrypted.")
 
+  def _open(self, name: str, record: dict, part: str = VALUE_PART) -> str:
+    stored = _part(record, part)
+    if stored is None:
+      raise VaultError(404, f"{name} has no part named {part}.")
+    return self._open_part(name, stored)
+
   def _opens(self, name: str, record: dict) -> bool:
     try:
-      self._open(name, record)
+      for part in record["parts"]:
+        if part.get("secret"):
+          self._open_part(name, part)
     except VaultError:
       return False
     return True
@@ -1090,7 +1419,9 @@ class Vault:
         "updated_at": record["updated_at"],
         "revision": record.get("revision", 0),
         "origin": record.get("origin"),
-        "multiline": bool(record.get("multiline")),
+        "multiline": bool((_part(record, VALUE_PART) or {}).get("multiline")),
+        # Plain parts (an id, a region) show their text; secret ones never do.
+        "parts": [_listed_part(part) for part in record["parts"]],
         **stats.get(name, _empty_stats()),
       }
       for name, record in sorted(records.items())
@@ -1102,6 +1433,13 @@ class Vault:
     An update changes only what it names: an omitted ``inject`` or ``grants``
     keeps the key's current one, so replacing a value never withdraws who may
     use it. A new key needs a value and where it is sent.
+
+    ``value`` is the part ``value`` (secret). ``parts`` lists parts to add or
+    replace, each ``{name, value, secret?, label?}``; a part the key already
+    has keeps its secrecy and label unless the item names them, and every
+    other part stays as it is, so rotating one secret never retypes the rest.
+    ``remove_parts`` names parts to drop. Afterwards the key must have at
+    least one secret part and every part its recipe sends.
 
     ``create_only`` refuses an occupied name atomically, so a caller choosing a
     free name can never overwrite another key. ``revision``, when given, must
@@ -1134,21 +1472,16 @@ class Vault:
         raise VaultError(409, f"{name} changed since it was loaded; review it again.")
       if existing is None and len(self._records) >= MAX_KEYS:
         raise VaultError(400, f"The vault holds at most {MAX_KEYS} keys.")
-      if body.get("value") is not None:
-        value = validate_value(body["value"])
-        # Marked so the owner sees it, and the platform never puts it in a header.
-        sealed = {**self._seal(name, value), "multiline": "\n" in value or "\r" in value}
-      elif existing is not None:
-        sealed = {"nonce": existing["nonce"], "sealed": existing["sealed"],
-                  "multiline": bool(existing.get("multiline"))}
-      else:
-        raise VaultError(400, "A new key needs a value.")
+      parts, new_values = self._parts_after(name, existing, body)
       if body.get("inject") is not None:
         inject = validate_inject(body["inject"])
       elif existing is not None:
         inject = existing["inject"]
       else:
         raise VaultError(400, "A new key needs where it is sent: a header or a query parameter.")
+      missing = recipe_fits(inject, [part["name"] for part in parts])
+      if missing:
+        raise VaultError(400, f"{name} is sent with {', '.join(missing)}, which it has no part for.")
       if body.get("grants") is not None:
         grants = validate_grants(body["grants"])
       else:
@@ -1156,13 +1489,13 @@ class Vault:
       if actor.split(":", 1)[0] == "agent":
         _refuse_an_agent_widening(existing, grants)
       kept_origin = existing.get("origin") if existing else origin
-      if existing is not None and body.get("value") is not None and origin != kept_origin:
+      if existing is not None and new_values and origin != kept_origin:
         if kept_origin:
           grants["apps"] = without_app(grants, kept_origin["app"])
         kept_origin = None
       now = _now()
       self._records[name] = {
-        **sealed,
+        "parts": parts,
         "inject": inject,
         "grants": grants,
         "created_at": existing["created_at"] if existing else now,
@@ -1178,6 +1511,42 @@ class Vault:
         del self._requests[rid]
       self._audit_change(name, actor, "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
+
+  def _parts_after(self, name: str, existing: dict | None, body: dict) -> tuple[list[dict], bool]:
+    """The key's parts once ``body`` is applied, and whether it changed a value."""
+    current = {part["name"]: part for part in (existing or {}).get("parts") or []}
+    items = []
+    if body.get("value") is not None:
+      items.append({"name": VALUE_PART, "value": body["value"]})
+    raw = body.get("parts")
+    if raw is not None:
+      if not isinstance(raw, list) or len(raw) > MAX_PARTS:
+        raise VaultError(400, f"A key has at most {MAX_PARTS} parts.")
+      items += raw
+    named = []
+    for item in items:
+      if not isinstance(item, dict):
+        raise VaultError(400, "Each part names itself and gives its value.")
+      meta = _part_meta(item, current.get(str(item.get("name") or "").strip()))
+      if meta["name"] in named:
+        raise VaultError(400, f"Part {meta['name']} is given twice.")
+      named.append(meta["name"])
+      current[meta["name"]] = self._seal_part(name, meta, validate_value(item.get("value")))
+    removed = body.get("remove_parts") or []
+    if not isinstance(removed, list):
+      raise VaultError(400, "Name the parts to remove.")
+    for part in removed:
+      if part in named or current.pop(part, None) is None:
+        raise VaultError(400, f"{name} has no part {part} to remove.")
+    if existing is None and not current:
+      raise VaultError(400, "A new key needs a value.")
+    if len(current) > MAX_PARTS:
+      raise VaultError(400, f"A key has at most {MAX_PARTS} parts.")
+    if not any(part["secret"] for part in current.values()):
+      raise VaultError(400, "A key keeps at least one secret part.")
+    # The part ``value`` first, then the others in the order they were added.
+    ordered = sorted(current.values(), key=lambda part: part["name"] != VALUE_PART)
+    return ordered, bool(named)
 
   def _owned_name(self, origin: dict) -> str | None:
     """The key the app in ``origin`` created for that secret and still holds."""
@@ -1308,14 +1677,16 @@ class Vault:
       self._audit_change(name, actor, "revoked")
     return True
 
-  def reveal(self, name: str, caller: tuple[str, str]) -> str:
-    """The value itself, for the owner, the owner's agents and the platform.
+  def reveal(self, name: str, caller: tuple[str, str], part: str = VALUE_PART) -> str:
+    """One part's value (``value`` unless named), for the owner, the owner's
+    agents and the platform.
 
     Apps are refused here as well as by the server: lending a key to an app
     means using it on the app's behalf, never handing it over. A key whose
     Agents switch is off is kept from agents for reading as well as use.
     """
     validate_name(name)
+    _part_name(part, "A read")
     if caller[0] == "app":
       self.log_event(name, caller_text(caller), "denied", status=403,
                      reason="apps cannot read key values")
@@ -1325,12 +1696,12 @@ class Vault:
       if record is None:
         raise VaultError(404, f"No key named {name}")
       refused = caller[0] == "agent" and not record["grants"].get("agents")
-      value = None if refused else self._open(name, record)
+      value = None if refused else self._open(name, record, part)
     if refused:
       self.log_event(name, caller_text(caller), "denied", status=403,
                      reason="agents are switched off for this key")
       raise VaultError(403, "Agents are switched off for this key in Settings › Keys.")
-    self.log_event(name, caller_text(caller), "revealed")
+    self.log_event(name, caller_text(caller), "revealed", reason=None if part == VALUE_PART else f"part {part}")
     return value
 
   # -- access requests (the handshake) ---------------------------------------
@@ -1391,9 +1762,20 @@ class Vault:
     if len(json.dumps(sites)) > MAX_ASK_SITES_BYTES:
       raise VaultError(400, "Ask for fewer sites or paths at once.")
     inject = validate_inject(body["inject"]) if body.get("inject") is not None else None
+    specs = validate_part_specs(body["parts"]) if body.get("parts") is not None else None
     request_id = f"{id_prefix}-{name}"
     with self._change():
       record = self._records.get(name)
+      if specs is not None and inject is None:
+        raise VaultError(400, "Say how a key with several parts is sent (inject).")
+      if inject is not None:
+        # A new key gets the parts the request lists (or the one ``value``).
+        # An existing key keeps its own parts: a recipe that doesn't fit them
+        # is never set (``sets_inject``), and the card says the key keeps its own.
+        have = [spec["name"] for spec in specs] if specs is not None else [VALUE_PART]
+        missing = recipe_fits(inject, have)
+        if missing and record is None:
+          raise VaultError(400, f"The recipe sends {', '.join(missing)}; list every part it sends in parts.")
       grant = asker_grant(record["grants"], asker) if record is not None else None
       existing = self._requests.get(request_id)
       if existing is not None and existing.get("install") != asker.get("install"):
@@ -1440,6 +1822,8 @@ class Vault:
         "key": name, "reason": reason, "sites": sites, "inject": inject,
         "status": "pending", "created_at": now, "asked_at": now, "ticket": secrets.token_hex(8),
       }
+      if specs is not None and record is None:
+        self._requests[request_id]["parts"] = specs
       self._audit_change(name, caller, "requested")
     asked = {"sites": sites, "reason": reason, "created": True}
     if grant is not None:
@@ -1481,7 +1865,10 @@ class Vault:
         item["sets_inject"] = sets_inject(record, item)
         item["inject_kept"] = (record is not None and item.get("inject") is not None
                                and item["inject"] != record["inject"] and not item["sets_inject"])
-        item["key_inject"] = dict(record["inject"]) if record is not None else None
+        item["key_inject"] = copy.deepcopy(record["inject"]) if record is not None else None
+        # The parts a new key is pasted as on the card: the request's, or the
+        # one ``value``. An existing key's own parts are listed with the key.
+        item["parts"] = item.get("parts") if record is None else None
     return sorted(requests, key=lambda item: item["created_at"], reverse=True)
 
   def approve_request(self, request_id: str, body: dict, *, actor: str = "owner") -> dict:
@@ -1522,7 +1909,7 @@ class Vault:
       sites = validate_sites(body.get("sites"), "You and your agents" if for_agents else "An app")
       existing = self._records.get(name)
       if existing is not None:
-        if body.get("value") is not None:
+        if body.get("value") is not None or body.get("parts") is not None:
           raise VaultError(
             409, f"{name} already exists, and approving only says who may use it where. "
             "Change the key itself on its page.",
@@ -1537,7 +1924,8 @@ class Vault:
           inject = request["inject"]
       else:
         grants = {"apps": [], "agents": False, "sites": []}
-        inject = body.get("inject") or dict(DEFAULT_INJECT)
+        # A key of several parts is sent as its request proposed: no default fits it.
+        inject = body.get("inject") or (request["inject"] if request.get("parts") else dict(DEFAULT_INJECT))
       if for_agents:
         grants = {**grants, "agents": True, "sites": _with_sites(grants["sites"], sites)}
       else:
@@ -1549,7 +1937,7 @@ class Vault:
                                      {**grant, "sites": _with_sites(grant["sites"], sites)}]}
       put = {"grants": grants, "inject": inject}
       if existing is None:
-        put["value"] = body.get("value")
+        put.update(_new_key_parts(request, body))
       result = self.put_key(name, put, actor=actor)
       self._requests.pop(request_id, None)
       self._audit_change(name, actor, f"granted {_asker_label(request)}")
@@ -1717,8 +2105,8 @@ class Vault:
 
   # -- use -----------------------------------------------------------------
 
-  def authorize(self, name: str, caller: tuple[str, str], method: str, host: str, path: str):
-    """Return (inject, value) for an allowed use, or raise the denial."""
+  def authorize(self, name: str, caller: tuple[str, str], method: str, host: str, path: str) -> Loan:
+    """Return what an allowed use sends (a ``Loan``), or raise the denial."""
     with self._lock:
       record = self._records.get(name)
       refused = f"{caller_name(caller)} may not use this key"
@@ -1735,15 +2123,20 @@ class Vault:
       reason = site_allows(caller_sites(record["grants"], *caller), host, method, path)
       if reason:
         raise GrantRefusal(403, reason)
-      value = self._open(name, record)
-      if record["inject"]["type"] == "header":
-        if any(ch in value for ch in "\r\n"):
+      inject = copy.deepcopy(record["inject"])
+      used = {part["name"]: part for part in record["parts"] if part["name"] in recipe_parts(inject)}
+      values = {part: self._open_part(name, stored) for part, stored in used.items()}
+      if inject["type"] == "header":
+        if any(ch in values[VALUE_PART] for ch in "\r\n"):
           raise VaultError(400, f"{name} has line breaks, so it can't be sent in a header.")
         try:
-          (record["inject"].get("prefix", "") + value).encode("latin-1")
+          (inject.get("prefix", "") + values[VALUE_PART]).encode("latin-1")
         except UnicodeEncodeError:
           raise VaultError(400, f"{name} has characters a header can't carry, so it can't be sent in a header.")
-      return dict(record["inject"]), value
+      else:
+        # Headers can't carry a part with line breaks; a query or body can.
+        recipe_headers(inject, values)
+      return Loan(inject, values, frozenset(part for part, stored in used.items() if stored.get("secret")))
 
   # -- logs and counters (never values) ----------------------------------------
 
@@ -1850,7 +2243,47 @@ def sets_inject(record: dict | None, request: dict) -> bool:
   """Whether approving ``request`` sets how existing key ``record`` is sent:
   it proposed a slot other than the key's own, and nothing sends the key yet."""
   return (record is not None and request.get("inject") is not None
-          and sent_nowhere(record["grants"]) and request["inject"] != record["inject"])
+          and sent_nowhere(record["grants"]) and request["inject"] != record["inject"]
+          and not recipe_fits(request["inject"], [part["name"] for part in record["parts"]]))
+
+
+def _new_key_parts(request: dict, body: dict) -> dict:
+  """What the owner's answer saves for a key the request creates.
+
+  A request listing parts gets exactly those, with the names, labels and
+  secrecy it proposed and the values the answer carries (``parts``, a map
+  of part name to value). Any other request gets the one ``value``.
+  """
+  specs = request.get("parts")
+  if not specs:
+    return {"value": body.get("value")}
+  values = body.get("parts")
+  if not isinstance(values, dict) or set(values) != {spec["name"] for spec in specs}:
+    raise VaultError(400, "Give a value for each part the request lists.")
+  return {"parts": [{**spec, "value": values[spec["name"]]} for spec in specs]}
+
+
+def _part(record: dict, name: str) -> dict | None:
+  return next((part for part in record.get("parts") or [] if part["name"] == name), None)
+
+
+def _listed_part(part: dict) -> dict:
+  listed = {"name": part["name"], "label": part.get("label", ""), "secret": bool(part.get("secret"))}
+  if part.get("secret"):
+    listed["multiline"] = bool(part.get("multiline"))
+  else:
+    listed["text"] = part["text"]
+  return listed
+
+
+def _migrated_to_parts(record: dict) -> dict:
+  """A record from before version 4: its one sealed value becomes the secret part ``value``."""
+  migrated = {k: v for k, v in record.items() if k not in ("nonce", "sealed", "multiline")}
+  migrated["parts"] = [{
+    "name": VALUE_PART, "label": "", "secret": True,
+    "nonce": record["nonce"], "sealed": record["sealed"], "multiline": bool(record.get("multiline")),
+  }]
+  return migrated
 
 
 def asker_grant(grants: dict, asker: dict) -> dict | None:
@@ -2155,7 +2588,9 @@ class VaultHandler(BaseHTTPRequestHandler):
       self._send_json(200, {"revoked": parts[1]})
     elif method == "GET" and len(parts) == 3 and parts[0] == "keys" and parts[2] == "value":
       caller = parse_caller(self.headers.get("X-Vault-Caller"))
-      self._send_json(200, {"name": parts[1], "value": vault.reveal(parts[1], caller)})
+      part = query.get("part") or VALUE_PART
+      answer = {"name": parts[1], "value": vault.reveal(parts[1], caller, part)}
+      self._send_json(200, answer if part == VALUE_PART else {**answer, "part": part})
     elif method == "GET" and parts == ["usage"]:
       limit = int(query.get("limit") or 100)
       self._send_json(200, {"usage": vault.usage(key=query.get("key") or None, limit=limit)})
@@ -2234,10 +2669,10 @@ class VaultHandler(BaseHTTPRequestHandler):
           raise VaultError(400, "The destination must be a site name like api.example.com (HTTPS, port 443).")
         path = normalized_request_path(raw_path)
         body = self._read_body()
-        inject, value = self.vault.authorize(name, caller, method, host, path)
-        request = build_upstream_request(
+        loan = self.vault.authorize(name, caller, method, host, path)
+        request, body = build_upstream_request(
           method=method, host=host, raw_path=raw_path, raw_query=split.query,
-          caller_headers=list(self.headers.items()), inject=inject, value=value,
+          caller_headers=list(self.headers.items()), loan=loan, body=body,
         )
       except VaultError as exc:
         refused = exc.status < 500 and exc.status != 429
@@ -2251,7 +2686,7 @@ class VaultHandler(BaseHTTPRequestHandler):
           answer["ask"] = AGENT_ASK
         self._send_json(exc.status, answer, denied=True)
         return
-      self._relay(logged_name, caller_label, request, body, secret_echoes(value), started, deadline)
+      self._relay(logged_name, caller_label, request, body, loan.echoes(), started, deadline)
     finally:
       deadline.stop()
       if borrowing:
