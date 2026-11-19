@@ -7333,6 +7333,20 @@ def _add_app_install_ids(eng) -> None:
       )
 
 
+def _add_chat_pending_revision(eng) -> None:
+  """Order queue snapshots: every existing chat's queue starts at revision 0."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  if "pending_revision" not in {c["name"] for c in inspector.get_columns("chats")}:
+    with eng.begin() as conn:
+      conn.execute(text(
+        "ALTER TABLE chats ADD COLUMN pending_revision INTEGER NOT NULL DEFAULT 0"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7462,6 +7476,7 @@ _SCHEMA_MIGRATIONS = (
   ("0105_autopilot_push_mode", _add_autopilot_push_mode),
   ("0106_browser_grant_full_access", _add_browser_grant_full_access),
   ("0107_app_install_id", _add_app_install_ids),
+  ("0108_chat_pending_revision", _add_chat_pending_revision),
 )
 
 

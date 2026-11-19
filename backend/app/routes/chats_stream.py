@@ -584,6 +584,7 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
 def _queued_response(
   new_msg: dict,
   position: int,
+  pending_revision: int,
   *,
   started: bool = False,
   message: dict | None = None,
@@ -600,6 +601,9 @@ def _queued_response(
     # content, so the client must swap to this exact row as soon as the queue
     # POST acks; waiting for a remount/hydrate leaves fast-forward rejected.
     "pending_message": new_msg,
+    # The queue revision this acknowledgement was read at: the client ignores
+    # any queue list older than it, which would not yet contain this row.
+    "pending_revision": pending_revision,
   }
   if started:
     payload["started"] = True
@@ -631,7 +635,7 @@ def _duplicate_send_response(
           "status": "rejected", "message": row, "running": is_chat_running(chat_id),
         })
       if is_chat_running(chat_id):
-        return _queued_response(row, position)
+        return _queued_response(row, position, chat.pending_revision)
       # Preserve the existing stale-queue self-heal: the normal queue branch
       # will idempotently find this cid via AppendPending, then promote the
       # idle queue into exactly one run. A preflight acknowledgement here
@@ -787,7 +791,8 @@ def _steer_enabled(chat: models.Chat) -> bool:
 
 def _steered_response(
   chat_id: str,
-  pending_messages: list[dict] | None = None,
+  pending_messages: list[dict],
+  pending_revision: int,
   *,
   cut_deferred: bool = False,
 ) -> JSONResponse:
@@ -803,9 +808,10 @@ def _steered_response(
   ``steered_into_turn`` cut. This keeps provider I/O outside the route's queue
   lock while preserving an exactly-once durable reserve.
   """
-  payload = {"status": "steered", "chat_id": chat_id}
-  if pending_messages is not None:
-    payload["pending_messages"] = pending_messages
+  payload = {
+    "status": "steered", "chat_id": chat_id,
+    "pending_messages": pending_messages, "pending_revision": pending_revision,
+  }
   if cut_deferred:
     payload["cut_deferred"] = True
   return JSONResponse(status_code=202, content=payload)
@@ -1668,7 +1674,9 @@ async def _send_message_locked(
       owner_input=is_owner_input_principal(principal),
     )
     db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
+    return _queued_response(
+      new_msg, len(chat.pending_messages or []), chat.pending_revision,
+    )
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
@@ -1760,12 +1768,8 @@ async def _send_message_locked(
         # then commits + publishes the authoritative cut. Echo the durable
         # queue exactly as it stands so the client can retain the accepted row
         # through this deferred window.
-        stored_result = {
-          "stored_messages": user_msgs,
-          "pending": list(chat.pending_messages or []),
-        }
         return _steered_response(
-          chat_id, stored_result.get("pending"),
+          chat_id, list(chat.pending_messages or []), chat.pending_revision,
           cut_deferred=True,
         )
       if body.force_steer:
@@ -1779,7 +1783,7 @@ async def _send_message_locked(
         )
       except ValueError:
         position = len(remaining)
-      return _queued_response(reserved, position)
+      return _queued_response(reserved, position, chat.pending_revision)
     if body.force_steer:
       return _not_steered_response(chat_id)
 
@@ -1856,6 +1860,7 @@ async def _send_message_locked(
     return _queued_response(
       new_msg,
       position,
+      chat.pending_revision,
       started=started_message is not None,
       message=started_message,
     )
@@ -1872,7 +1877,9 @@ async def _send_message_locked(
       restore_archived=restore_archived,
       owner_input=is_owner_input_principal(principal),
     )
-    return _queued_response(new_msg, len(chat.pending_messages))
+    return _queued_response(
+      new_msg, len(chat.pending_messages), chat.pending_revision,
+    )
 
   # From here until create_task, any exception must discard the
   # starting guard — otherwise the chat_id stays in the set forever and
@@ -1960,7 +1967,7 @@ async def _send_message_locked(
           position = [cid_of(row) for row in pending].index(cid_of(existing)) + 1
         except ValueError:
           position = len(pending)
-        return _queued_response(existing, position)
+        return _queued_response(existing, position, result["pending_revision"])
       return JSONResponse(
         status_code=200,
         content={
@@ -2059,7 +2066,10 @@ async def cancel_pending_message(
     result = await await_ack(get_writer().submit(
       CancelPending(chat_id=chat_id, run_token="", cid=cid)
     ))
-  return {"pending_messages": result["pending"]}
+  return {
+    "pending_messages": result["pending"],
+    "pending_revision": result["pending_revision"],
+  }
 
 
 @router.patch(
@@ -2114,7 +2124,11 @@ async def update_pending_message(
     )
   )
   result = await await_ack(ack)
-  return {"updated": result["updated"], "pending_messages": result["pending"]}
+  return {
+    "updated": result["updated"],
+    "pending_messages": result["pending"],
+    "pending_revision": result["pending_revision"],
+  }
 
 
 @router.get("/{chat_id}/stream")

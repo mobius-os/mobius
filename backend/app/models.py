@@ -281,6 +281,11 @@ class Chat(Base):
   # are not runnable: test `continuations.has_runnable_pending` when the
   # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
+  # Advances in the same commit as every pending_messages write
+  # (chat_writer._replace_pending) and travels with every response that
+  # carries the queue, so a browser can ignore a list older than one it has
+  # already seen.
+  pending_revision = Column(Integer, nullable=False, server_default="0")
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
   session_id = Column(String(128), nullable=True, default=None)

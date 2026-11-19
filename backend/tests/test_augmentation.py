@@ -174,6 +174,48 @@ def test_send_while_running_queues_message(client, db, auth, chat):
     registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
+def test_every_queue_response_carries_the_revision_it_was_read_at(client, db, auth, chat):
+  """The queued ack, runtime, detail, PATCH and DELETE each report the queue
+  revision their list (or row) was read at, so a browser can order them."""
+  from unittest.mock import MagicMock
+
+  mock_proc = MagicMock()
+  mock_proc.returncode = None
+  _register_proc(chat.id, mock_proc)
+
+  def revisions():
+    runtime = client.get(f"/api/chats/{chat.id}/runtime", headers=auth).json()
+    detail = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+    db.refresh(chat)
+    return runtime["pending_revision"], detail["pending_revision"], chat.pending_revision
+
+  try:
+    assert revisions() == (0, 0, 0)
+    queued = client.post(
+      f"/api/chats/{chat.id}/messages",
+      json={"content": "queued", "cid": "c-queued"}, headers=auth,
+    ).json()
+    assert queued["status"] == "queued" and queued["pending_revision"] == 1
+    assert revisions() == (1, 1, 1)
+
+    edit = client.patch(
+      f"/api/chats/{chat.id}/pending/c-queued", headers=auth, json={"content": "edited"},
+    ).json()
+    assert edit["updated"] is True and edit["pending_revision"] == 2
+    unchanged = client.patch(
+      f"/api/chats/{chat.id}/pending/c-queued", headers=auth, json={"content": "edited"},
+    ).json()
+    assert unchanged["pending_revision"] == 2
+
+    cancel = client.delete(f"/api/chats/{chat.id}/pending/c-queued", headers=auth).json()
+    assert cancel == {"pending_messages": [], "pending_revision": 3}
+    again = client.delete(f"/api/chats/{chat.id}/pending/c-queued", headers=auth).json()
+    assert again == {"pending_messages": [], "pending_revision": 3}
+    assert revisions() == (3, 3, 3)
+  finally:
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
+
+
 def test_multiple_queued_messages_ordered(client, db, auth, chat):
   """Multiple sends while running are queued in order."""
   from unittest.mock import MagicMock
@@ -874,7 +916,7 @@ def test_update_pending_message_reports_a_racing_promotion(client, db, auth):
     json={"content": "too late"},
   )
   assert resp.status_code == 200
-  assert resp.json() == {"updated": False, "pending_messages": []}
+  assert resp.json() == {"updated": False, "pending_messages": [], "pending_revision": 0}
 
 
 def test_update_pending_message_rejects_empty_content(client, db, auth):

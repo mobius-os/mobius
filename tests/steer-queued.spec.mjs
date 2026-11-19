@@ -107,7 +107,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
             status: 'steered',
             chat_id: 'mock',
             cut_deferred: true,
-            pending_messages: live.pending,
+            pending_messages: live.pending, pending_revision: 0,
           }),
         })
       }
@@ -252,7 +252,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [],
+            pending_messages: [], pending_revision: 0,
           }),
         })
       }
@@ -263,7 +263,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: [],
+            pending_messages: [], pending_revision: 0,
           }),
         })
       }
@@ -371,7 +371,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
         return route.fulfill({
           status: 202,
           contentType: 'application/json',
-          body: JSON.stringify({ status: 'steered', chat_id: 'mock', pending_messages: [] }),
+          body: JSON.stringify({ status: 'steered', chat_id: 'mock', pending_messages: [], pending_revision: 0 }),
         })
       }
       if (body.content === 'first message') {
@@ -477,7 +477,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           body: JSON.stringify({
             status: 'steered',
             chat_id: 'mock',
-            pending_messages: live.pending,
+            pending_messages: live.pending, pending_revision: 0,
           }),
         })
       }
@@ -597,7 +597,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
-            status: 'steered', chat_id: 'mock', cut_deferred: true, pending_messages: live.pending,
+            status: 'steered', chat_id: 'mock', cut_deferred: true, pending_messages: live.pending, pending_revision: 0,
           }),
         })
       }
@@ -806,7 +806,7 @@ test.describe('Steer queued messages (fast-forward into the live turn)', () => {
           status: 202,
           contentType: 'application/json',
           body: JSON.stringify({
-            status: 'steered', chat_id: 'mock', pending_messages: [],
+            status: 'steered', chat_id: 'mock', pending_messages: [], pending_revision: 0,
           }),
         })
       }

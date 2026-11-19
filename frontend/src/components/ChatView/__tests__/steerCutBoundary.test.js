@@ -137,7 +137,7 @@ test('the cut hands the steered rows off the tray and into the transcript', () =
   )
   assert.match(
     handler,
-    /pendingQueue\.completeByCid\(steeredMessages\.map\(cidOf\)\)/,
+    /pendingQueue\.completeByCid\(steeredMessages\.map\(cidOf\), \{ revision: pendingRevision \}\)/,
     'the cut is when the rows genuinely leave chat.pending_messages',
   )
 })

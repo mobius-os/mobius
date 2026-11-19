@@ -106,6 +106,7 @@ export function runtimeSnapshot(overrides = {}) {
     running: false,
     runtime_revision: 0,
     pending_messages: [],
+    pending_revision: 0,
     pending_question_id: null,
     ...overrides,
   }

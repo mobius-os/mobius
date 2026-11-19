@@ -847,6 +847,64 @@ def test_steered_dedup_by_cid_drops_redelivery_keeps_distinct(actor):
   assert user_cids == [None, "c-a", "c-b"]
 
 
+def _pending_revision(chat_id="c1"):
+  db = SessionLocal()
+  try:
+    return db.get(models.Chat, chat_id).pending_revision
+  finally:
+    db.close()
+
+
+def test_every_queue_mutation_advances_the_revision_it_reports(actor):
+  """Each committed queue change advances `pending_revision` by exactly one in
+  the same commit, and a command that reports a queue reports that revision.
+  A command that changes nothing leaves it alone."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  assert _pending_revision() == 0
+
+  for index, cid in enumerate(("c-a", "c-b", "c-c", "c-d")):
+    _await(actor.submit(AppendPending(
+      chat_id="c1", run_token="",
+      user_msg={"role": "user", "content": cid, "ts": 10 + index, "cid": cid},
+      owner_input=True,
+    )))
+  assert _pending_revision() == 4
+
+  edited = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-a", content="edited",
+  )))
+  assert edited["pending_revision"] == _pending_revision() == 5
+  same = _await(actor.submit(UpdatePending(
+    chat_id="c1", run_token="", cid="c-a", content="edited",
+  )))
+  assert same["pending_revision"] == _pending_revision() == 5
+
+  cancelled = _await(actor.submit(CancelPending(chat_id="c1", run_token="", cid="c-b")))
+  assert cancelled["pending_revision"] == _pending_revision() == 6
+  missing = _await(actor.submit(CancelPending(chat_id="c1", run_token="", cid="c-b")))
+  assert missing["pending_revision"] == _pending_revision() == 6
+
+  steered = _await(actor.submit(AppendSteeredUserMessage(
+    chat_id="c1", run_token="",
+    user_msgs=[{"role": "user", "content": "c-c", "ts": 12, "cid": "c-c"}],
+    consume_pending_cids=["c-c"],
+  )))
+  assert steered["pending_revision"] == _pending_revision() == 7
+  assert [row["cid"] for row in steered["pending"]] == ["c-a", "c-d"]
+
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token=""))) == {"held": 2}
+  assert _pending_revision() == 8
+  assert _await(actor.submit(HoldPending(chat_id="c1", run_token=""))) == {"held": 2}
+  assert _pending_revision() == 8
+  assert _await(actor.submit(ReleaseHeld(chat_id="c1", run_token=""))) == {"released": 2}
+  assert _pending_revision() == 9
+
+  promoted = _await(actor.submit(PromotePending(chat_id="c1", run_token="rt1")))
+  assert promoted["promoted"]["_consumed_cids"] == ["c-a", "c-d"]
+  assert promoted["promoted"]["_pending_revision"] == _pending_revision() == 10
+  assert _load_chat()["pending_messages"] == []
+
+
 # -- 7. StartTurn atomic --------------------------------------------------
 def test_start_turn_is_atomic(actor):
   """StartTurn appends the user message, sets the title + provider on the

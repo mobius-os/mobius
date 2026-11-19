@@ -1303,6 +1303,8 @@ def test_steers_into_live_claude_turn_reserves_durable_pending(
   assert [m["content"] for m in res.json()["pending_messages"]] == [
     "actually use blue"
   ]
+  # The echoed list is read at the reservation's queue revision.
+  assert res.json()["pending_revision"] == 1
 
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["actually use blue"]
@@ -1586,6 +1588,9 @@ def test_codex_steer_publishes_cut_from_handle_owned_settlement(
     "assistant_identity", "steered_into_turn",
   ]
   cut = [e for e in bc.event_log if e.get("type") == "steered_into_turn"][0]
+  # The reservation is revision 1 and the cut that consumed it revision 2; the
+  # echoed list was read after the cut, so it carries the cut's revision.
+  assert cut["pending_revision"] == body["pending_revision"] == 2
   assert cut["assistant_message_id"] == "run-codex-cut"
   assert cut["next_assistant_message_id"] == "run-codex-cut:assistant:1"
   assert [m["content"] for m in cut["messages"]] == ["Q2"]
@@ -2064,7 +2069,7 @@ def test_steer_cut_preserves_hidden_carrier_and_owner_row_metadata():
     "role": "user", "ts": 2, "cid": "owner-1", "content": "Please continue",
     "attachments": [{"name": "example.png"}],
   }
-  event = steered_into_turn_event([carrier, owner])
+  event = steered_into_turn_event([carrier, owner], pending_revision=7)
   assert event["messages"] == [
     {**carrier, "steered": True}, {**owner, "steered": True},
   ]
