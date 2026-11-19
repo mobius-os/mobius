@@ -1027,6 +1027,25 @@ def test_start_turn_retry_after_completion_is_idempotent(actor):
   assert _load_run("retry-run") is None
 
 
+def test_start_turn_retry_of_a_queued_cid_reports_the_queue_revision(actor):
+  """A lost reply retried as StartTurn while its row is still queued is
+  acknowledged at the revision of the queue that holds it."""
+  _seed_chat(messages=[{"role": "user", "content": "hi", "ts": 1}])
+  _await(actor.submit(AppendPending(
+    chat_id="c1", run_token="",
+    user_msg={"role": "user", "content": "queued", "ts": 10, "cid": "c-queued"},
+  )))
+  result = _await(actor.submit(StartTurn(
+    chat_id="c1", run_token="retry-run",
+    user_msg={"role": "user", "content": "queued", "ts": 99, "cid": "c-queued"},
+    title_source="queued", default_provider="codex",
+  )))
+  assert result["duplicate"] is True
+  assert result["duplicate_location"] == "pending"
+  assert result["pending_revision"] == _pending_revision() == 1
+  assert _load_run("retry-run") is None
+
+
 def test_start_turn_does_not_bypass_pending_owner_question(actor):
   question = _question_msg("owner-decision", content="Choose a direction.")
   _seed_chat(

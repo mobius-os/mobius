@@ -1762,6 +1762,8 @@ def test_falls_back_to_queue_when_steer_returns_false(
   assert res.json()["status"] == "queued"
   chat = _read_chat(chat_id)
   assert [m["content"] for m in chat.pending_messages] == ["queued please"]
+  # The reservation stays queued, acknowledged at its own revision.
+  assert res.json()["pending_revision"] == chat.pending_revision == 1
   # No steered event was broadcast.
   bc = get_broadcast(chat_id)
   assert not [

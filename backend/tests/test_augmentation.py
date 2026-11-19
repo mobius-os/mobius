@@ -216,6 +216,26 @@ def test_every_queue_response_carries_the_revision_it_was_read_at(client, db, au
     registry.unregister(chat.id, RunnerKind.SUBPROCESS)
 
 
+def test_duplicate_send_acknowledgement_carries_the_queue_revision(client, db, auth, chat):
+  """A retried send whose cid is already queued is acknowledged before any
+  append, at the revision of the queue it was found in."""
+  from unittest.mock import MagicMock
+
+  mock_proc = MagicMock()
+  mock_proc.returncode = None
+  _register_proc(chat.id, mock_proc)
+  try:
+    send = {"content": "queued once", "cid": "c-retried"}
+    first = client.post(f"/api/chats/{chat.id}/messages", json=send, headers=auth).json()
+    retry = client.post(f"/api/chats/{chat.id}/messages", json=send, headers=auth).json()
+    db.refresh(chat)
+    assert [row["cid"] for row in chat.pending_messages] == ["c-retried"]
+    assert first["pending_revision"] == retry["pending_revision"] == chat.pending_revision == 1
+    assert retry["status"] == "queued" and retry["position"] == 1
+  finally:
+    registry.unregister(chat.id, RunnerKind.SUBPROCESS)
+
+
 def test_multiple_queued_messages_ordered(client, db, auth, chat):
   """Multiple sends while running are queued in order."""
   from unittest.mock import MagicMock
@@ -278,6 +298,8 @@ def test_stale_pending_drains_on_fresh_send(client, db, auth, chat):
     assert data["message"]["_consumed_cids"][:2] == ["legacy-100", "legacy-200"]
     assert len(data["message"]["_consumed_cids"]) == 3
     db.refresh(chat)
+    # The append is revision 1 and the promotion that consumed it revision 2.
+    assert data["message"]["_pending_revision"] == chat.pending_revision == 2
     # Stale pending plus the new send were promoted as separate ordered rows
     # (the provider-facing combined text is data["message"]["content"] above).
     assert [m["content"] for m in list(transcript_rows.history(chat))[-3:]] == ["stale 1", "stale 2", "new send"]
@@ -364,6 +386,9 @@ def test_stale_pending_started_response_when_new_send_remains_queued(
     assert data["position"] == 2
     assert data["message"]["content"] == "visible first"
     db.refresh(chat)
+    # The list behind `position` was read after the promotion it reports.
+    assert data["pending_revision"] == data["message"]["_pending_revision"]
+    assert data["pending_revision"] == chat.pending_revision == 2
     assert list(transcript_rows.history(chat))[-1]["content"] == "visible first"
     assert [m["content"] for m in chat.pending_messages] == [
       "hidden next",
