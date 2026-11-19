@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app import browser_profiles, browser_processes, chat, config
+from app import browser_profiles, browser_processes, chat, config, file_cache
 from app.browser_profiles import enforce_browser_profile_quota
 
 
@@ -200,14 +200,29 @@ def test_browser_sessions_for_chat_preserves_opaque_session_values(tmp_path):
   })
 
 
+class _Scans(list):
+  """The chats each inventory scan was asked about, plus page-cache advice."""
+  def __init__(self):
+    super().__init__()
+    self.reclaims = []
+
+
 def _stub_cleanup_inventory(monkeypatch, initial):
-  scans = []
+  scans = _Scans()
   def scan(_chat_id):
     scans.append(_chat_id)
     return initial if len(scans) == 1 else browser_profiles.BrowserSessionScan(frozenset(), True)
   monkeypatch.setattr(browser_profiles, "browser_session_targets_for_chat", scan)
   monkeypatch.setattr(browser_processes, "terminate_processes", lambda processes: None)
   monkeypatch.setattr(browser_processes, "reset_browser_processes", lambda **kwargs: False)
+  # A verified release ends by advising the host page cache about the browser
+  # bundle. That walks real files and every process's memory maps: host work
+  # whose duration depends on the runner, and which the cleanup tests' short
+  # deadlines must not measure.
+  monkeypatch.setattr(file_cache, "browser_tool_paths", lambda: ("browser-tools",))
+  monkeypatch.setattr(
+    file_cache, "reclaim_file_cache", lambda paths, **_kwargs: scans.reclaims.append(paths),
+  )
   return scans
 
 
@@ -319,7 +334,7 @@ def test_terminal_browser_cleanup_kills_timed_out_close_process(monkeypatch):
 
 
 def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog):
-  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+  scans = _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
     frozenset({browser_profiles.BrowserSessionTarget(session="chat-chat-a")}), True,
   ))
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
@@ -361,12 +376,13 @@ def test_terminal_browser_cleanup_bounds_wait_after_sigkill(monkeypatch, caplog)
   assert proc.kill_calls == 1
   assert proc.wait_calls == 3
   assert "did not reap after SIGKILL" in caplog.text
+  assert scans.reclaims == [("browser-tools",)]  # cleanup still finished
 
 
 def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_term(
   monkeypatch, caplog,
 ):
-  _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
+  scans = _stub_cleanup_inventory(monkeypatch, browser_profiles.BrowserSessionScan(
     frozenset({browser_profiles.BrowserSessionTarget(session="chat-chat-a")}), True,
   ))
   monkeypatch.setattr(chat, "_BROWSER_CLOSE_WAIT_TIMEOUT", 0.01)
@@ -408,6 +424,7 @@ def test_terminal_browser_cleanup_bounds_wait_when_process_disappears_before_ter
   assert proc.terminate_calls == 1
   assert proc.kill_calls == 0
   assert "did not reap after disappearing before SIGTERM" in caplog.text
+  assert scans.reclaims == [("browser-tools",)]  # cleanup still finished
 
 
 def test_quota_prunes_regenerable_cache_before_profile(tmp_path):
