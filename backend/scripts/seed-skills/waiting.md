@@ -189,7 +189,11 @@ automatically resume from it.
 
 - Declare the wait BEFORE the closing words of the turn, and confirm the
   declare succeeded (it returns the armed wait). Only then is "I'll continue
-  when X lands" an honest sentence.
+  when X lands" an honest sentence. A declare that got no reply may still have
+  armed the wait: retry the identical declaration in the same turn. It returns
+  that same wait, keeping its original deadline, instead of a second one. If
+  it has already fired, its status says so and its result still resumes the
+  chat after this turn.
 - In your closing message, say the chat will resume on its own and roughly
   when checks happen — the partner should never have to babysit.
 - Never declare a wait whose check has side effects (posting, merging,

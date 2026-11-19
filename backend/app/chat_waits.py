@@ -231,6 +231,49 @@ class WaitValidationError(ValueError):
   """A declare request that cannot become a well-formed wait."""
 
 
+def _identical_wait_from_run(
+  db: Session, *, chat_id: str, run_id: str, description: str,
+  condition_owner: str, kind: str, command: str | None, condition: dict | None,
+  interval: int, delay_secs: int | None, deadline: int,
+) -> models.ChatWait | None:
+  """Return this run's wait with exactly this declaration unless withdrawn.
+
+  A wait that already fired is still the one the retry asked for. The next
+  sweep probes a command or GitHub wait at once, so an already-true condition
+  often fires before a lost-reply retry arrives, and its result reaches the
+  chat only in a later run. A withdrawn wait (cancelled while armed, or its
+  result withdrawn) stays withdrawn, so declaring it again arms a new one.
+  """
+  candidates = (
+    db.query(models.ChatWait)
+    .filter(
+      models.ChatWait.chat_id == chat_id,
+      models.ChatWait.created_by_run_id == run_id,
+      models.ChatWait.status != "cancelled",
+      models.ChatWait.result_disposition.is_(None)
+      | models.ChatWait.result_disposition.not_in(tuple(_WITHDRAWN_DISPOSITIONS)),
+      models.ChatWait.kind == kind,
+    )
+    .all()
+  )
+
+  def offset(row: models.ChatWait, moment) -> int | None:
+    return None if moment is None else round((moment - row.created_at).total_seconds())
+
+  for row in candidates:
+    if (
+      row.description == description[:500]
+      and row.condition_owner == condition_owner
+      and row.command == command
+      and row.condition_json == condition
+      and row.interval_secs == interval
+      and offset(row, row.due_at) == delay_secs
+      and offset(row, row.deadline_at) == deadline
+    ):
+      return row
+  return None
+
+
 def declare_wait(
   db: Session,
   *,
@@ -272,6 +315,7 @@ def declare_wait(
   condition_owner = (condition_owner or "").strip() or None
   if kind == "command" and condition_owner is None:
     raise WaitValidationError("command waits need a condition owner")
+  condition_owner = condition_owner or ("Time" if kind == "timer" else "External system")
   if kind in ("command", "github_checks") and deadline_secs is None:
     raise WaitValidationError("command and GitHub waits need an explicit deadline")
 
@@ -317,6 +361,27 @@ def declare_wait(
     next_check_at = due_at
     deadline = max(deadline, int(delay_secs))
 
+  deadline_at = now + timedelta(seconds=deadline)
+  if created_by_run_id is not None:
+    # Share first attachment's fence through the Wait commit. The writer
+    # either adopts this row or declaration reads its already-attached Goal.
+    fence_owner(db)
+    # A client that timed out cannot know whether its declaration committed.
+    # Behind the fence, an identical retry from the same run sees the earlier
+    # row and receives it, armed or already fired, rather than arming a
+    # duplicate that wakes twice.
+    already_declared = _identical_wait_from_run(
+      db, chat_id=chat_id, run_id=created_by_run_id, description=description,
+      condition_owner=condition_owner, kind=kind, command=command,
+      condition=condition, interval=interval,
+      delay_secs=delay_secs if kind == "timer" else None, deadline=deadline,
+    )
+    if already_declared is not None:
+      # Commit like the arming path does, so the caller's session keeps the
+      # same outcome either way and the fence is released.
+      db.commit()
+      return already_declared
+
   armed = (
     db.query(models.ChatWait)
     .filter(
@@ -329,12 +394,6 @@ def declare_wait(
     raise WaitValidationError(
       f"this chat already has {armed} armed waits; cancel one first"
     )
-
-  deadline_at = now + timedelta(seconds=deadline)
-  if created_by_run_id is not None:
-    # Share first attachment's fence through the Wait commit. The writer
-    # either adopts this row or declaration reads its already-attached Goal.
-    fence_owner(db)
   source = (
     db.query(models.ChatRun).filter(
       models.ChatRun.id == created_by_run_id,
@@ -348,9 +407,7 @@ def declare_wait(
     root_run_id=(source.root_run_id or source.id) if source else None,
     goal_id=source.goal_id if source else None,
     description=description[:500],
-    condition_owner=(
-      condition_owner or ("Time" if kind == "timer" else "External system")
-    ),
+    condition_owner=condition_owner,
     kind=kind,
     command=command,
     condition_json=condition,
