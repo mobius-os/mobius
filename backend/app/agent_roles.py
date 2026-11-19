@@ -191,11 +191,6 @@ def app_tool_exposed_name(name: str) -> str:
   return f"{slug.replace('-', '_')}_{tool}"
 
 
-# Routes whose use is recorded per app, so the owner can see what left.
-WEB_ROUTES = frozenset(path for _method, path in TOOLS["web"].routes)
-KEY_USE_PREFIX = "/api/keys/use/"
-
-
 @dataclass(frozen=True)
 class AgentRole:
   role: str  # the manifest's agent.scope
@@ -395,12 +390,15 @@ def _bearers(scope: dict) -> list[str]:
 
 
 class AgentKeyScope:
-  """ASGI middleware: an agent key reaches only its allow-list.
+  """ASGI middleware: an agent key reaches only its allow-list, and a room
+  reaches Möbius only with agent keys.
 
   A new Möbius route (a proxy, a connector, a sender) is therefore closed to
-  confined agents until a tool deliberately opens it. Route checks (the app's
-  accepted permissions, run liveness) still apply afterwards; this only
-  narrows.
+  confined agents until a tool deliberately opens it. A request that arrived
+  on the room's address (``ROOM_HOST``) must carry credentials, every one an
+  agent key, so the allow-list always applies and a credential a room found
+  elsewhere is refused. Route checks (the app's accepted permissions, run
+  liveness) still apply afterwards; this only narrows.
   """
 
   def __init__(self, app):
@@ -410,55 +408,60 @@ class AgentKeyScope:
     if scope["type"] in ("http", "websocket"):
       from app import auth
 
-      for token in _bearers(scope):
-        key = AgentKey.from_claims(auth.decode_access_token(token))
-        if key is None:
-          continue
-        method = scope.get("method", "WEBSOCKET")
-        if scope["type"] == "http" and key.may_call(method, scope["path"]):
-          _record_use(key, scope)
-          break
-        return await _refuse(scope, receive, send, key)
+      keys = [
+        AgentKey.from_claims(auth.decode_access_token(token))
+        for token in _bearers(scope)
+      ]
+      if _from_room(scope) and (not keys or None in keys):
+        return await _refuse(scope, receive, send, ROOM_ONLY_AGENT_KEYS)
+      method = scope.get("method", "WEBSOCKET")
+      for key in filter(None, keys):
+        if scope["type"] != "http" or not key.may_call(method, scope["path"]):
+          return await _refuse(scope, receive, send, _outside_access(key))
+        # The route records what it sends outside Möbius (record_agent_use).
+        scope.setdefault("state", {})["agent_key"] = key
+        break
     await self.app(scope, receive, send)
 
 
-def _record_use(key: AgentKey, scope: dict) -> None:
-  """Record what a confined agent sends outside Möbius, per app: each page it
-  opens and each key it uses (the key and site, never the request)."""
+ROOM_ONLY_AGENT_KEYS = "From inside an agent's room, only its own agent key works."
+
+
+def _from_room(scope: dict) -> bool:
+  host = (scope.get("server") or ("",))[0] or ""
+  return host.removeprefix("::ffff:") == ROOM_HOST
+
+
+def _outside_access(key: AgentKey) -> str:
+  label = ROLES[key.role].label if key.role in ROLES else key.role
+  return f"An app agent with {label} access cannot use this part of Möbius."
+
+
+def record_agent_use(request: Any, kind: str, **fields: str) -> None:
+  """Record, per app, what a confined agent sent outside Möbius: each page it
+  opened and each key it used (the key and site, never the request). Called
+  by the route once the request has actually gone out, whatever the site then
+  answered; Möbius's own refusals send nothing and record nothing."""
+  key = getattr(request.state, "agent_key", None)
+  if key is None:
+    return
   from app import activity
 
-  path = scope["path"]
-  if path in WEB_ROUTES:
-    query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-    url = (query.get("url") or [""])[0]
-    activity.log_event(
-      "app_agent_web",
-      app_id=key.app_id,
-      chat_id=key.chat,
-      kind="open_page",
-      url=url[:2000],
-    )
-  elif path.startswith(KEY_USE_PREFIX):
-    name, _, rest = path[len(KEY_USE_PREFIX) :].partition("/")
-    activity.log_event(
-      "app_agent_web",
-      app_id=key.app_id,
-      chat_id=key.chat,
-      kind="use_key",
-      key=name[:200],
-      site=rest.partition("/")[0][:300],
-    )
+  activity.log_event(
+    "app_agent_web",
+    app_id=key.app_id,
+    chat_id=key.chat,
+    kind=kind,
+    **{name: value[:2000] for name, value in fields.items()},
+  )
 
 
-async def _refuse(scope, receive, send, key: AgentKey) -> None:
+async def _refuse(scope, receive, send, reason: str) -> None:
   if scope["type"] == "websocket":
     await receive()
     await send({"type": "websocket.close", "code": 4403})
     return
-  label = ROLES[key.role].label if key.role in ROLES else key.role
-  body = json.dumps(
-    {"detail": f"An app agent with {label} access cannot use this part of Möbius."}
-  )
+  body = json.dumps({"detail": reason})
   await send(
     {
       "type": "http.response.start",
@@ -501,11 +504,19 @@ ROOM_ENV = (
   "DISABLE_TELEMETRY",
 )
 GATEWAY_PATH = "/api/agent-gateway"
+# The room's only door: this server, on a loopback address no other caller
+# uses. The server knows a request came from a room by the address it arrived
+# on, which no header can change, and accepts only agent keys there
+# (AgentKeyScope). So a credential a room finds anywhere (another program's
+# command line, a file) is useless from inside it.
+ROOM_HOST = "127.0.0.2"
 
 
-def _port(url: str) -> int:
-  parsed = urlparse(url)
-  return parsed.port or (443 if parsed.scheme == "https" else 80)
+def room_url() -> str:
+  """This server as a room reaches it: its own listener, on ``ROOM_HOST``."""
+  from app.config import loopback_listener_url
+
+  return f"http://{ROOM_HOST}:{urlparse(loopback_listener_url('')).port}"
 
 
 @dataclass(frozen=True)
@@ -526,7 +537,7 @@ class Room:
   tmp: Path  # disposable temporary files
   config: Path  # settings Möbius writes for the runtime; read-only inside
   data: Path | None  # the app's files, read-only or writable by role
-  api_base_url: str
+  url: str  # this server as the room reaches it (room_url)
 
   @classmethod
   def for_run(
@@ -536,7 +547,6 @@ class Room:
     chat_dir: Path,
     scratch: Path,
     storage_dir: Path,
-    api_base_url: str,
   ) -> "Room":
     home = chat_dir / "agent-rooms" / role.grant
     for sub in (".claude", ".codex"):
@@ -549,7 +559,7 @@ class Room:
     if role.spec.data is not None:
       storage_dir.mkdir(parents=True, exist_ok=True)
       data = storage_dir
-    return cls(role, home, tmp, config, data, api_base_url.rstrip("/"))
+    return cls(role, home, tmp, config, data, room_url())
 
   @property
   def cwd(self) -> Path:
@@ -583,7 +593,6 @@ class Room:
     return provider_web(self.role.tools)
 
   def fence_args(self) -> list[str]:
-    port = _port(self.api_base_url)
     args = [
       sys.executable,
       "-I",
@@ -595,9 +604,7 @@ class Room:
       "--cwd",
       str(self.cwd),
       "--door",
-      f"127.0.0.1:{port}",
-      "--door",
-      f"[::1]:{port}",
+      self.url.removeprefix("http://"),
       # The control tools' own code, read-only (scripts/mobius_control_mcp.py).
       "--ro",
       str(_BACKEND / "scripts"),
@@ -616,7 +623,8 @@ class Room:
     """Settings for the runtime: the gateway instead of a login, homes inside."""
     return {
       "AGENT_TOKEN": key,
-      "ANTHROPIC_BASE_URL": self.api_base_url + GATEWAY_PATH,
+      "API_BASE_URL": self.url,
+      "ANTHROPIC_BASE_URL": self.url + GATEWAY_PATH,
       "ANTHROPIC_AUTH_TOKEN": key,
       "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
       "CODEX_HOME": str(self.home / ".codex"),
@@ -674,7 +682,7 @@ class Room:
         f'{entry}.wire_api="responses"',
       ]
     out += [
-      f'{entry}.base_url="{self.api_base_url}{GATEWAY_PATH}/v1"',
+      f'{entry}.base_url="{self.url}{GATEWAY_PATH}/v1"',
       f'{entry}.env_key="AGENT_TOKEN"',
     ]
     if not self.web:

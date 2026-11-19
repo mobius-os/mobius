@@ -187,8 +187,15 @@ Two further limits follow from how upstream identifies callers. The service
 token in `/data/service-token.txt` is a plain owner token, so anything that
 can read that file (agents and app server code, as above) counts as the
 owner's own input and could approve a request. And an agent run an app starts
-is an ordinary agent: an app that can start agent runs can ask that agent to
-read or borrow a key the Agents switch allows.
+at Admin, or for an app that declares no agent access, is an ordinary agent:
+the app can ask that agent to read or borrow a key the Agents switch allows.
+Tools, Read and Edit agents run in a room whose only door accepts their own
+agent key, so they reach no key the app was not granted (`agent` in the
+manifest; CAPABILITIES.md "App agent access").
+
+Every process can read every other process's command line, agent rooms
+included, so never pass a token, key or password as a program argument; send
+it through a pipe or a file instead, as `mapi` does.
 
 ## Opaque embedded-chat contract
 

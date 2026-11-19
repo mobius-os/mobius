@@ -2062,7 +2062,9 @@ class VaultHandler(BaseHTTPRequestHandler):
   def log_message(self, format, *args) -> None:  # noqa: A002 - stdlib signature
     pass
 
-  def _send_json(self, status: int, payload, *, denied: bool = False) -> None:
+  def _send_json(
+    self, status: int, payload, *, denied: bool = False, sent_key: str | None = None,
+  ) -> None:
     self._answer_started = True
     body = json.dumps(payload).encode()
     self.send_response(status)
@@ -2071,6 +2073,9 @@ class VaultHandler(BaseHTTPRequestHandler):
     self.send_header("Connection", "close")
     if denied:
       self.send_header("X-Vault-Denied", "1")
+    if sent_key is not None:
+      # The request had already gone out with the key when it failed.
+      self.send_header("X-Vault-Key", sent_key)
     self.end_headers()
     if self.command != "HEAD":
       self.wfile.write(body)
@@ -2255,6 +2260,7 @@ class VaultHandler(BaseHTTPRequestHandler):
   def _relay(self, name, caller_label, request: UpstreamRequest, body, echoes, started, deadline: BorrowDeadline) -> None:
     method, host, raw_path = request.method, request.host, request.target.split("?", 1)[0]
     connection = None
+    self._key_sent = False  # set once the request, key included, starts to leave
     try:
       connection, sock, response = self._open_upstream(request, body, deadline)
       inflater = Inflater(response.getheaders())
@@ -2270,7 +2276,10 @@ class VaultHandler(BaseHTTPRequestHandler):
         status=exc.status, reason=exc.reason,
         ms=int((time.monotonic() - started) * 1000),
       )
-      self._send_json(exc.status, {"error": "denied" if refused else "upstream", "reason": exc.reason}, denied=True)
+      self._send_json(
+        exc.status, {"error": "denied" if refused else "upstream", "reason": exc.reason},
+        denied=True, sent_key=name if self._key_sent else None,
+      )
       return
 
     def record(failure: str | None) -> None:
@@ -2392,6 +2401,8 @@ class VaultHandler(BaseHTTPRequestHandler):
         connection.putheader(header, header_value)
       if body is not None:
         connection.putheader("Content-Length", str(len(body)))
+      # From here the key may have left, even if sending fails part way.
+      self._key_sent = True
       connection.endheaders(body)
       # Kept for read timeouts: http.client lets go of it once the answer
       # owns the connection.

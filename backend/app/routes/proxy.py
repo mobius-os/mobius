@@ -25,6 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
+from app.agent_roles import record_agent_use
 from app.deps import authorize_current_owner_or_app_detached, reject_cross_site
 from app.image_previews import downscaled_webp
 from app.net_utils import (
@@ -385,6 +386,7 @@ async def _read_external_get(
   headers: dict[str, str] | None = None,
   probe_truncation: bool = True,
   cache_headers: ResponseCacheHeaders | None = None,
+  on_send: Callable[[], None] | None = None,
 ) -> _ExternalRead:
   """Read one public URL with a byte cap and SSRF-safe redirect handling.
 
@@ -413,6 +415,8 @@ async def _read_external_get(
       )
       req.headers["host"] = host_header
       req.extensions["sni_hostname"] = sni_host
+      if on_send is not None and hop == 0:
+        on_send()  # the URL passed every check and now leaves Möbius
       try:
         upstream = await hop_client.send(req, stream=True)
       except httpx.RequestError as exc:
@@ -626,6 +630,7 @@ async def proxy_get(
       read = await _read_external_get(
         _proxy_clients, url, _MAX_BYTES, headers=headers,
         probe_truncation=False, cache_headers=_PrivateBrowserCacheHeaders(),
+        on_send=lambda: record_agent_use(request, "open_page", url=url),
       )
   except TimeoutError:
     raise HTTPException(

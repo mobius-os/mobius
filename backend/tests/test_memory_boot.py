@@ -109,7 +109,8 @@ def test_later_boot_preserves_existing_memory_skill_but_does_not_reseed_it(
 def test_seeded_cron_jobs_use_only_app_scoped_credentials():
   text = (SCRIPTS / "seed-skills" / "cron.md").read_text(encoding="utf-8")
 
-  assert 'Authorization: Bearer $APP_TOKEN' in text
+  # The app's own token, sent through a pipe rather than curl's argv.
+  assert "printf 'Authorization: Bearer %s\\n' \"$APP_TOKEN\"" in text
   assert "Never read `/data/service-token.txt` from an app job" in text
   assert "SERVICE_TOKEN=$(cat /data/service-token.txt)" not in text
   assert "using bearer token $SERVICE_TOKEN" not in text

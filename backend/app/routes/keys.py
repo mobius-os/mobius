@@ -420,6 +420,13 @@ async def use_key(
   except key_vault.VaultTimeout as exc:
     raise HTTPException(504, str(exc)) from exc
   upstream = answer[0]
+  if "x-vault-key" in upstream.headers:
+    # The vault sets this on every answer once the request had left with the
+    # key: the site's own answer, or a failure after sending (the site hung
+    # up, an encoding it cannot read). A refusal before sending lacks it.
+    from app.agent_roles import record_agent_use
+
+    record_agent_use(request, "use_key", key=name, site=host)
   response_headers = {
     k: v for k, v in upstream.headers.items()
     if k.lower() in _RELAYED_RESPONSE_HEADERS or k.lower().startswith(_RELAYED_RESPONSE_PREFIXES)

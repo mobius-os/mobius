@@ -401,7 +401,6 @@ def _room(tmp_path, role, *tools):
     chat_dir=tmp_path / "chat",
     scratch=tmp_path / "scratch",
     storage_dir=tmp_path / "apps" / "7",
-    api_base_url="http://localhost:8080",
   )
 
 
@@ -426,7 +425,7 @@ def test_the_room_never_carries_a_login(tmp_path):
   room = _room(tmp_path, "edit", "web")
   env = room.env("agent-key")
   assert env["ANTHROPIC_AUTH_TOKEN"] == env["AGENT_TOKEN"] == "agent-key"
-  assert env["ANTHROPIC_BASE_URL"] == "http://localhost:8080/api/agent-gateway"
+  assert env["ANTHROPIC_BASE_URL"] == f"{agent_roles.room_url()}/api/agent-gateway"
   assert "cli-auth" not in json.dumps(env)
   assert env["MOBIUS_AGENT_TOOLS"] == "open_page"
   assert set(env) <= set(agent_roles.ROOM_ENV)
@@ -436,7 +435,7 @@ def test_codex_reaches_its_model_through_the_gateway(tmp_path):
   web = _room(tmp_path, "tools", "web").codex_overrides([])
   assert 'model_provider="mobius_gateway"' in web
   assert (
-    'model_providers.mobius_gateway.base_url="http://localhost:8080/api/agent-gateway/v1"'
+    f'model_providers.mobius_gateway.base_url="{agent_roles.room_url()}/api/agent-gateway/v1"'
     in web
   )
   assert 'web_search="live"' in web
@@ -1603,16 +1602,8 @@ def test_a_confined_agent_borrows_exactly_as_its_app(
       f"app:{app.id}:{app.install_id}",  # the app's exact installation
     )
   ]
-  assert (
-    ("app_agent_web",),
-    {
-      "app_id": app.id,
-      "chat_id": run.chat_id,
-      "kind": "use_key",
-      "key": "openweather",
-      "site": "api.openweathermap.org",
-    },
-  ) in logged
+  # The vault refused, so no use of the key is recorded.
+  assert not [entry for entry in logged if entry[1].get("kind") == "use_key"]
 
 
 @pytest.mark.asyncio
@@ -1645,3 +1636,221 @@ def test_the_prompt_says_how_to_use_the_apps_keys(tmp_path):
     room.role, app_id=7, app_name="Weather", room=room, app_prompt=None
   )
   assert "/api/keys/use/<key>/<host>/<path>" in prompt and "never see it" in prompt
+
+
+# --- the room's door accepts only agent keys (GHSA-3354-mq8m-hfv3) ------------------
+
+
+def test_a_room_reaches_this_server_only_on_the_room_address(tmp_path, monkeypatch):
+  monkeypatch.setenv("PORT", "8123")
+  room = _room(tmp_path, "edit", "web")
+  args = room.fence_args()
+  doors = [args[i + 1] for i, arg in enumerate(args) if arg == "--door"]
+  assert room.url == "http://127.0.0.2:8123" and doors == ["127.0.0.2:8123"]
+  env = room.env("agent-key")
+  assert env["API_BASE_URL"] == room.url
+  assert env["ANTHROPIC_BASE_URL"].startswith(room.url + "/")
+
+
+def test_from_the_room_address_only_agent_keys_work(client, owner_token, db):
+  from fastapi.testclient import TestClient
+
+  app = _local_app(db, "notes", _role("read"))
+  key, _run = _agent_key_for(db, app, role="read")
+  room = TestClient(client.app, base_url="http://127.0.0.2:8000")
+  own = f"/api/storage/apps/{app.id}/notes.json"
+  for attempt in (
+    room.get("/api/apps/", headers={"Authorization": f"Bearer {owner_token}"}),
+    room.get("/api/health"),  # no credential at all
+    room.get(
+      own, headers={"Authorization": f"Bearer {owner_token}"}, params={"token": key}
+    ),
+    room.get(
+      own, headers={"Authorization": f"Bearer {key}"}, params={"token": owner_token}
+    ),
+    room.get(own, headers={"Authorization": "Bearer not-a-token"}),
+  ):
+    assert attempt.status_code == 403, attempt.text
+    assert "only its own agent key" in attempt.json()["detail"]
+  assert room.get(own, headers={"Authorization": f"Bearer {key}"}).status_code != 403
+  # The same owner credential still works anywhere else.
+  owner = {"Authorization": f"Bearer {owner_token}"}
+  assert client.get("/api/apps/", headers=owner).status_code == 200
+
+
+@pytest.mark.parametrize(
+  "vault_header, recorded",
+  [
+    ({"x-vault-key": "openweather"}, True),  # sent; the site said 403
+    # Sent, then the site hung up (or used an encoding the vault can't read).
+    ({"x-vault-denied": "1", "x-vault-key": "openweather"}, True),
+    ({"x-vault-denied": "1"}, False),  # the vault refused; nothing left
+  ],
+)
+def test_a_key_use_is_recorded_when_the_key_was_sent(
+  client, owner_token, db, monkeypatch, vault_header, recorded
+):
+  import httpx
+
+  from app import activity, key_vault
+
+  app = _local_app(db, "weather", _role("tools", "keys"))
+  key, run = _agent_key_for(db, app, role="tools", tools=("keys",))
+  logged = []
+
+  async def fake_borrow(*_args, **_kwargs):
+    return httpx.Response(
+      403, headers=vault_header, stream=httpx.ByteStream(b"no")
+    ), None
+
+  async def fake_close(_answer):
+    pass
+
+  monkeypatch.setattr(key_vault, "borrow", fake_borrow)
+  monkeypatch.setattr(key_vault, "close_use", fake_close)
+  monkeypatch.setattr(activity, "log_event", lambda *a, **kw: logged.append(kw))
+  answer = client.get(
+    "/api/keys/use/openweather/api.openweathermap.org/data",
+    headers={"Authorization": f"Bearer {key}"},
+  )
+  assert answer.status_code == 403
+  uses = [entry for entry in logged if entry.get("kind") == "use_key"]
+  assert uses == (
+    [
+      {
+        "app_id": app.id,
+        "chat_id": run.chat_id,
+        "kind": "use_key",
+        "key": "openweather",
+        "site": "api.openweathermap.org",
+      }
+    ]
+    if recorded
+    else []
+  )
+
+
+@pytest.mark.parametrize("sent, status", [(True, 502), (False, 400)])
+def test_a_page_is_recorded_once_it_was_requested(
+  client, owner_token, db, monkeypatch, sent, status
+):
+  from fastapi import HTTPException
+
+  from app import activity
+  from app.routes import proxy
+
+  app = _local_app(db, "research", _role("tools", "web"))
+  key, _run = _agent_key_for(db, app, role="tools", tools=("web",))
+  logged = []
+
+  async def fake_read(_client, _url, _max, *, on_send=None, **_kwargs):
+    if sent:
+      on_send()  # the request left Möbius; the site then failed
+    raise HTTPException(status, "site failed" if sent else "not a public address")
+
+  monkeypatch.setattr(proxy, "_read_external_get", fake_read)
+  monkeypatch.setattr(activity, "log_event", lambda *a, **kw: logged.append(kw))
+  answer = client.get(
+    "/api/proxy",
+    params={"url": "https://example.com/page"},
+    headers={"Authorization": f"Bearer {key}"},
+  )
+  assert answer.status_code == status
+  pages = [entry["url"] for entry in logged if entry.get("kind") == "open_page"]
+  assert pages == (["https://example.com/page"] if sent else [])
+
+
+@pytest.mark.skipif(
+  '"available": true' not in _room_available(), reason="host cannot build rooms"
+)
+def test_a_credential_a_room_reads_elsewhere_is_refused_at_its_door(tmp_path):
+  """The advisory's chain end to end: a room reads an owner credential from
+  another program's command line and presents it at its door."""
+  import threading
+  import time
+
+  import jwt
+  import uvicorn
+
+  from app.config import get_settings
+
+  secret, later = get_settings().secret_key, int(time.time()) + 600
+  owner = jwt.encode({"sub": "owner", "exp": later}, secret, algorithm="HS256")
+  agent = jwt.encode(
+    {"scope": "app", "app_id": 7, "agent_role": "tools", "exp": later},
+    secret,
+    algorithm="HS256",
+  )
+
+  async def ok(scope, receive, send):
+    await send({"type": "http.response.start", "status": 200, "headers": []})
+    await send({"type": "http.response.body", "body": b"ok"})
+
+  probe = socket.socket()
+  probe.bind(("127.0.0.1", 0))
+  port = probe.getsockname()[1]
+  probe.close()
+  server = uvicorn.Server(
+    uvicorn.Config(
+      agent_roles.AgentKeyScope(ok), host="0.0.0.0", port=port, log_level="error"
+    )
+  )
+  threading.Thread(target=server.run, daemon=True).start()
+  while not server.started:
+    time.sleep(0.05)
+  sibling = subprocess.Popen(
+    [
+      sys.executable,
+      "-c",
+      "import time; time.sleep(30)",
+      "Authorization: Bearer " + owner,
+    ]
+  )
+  script = tmp_path / "probe.py"
+  script.write_text(
+    "import os, sys, urllib.request, urllib.error\n"
+    "found = None\n"
+    "for pid in filter(str.isdigit, os.listdir('/proc')):\n"
+    "  try: args = open(f'/proc/{pid}/cmdline', 'rb').read().split(b'\\0')\n"
+    "  except OSError: continue\n"
+    "  found = found or next((a.split()[-1].decode() for a in args\n"
+    "                         if a.startswith(b'Authorization: Bearer ')), None)\n"
+    "def call(token):\n"
+    "  request = urllib.request.Request(sys.argv[1] + '/api/agent-gateway/v1/messages',\n"
+    "                                   headers={'Authorization': 'Bearer ' + token})\n"
+    "  try: return urllib.request.urlopen(request, timeout=5).status\n"
+    "  except urllib.error.HTTPError as error: return error.code\n"
+    "print('found' if found else 'none', call(found or 'x'), call(sys.argv[2]))\n"
+  )
+  home = tmp_path / "home"
+  home.mkdir()
+  try:
+    result = subprocess.run(
+      [
+        sys.executable,
+        str(FENCE),
+        "--home",
+        str(home),
+        "--ro",
+        str(tmp_path),
+        "--door",
+        f"{agent_roles.ROOM_HOST}:{port}",
+        "--",
+        sys.executable,
+        "-I",
+        str(script),
+        f"http://{agent_roles.ROOM_HOST}:{port}",
+        agent,
+      ],
+      capture_output=True,
+      text=True,
+      timeout=60,
+      env={"PATH": "/usr/bin:/bin"},
+    )
+  finally:
+    sibling.kill()
+    server.should_exit = True
+  assert result.returncode == 0, result.stderr
+  # The room can still read the sibling's argv (residual, documented), but the
+  # credential it found is useless at its door; its own agent key works.
+  assert result.stdout.split() == ["found", "403", "200"]
