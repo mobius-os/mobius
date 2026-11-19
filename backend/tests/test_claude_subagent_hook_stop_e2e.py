@@ -21,6 +21,9 @@ scripts every response and records every request. The environment handed to
 the CLI is rebuilt from an allowlist (no inherited credentials), with HOME and
 CLAUDE_CONFIG_DIR in a temp dir and nonessential traffic disabled.
 
+It also proves how the CLI applies a PreToolUse matcher written as a list of
+exact MCP tool names, the form the runner's card check registers.
+
 Run:  python -m pytest -q -s test_claude_subagent_hook_stop_e2e.py
 Set PROBE_VERBOSE=1 to print the request/event timelines.
 """
@@ -49,6 +52,7 @@ DISPATCHER_SYS = "PROBE-DISPATCHER: you launch helpers."
 HELPER_SYS = "PROBE-HELPER-SYS: you are a probe helper."
 AGENT_TYPE = "probe-helper"
 MCP_TOOL = "mcp__probe__ask_parent"  # stands in for mobius_control ask_parent
+CARD_SYS = "PROBE-CARD: you work, then save an owner card."
 STOP_MARKER = "marker-1"
 VERBOSE = bool(os.environ.get("PROBE_VERBOSE"))
 
@@ -129,6 +133,8 @@ class FakeAnthropic:
     system = _system_text(body)
     messages = body.get("messages") or []
     last = next((msg for msg in reversed(messages) if msg.get("role") == "user"), {})
+    if CARD_SYS in system:
+      return "card", self._card(last)
     if HELPER_SYS in system:
       return "helper", self._helper(messages, last)
     if DISPATCHER_SYS in system:
@@ -169,6 +175,19 @@ class FakeAnthropic:
         }),
       ]
     return [{"type": "text", "text": "SUB-DEFAULT"}]
+
+  def _card(self, last):
+    """Bash, then a non-card control tool, then a card, then a closing line."""
+    results = _tool_results(last)
+    if any("_card_" in tid for tid in results):
+      return [{"type": "text", "text": "CARD-DONE"}]
+    if any("_checkpoint_" in tid for tid in results):
+      return [self._tool("card", "mcp__mobius_control__request_question",
+                         {"question": "Ready?"})]
+    if any("_work_" in tid for tid in results):
+      return [self._tool("checkpoint", "mcp__mobius_control__checkpoint_chat",
+                         {"note": "saved"})]
+    return [self._tool("work", "Bash", {"command": "echo work", "description": "work"})]
 
   def _parent(self, body, messages, last):
     tools = {t.get("name") for t in body.get("tools") or []}
@@ -658,3 +677,75 @@ async def test_stop_task_comparison(scrubbed_env, fake_api):
     print("helper requests after follow-up:", len(resumed))
     print("SUBAGENT_STOP EVENTS:", [e for e in probe.events if e["ev"] == "SubagentStop"])
     assert not any("SUB-AFTER-SLOW" in str(r["reply"]) for r in probe.helper_requests())
+
+
+@pytest.mark.asyncio
+async def test_pretooluse_matcher_of_exact_mcp_names_reaches_only_those_tools(
+  scrubbed_env, fake_api,
+):
+  from claude_agent_sdk import (
+    ClaudeAgentOptions, ClaudeSDKClient, HookMatcher, create_sdk_mcp_server, tool,
+  )
+  from claude_agent_sdk.types import (
+    PermissionResultAllow, ResultMessage, ToolResultBlock, UserMessage,
+  )
+
+  from app.claude_sdk_runner import _ANSWER_CHECK_CARD_MATCHER
+
+  ran: list[str] = []
+  hooked: list[str] = []
+
+  @tool("checkpoint_chat", "Save a note.", {"note": str})
+  async def checkpoint_chat(args):
+    ran.append("checkpoint_chat")
+    return {"content": [{"type": "text", "text": "saved"}]}
+
+  @tool("request_question", "Ask the owner.", {"question": str})
+  async def request_question(args):
+    ran.append("request_question")
+    return {"content": [{"type": "text", "text": "asked"}]}
+
+  async def before_card(data, tool_use_id, context):
+    hooked.append(data.get("tool_name"))
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PreToolUse", "permissionDecision": "deny",
+      "permissionDecisionReason": "PROBE-CARD-DENIED",
+    }}
+
+  async def allow_all(_tool, _input, _context):
+    return PermissionResultAllow()
+
+  options = ClaudeAgentOptions(
+    system_prompt=CARD_SYS, model="haiku", cwd=str(scrubbed_env),
+    env={k: os.environ[k] for k in os.environ},
+    strict_mcp_config=True, setting_sources=None,
+    mcp_servers={"mobius_control": create_sdk_mcp_server(
+      "mobius_control", tools=[checkpoint_chat, request_question],
+    )},
+    permission_mode="default", can_use_tool=allow_all,
+    disallowed_tools=["Workflow"], cli_path=str(CLI),
+    hooks={"PreToolUse": [
+      HookMatcher(matcher=_ANSWER_CHECK_CARD_MATCHER, hooks=[before_card]),
+    ]},
+    extra_args={"settings": json.dumps({"disableWorkflows": True})},
+  )
+  results: dict[str, str] = {}
+  async with ClaudeSDKClient(options) as client:
+    await client.query("WORK THEN CARD")
+    async def read():
+      async for message in client.receive_response():
+        if isinstance(message, UserMessage) and isinstance(message.content, list):
+          for block in message.content:
+            if isinstance(block, ToolResultBlock):
+              results[block.tool_use_id] = json.dumps(block.content)
+        if isinstance(message, ResultMessage):
+          return
+    await asyncio.wait_for(read(), timeout=60)
+
+  # Neither Bash nor a control tool sharing the card's server prefix reaches
+  # the hook; the card does, and its deny keeps the card tool from running.
+  assert hooked == ["mcp__mobius_control__request_question"]
+  assert ran == ["checkpoint_chat"]
+  card = next(text for tid, text in results.items() if "_card_" in tid)
+  assert "PROBE-CARD-DENIED" in card
+  assert any("CARD-DONE" in str(r["reply"]) for r in fake_api.requests)
