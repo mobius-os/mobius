@@ -14,6 +14,7 @@ from app.database import SessionLocal
 from app import contribution_review_lifecycle as review_lifecycle
 from app import contribution_review_queries as queries, contribution_review_runs as domain, models
 from app import contribution_review_verdicts as verdicts
+from app.contribution_review_effects import DispatchResult
 from app.routes import contribution_reviews as routes
 from app.timeutil import now_naive_utc
 from tests.test_contribution_review_admission import owner, refusal  # noqa: F401  (fixture and helper)
@@ -526,12 +527,43 @@ def test_the_owner_can_dismiss_a_verdict_the_clock_made_unconfirmed(setup):
   assert stored(db, row)["verdict_proposal"]["state"] == "not_dispatched"
 
 
-def test_a_late_confirmation_of_the_request_that_timed_out_cannot_overwrite_the_unconfirmed_verdict(setup):
+def timed_out_while_in_flight(setup):
   db, row, _ = setup
   save_verdict(db, row, "posting", 6)
   routes.sweep_review_lifecycles(db)
-  verdicts._settle(db, row, KEY, "v1", {"state": "posted", "review_id": 5})  # what a stale dispatcher would write
   assert stored(db, row)["verdict_proposal"]["state"] == "unknown"
+  return db, row
+
+
+def test_the_dispatcher_of_a_timed_out_verdict_still_records_its_confirmed_review(setup):
+  db, row = timed_out_while_in_flight(setup)
+  verdicts._persist_result(db, row, KEY, "v1", DispatchResult.confirmed({"id": 5, "url": "https://example.test/r/5"}))
+  proposal = stored(db, row)["verdict_proposal"]
+  assert (proposal["state"], proposal["review_id"], proposal["id"]) == ("posted", 5, "v1")
+  assert "summary" not in proposal  # the clock's "no answer" line no longer holds
+
+
+def test_the_dispatcher_of_a_timed_out_verdict_still_records_its_definite_refusal(setup):
+  db, row = timed_out_while_in_flight(setup)
+  verdicts._persist_result(db, row, KEY, "v1", DispatchResult.not_dispatched("GitHub refused the review."))
+  proposal = stored(db, row)["verdict_proposal"]
+  assert (proposal["state"], proposal["summary"]) == ("not_dispatched", "GitHub refused the review.")
+
+
+def test_a_dispatcher_that_is_itself_unsure_leaves_the_timed_out_verdict_as_it_was(setup):
+  db, row = timed_out_while_in_flight(setup)
+  before = stored(db, row)["verdict_proposal"]
+  verdicts._persist_result(db, row, KEY, "v1", DispatchResult.unknown("Lost response"))
+  assert stored(db, row)["verdict_proposal"] == before
+
+
+def test_a_late_result_cannot_overwrite_a_verdict_the_owner_dismissed_or_another_proposal(setup):
+  db, row = timed_out_while_in_flight(setup)
+  verdicts._persist_result(db, row, KEY, "other", DispatchResult.confirmed({"id": 5}))
+  assert stored(db, row)["verdict_proposal"]["state"] == "unknown"
+  verdicts.dismiss(db, row, KEY, "v1")
+  verdicts._persist_result(db, row, KEY, "v1", DispatchResult.confirmed({"id": 5}))
+  assert stored(db, row)["verdict_proposal"]["state"] == "not_dispatched"
 
 
 # --- a review that starts another round is not judged by the vector of the last one -------------------
