@@ -741,25 +741,46 @@ def test_two_tasks_giving_an_app_its_installation_id_never_give_it_two(client, d
   assert older.install_id == "a" * 32
 
 
-def test_naming_keeps_trying_after_an_unexpected_error(client, db, vault, monkeypatch, caplog):
-  """An error that isn't the vault's answer (the database, say) is logged and
-  retried, rather than ending naming with nothing in the log."""
+@pytest.mark.parametrize("first", ["unexpected", "unavailable"])
+def test_naming_keeps_trying_after_an_unexpected_error(client, db, vault, monkeypatch, caplog, first):
+  """An error that isn't the vault's answer (the database, say) is logged,
+  once, even when it first appears after the vault was briefly unavailable,
+  and naming retries until it succeeds."""
   import asyncio
   import logging
   calls = []
+  troubles = [key_vault.VaultUnavailable("not yet")] if first == "unavailable" else []
+  troubles += [RuntimeError("database is locked"), RuntimeError("database is locked")]
 
   async def flaky():
     calls.append(1)
-    if len(calls) < 3:
-      raise RuntimeError("database is locked")
+    if troubles:
+      raise troubles.pop(0)
     return {"stamped": 0, "keys": [], "requests": 0}
   monkeypatch.setattr(key_vault, "_vault_ever_used", lambda: True)
   monkeypatch.setattr(key_vault, "adopt_app_installs", flaky)
   monkeypatch.setattr(key_vault, "_NAME_INSTALLS_RETRY_SECS", (0,))
   with caplog.at_level(logging.ERROR, logger=key_vault.log.name):
     asyncio.run(asyncio.wait_for(key_vault._name_app_installs(), timeout=5))
-  assert len(calls) == 3
-  assert sum("could not name app installations" in r.getMessage() for r in caplog.records) == 1
+  assert len(calls) == (4 if first == "unavailable" else 3)
+  logged = [r for r in caplog.records if "could not name app installations; retrying" in r.getMessage()]
+  assert len(logged) == 1 and logged[0].exc_info is not None
+
+
+def test_naming_ends_on_a_reply_missing_its_counts(client, db, vault, monkeypatch):
+  """However the vault words its answer, a taken naming is done: logging it
+  never makes naming start over."""
+  import asyncio
+  calls = []
+
+  async def terse():
+    calls.append(1)
+    return {"stamped": 2}
+  monkeypatch.setattr(key_vault, "_vault_ever_used", lambda: True)
+  monkeypatch.setattr(key_vault, "adopt_app_installs", terse)
+  monkeypatch.setattr(key_vault, "_NAME_INSTALLS_RETRY_SECS", (0,))
+  asyncio.run(asyncio.wait_for(key_vault._name_app_installs(), timeout=5))
+  assert len(calls) == 1
 
 
 def test_a_saved_secret_of_an_app_without_an_installation_id_is_still_imported(client, db, vault):
