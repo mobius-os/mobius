@@ -5,7 +5,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
-  AppBlockChatContext, appBlockChatKey, askCid, blockFingerprint, createAppBlockChat, useAppBlockChat,
+  AppBlockChatContext, TailMessageContext, appBlockChatKey, askCid, blockFingerprint, createAppBlockChat, useAppBlockChat,
 } from '../markdown/appBlockChat.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 
@@ -68,8 +68,64 @@ test('the block\'s own JSON cannot supply a chat context', () => {
   renderToStaticMarkup(createElement(Probe))
   assert.equal(seen.context, null, 'outside a chat transcript there is no context')
   renderToStaticMarkup(createElement(AppBlockChatContext.Provider, { value: createAppBlockChat('chat-1') }, createElement(Probe)))
-  assert.deepEqual(seen.context, { chatId: 'chat-1', latest: true })
+  assert.deepEqual(seen.context, { chatId: 'chat-1', latest: true, tail: false })
   assert.deepEqual(seen.refresh, { seq: 0, reason: '' })
+})
+
+test('only the message renderer says a block is in the chat\'s last message', () => {
+  let seen = null
+  const Probe = () => { seen = useAppBlockChat('contribute\nchat:contributions'); return null }
+  const inChat = child => createElement(AppBlockChatContext.Provider, { value: createAppBlockChat('chat-1') }, child)
+  renderToStaticMarkup(inChat(createElement(TailMessageContext.Provider, { value: true }, createElement(Probe))))
+  assert.equal(seen.context.tail, true)
+  renderToStaticMarkup(inChat(createElement(Probe)))
+  assert.equal(seen.context.tail, false, 'an earlier message, or no message at all, is not the tail')
+})
+
+// ---- The block the owner still has to act on.
+
+test('the chat names the newest block that awaits the owner, and forgets it once it stops waiting', () => {
+  const chat = createAppBlockChat('chat-1')
+  const [older, newer] = [{}, {}]
+  chat.place('contribute\nreview:x', older, node(1))
+  chat.place('contribute\nchat:contributions', newer, node(5))
+  assert.equal(chat.waitingBlock(), null, 'a placed block does not wait by itself')
+  chat.setWaiting('contribute\nreview:x', older, 'Contribute')
+  assert.equal(chat.waitingBlock().node.position, 1)
+  chat.setWaiting('contribute\nchat:contributions', newer, 'Contribute')
+  assert.deepEqual({ position: chat.waitingBlock().node.position, appName: chat.waitingBlock().appName },
+    { position: 5, appName: 'Contribute' }, 'the later block in the transcript is the one named')
+  chat.setWaiting('contribute\nchat:contributions', newer, '')
+  assert.equal(chat.waitingBlock().node.position, 1)
+  chat.remove('contribute\nreview:x', older)
+  assert.equal(chat.waitingBlock(), null, 'an unmounted block no longer waits')
+})
+
+test('a waiting report made before the block is placed is kept, and a view swap does not drop it', () => {
+  const chat = createAppBlockChat('chat-1')
+  const key = 'contribute\nchat:contributions'
+  const block = {}
+  chat.setWaiting(key, block, 'Contribute')
+  assert.equal(chat.waitingBlock(), null, 'nothing to point at until its section exists')
+  chat.place(key, block, node(2))
+  assert.equal(chat.waitingBlock().node.position, 2)
+  chat.place(key, block, node(3)) // its static and live views swap
+  assert.equal(chat.waitingBlock().node.position, 3)
+})
+
+test('the waiting block keeps one identity until it changes, so a subscriber is not re-rendered for nothing', () => {
+  const chat = createAppBlockChat('chat-1')
+  const key = 'contribute\nchat:contributions'
+  const block = {}
+  let heard = 0
+  chat.subscribe(() => { heard += 1 })
+  chat.place(key, block, node(1))
+  chat.setWaiting(key, block, 'Contribute')
+  const first = chat.waitingBlock()
+  chat.refresh('turn')
+  chat.setWaiting(key, block, 'Contribute')
+  assert.equal(chat.waitingBlock(), first)
+  assert.equal(heard, 3, 'a repeated report notifies nobody')
 })
 
 // ---- Card asks (ask-v1).
