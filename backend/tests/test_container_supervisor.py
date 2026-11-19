@@ -156,9 +156,10 @@ def test_boot_starts_with_default_signal_handling_like_under_tini(tmp_path):
   # The supervisor also blocks its handled signals while it starts a boot; the
   # boot must not inherit that mask either.
   # Read the boot's own status with shell builtins only. A command
-  # substitution would make a child read the shell's status while dash blocks
-  # every signal around that very fork, so it sometimes saw a full mask that
-  # no boot ever started with.
+  # substitution forks, and glibc's fork() blocks every signal (its internal
+  # ones included) in the shell until the fork returns; a child scheduled
+  # first then reads that temporary full mask, which no boot ever started
+  # with. Any shell built on glibc has the same race.
   proc, log = _start(
     tmp_path,
     'while read -r key value; do case $key in '
