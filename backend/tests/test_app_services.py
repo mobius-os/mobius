@@ -2300,14 +2300,23 @@ async def test_decode_estimates_cover_measured_allocation_peaks(shape):
     print(f"{shape} {direction}: {len(raw)} bytes, decode peak {decode_peak} <= {estimate}")
     del value
   # The parsed tree alone, measured away from the event loop's own allocations.
+  # tracemalloc traces every thread, so count only the blocks the stdlib
+  # json package allocated and still holds (its C scanner runs under
+  # json/decoder.py, the pure-Python one in json/scanner.py), not what
+  # another thread did meanwhile.
   gc.collect()
   tracemalloc.start()
   try:
     value = json.loads(raw)
-    tree = tracemalloc.get_traced_memory()[0]
+    snapshot = tracemalloc.take_snapshot()
   finally:
     tracemalloc.stop()
-  assert tree <= retained
+  package = os.path.join(os.path.dirname(json.__file__), "*")
+  parsed = snapshot.filter_traces([tracemalloc.Filter(True, package)])
+  tree = sum(trace.size for trace in parsed.traces)
+  del snapshot, parsed
+  # The filter must still see the value: at least its top-level object.
+  assert sys.getsizeof(value) <= tree <= retained
   assert rendered == JSONResponse(value).body
   assert app_services._admitted_exchange_cost == 0
 
