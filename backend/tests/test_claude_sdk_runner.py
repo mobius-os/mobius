@@ -4157,8 +4157,58 @@ async def test_a_key_request_is_held_while_its_reply_points_to_something_unshown
   # the repair goes into visible text, which the owner sees either way.
   assert "This card has no message" not in reason
   assert "card's message" not in reason
-  assert "call the same card tool again with the same arguments" in reason
+  # It may never save a card, so it is told about the request, not a card.
+  assert "The card was NOT saved" not in reason
+  assert "The request was NOT made" in reason
+  assert "make the same key request again with the same arguments" in reason
   assert decisions[1] == {"continue_": True}
+
+
+async def _key_request_returns(options, response: dict) -> None:
+  """The PostToolUse hooks the CLI runs when a `request_key` call returns."""
+  tool_name = "mcp__mobius_control__request_key"
+  hook_input = {
+    "hook_event_name": "PostToolUse", "tool_name": tool_name,
+    "tool_input": {"key": "weather", "reason": "Fetch the forecast."},
+    "tool_response": [{"type": "text", "text": json.dumps(response)}],
+    "tool_use_id": "toolu_k",
+  }
+  for matcher in options.hooks["PostToolUse"]:
+    if matcher.matcher is None or tool_name in matcher.matcher.split("|"):
+      for hook in matcher.hooks:
+        await hook(hook_input, "toolu_k", {})
+
+
+@pytest.mark.asyncio
+async def test_a_held_key_request_answered_at_once_leaves_the_end_of_turn_check_its_image(monkeypatch):
+  # Held for an unshown image, the key request is made again unchanged and
+  # answers at once without a card, so the turn goes on. The hold must not
+  # count as having reviewed that image: the turn still ends without showing
+  # it, and the end-of-turn check says so, as it would with no key request.
+  chat_id = "answer-check-key-answered-at-once-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _viewed_before_after(chat_id)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _call_key_request(self.options))
+      decisions.append(await _call_key_request(self.options))
+      await _key_request_returns(self.options, {
+        "state": "answered_without_card", "answer": "granted",
+      })
+      bus.assistant_blocks.append({"type": "text", "content": "Here is the before and after."})
+      decisions.append(await _fire_stop_hook(
+        self.options, last_assistant_message="Here is the before and after.",
+      ))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
+  assert decisions[1] == {"continue_": True}
+  assert decisions[2]["decision"] == "block"
+  assert "before-after.png" in decisions[2]["reason"]
 
 
 @pytest.mark.asyncio
