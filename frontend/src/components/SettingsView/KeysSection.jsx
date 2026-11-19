@@ -504,7 +504,9 @@ function ValueRow({ keyRecord: key, part, names, save, busy }) {
   const warning = replaceWarning(key, names)
   const single = keyParts(key).length === 1 && part.name === 'value'
   const label = partLabel(part)
-  const [shown, setShown] = useState(part.secret ? null : part.text)
+  const [revealed, setShown] = useState(null)
+  // A plain part always shows its current text; a secret one only once revealed.
+  const shown = part.secret ? revealed : part.text
   const [replacing, setReplacing] = useState(false)
   const [next, setNext] = useState('')
   const [multiline, setMultiline] = useState(Boolean(part.multiline))

@@ -792,6 +792,9 @@ def secret_echoes(*values: str) -> SecretEchoes:
   whatever the vault composed from them); longer secrets are tried first, so
   one that contains another is redacted whole.
   """
+  if not values:
+    # Nothing secret was sent: match nothing (an empty pattern matches everywhere).
+    return SecretEchoes(re.compile(rb"(?!)"), 0)
   groups: dict[str, tuple[bytes, int]] = {}
   alternatives: list[tuple[int, bytes]] = []
   longest = 0
@@ -1482,6 +1485,8 @@ class Vault:
       missing = recipe_fits(inject, [part["name"] for part in parts])
       if missing:
         raise VaultError(400, f"{name} is sent with {', '.join(missing)}, which it has no part for.")
+      if not _sends_a_secret(inject, parts):
+        raise VaultError(400, f"{name} would be sent without any secret part; mark the secret one secret.")
       if body.get("grants") is not None:
         grants = validate_grants(body["grants"])
       else:
@@ -1533,7 +1538,7 @@ class Vault:
       named.append(meta["name"])
       current[meta["name"]] = self._seal_part(name, meta, validate_value(item.get("value")))
     removed = body.get("remove_parts") or []
-    if not isinstance(removed, list):
+    if not isinstance(removed, list) or not all(isinstance(part, str) for part in removed):
       raise VaultError(400, "Name the parts to remove.")
     for part in removed:
       if part in named or current.pop(part, None) is None:
@@ -1776,6 +1781,8 @@ class Vault:
         missing = recipe_fits(inject, have)
         if missing and record is None:
           raise VaultError(400, f"The recipe sends {', '.join(missing)}; list every part it sends in parts.")
+        if record is None and specs is not None and not _sends_a_secret(inject, specs):
+          raise VaultError(400, "The recipe sends no secret part; mark the secret one secret.")
       grant = asker_grant(record["grants"], asker) if record is not None else None
       existing = self._requests.get(request_id)
       if existing is not None and existing.get("install") != asker.get("install"):
@@ -2245,6 +2252,13 @@ def sets_inject(record: dict | None, request: dict) -> bool:
   return (record is not None and request.get("inject") is not None
           and sent_nowhere(record["grants"]) and request["inject"] != record["inject"]
           and not recipe_fits(request["inject"], [part["name"] for part in record["parts"]]))
+
+
+def _sends_a_secret(inject: dict, parts: list[dict]) -> bool:
+  """Whether ``inject`` sends at least one secret part: what it sends is what
+  the vault redacts, so a key sent with only plain parts would be no key."""
+  sent = set(recipe_parts(inject))
+  return any(part["secret"] for part in parts if part["name"] in sent)
 
 
 def _new_key_parts(request: dict, body: dict) -> dict:

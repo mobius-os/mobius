@@ -453,3 +453,25 @@ def test_store_key_takes_slots_and_refuses_a_missing_field(monkeypatch, vault):
   assert vault.list_keys() == []
   assert _store_key(monkeypatch, vault, args, {"id": ACCOUNT, "secret": SECRET}) == 0
   assert vault.list_keys()[0]["inject"]["type"] == "slots"
+
+
+def test_a_recipe_must_send_a_secret_part(vault):
+  plain_only = {"type": "slots", "slots": [{"type": "query", "name": "id", "part": "account"}]}
+  with pytest.raises(kv.VaultError, match="without any secret part"):
+    vault.put_key("bad", {"parts": BASIC_PARTS, "inject": plain_only, "grants": GRANTS})
+  with pytest.raises(kv.VaultError, match="no secret part"):
+    vault.request_for_agents(_ask(inject=plain_only), actor="agent:c1")
+  vault.put_key("pair", {"parts": [*BASIC_PARTS, {"name": "spare", "value": OTHER_SECRET}], "inject": BASIC, "grants": GRANTS})
+  # Making the only secret it sends plain is refused too, though another stays secret.
+  with pytest.raises(kv.VaultError, match="without any secret part"):
+    vault.put_key("pair", {"parts": [{"name": "token", "value": "x", "secret": False}]})
+
+
+def test_with_nothing_secret_redaction_changes_nothing():
+  assert kv.redact(b"an ordinary answer", kv.secret_echoes()) == b"an ordinary answer"
+
+
+def test_parts_to_remove_are_named_by_text(vault):
+  vault.put_key("pair", {"parts": BASIC_PARTS, "inject": BASIC, "grants": GRANTS})
+  with pytest.raises(kv.VaultError, match="Name the parts"):
+    vault.put_key("pair", {"remove_parts": [["token"]]})
