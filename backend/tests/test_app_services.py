@@ -3317,16 +3317,18 @@ print(json.dumps({"body": {"length": len(value)}}))
   app = _service_app(db, access="public", service_bytes=service, max_bytes=60 * 1024 * 1024)
   raw = b'"' + escape * ((4 * 1024 * 1024) // len(escape)) + b'"'
   expected = len(json.loads(raw))
-  # Each beat records the event-loop thread's CPU time, so a gap is the work
-  # other tasks did before it ran again, not time a loaded runner spent
-  # descheduled. Bounded 16 KiB scan steps keep it near 20 ms; one
-  # unyielding 4 MiB scan takes 0.2-0.4 s.
+  # Each beat records wall-clock and event-loop-thread CPU time. The CPU gap
+  # is the work other tasks did before the heartbeat ran again, which a
+  # loaded runner's descheduling does not inflate: its floor is the one
+  # json.loads of the whole text (about 30 ms), while one unyielding 4 MiB
+  # scan takes 0.2-0.4 s. The wall gap still catches a step that blocks
+  # without burning loop CPU (a sleep, a GIL-holding thread).
   beats = []
   running = True
 
   async def heartbeat():
     while running:
-      beats.append(time.thread_time())
+      beats.append((time.monotonic(), time.thread_time()))
       await asyncio.sleep(0.01)
 
   async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
@@ -3344,9 +3346,11 @@ print(json.dumps({"body": {"length": len(value)}}))
       await beat
   assert response.status_code == 200
   assert response.json() == {"length": expected}
-  gap = max(b - a for a, b in zip(beats, beats[1:]))
-  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat CPU gap: {gap:.4f}s")
-  assert gap < 0.1, "bounded scanner monopolized the event loop for an escaped scalar"
+  wall = max(b[0] - a[0] for a, b in zip(beats, beats[1:]))
+  cpu = max(b[1] - a[1] for a, b in zip(beats, beats[1:]))
+  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {wall:.4f}s wall, {cpu:.4f}s CPU")
+  assert cpu < 0.1, "bounded scanner monopolized the event loop for an escaped scalar"
+  assert wall < 0.2, "the event loop was blocked for an escaped scalar"
   assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
 
 
