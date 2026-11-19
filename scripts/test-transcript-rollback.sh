@@ -48,8 +48,10 @@ cleanup() {
 trap cleanup EXIT
 
 fail() {
-  echo "transcript rollback: $*" >&2
+  # Diagnostics first, the reason last: it then ends the step's log, where
+  # readers and scripts/ci-failures.sh look, instead of scrolling out of view.
   docker logs "$name" --tail 80 >&2 2>&1 || true
+  echo "transcript rollback: $*" >&2
   exit 1
 }
 

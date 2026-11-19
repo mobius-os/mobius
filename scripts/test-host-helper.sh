@@ -61,12 +61,14 @@ export COMPOSE_PROJECT_NAME=mobius
 [[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
 
 fail() {
-  echo "host helper: $*" >&2
+  # Diagnostics first, the reason last: it then ends the step's log, where
+  # readers and scripts/ci-failures.sh look, instead of scrolling out of view.
   systemctl --no-pager status mobius-rebuild.service mobius-rebuild.path >&2 || true
   journalctl --no-pager -u mobius-rebuild.service -n 80 >&2 || true
   cat "$STATUS" >&2 2>/dev/null || true
   local cid
   if cid=$(app_container); then docker logs "$cid" --tail 60 >&2 2>&1 || true; fi
+  echo "host helper: $*" >&2
   exit 1
 }
 

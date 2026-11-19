@@ -7,8 +7,9 @@
 # it; a run id (anything longer than 7 digits) names one run. For each failed
 # job this prints the failed step names and bounded failure lines: pytest
 # FAILED/ERROR lines with their E-line excerpts, node:test failure blocks
-# (✖ ... or not ok ...), and Error: lines. When a failed step has none of
-# those, it prints that step's last lines instead. The complete failed-job
+# (✖ ... or not ok ...), Error: lines, and the step's final output line, where
+# a failing script states its reason. When a failed step has none of the
+# pattern lines, it prints that step's last lines instead. The complete failed-job
 # logs are saved to a temp file whose path is printed before the first job
 # and again at the end.
 #
@@ -131,6 +132,12 @@ extract() {
           first = seg_end[s] - tail_lines; if (first < seg_start[s]) first = seg_start[s]
           print "    (no recognizable failure lines; last " (seg_end[s] - first) " lines of the step)"
           for (i = first; i < seg_end[s]; i++) if (line[i] !~ /^##\[(end)?group\]/) print "    " clip(line[i])
+        } else if (exit_line[s] != "") {
+          # A failing script usually states its reason last, after any
+          # diagnostics it dumps; those can match the patterns above and
+          # would otherwise hide that final line.
+          for (i = seg_end[s] - 1; i >= seg_start[s] && (line[i] ~ /^ *$/ || line[i] ~ /^##\[/); i--) ;
+          if (i >= seg_start[s]) emit(line[i])
         }
         if (exit_line[s] != "") print "    " exit_line[s]
       }
