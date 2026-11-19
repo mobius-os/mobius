@@ -1682,6 +1682,8 @@ def test_from_the_room_address_only_agent_keys_work(client, owner_token, db):
   "vault_header, recorded",
   [
     ({"x-vault-key": "openweather"}, True),  # sent; the site said 403
+    # Sent, then the site hung up (or used an encoding the vault can't read).
+    ({"x-vault-denied": "1", "x-vault-key": "openweather"}, True),
     ({"x-vault-denied": "1"}, False),  # the vault refused; nothing left
   ],
 )

@@ -84,6 +84,10 @@ class _Echo(BaseHTTPRequestHandler):
       self.send_header("Content-Length", "0")
       self.end_headers()
       return True
+    if self.path == "/v1/hang-up":
+      # Takes the request, key included, and hangs up without answering.
+      self.close_connection = True
+      return True
     if self.path == "/v1/truncated":
       # Promises more than it sends, then hangs up mid-answer.
       self.send_response(200)
@@ -521,6 +525,18 @@ def test_an_encoding_the_vault_cannot_read_is_refused(client, auth, db, vault):
   refused = client.get("/api/keys/use/echoed/api.example.com/v1/brotli", headers=_app_auth(db, weather))
   assert refused.status_code == 502 and refused.headers["X-Vault-Denied"] == "1"
   assert DUMMY not in refused.text
+
+
+@pytest.mark.parametrize("path", ["/v1/brotli", "/v1/hang-up"])
+def test_a_failure_after_the_key_left_says_it_was_sent(client, auth, db, vault, path):
+  weather = _app(db, "weather")
+  vault.put_key("echoed", {"value": DUMMY, "inject": ASK["inject"],
+                           "grants": {"apps": [{"id": weather.id, "install": weather.install_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}})
+  failed = client.get(f"/api/keys/use/echoed/api.example.com{path}", headers=_app_auth(db, weather))
+  assert failed.status_code == 502 and failed.headers["X-Vault-Denied"] == "1"
+  assert failed.headers["X-Vault-Key"] == "echoed"  # the request had gone out
+  refused = client.get("/api/keys/use/echoed/elsewhere.example/v1/x", headers=_app_auth(db, weather))
+  assert refused.headers.get("X-Vault-Denied") == "1" and "X-Vault-Key" not in refused.headers
 
 
 # -- the retired per-app secret store ------------------------------------------
