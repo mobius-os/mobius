@@ -254,3 +254,28 @@
   .mobius-account__spin,
   .mobius-account__skeleton { animation: none; }
 }
+
+/* Credits row: the spendable balance, figure over unit, on the right. */
+.mobius-account__balance {
+  display: grid;
+  flex: none;
+  justify-items: end;
+  gap: 1px;
+  text-align: right;
+}
+.mobius-account__balance-figure {
+  /* Green like Connected and incoming credits: money you can spend. */
+  color: var(--green-text, var(--green));
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.mobius-account__balance-unit {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+.mobius-account__balance--owed .mobius-account__balance-figure,
+.mobius-account__balance--owed .mobius-account__balance-unit { color: var(--warning-text, var(--warning)); }

@@ -469,8 +469,14 @@ def purchase_terms() -> dict:
   return {**_call("GET", "purchase-terms", credentials), "pairing": credentials["pairing"]}
 
 
-def transactions(limit: int = 50) -> dict:
-  return _call("GET", f"transactions?limit={max(1, min(int(limit), 200))}", _paired())
+def transactions(limit: int = 50, before: str | None = None) -> dict:
+  """One page of the wallet's history, newest first. ``before`` is the
+  ``next_cursor`` of the previous page (a ledger entry id); the service
+  answers ``next_cursor`` only while older entries remain."""
+  path = f"transactions?limit={max(1, min(int(limit), 200))}"
+  if before is not None:
+    path += f"&before={_path_piece(before, _UUID)}"
+  return _call("GET", path, _paired())
 
 
 def fund_models(amount_micro: int, idempotency_key: str) -> dict:

@@ -275,6 +275,22 @@ test('a paid checkout refreshes the balance and releases its lifecycle', async t
   assert.equal(hook.result.current.notice, 'paid')
 })
 
+test('stepping away from the Credits page mid-checkout still confirms the payment', async t => {
+  // Settings owns the wallet and only deactivates it when the owner leaves
+  // the Credits and account pages; the open checkout must not be abandoned.
+  const { server, hook, popup, purchase } = await checkoutHook(t)
+  hook.rerender({ active: false })
+  assert.equal(hook.result.current.busy, true)
+  server.topupStatus = 'paid'
+  popup.closed = true
+  t.mock.timers.tick(800)
+  await purchase
+  await flush()
+  assert.equal(hook.result.current.notice, 'paid')
+  assert.equal(hook.result.current.busy, false)
+  assert.equal(server.calls.find(c => c.path.endsWith('/topup')).signal.aborted, false)
+})
+
 /**
  * A Möbius launched from mobius.you that the launcher can pair: unpaired, or
  * with `revoked`, paired with a key the service now refuses.
