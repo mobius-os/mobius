@@ -182,14 +182,21 @@ export const ADMISSION_WITHDRAWN = name =>
   `${name} can no longer run in this chat. Open ${name} to check the result of the last action before trying again.`
 
 /** Whether the owner still has to act on this block: it is the newest of its
- *  kind, in the chat's last message, and its app reports a control the owner
- *  can press now. A control that only opens the app, one that is busy, hidden
- *  or disabled, and the host's own ask (an offer, not a pending step) do not
- *  count, so a sent or settled block stops waiting by itself. */
-export function blockAwaitsOwner({ state, admitted, context, ask }) {
-  if (!state || !admitted || ask || state.recoveryPending) return false
+ *  kind, in the chat's last message, and it draws a control the owner can press
+ *  now. The controls are the ones PassiveBlockView draws (the snapshot's block
+ *  and item actions, so an item action replaced by the app's own rows is not
+ *  one), and none is pressable while the session is locked. A control that
+ *  only opens the app, one that is busy, hidden or disabled, and the host's own
+ *  ask (an offer, not a pending step) do not count, so a sent or settled block
+ *  stops waiting by itself. */
+export function blockAwaitsOwner({ block, state, admitted, context, ask, locked = false }) {
+  if (!state || !admitted || locked || ask || state.recoveryPending) return false
   if (context?.latest !== true || context.tail !== true) return false
-  return state.actions.some(action => !action.hidden && !action.disabled && !action.busy && !action.open)
+  const snapshot = sessionSnapshot(block, state)
+  return [snapshot.action, ...snapshot.items.map(item => item.action)].some(target => {
+    const action = target && state.actions.find(candidate => candidate.key === target.intent)
+    return Boolean(action) && !action.hidden && !action.disabled && !action.busy && !action.open
+  })
 }
 
 export default function PassiveAppBlock({ block, app, onInternalNav, admitted = true }) {
@@ -225,7 +232,8 @@ export default function PassiveAppBlock({ block, app, onInternalNav, admitted = 
   useEffect(() => setWantsFrame(session.wantsFrame), [session.wantsFrame])
   useEffect(() => setWaking(session.waking), [session.waking])
   const ask = blockAsk({ state: session.displayState, admitted, allowed: askAllowed, context: chat.context })
-  const awaitsOwner = blockAwaitsOwner({ state: session.displayState, admitted, context: chat.context, ask })
+  const awaitsOwner = blockAwaitsOwner({ block, state: session.displayState, admitted, context: chat.context, ask,
+    locked: sessionLocked(session, admitted) })
   const { setWaiting } = chat
   useEffect(() => { setWaiting(awaitsOwner ? app.name : '') }, [setWaiting, awaitsOwner, app.name])
   if (passiveBlockMode({ admitted, supported: session.supported, near, granted, retained: session.retained, staticOpen, hasPresentation: Boolean(session.displayState) }) === 'static') {

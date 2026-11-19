@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { AskControl, PassiveBlockView, SessionControls, blockAsk, blockAwaitsOwner, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { AskControl, PassiveBlockView, SessionControls, blockAsk, blockAwaitsOwner, passiveBlockMode, sessionLocked } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -583,25 +583,54 @@ test('after a tap the ask waits, and says why only to assistive technology', () 
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
 })
 
-test('a block awaits the owner only while its app offers a control to press, on the newest block of the last message', () => {
-  const press = { hidden: false, disabled: false, busy: false, open: false }
-  const state = { actions: [press], recoveryPending: false }
+test('a block awaits the owner only while it draws a control to press, on the newest block of the last message', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send', intent: 'send:all' } }) })
+  const press = { key: 'send:all', hidden: false, disabled: false, busy: false, open: false }
+  const state = { actions: [press], recoveryPending: false, rows: null }
   const context = { chatId: 'chat-1', latest: true, tail: true }
-  assert.equal(blockAwaitsOwner({ state, admitted: true, context, ask: null }), true)
-  assert.equal(blockAwaitsOwner({ state: { ...state, actions: [{ ...press, disabled: true }, press] }, admitted: true, context, ask: null }),
-    true, 'one pressable control is enough')
+  const awaits = input => blockAwaitsOwner({ block, state, admitted: true, context, ask: null, locked: false, ...input })
+  assert.equal(awaits({}), true)
   for (const input of [
-    { state: null, admitted: true, context, ask: null },
-    { state, admitted: false, context, ask: null },
-    { state, admitted: true, context: null, ask: null },
-    { state, admitted: true, context: { ...context, latest: false }, ask: null },
-    { state, admitted: true, context: { ...context, tail: false }, ask: null },
-    { state, admitted: true, context, ask: fixAsk },
-    { state: { ...state, recoveryPending: true }, admitted: true, context, ask: null },
-    { state: { ...state, actions: [] }, admitted: true, context, ask: null },
-    ...['hidden', 'disabled', 'busy', 'open'].map(flag => (
-      { state: { ...state, actions: [{ ...press, [flag]: true }] }, admitted: true, context, ask: null })),
-  ]) assert.equal(blockAwaitsOwner(input), false, JSON.stringify(input))
+    { state: null },
+    { admitted: false },
+    { context: null },
+    { context: { ...context, latest: false } },
+    { context: { ...context, tail: false } },
+    { ask: fixAsk },
+    { locked: true },
+    { state: { ...state, recoveryPending: true } },
+    { state: { ...state, actions: [] } },
+    ...['hidden', 'disabled', 'busy', 'open'].map(flag => ({ state: { ...state, actions: [{ ...press, [flag]: true }] } })),
+  ]) assert.equal(awaits(input), false, JSON.stringify(input))
+})
+
+test('the waiting cue follows the controls the block draws: an item action the app\'s rows replace is none, and a locked session offers none', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    items: [{ title: 'First change', intent: 'open:a', action: { label: 'Contribute', intent: 'send:a' } }] }) })
+  const keys = new Set(['send:a'])
+  const context = { chatId: 'chat-1', latest: true, tail: true }
+  const report = extra => sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send:a', label: 'Contribute' }], ...extra }, 's', keys)
+  const drawn = state => renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: false, onEvent() {} }))
+  const awaits = (state, locked = false) => blockAwaitsOwner({ block, state, admitted: true, context, ask: null, locked })
+  // The app's own rows (here none) replace the saved item, and its control with it.
+  const replaced = report({ rows: [] })
+  assert.doesNotMatch(drawn(replaced), /<button/, 'the item control is not drawn')
+  assert.equal(awaits(replaced), false)
+  // Without rows the item's control is drawn and pressable.
+  const plain = report({})
+  assert.match(drawn(plain), /<button type="button" class="md-app-block__action"[^>]*>Contribute<\/button>/)
+  assert.equal(awaits(plain), true)
+  // One action busy locks every button (sessionLocked), including the idle sibling.
+  const two = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send all', intent: 'send:all' }, items: [{ title: 'First change', intent: 'open:a', action: { label: 'Contribute', intent: 'send:a' } }] }) })
+  const busy = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [
+    { key: 'send:all', label: 'Send all', busy: true }, { key: 'send:a', label: 'Contribute' }] }, 's', new Set(['send:all', 'send:a']))
+  const locked = sessionLocked({ state: busy, awaitingAck: false, authoritative: true }, true)
+  assert.equal(locked, true)
+  const html = renderToStaticMarkup(createElement(PassiveBlockView, { block: two, app: admitted[0], state: busy, locked, confirmArmed: false, onEvent() {} }))
+  assert.equal((html.match(/<button/g) || []).length, (html.match(/<button[^>]*disabled=""/g) || []).length, 'every drawn button is disabled')
+  assert.equal(blockAwaitsOwner({ block: two, state: busy, admitted: true, context, ask: null, locked }), false)
 })
 
 test('an ask is drawn only for an admitted app on the attested chat\'s newest block, outside recovery', () => {
