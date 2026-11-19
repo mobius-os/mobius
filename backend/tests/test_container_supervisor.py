@@ -155,10 +155,17 @@ def test_boot_starts_with_default_signal_handling_like_under_tini(tmp_path):
   # shell pipeline and the server react to a closed pipe.
   # The supervisor also blocks its handled signals while it starts a boot; the
   # boot must not inherit that mask either.
+  # Read the boot's own status with shell builtins only. A command
+  # substitution forks, and glibc's fork() blocks every signal (its internal
+  # ones included) in the shell until the fork returns; a child scheduled
+  # first then reads that temporary full mask, which no boot ever started
+  # with. Any shell built on glibc has the same race.
   proc, log = _start(
     tmp_path,
-    'echo "ignored $(awk \'/^SigIgn:/ {print $2}\' /proc/$$/status)" >> "$BOOT_LOG"; '
-    'echo "blocked $(awk \'/^SigBlk:/ {print $2}\' /proc/$$/status)" >> "$BOOT_LOG"; exit 0',
+    'while read -r key value; do case $key in '
+    'SigIgn:) echo "ignored $value" >> "$BOOT_LOG" ;; '
+    'SigBlk:) echo "blocked $value" >> "$BOOT_LOG" ;; '
+    'esac; done < /proc/$$/status; exit 0',
   )
   assert proc.wait(timeout=15) == 0
   assert int(_log_lines(log, "ignored")[0][0], 16) == 0
