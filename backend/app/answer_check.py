@@ -20,7 +20,10 @@ turn, all three count. Just before it saves an owner card (a saved card ends
 the turn, so a later check could never reopen it), only images and links do:
 a question, approval or restart card carries the turn's closing message in its
 `message`, so one without it is declined outright, with no reading of
-thinking. `after_step_reason` is the narrower check run after each work step,
+thinking. A key request may carry one too but is never declined for lacking
+it: it often answers at once without saving a card, and then drops it (and the
+turn goes on, so its caller forgets a hold once the request returns).
+`after_step_reason` is the narrower check run after each work step,
 for words written as an extra thinking part. Both return text for the agent,
 or None. They never quote thinking back: asking the model to reproduce even
 summarized thinking can trigger a reasoning-extraction refusal, so the
@@ -80,6 +83,13 @@ _BEFORE_CARD = (
   "sees only your visible reply; your thinking and tool activity are hidden "
   "from them."
 )
+# A key request often answers at once without any card, so a held one is told
+# about the request, not a card.
+_BEFORE_KEY_REQUEST = (
+  "Möbius check before your key request is made. The request was NOT made. "
+  "The owner sees only your visible reply; your thinking and tool activity "
+  "are hidden from them."
+)
 _MISSING_ANSWER = (
   "Your visible reply may not yet answer the owner's latest message or "
   "report the result. {seen} Re-read that message and the verified task "
@@ -118,6 +128,10 @@ _BEFORE_CARD_NEXT = (
   "Do not mention this check. Then call the same card tool again with the "
   "same arguments; this check speaks again only about something new."
 )
+_BEFORE_KEY_REQUEST_NEXT = (
+  "Do not mention this check. Then make the same key request again with the "
+  "same arguments; this check speaks again only about something new."
+)
 _BEFORE_MESSAGE_CARD_NEXT = (
   "Do not mention this check. Put any needed explanation, image or link in "
   "the card's message and call the same card tool again, keeping its decision "
@@ -143,19 +157,22 @@ def reason(
   before_card: bool,
   reminded: bool = False,
   last_assistant_message: object = None,
-  message_card: bool = False,
+  message_required: bool = False,
+  key_request: bool = False,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
   ``last_assistant_message`` is pending visible text: the CLI's final text at
-  Stop, or a card's closing message before its save. ``message_card`` marks a
-  card that carries that message (all but secret cards): one without it is
-  declined, and repairs are directed into it. Before a card, thinking is not
-  read at all; the message rule covers a closing message left out. Once a
-  reminder has spoken this turn (``reminded``), the length rule stays quiet:
-  it has no new evidence, and a reply that ends with more reasoning and
-  nothing more to say, as the reminder allows, must not be returned again for
-  it.
+  Stop, or a card's closing message before its save. ``message_required``
+  marks a card whose save needs that message (question, approval, restart):
+  one without it is declined, and repairs are directed into it. Other cards'
+  repairs go into visible text, which the owner sees whether or not a card is
+  saved. Before a card, thinking is not read at all; the message rule covers a
+  closing message left out. Once a reminder has spoken this turn
+  (``reminded``), the length rule stays quiet: it has no new evidence, and a
+  reply that ends with more reasoning and nothing more to say, as the reminder
+  allows, must not be returned again for it. ``key_request`` words a hold
+  before a key request, which may never save a card, as a request not made.
   """
   if not isinstance(blocks, list):
     return None
@@ -163,7 +180,7 @@ def reason(
   visible = _with_undispatched_tail(dispatched, last_assistant_message)
   parts: list[str] = []
   if before_card:
-    if message_card and not (
+    if message_required and not (
       isinstance(last_assistant_message, str) and last_assistant_message.strip()
     ):
       parts.append(_NO_CARD_MESSAGE)
@@ -190,8 +207,10 @@ def reason(
     parts.append(_LINKS.format(hosts=", ".join(link_hosts)))
   if not parts:
     return None
+  if before_card and key_request:
+    return " ".join([_BEFORE_KEY_REQUEST, *parts, _BEFORE_KEY_REQUEST_NEXT])
   if before_card:
-    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_card else _BEFORE_CARD_NEXT
+    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_required else _BEFORE_CARD_NEXT
     return " ".join([_BEFORE_CARD, *parts, next_step])
   return " ".join([_END_OF_TURN, *parts, _END_OF_TURN_NEXT])
 

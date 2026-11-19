@@ -4099,10 +4099,140 @@ async def test_answer_check_before_a_card_is_registered_only_for_owner_card_tool
   assert re.fullmatch(r"[a-zA-Z0-9_|]+", matcher.matcher)
   assert set(matcher.matcher.split("|")) == {
     "mcp__mobius_control__request_approval",
+    "mcp__mobius_control__request_key",
     "mcp__mobius_control__request_question",
     "mcp__mobius_control__request_restart",
     "mcp__mobius_control__request_secret",
   }
+
+
+async def _call_key_request(options, **tool_input) -> dict:
+  """A `request_key` call through the PreToolUse hooks the CLI would run.
+
+  The CLI runs a hook only when its matcher lists the tool by exact name.
+  """
+  tool_name = "mcp__mobius_control__request_key"
+  hook_input = {
+    "hook_event_name": "PreToolUse", "tool_name": tool_name,
+    "tool_input": {"key": "weather", "reason": "Fetch the forecast.", **tool_input},
+    "tool_use_id": "toolu_k",
+  }
+  for matcher in options.hooks["PreToolUse"]:
+    if tool_name in matcher.matcher.split("|"):
+      for hook in matcher.hooks:
+        output = await hook(hook_input, "toolu_k", {})
+        if "hookSpecificOutput" in output:
+          return output
+  return {"continue_": True}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["image", "link"])
+async def test_a_key_request_is_held_while_its_reply_points_to_something_unshown(monkeypatch, missing):
+  chat_id = "answer-check-key-card-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  if missing == "image":
+    bus.assistant_blocks = _viewed_before_after(chat_id)
+    shown = f"![Before and after](/api/chats/{chat_id}/media/before-after.png)"
+  else:
+    bus.assistant_blocks = _link_only_in_tool_output("Pay on the page linked above.")
+    shown = f"[Open checkout]({_CHECKOUT})"
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _call_key_request(self.options))
+      # The agent shows it in visible text and asks again unchanged.
+      bus.assistant_blocks.append({"type": "text", "content": shown})
+      decisions.append(await _call_key_request(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  output = decisions[0]["hookSpecificOutput"]
+  assert output["permissionDecision"] == "deny"
+  reason = output["permissionDecisionReason"]
+  assert ("before-after.png" if missing == "image" else "link but shows none") in reason
+  # No message is asked for: a key request that answers at once drops it, so
+  # the repair goes into visible text, which the owner sees either way.
+  assert "This card has no message" not in reason
+  assert "card's message" not in reason
+  # It may never save a card, so it is told about the request, not a card.
+  assert "The card was NOT saved" not in reason
+  assert "The request was NOT made" in reason
+  assert "make the same key request again with the same arguments" in reason
+  assert decisions[1] == {"continue_": True}
+
+
+async def _key_request_returns(options, response: dict) -> None:
+  """The PostToolUse hooks the CLI runs when a `request_key` call returns."""
+  tool_name = "mcp__mobius_control__request_key"
+  hook_input = {
+    "hook_event_name": "PostToolUse", "tool_name": tool_name,
+    "tool_input": {"key": "weather", "reason": "Fetch the forecast."},
+    "tool_response": [{"type": "text", "text": json.dumps(response)}],
+    "tool_use_id": "toolu_k",
+  }
+  for matcher in options.hooks["PostToolUse"]:
+    if matcher.matcher is None or tool_name in matcher.matcher.split("|"):
+      for hook in matcher.hooks:
+        await hook(hook_input, "toolu_k", {})
+
+
+@pytest.mark.asyncio
+async def test_a_held_key_request_answered_at_once_leaves_the_end_of_turn_check_its_image(monkeypatch):
+  # Held for an unshown image, the key request is made again unchanged and
+  # answers at once without a card, so the turn goes on. The hold must not
+  # count as having reviewed that image: the turn still ends without showing
+  # it, and the end-of-turn check says so, as it would with no key request.
+  chat_id = "answer-check-key-answered-at-once-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = _viewed_before_after(chat_id)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _call_key_request(self.options))
+      decisions.append(await _call_key_request(self.options))
+      await _key_request_returns(self.options, {
+        "state": "answered_without_card", "answer": "granted",
+      })
+      bus.assistant_blocks.append({"type": "text", "content": "Here is the before and after."})
+      decisions.append(await _fire_stop_hook(
+        self.options, last_assistant_message="Here is the before and after.",
+      ))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  assert decisions[0]["hookSpecificOutput"]["permissionDecision"] == "deny"
+  assert decisions[1] == {"continue_": True}
+  assert decisions[2]["decision"] == "block"
+  assert "before-after.png" in decisions[2]["reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["missing", None, "", "   "])
+async def test_a_key_request_without_a_message_goes_through_when_nothing_is_unshown(monkeypatch, message):
+  # A key the agent may already use answers at once with no card, and the
+  # turn continues; nothing here may hold that call for a closing message.
+  chat_id = "answer-check-key-no-message-chat"
+  decisions: list[dict] = []
+  bus = _ChatBus()
+  bus.assistant_blocks = [
+    {"type": "thinking", "content": "The forecast needs the weather key. " * 30},
+    {"type": "text", "content": "Checking the forecast."},
+  ]
+  tool_input = {} if message == "missing" else {"message": message}
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _call_key_request(self.options, **tool_input))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  assert decisions == [{"continue_": True}]
 
 
 @pytest.mark.asyncio
