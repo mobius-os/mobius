@@ -20,7 +20,9 @@ turn, all three count. Just before it saves an owner card (a saved card ends
 the turn, so a later check could never reopen it), only images and links do:
 a question, approval or restart card carries the turn's closing message in its
 `message`, so one without it is declined outright, with no reading of
-thinking. `after_step_reason` is the narrower check run after each work step,
+thinking. A key request may carry one too but is never declined for lacking
+it: it often answers at once without saving a card, and then drops it.
+`after_step_reason` is the narrower check run after each work step,
 for words written as an extra thinking part. Both return text for the agent,
 or None. They never quote thinking back: asking the model to reproduce even
 summarized thinking can trigger a reasoning-extraction refusal, so the
@@ -143,19 +145,20 @@ def reason(
   before_card: bool,
   reminded: bool = False,
   last_assistant_message: object = None,
-  message_card: bool = False,
+  message_required: bool = False,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
   ``last_assistant_message`` is pending visible text: the CLI's final text at
-  Stop, or a card's closing message before its save. ``message_card`` marks a
-  card that carries that message (all but secret cards): one without it is
-  declined, and repairs are directed into it. Before a card, thinking is not
-  read at all; the message rule covers a closing message left out. Once a
-  reminder has spoken this turn (``reminded``), the length rule stays quiet:
-  it has no new evidence, and a reply that ends with more reasoning and
-  nothing more to say, as the reminder allows, must not be returned again for
-  it.
+  Stop, or a card's closing message before its save. ``message_required``
+  marks a card whose save needs that message (question, approval, restart):
+  one without it is declined, and repairs are directed into it. Other cards'
+  repairs go into visible text, which the owner sees whether or not a card is
+  saved. Before a card, thinking is not read at all; the message rule covers a
+  closing message left out. Once a reminder has spoken this turn
+  (``reminded``), the length rule stays quiet: it has no new evidence, and a
+  reply that ends with more reasoning and nothing more to say, as the reminder
+  allows, must not be returned again for it.
   """
   if not isinstance(blocks, list):
     return None
@@ -163,7 +166,7 @@ def reason(
   visible = _with_undispatched_tail(dispatched, last_assistant_message)
   parts: list[str] = []
   if before_card:
-    if message_card and not (
+    if message_required and not (
       isinstance(last_assistant_message, str) and last_assistant_message.strip()
     ):
       parts.append(_NO_CARD_MESSAGE)
@@ -191,7 +194,7 @@ def reason(
   if not parts:
     return None
   if before_card:
-    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_card else _BEFORE_CARD_NEXT
+    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_required else _BEFORE_CARD_NEXT
     return " ".join([_BEFORE_CARD, *parts, next_step])
   return " ".join([_END_OF_TURN, *parts, _END_OF_TURN_NEXT])
 

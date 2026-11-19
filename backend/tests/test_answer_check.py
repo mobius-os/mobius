@@ -10,11 +10,11 @@ from app import answer_check
 
 
 def _reason(
-  blocks, *, before_card, chat_id="c", media_dir="/m", last=None, message_card=False,
+  blocks, *, before_card, chat_id="c", media_dir="/m", last=None, message_required=False,
 ):
   return answer_check.reason(
     blocks, chat_id=chat_id, media_dir=media_dir, before_card=before_card,
-    last_assistant_message=last, message_card=message_card,
+    last_assistant_message=last, message_required=message_required,
   )
 
 
@@ -72,11 +72,11 @@ def test_answer_check_before_a_card_asks_for_its_message_instead_of_reading_thin
   # A question, approval or restart card carries the turn's closing message,
   # so whether one is there decides; closing reasoning is not read at all.
   closing = _closing_draft_in_thinking()
-  assert _reason(closing, before_card=True, message_card=True, last="Two options below.") is None
+  assert _reason(closing, before_card=True, message_required=True, last="Two options below.") is None
   for blank in (None, "", "   ", 5):
     reason = _reason(
       [{"type": "text", "content": "Two options, pick one below."}],
-      before_card=True, message_card=True, last=blank,
+      before_card=True, message_required=True, last=blank,
     )
     assert reason is not None
     assert reason.startswith("Möbius check before your card is saved.")

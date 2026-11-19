@@ -274,7 +274,16 @@ _CLAUDE_TURN_END_TOOLS = (
 # runs just before one is saved (see `answer_check.reason`).
 _ANSWER_CHECK_CARD_TOOLS = frozenset(
   f"mcp__{CONTROL_SERVER_NAME}__{name}"
-  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
+  for name in (
+    APPROVAL_TOOL_NAME, KEY_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME,
+  )
+)
+# The cards whose save needs the turn's closing `message`. A key request may
+# carry one, but often answers at once without saving a card and drops it; a
+# secret card has none.
+_ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME)
 )
 # The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
 # of exact tool names, so only these calls pay the PreToolUse round trip.
@@ -1447,7 +1456,7 @@ async def run_claude_sdk_turn(
 
   def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
-    message_card: bool = False,
+    message_required: bool = False,
   ) -> str | None:
     nonlocal answer_check_reminders
     if (
@@ -1463,7 +1472,7 @@ async def run_claude_sdk_turn(
       before_card=before_card,
       reminded=answer_check_reminders > 0,
       last_assistant_message=last_assistant_message,
-      message_card=message_card,
+      message_required=message_required,
     )
     if reason is None:
       return None
@@ -1501,12 +1510,11 @@ async def run_claude_sdk_turn(
       return {"continue_": True}
     # A successful save publishes this closing message with its card. Count
     # it as pending visible text, without publishing it before the save.
-    # Secret cards have no closing-message field.
-    message_card = hook_input.get("tool_name") != f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}"
     tool_input = hook_input.get("tool_input")
-    message = tool_input.get("message") if message_card and isinstance(tool_input, dict) else None
+    message = tool_input.get("message") if isinstance(tool_input, dict) else None
     reason = _answer_check_since_last_reminder(
-      before_card=True, last_assistant_message=message, message_card=message_card,
+      before_card=True, last_assistant_message=message,
+      message_required=hook_input.get("tool_name") in _ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS,
     )
     if reason is None:
       return {"continue_": True}
