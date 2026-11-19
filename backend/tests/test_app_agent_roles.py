@@ -1678,46 +1678,84 @@ def test_from_the_room_address_only_agent_keys_work(client, owner_token, db):
   assert client.get("/api/apps/", headers=owner).status_code == 200
 
 
-def test_an_agent_use_is_recorded_only_once_the_route_allows_it(monkeypatch):
-  import asyncio
+@pytest.mark.parametrize(
+  "vault_header, recorded",
+  [
+    ({"x-vault-key": "openweather"}, True),  # sent; the site said 403
+    ({"x-vault-denied": "1"}, False),  # the vault refused; nothing left
+  ],
+)
+def test_a_key_use_is_recorded_when_the_key_was_sent(
+  client, owner_token, db, monkeypatch, vault_header, recorded
+):
+  import httpx
 
-  from app import activity, auth
+  from app import activity, key_vault
 
+  app = _local_app(db, "weather", _role("tools", "keys"))
+  key, run = _agent_key_for(db, app, role="tools", tools=("keys",))
   logged = []
+
+  async def fake_borrow(*_args, **_kwargs):
+    return httpx.Response(
+      403, headers=vault_header, stream=httpx.ByteStream(b"no")
+    ), None
+
+  async def fake_close(_answer):
+    pass
+
+  monkeypatch.setattr(key_vault, "borrow", fake_borrow)
+  monkeypatch.setattr(key_vault, "close_use", fake_close)
   monkeypatch.setattr(activity, "log_event", lambda *a, **kw: logged.append(kw))
-  claims = AgentKey.claims_for(AgentRole("tools", ("keys",), "why"), "claude")
-  monkeypatch.setattr(
-    auth, "decode_access_token", lambda _t: {**claims, "scope": "app", "app_id": 7}
+  answer = client.get(
+    "/api/keys/use/openweather/api.openweathermap.org/data",
+    headers={"Authorization": f"Bearer {key}"},
   )
-  path = "/api/keys/use/openweather/api.openweathermap.org/data"
+  assert answer.status_code == 403
+  uses = [entry for entry in logged if entry.get("kind") == "use_key"]
+  assert uses == (
+    [
+      {
+        "app_id": app.id,
+        "chat_id": run.chat_id,
+        "kind": "use_key",
+        "key": "openweather",
+        "site": "api.openweathermap.org",
+      }
+    ]
+    if recorded
+    else []
+  )
 
-  async def call(status):
-    async def route(scope, receive, send):
-      await send({"type": "http.response.start", "status": status, "headers": []})
-      await send({"type": "http.response.body", "body": b""})
 
-    async def receive():
-      return {"type": "http.request", "body": b""}
+@pytest.mark.parametrize("sent, status", [(True, 502), (False, 400)])
+def test_a_page_is_recorded_once_it_was_requested(
+  client, owner_token, db, monkeypatch, sent, status
+):
+  from fastapi import HTTPException
 
-    async def send(_message):
-      pass
+  from app import activity
+  from app.routes import proxy
 
-    scope = {
-      "type": "http",
-      "method": "GET",
-      "path": path,
-      "query_string": b"",
-      "headers": [(b"authorization", b"Bearer stub")],
-      "server": ("127.0.0.1", 80),
-    }
-    await agent_roles.AgentKeyScope(route)(scope, receive, send)
+  app = _local_app(db, "research", _role("tools", "web"))
+  key, _run = _agent_key_for(db, app, role="tools", tools=("web",))
+  logged = []
 
-  asyncio.run(call(404))
-  assert logged == []
-  asyncio.run(call(200))
-  assert [(entry["kind"], entry["key"], entry["site"]) for entry in logged] == [
-    ("use_key", "openweather", "api.openweathermap.org")
-  ]
+  async def fake_read(_client, _url, _max, *, on_send=None, **_kwargs):
+    if sent:
+      on_send()  # the request left Möbius; the site then failed
+    raise HTTPException(status, "site failed" if sent else "not a public address")
+
+  monkeypatch.setattr(proxy, "_read_external_get", fake_read)
+  monkeypatch.setattr(activity, "log_event", lambda *a, **kw: logged.append(kw))
+  answer = client.get(
+    "/api/proxy",
+    params={"url": "https://example.com/page"},
+    headers={"Authorization": f"Bearer {key}"},
+  )
+  assert answer.status_code == status
+  pages = [entry["url"] for entry in logged if entry.get("kind") == "open_page"]
+  assert pages == (["https://example.com/page"] if sent else [])
 
 
 @pytest.mark.skipif(

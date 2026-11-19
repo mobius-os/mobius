@@ -161,6 +161,7 @@ def test_proxy_get_allows_opaque_app_frame_request(
 
   async def fake_read(
     _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+    on_send,
   ):
     assert url == "https://example.com/manifest.json"
     return _ExternalRead(
@@ -262,6 +263,7 @@ def test_proxy_releases_db_connection_before_external_fetch(
 
   async def fake_read(
     _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+    on_send,
   ):
     assert url == "https://example.com/data"
     checked_out.append(checked_out_connections())
@@ -329,6 +331,7 @@ def test_proxy_sends_identifiable_user_agent(client, owner_token, monkeypatch):
 
   async def fake_read(
     _client, url, max_bytes, *, headers, probe_truncation, cache_headers,
+    on_send,
   ):
     seen.append(headers["User-Agent"])
     return _ExternalRead(

@@ -420,6 +420,12 @@ async def use_key(
   except key_vault.VaultTimeout as exc:
     raise HTTPException(504, str(exc)) from exc
   upstream = answer[0]
+  if "x-vault-key" in upstream.headers:
+    # The vault sent the key and relays the site's answer (a refusal of its
+    # own carries X-Vault-Denied instead): the use happened.
+    from app.agent_roles import record_agent_use
+
+    record_agent_use(request, "use_key", key=name, site=host)
   response_headers = {
     k: v for k, v in upstream.headers.items()
     if k.lower() in _RELAYED_RESPONSE_HEADERS or k.lower().startswith(_RELAYED_RESPONSE_PREFIXES)

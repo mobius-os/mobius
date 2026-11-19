@@ -191,11 +191,6 @@ def app_tool_exposed_name(name: str) -> str:
   return f"{slug.replace('-', '_')}_{tool}"
 
 
-# Routes whose use is recorded per app, so the owner can see what left.
-WEB_ROUTES = frozenset(path for _method, path in TOOLS["web"].routes)
-KEY_USE_PREFIX = "/api/keys/use/"
-
-
 @dataclass(frozen=True)
 class AgentRole:
   role: str  # the manifest's agent.scope
@@ -423,7 +418,8 @@ class AgentKeyScope:
       for key in filter(None, keys):
         if scope["type"] != "http" or not key.may_call(method, scope["path"]):
           return await _refuse(scope, receive, send, _outside_access(key))
-        send = _recording_use(key, scope, send)
+        # The route records what it sends outside Möbius (record_agent_use).
+        scope.setdefault("state", {})["agent_key"] = key
         break
     await self.app(scope, receive, send)
 
@@ -441,43 +437,23 @@ def _outside_access(key: AgentKey) -> str:
   return f"An app agent with {label} access cannot use this part of Möbius."
 
 
-def _recording_use(key: AgentKey, scope: dict, send):
-  """``send``, recording the use once the route has allowed it."""
-
-  async def recording(message):
-    if message["type"] == "http.response.start" and message["status"] < 400:
-      _record_use(key, scope)
-    await send(message)
-
-  return recording
-
-
-def _record_use(key: AgentKey, scope: dict) -> None:
-  """Record what a confined agent sends outside Möbius, per app: each page it
-  opens and each key it uses (the key and site, never the request)."""
+def record_agent_use(request: Any, kind: str, **fields: str) -> None:
+  """Record, per app, what a confined agent sent outside Möbius: each page it
+  opened and each key it used (the key and site, never the request). Called
+  by the route once the request has actually gone out, whatever the site then
+  answered; Möbius's own refusals send nothing and record nothing."""
+  key = getattr(request.state, "agent_key", None)
+  if key is None:
+    return
   from app import activity
 
-  path = scope["path"]
-  if path in WEB_ROUTES:
-    query = parse_qs(scope.get("query_string", b"").decode("latin-1"))
-    url = (query.get("url") or [""])[0]
-    activity.log_event(
-      "app_agent_web",
-      app_id=key.app_id,
-      chat_id=key.chat,
-      kind="open_page",
-      url=url[:2000],
-    )
-  elif path.startswith(KEY_USE_PREFIX):
-    name, _, rest = path[len(KEY_USE_PREFIX) :].partition("/")
-    activity.log_event(
-      "app_agent_web",
-      app_id=key.app_id,
-      chat_id=key.chat,
-      kind="use_key",
-      key=name[:200],
-      site=rest.partition("/")[0][:300],
-    )
+  activity.log_event(
+    "app_agent_web",
+    app_id=key.app_id,
+    chat_id=key.chat,
+    kind=kind,
+    **{name: value[:2000] for name, value in fields.items()},
+  )
 
 
 async def _refuse(scope, receive, send, reason: str) -> None:
