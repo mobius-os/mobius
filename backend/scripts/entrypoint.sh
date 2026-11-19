@@ -265,7 +265,7 @@ _served_sha="${BUILD_SHA:-unknown}"
 # stray PYTHONPATH could shadow app.main. SECRET_KEY/DATABASE_URL/DATA_DIR are
 # preserved (env -u removes only the named vars) so `import app.main` still
 # resolves settings exactly as the served process does.
-_env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE -u MOBIUS_SSO_CLIENT_SECRET -u MOBIUS_COMPUTE_INSTANCE_TOKEN -u MOBIUS_IDENTITY_BOOTSTRAP"
+_env_scrub="env -u PYTHONPATH -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_OBJECT_DIRECTORY -u GIT_COMMON_DIR -u GIT_NAMESPACE -u MOBIUS_SSO_CLIENT_SECRET -u MOBIUS_COMPUTE_INSTANCE_TOKEN -u MOBIUS_IDENTITY_BOOTSTRAP -u MOBIUS_STAGING_CLIENT_SECRET -u MOBIUS_STAGING_BOOTSTRAP"
 
 _platform_git_valid() {
   [ -d /data/platform/.git ] || return 1
@@ -1053,6 +1053,8 @@ unset MOBIUS_IDENTITY_BOOTSTRAP
 # The broker owns managed account credentials; neither it nor the retired
 # compute token may reach the unprivileged app or its child processes.
 unset MOBIUS_SSO_CLIENT_SECRET MOBIUS_COMPUTE_INSTANCE_TOKEN
+# A developer's staging launcher credential and receipt are the broker's too.
+unset MOBIUS_STAGING_CLIENT_SECRET MOBIUS_STAGING_BOOTSTRAP
 _identity_broker_ready=0
 for _broker_wait in $(seq 1 50); do
   if [ -S /run/mobius-identity-broker.sock ]; then

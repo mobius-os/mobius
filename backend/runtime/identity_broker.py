@@ -30,7 +30,7 @@ import urllib.parse
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, MutableMapping
 
 import httpx
 from cryptography.hazmat.primitives import serialization
@@ -83,7 +83,63 @@ def launcher_file(private_dir: Path, name: str, launcher: str) -> Path:
   return private_dir / f"{stem}.{digest}.{suffix}"
 
 
+MANAGED_INSTANCE_ID = r"mob_[A-Za-z0-9_-]{3,80}"
+MANAGED_INSTANCE_RE = re.compile(rf"^{MANAGED_INSTANCE_ID}$")
+
+
+def _is_https_origin(value: str) -> bool:
+  """Whether ``value`` is a bare HTTPS origin the server's settings accept too."""
+  try:
+    parsed = urllib.parse.urlsplit(value)
+    parsed.port
+  except ValueError:
+    return False
+  return parsed.scheme == "https" and bool(parsed.hostname) and not (
+    parsed.path or parsed.query or parsed.fragment
+    or parsed.username or parsed.password
+  )
+
+
+def select_launcher_side(
+  environ: MutableMapping[str, str], data_dir: Path,
+) -> dict[str, Any]:
+  """Start this boot on a developer's staging launcher when it was chosen.
+
+  A developer's instance carries a second launcher configuration under
+  ``MOBIUS_STAGING_*``; one word in the data directory chooses it for the next
+  boot. It replaces the default configuration for this process only: the
+  default link files and variables are never rewritten, so a boot without the
+  choice is the default launcher again. Anything missing or malformed means the
+  default. This is the only place the rule lives; the server asks for the
+  answer over the private socket.
+  """
+  issuer = _normalize_launcher(environ.pop("MOBIUS_STAGING_ISSUER", ""))
+  secret = environ.pop("MOBIUS_STAGING_CLIENT_SECRET", "")
+  bootstrap = environ.pop("MOBIUS_STAGING_BOOTSTRAP", "").strip()
+  available = (
+    _is_https_origin(issuer)
+    and issuer != DEFAULT_LAUNCHER
+    and len(secret) >= 32
+    and bool(MANAGED_INSTANCE_RE.fullmatch(environ.get("MOBIUS_SSO_INSTANCE_ID", "")))
+  )
+  try:
+    chosen = (data_dir / "launcher-side").read_text(encoding="utf-8").strip()
+  except (OSError, UnicodeError):
+    chosen = ""
+  if not available or chosen != "staging":
+    return {"available": available, "side": "production", "launcher": None}
+  environ["MOBIUS_IDENTITY_ISSUER"] = issuer
+  environ["MOBIUS_SSO_ISSUER"] = issuer
+  environ["MOBIUS_SSO_CLIENT_SECRET"] = secret
+  # The default launcher's enrollment receipt must not be offered to staging.
+  environ.pop("MOBIUS_IDENTITY_BOOTSTRAP", None)
+  if bootstrap:
+    environ["MOBIUS_IDENTITY_BOOTSTRAP"] = bootstrap
+  return {"available": True, "side": "staging", "launcher": issuer}
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
+LAUNCHER_SIDE = select_launcher_side(os.environ, DATA_DIR)
 PRIVATE_DIR = DATA_DIR / "identity-broker"
 IDENTITY_BASE_URL = launcher_origin(os.environ)
 KEY_PATH = PRIVATE_DIR / "instance-ed25519.pem"
@@ -125,8 +181,6 @@ MAX_CONTRIBUTION_BODY = 3_000_000
 log = logging.getLogger("mobius.identity_broker")
 REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$")
 INSTANCE_RE = re.compile(r"^mob_[A-Za-z0-9_-]{3,160}$")
-MANAGED_INSTANCE_ID = r"mob_[A-Za-z0-9_-]{3,80}"
-MANAGED_INSTANCE_RE = re.compile(rf"^{MANAGED_INSTANCE_ID}$")
 OAUTH_STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 MANAGED_PREFIX = "/managed"
 # Railway management is read-only from an instance apart from a few reviewed
@@ -1514,6 +1568,9 @@ class _Handler(BaseHTTPRequestHandler):
         raise FileNotFoundError("broker route not found")
       if is_unix and method == "GET" and path == "/identity":
         self._json(200, broker.identity())
+        return
+      if is_unix and method == "GET" and path == "/identity/launcher-side":
+        self._json(200, LAUNCHER_SIDE)
         return
       if is_unix and method == "POST" and path == "/identity/enroll":
         value = json.loads(self._body())

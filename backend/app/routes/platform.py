@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -28,7 +29,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app import auth, deployment_control, models, platform_activation, platform_update
+from app import (
+  auth, deployment_control, launcher_side, models, platform_activation,
+  platform_update,
+)
+from app.config import get_settings
 from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
@@ -481,6 +486,10 @@ def restart_platform(
   """Owner-confirmed restart to finish an update. Sends the response, then
   drains and asks the container supervisor to rerun the boot in place, so it
   starts with the new code (force-exit fallback)."""
+  return _restarting_response()
+
+
+def _restarting_response() -> JSONResponse:
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:
@@ -492,3 +501,42 @@ def restart_platform(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),
   )
+
+
+class LauncherSideOut(BaseModel):
+  available: bool
+  side: Literal["production", "staging"]
+
+
+class LauncherSideChoice(BaseModel):
+  side: Literal["production", "staging"]
+
+
+@router.get("/launcher-side", response_model=LauncherSideOut)
+def launcher_side_status(
+  _: models.Owner = Depends(get_current_owner),
+) -> LauncherSideOut:
+  """Whether this instance has a staging launcher, and the side it runs on."""
+  side = launcher_side.boot_side()
+  return LauncherSideOut(available=side.available, side=side.side)
+
+
+@router.post("/launcher-side", dependencies=[Depends(reject_cross_site)])
+def choose_launcher_side(
+  choice: LauncherSideChoice,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> JSONResponse:
+  """Record the side for the next boot and restart into it.
+
+  The launcher address is read once at start, so the choice takes a restart.
+  It picks the account service this instance trusts, which is the owner's
+  decision alone: Full access may restart, but not choose this.
+  """
+  # Production stays choosable, so a choice left from removed staging
+  # variables can always be cleared.
+  if choice.side == launcher_side.STAGING and not launcher_side.boot_side().available:
+    raise HTTPException(status_code=409, detail="No staging launcher is configured.")
+  # Refuse first: a recorded choice with no restart would surprise a later one.
+  response = _restarting_response()
+  launcher_side.choose_side(choice.side, Path(get_settings().data_dir))
+  return response
