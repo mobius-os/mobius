@@ -343,7 +343,7 @@ def test_trash_then_recover_keeps_the_installation_its_key_grants_name(
 
   def borrows(token):
     caller = kv.parse_caller(keys_routes._caller(get_principal(token=token, db=db)))
-    return store.authorize("lent", caller, "GET", "api.example.com", "/x")[1] == "dummy-lent-0123456789"
+    return store.authorize("lent", caller, "GET", "api.example.com", "/x").values["value"] == "dummy-lent-0123456789"
 
   assert borrows(_app_token(client, auth, app_id))
   assert client.delete(f"/api/apps/{app_id}", headers=auth).status_code == 204
