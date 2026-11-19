@@ -100,19 +100,27 @@ function formatFailure(failure, outputByFile) {
   const cause = error?.cause ?? error
   out.push(`✖ ${failure.name}`)
   out.push(`  at ${relativeFile(failure.file)}:${failure.line ?? '?'}`)
-  // A file-level failure with the generic "test failed" message is a test
-  // process that crashed or never loaded; its own output carries the error
-  // and has already arrived by the time the file-level result is reported.
-  const fileLevelCrash = failure.nesting === 0
-    && String(cause?.message ?? cause) === 'test failed'
-    && failure.file && !failure.entryFile
-  if (fileLevelCrash) {
-    const output = (outputByFile.get(failure.file) || '').trimEnd().split('\n')
-    out.push(`  test file exited unsuccessfully; last ${Math.min(output.length, OUTPUT_TAIL_LINES)} output lines:`)
-    out.push(indent(output.slice(-OUTPUT_TAIL_LINES).join('\n')))
-  } else {
-    if (error?.failureType && error.failureType !== 'testCodeFailure') out.push(`  (${error.failureType})`)
-    out.push(indent(describeError(cause).join('\n')))
+  try {
+    // A file-level failure with the generic "test failed" message is a test
+    // process that crashed or never loaded; its own output carries the error
+    // and has already arrived by the time the file-level result is reported.
+    const fileLevelCrash = failure.nesting === 0
+      && String(cause?.message ?? cause) === 'test failed'
+      && failure.file && !failure.entryFile
+    if (fileLevelCrash) {
+      const output = (outputByFile.get(failure.file) || '').trimEnd().split('\n')
+      out.push(`  test file exited unsuccessfully; last ${Math.min(output.length, OUTPUT_TAIL_LINES)} output lines:`)
+      out.push(indent(output.slice(-OUTPUT_TAIL_LINES).join('\n')))
+    } else {
+      if (error?.failureType && error.failureType !== 'testCodeFailure') out.push(`  (${error.failureType})`)
+      out.push(indent(describeError(cause).join('\n')))
+    }
+  } catch {
+    // A test can throw values String() cannot convert: null-prototype objects,
+    // Symbol names, or an Error whose lazily built stack reads such a message
+    // or name. Converting one here would crash the reporter and hide the
+    // failure; inspect() describes it without converting it.
+    out.push(indent(clip(inspect(cause, { depth: 2, breakLength: 120 }), MESSAGE_CHARS)))
   }
   return `${out.join('\n')}\n\n`
 }
