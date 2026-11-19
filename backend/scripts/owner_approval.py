@@ -22,6 +22,7 @@ from urllib.request import Request, urlopen
 _SAFE_REJECTION_PATH_PARTS = frozenset({
   "questions", "id", "header", "question", "options",
   "label", "description", "on_answer", "work_key", "message",
+  "key", "reason", "sites", "inject",
 })
 
 
@@ -34,6 +35,17 @@ def request_approval(
 
 def request_question(questions: list[dict], message: str | None = None) -> dict:
   return save_card("question", _with_message({"questions": questions}, message))
+
+
+def request_key(
+  key: str, reason: str, sites: list[dict] | None = None,
+  inject: dict | None = None, message: str | None = None,
+) -> dict:
+  """Ask to use a key; a card is saved only when the owner must answer."""
+  body = {"key": key, "reason": reason, "sites": sites or []}
+  if inject is not None:
+    body["inject"] = inject
+  return save_card("key-request", _with_message(body, message))
 
 
 def request_restart(message: str | None = None) -> dict:
@@ -126,6 +138,11 @@ def save_card(kind: str, body: dict) -> dict:
       and isinstance(payload.get("work_key"), str)):
     # The approval's work_key is already owned or completed elsewhere: no card
     # was saved, the turn continues, and this is the claim_agent_work result.
+    return payload
+  if (kind == "key-request" and isinstance(payload, dict)
+      and payload.get("state") == "answered_without_card"):
+    # The vault answered at once (the key already reaches those sites, or
+    # the owner said no earlier): no card was saved and the turn continues.
     return payload
   if (not isinstance(payload, dict)
       or payload.get("state") not in {"waiting_for_owner", "answered"}

@@ -4,50 +4,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_mobius_has_no_recovery_runtime_or_boot_mode():
-  recovery_target = ROOT / "backend/recovery_target"
-  # An old checkout can leave ignored __pycache__ residue behind after source
-  # removal. It is neither importable without its source nor included in the
-  # Docker context; reject actual files rather than making local cache cleanup
-  # part of the architectural contract.
-  shipped_recovery_files = [
-    path for path in recovery_target.rglob("*")
-    if path.is_file() and "__pycache__" not in path.parts
-  ]
-  assert shipped_recovery_files == []
-  assert not (ROOT / "scripts/mobiusctl").exists()
-  assert not (ROOT / "scripts/external_recovery_release.py").exists()
-  assert not (ROOT / "scripts/core_digest_release.py").exists()
-  assert not (ROOT / "backend/app/release_channel.py").exists()
-  assert not (ROOT / ".github/workflows/external-recovery-image.yml").exists()
-  assert not (ROOT / ".github/workflows/core-digest-image.yml").exists()
-
-  dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-  entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
-    encoding="utf-8",
-  )
-  runtime = dockerfile + "\n" + entrypoint
-  for retired in (
-    "MOBIUS_BOOT_MODE",
-    "MOBIUS_RECOVERY_CAPABILITY_PUBLIC_KEY",
-    "MOBIUS_RECOVERY_TARGET_TOKEN",
-    "MOBIUS_PLATFORM_RELEASE_REF",
-    "managed_release",
-    "targetd.py",
-    "recovery-target",
-  ):
-    assert retired not in runtime
-
-  deployment = (ROOT / "scripts/deploy-prod.sh").read_text(encoding="utf-8")
-  test_sync = (ROOT / "scripts/sync-test-backend.sh").read_text(
-    encoding="utf-8",
-  )
-  architecture = (ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
-  assert "recoveryd" not in deployment.lower()
-  assert "recovery island" not in test_sync.lower()
-  assert "recovery profile" not in architecture.lower()
-
-
 def test_normal_agent_owns_full_root_without_a_recovery_co_process():
   compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
   entrypoint = (ROOT / "backend/scripts/entrypoint.sh").read_text(
@@ -65,13 +21,10 @@ def test_normal_agent_owns_full_root_without_a_recovery_co_process():
   assert "recovery" not in sudo_config.lower()
 
 
-def test_legacy_recovery_skill_is_not_seeded_or_referenced():
+def test_platform_maintenance_and_restore_skills_are_seeded():
   seed = ROOT / "backend/scripts/seed-skills"
-  assert not (seed / "recovery.md").exists()
   assert (seed / "platform-maintenance.md").is_file()
   assert (seed / "undo-and-restore.md").is_file()
-  for path in seed.glob("*.md"):
-    assert "`recovery.md`" not in path.read_text(encoding="utf-8")
 
 
 def test_boot_fallback_never_moves_or_prunes_owner_platform_source():

@@ -1891,8 +1891,71 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0104_claude_session_costs",
     "0105_autopilot_push_mode",
     "0106_browser_grant_full_access",
+    "0107_app_install_id",
   ]
   assert second == first
+
+
+def _insert_bare_apps(eng, ids):
+  """App rows as a release without ``install_id`` writes them: every column it
+  requires filled, the installation left to the migration."""
+  with eng.begin() as conn:
+    columns = conn.execute(text("PRAGMA table_info(apps)")).all()
+    for app_id in ids:
+      row = {"id": app_id, "slug": f"app-{app_id}", "source_dir": f"/data/apps/app-{app_id}", "name": f"App {app_id}"}
+      for _cid, name, kind, notnull, default, pk in columns:
+        if notnull and default is None and not pk and name not in row:
+          row[name] = 0 if kind.upper() in ("BOOLEAN", "INTEGER") else ""
+      names = ", ".join(row)
+      conn.execute(text(f"INSERT INTO apps ({names}) VALUES ({', '.join(':' + n for n in row)})"), row)
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_app_install_ids_are_backfilled_distinct_and_never_change(tmp_path, monkeypatch, start):
+  """Every app row gets its own installation id, once: a retry fills only
+  rows still without one, and a row created afterwards gets its own."""
+  db_path = tmp_path / "install-id.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
+  assert versions[-1] == "0107_app_install_id"
+  if start == "schema_0013":
+    models.Base.metadata.create_all(bind=eng)
+    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+    run_migrations(eng)  # The previous release's ledger, then its apps.
+    monkeypatch.undo()
+    assert "install_id" not in {c["name"] for c in inspect(eng).get_columns("apps")}
+    _insert_bare_apps(eng, [1, 2, 3])
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  if start == "fresh":
+    with eng.begin() as conn:
+      conn.execute(text("UPDATE apps SET install_id = NULL"))
+    _insert_bare_apps(eng, [1, 2, 3])
+    migrations._add_app_install_ids(eng)
+
+  assert "0107_app_install_id" in {row["version"] for row in schema_migration_history(eng)}
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.connect() as conn:
+    first = dict(conn.execute(text("SELECT id, install_id FROM apps")).all())
+  assert sorted(first) == [1, 2, 3] and len(set(first.values())) == 3
+  assert all(isinstance(value, str) and len(value) == 32 for value in first.values())
+  migrations._add_app_install_ids(eng)  # A crash retry changes nothing.
+  with Session(eng) as db:
+    later = models.App(name="Later", slug="later", source_dir="/data/apps/later")
+    db.add(later)
+    db.commit()
+    later_install = later.install_id
+  with eng.connect() as conn:
+    after = dict(conn.execute(text("SELECT id, install_id FROM apps")).all())
+  assert {app_id: after[app_id] for app_id in first} == first
+  assert later_install and later_install not in first.values()
+  with pytest.raises(IntegrityError):
+    with eng.begin() as conn:
+      conn.execute(text("UPDATE apps SET install_id = :taken WHERE id = 2"), {"taken": first[1]})
+  eng.dispose()
 
 
 @pytest.mark.parametrize("start", ["fresh", "schema_0013"])

@@ -2,46 +2,10 @@
    pane and outside its frame. Everything the owner reads here is the server's
    text (rendered as text) plus the app's name from the shell's own state; the
    app supplies identifiers only. It shares the file-export dialog's card. */
-import { useEffect, useId, useRef, useState } from 'react'
+import { useId, useRef } from 'react'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { fileExportInk } from '../../lib/appFileExport.js'
-import { OWNER_GRANT_ARM_MS } from '../../lib/appOwnerGrant.js'
-
-// The verb button stays inert until what it confirms has been on screen for
-// OWNER_GRANT_ARM_MS, and a tap counts only if its pointerdown and pointerup
-// both came after that, so a sheet that appears under a finger cannot be
-// confirmed. A keyboard click carries no pointer events (detail 0).
-function useArmedConfirm(shownKey, onConfirm) {
-  const [armedFor, setArmedFor] = useState(null)
-  const armedKeyRef = useRef(null)
-  const pressedArmedRef = useRef(false)
-  useEffect(() => {
-    if (!shownKey) return undefined
-    const timer = setTimeout(() => {
-      armedKeyRef.current = shownKey
-      setArmedFor(shownKey)
-    }, OWNER_GRANT_ARM_MS)
-    return () => {
-      clearTimeout(timer)
-      armedKeyRef.current = null
-      pressedArmedRef.current = false
-    }
-  }, [shownKey])
-  const isArmed = () => armedKeyRef.current !== null
-  return {
-    armed: !!shownKey && armedFor === shownKey,
-    pressHandlers: {
-      onPointerDown() { pressedArmedRef.current = isArmed() },
-      onPointerUp() { pressedArmedRef.current &&= isArmed() },
-      onPointerCancel() { pressedArmedRef.current = false },
-      onClick(event) {
-        const counts = isArmed() && (event.detail === 0 || pressedArmedRef.current)
-        pressedArmedRef.current = false
-        if (counts) onConfirm()
-      },
-    },
-  }
-}
+import useKeyAnswerGuard, { earlyAnswerHint } from '../SettingsView/useKeyAnswerGuard.js'
 
 function OwnerConfirmFacts({ preview, notice }) {
   return (
@@ -63,19 +27,26 @@ const TITLES = { checking: 'Checking this request…', error: 'Can’t confirm t
 const WAITING_VERBS = { checking: 'Checking…', confirming: 'Confirming…' }
 
 export default function OwnerConfirmSheet({ appName, themeColor, request, onCancel, onConfirm }) {
-  const dialogRef = useRef(null)
   const cancelRef = useRef(null)
   const titleId = useId()
   const { phase, preview, notice, error } = request
   const showsFacts = phase === 'ready' || phase === 'confirming'
-  const { armed, pressHandlers } = useArmedConfirm(phase === 'ready' ? preview : null, onConfirm)
-  useDialogFocus({ containerRef: dialogRef, initialFocusRef: cancelRef, onClose: onCancel })
+  // The verb wakes only once what it confirms has been seen, still and
+  // untouched for a moment, as on a key request card, so a sheet that
+  // appears or is revealed under a finger or a key cannot be confirmed.
+  const guard = useKeyAnswerGuard({ enabled: phase === 'ready' })
+  const armed = phase === 'ready' && guard.active
+  // Asleep is only aria-disabled, as on a key request card: every press on the
+  // card restarts the guard's wait, so a real `disabled` would switch the verb
+  // off under the owner's own held press and the browser would drop its click.
+  // guard.counts decides whether a click answers.
+  useDialogFocus({ containerRef: guard.cardProps.ref, initialFocusRef: cancelRef, onClose: onCancel })
   const title = showsFacts ? preview.headline : TITLES[phase]
   const verb = WAITING_VERBS[phase] || preview?.verb
   const cautious = showsFacts && preview.tone === 'caution'
   return (
     <div className="canvas-file-export canvas-owner-confirm" role="dialog" aria-modal="true"
-      aria-labelledby={titleId} ref={dialogRef} tabIndex={-1}>
+      aria-labelledby={titleId} tabIndex={-1} {...guard.cardProps}>
       <div className="canvas-file-export__card" style={themeColor ? {
         '--file-export-accent': themeColor,
         '--file-export-ink': fileExportInk(themeColor),
@@ -87,12 +58,14 @@ export default function OwnerConfirmSheet({ appName, themeColor, request, onCanc
           {phase === 'checking' && <p>Möbius is asking the server what this will do. Nothing happens until you confirm.</p>}
           {phase === 'error' && <p className="canvas-owner-confirm__error" role="alert">{error}</p>}
         </div>
+        {guard.early !== null && <p className="canvas-owner-confirm__notice" role="status">{earlyAnswerHint(guard.early)}</p>}
         <div className="canvas-file-export__actions">
           <button type="button" ref={cancelRef} onClick={onCancel}>
             {phase === 'error' ? 'Close' : 'Cancel'}
           </button>
           {phase !== 'error' && (
-            <button type="button" disabled={!armed} aria-disabled={!armed} {...pressHandlers}
+            <button type="button" disabled={phase !== 'ready'} aria-disabled={armed ? undefined : 'true'}
+              onClick={event => { if (phase === 'ready' && guard.counts(event)) onConfirm() }}
               className={`canvas-file-export__primary${cautious ? ' canvas-owner-confirm__caution' : ''}`}>
               {verb}
             </button>

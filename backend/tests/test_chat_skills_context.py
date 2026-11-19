@@ -277,6 +277,21 @@ def test_called_off_goal_settles_through_update_goal_not_chat_stop():
   assert "Only when the owner explicitly asks you to stop" in planning
 
 
+def test_goal_outcome_survives_milestones():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+  planning = " ".join((
+    repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
+  ).read_text(encoding="utf-8").split())
+
+  assert "answered card, contribution or restart is not completion" in core
+  assert "keep milestones as tasks in the same open Goal" in core
+  assert "Record each blocking question on its task and ask related ones" in core
+  assert "reconcile the owner's original request against the checklist" in planning
+  assert "low disk can sweep idle scratch sooner" in core
+  assert "still there after the answer" not in core
+
+
 def test_goal_responsibility_requires_truthful_outcome_or_real_handoff():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
@@ -810,3 +825,21 @@ def test_core_guidance_names_the_current_goal_completion_syntax():
     assert 'update_goal(complete: true, finished_claims: ["WORK_KEY"])' in text
     assert "A refusal is an answer; do not retry it through the script" in text
     assert "complete --finished" not in text
+
+
+def test_an_agents_key_request_is_a_saved_card_in_its_chat():
+  """An agent asking for a key saves an owner card in its own chat with the
+  request_key tool and is resumed by the owner's answer, so the skills name
+  the tool and the answer rather than a hand-written block or polling. No
+  notification is sent, so the card is the ask."""
+  repo = Path(__file__).resolve().parents[2]
+  seed_dir = repo / "backend" / "scripts" / "seed-skills"
+  for name in ("building-apps.md", "secure-input.md"):
+    text = (seed_dir / name).read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+    assert "`request_key`" in normalized, name
+    assert "mobius-key-request" not in text, name
+    assert "answered_without_card" in normalized, name
+    assert "**Allow** or **Not now**, so do not poll" in normalized, name
+    assert "no notification is sent" in normalized.lower(), name
+    assert "Settings › Keys lists it too" not in normalized, name

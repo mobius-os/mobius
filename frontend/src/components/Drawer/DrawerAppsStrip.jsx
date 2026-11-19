@@ -116,6 +116,7 @@ export default function DrawerAppsStrip({
   apps: recentApps,
   activeAppId,
   ownerInputSet,
+  keyWaitingSet = new Set(),
   streamingSet,
   newAppSet,
   onApp,
@@ -449,7 +450,7 @@ export default function DrawerAppsStrip({
             <DrawerAppTile
               app={app}
               active={activeAppId != null && Number(activeAppId) === Number(app.id)}
-              needsYou={!!(app.chat_id && ownerInputSet.has(app.chat_id))}
+              needsYou={!!(app.chat_id && ownerInputSet.has(app.chat_id)) || keyWaitingSet.has(String(app.id))}
               building={!!(app.chat_id && streamingSet.has(app.chat_id))}
               fresh={newAppSet.has(Number(app.id))}
               actions={actions}

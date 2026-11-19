@@ -37,13 +37,14 @@ import tempfile
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, NamedTuple, Protocol
+from urllib.parse import urlsplit
 
 from app.storage_io import atomic_write
 
@@ -282,15 +283,29 @@ def normalize_background_agent_settings(data_dir: str) -> bool:
 
 
 def _model_belongs_to_other_provider(model: str, provider: str) -> bool:
-  """True when `model` is a KNOWN model for some OTHER provider.
-  Use this to reject cross-provider mismatches without blocking
-  unknown / future model names — the SDK is the authority on what
-  it accepts; we only intercept the specific failure mode of
-  sending a Codex model to Claude or vice versa."""
+  """True when another provider owns `model` and `provider` does not.
+
+  Ownership is the (provider, model) pair: an id that two providers both list
+  (an app declaration and Codex discovery, say) stays valid for each of them.
+  Use this to reject cross-provider mismatches without blocking unknown /
+  future model names — the SDK is the authority on what it accepts; we only
+  intercept sending a Codex model to Claude or vice versa."""
+  if model in known_model_ids(provider):
+    return False
   for p in PROVIDERS:
     if p != provider and model in known_model_ids(p):
       return True
   return False
+
+
+def _declared_model_ids(provider_ids: Iterable[str]) -> set[str]:
+  """Built-in and declared ids of these providers, never discovered ones.
+
+  The one collision rule for both the Möbius catalogue and app declarations:
+  an id discovery also lists is shared by (provider, model), not a collision.
+  """
+  return {mid for pid in provider_ids
+          for mid in known_model_ids(pid, include_discovered=False)}
 
 
 def _load_agent_settings(data_dir: str) -> dict:
@@ -363,13 +378,29 @@ def remember_recent_model(model_prefs: Any, model_id: str) -> dict:
   return prefs
 
 
-def known_model_ids(provider_id: str) -> list[str]:
-  """Built-in fallback IDs, the Möbius catalogue, or an app's accepted IDs."""
+def known_model_ids(
+  provider_id: str, *, include_discovered: bool = True,
+) -> list[str]:
+  """Accepted identities, including newly discovered native-provider models.
+
+  Catalog expiry and availability govern discovery, not ownership: the last
+  served catalog is reused without I/O, and offline identities stay when a
+  live catalog is partial. App providers retain their declaration as
+  authority. Discovery lives only in this process's memory, so after a
+  restart a discovered id is unknown here until the model list is fetched
+  again; meanwhile the provider saved on the chat, and the provider the
+  picker sends with every pick, carry the pair. ``include_discovered=False``
+  gives only the built-in and declared ids, which do not depend on timing.
+  """
   provider = PROVIDERS.get(provider_id)
   if isinstance(provider, (MobiusProvider, AppModelProvider)):
     return ([model["id"] for model in provider.declaration["models"]]
             + list(provider.declaration.get("replacements", {})))
-  return KNOWN_MODELS.get(provider_id, [])
+  if not include_discovered:
+    return list(KNOWN_MODELS.get(provider_id, []))
+  cached = _model_registry_cache.get(provider_id)
+  discovered = [entry["id"] for entry in cached[1]] if cached else []
+  return list(dict.fromkeys([*KNOWN_MODELS.get(provider_id, []), *discovered]))
 
 
 def skills_enabled(data_dir: str) -> bool:
@@ -426,6 +457,8 @@ def effective_agent_settings(
   data_dir: str,
   chat_overrides: _SettingsOverride | dict[str, Any] | None = None,
   provider: str | None = None,
+  *,
+  file_layer: dict | None = None,
 ) -> dict:
   """Merge per-chat choices on top of the owner's latest picker choices.
 
@@ -461,7 +494,7 @@ def effective_agent_settings(
   # provider switch — without this, a brand-new empty chat would lose
   # the user's previously-picked Claude effort the moment they
   # switched to Codex in the panel (and vice versa).
-  file_layer = _load_agent_settings(data_dir)
+  file_layer = file_layer if file_layer is not None else _load_agent_settings(data_dir)
   if file_layer.get("effort") is not None:
     merged["effort"] = file_layer["effort"]
   if file_layer.get("effort_by_provider") is not None:
@@ -504,6 +537,7 @@ def snapshot_chat_agent_settings(
   model: str | None = None,
   effort: str | None = None,
   fallback_model: str | None = None,
+  file_layer: dict | None = None,
 ) -> dict | None:
   """Freeze one coherent, explicit runtime choice onto a new chat.
 
@@ -532,7 +566,7 @@ def snapshot_chat_agent_settings(
   if isinstance(effort, str) and effort.strip():
     overrides["effort"] = effort.strip()
   effective = effective_agent_settings(
-    data_dir, overrides or None, provider=provider,
+    data_dir, overrides or None, provider=provider, file_layer=file_layer,
   )
   if provider == "mobius" and chosen_model and not effective.get("model"):
     return None
@@ -549,6 +583,31 @@ def snapshot_chat_agent_settings(
     if value is not None:
       snapshot[key] = value
   return snapshot
+
+
+def snapshot_owner_chat_choice(
+  data_dir: str,
+  configured_provider: str | None = None,
+  *,
+  allow_unselected: bool = False,
+) -> tuple[str, dict | None]:
+  """Freeze provider and model from one picker revision for a new owner chat.
+
+  Resolving the provider and snapshotting the model each used to read the
+  settings file, so a pick landing between the two reads could split a valid
+  pair, especially for a future model absent from the offline catalog. The
+  file is read once here (``atomic_write`` makes one read a whole revision)
+  and that dict feeds both steps. No lock is held: the app registry refresh is
+  a database read and the provider checks read sign-in files.
+  """
+  sync_app_model_providers(data_dir)
+  settings = _load_agent_settings(data_dir)
+  provider = owner_default_provider(data_dir, configured_provider, settings=settings)
+  return provider, snapshot_chat_agent_settings(
+    data_dir, provider,
+    fallback_model=None if allow_unselected else DEFAULT_MODELS.get(provider),
+    file_layer=settings,
+  )
 
 
 def _background_default_choice(
@@ -1160,7 +1219,12 @@ class MobiusProvider(BaseProvider):
     from app.mobius_catalogue import parse_catalogue
     declaration = parse_catalogue(payload)
     ids = [m["id"] for m in declaration["models"]] + list(declaration["replacements"])
-    if any(_model_belongs_to_other_provider(mid, "mobius") for mid in ids):
+    # Built-in and app-declared ids only: Claude or Codex later discovering
+    # one of these ids shares it by (provider, model); it is not a collision
+    # that should discard the whole catalogue. The current Möbius declaration
+    # is what this replaces, so it grants no ownership here.
+    claimed = _declared_model_ids(pid for pid in PROVIDERS if pid != "mobius")
+    if any(mid in claimed for mid in ids):
       raise ValueError("Möbius catalogue collides with another provider")
     return declaration
 
@@ -1475,31 +1539,44 @@ class AppModelProvider(BaseProvider):
     ) or frozenset({"low", "medium", "high"})
 
   def check_auth(self, data_dir: str) -> str | None:
-    # Availability only: the registry already omits apps whose consent is
-    # inactive, and the relay re-checks consent on every request.
+    # Availability only: the key's value is never read. The relay re-checks
+    # everything on every request.
     return self.read_relay_key(data_dir, authorize=False).unavailable
 
-  def read_relay_key(self, data_dir: str, *, authorize: bool = True) -> RelayKeyRead:
+  def read_relay_key(
+    self, data_dir: str, *, authorize: bool = True, endpoint: str | None = None,
+  ) -> RelayKeyRead:
     """Resolve current authorization and the saved key in one blocking read.
 
     The relay runs this in a worker; a stale registry object or failed consent
     read must be refused before touching the encrypted app secret.
+    ``endpoint`` is the path under ``base_url`` the relay is about to call
+    (the protocol's main endpoint when omitted): the key's sites must allow it.
     """
     if not provider_enabled(data_dir, f"app-{self.app_id}"):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
-    if authorize and not _app_model_declaration_usable(self.app_id, self.declaration, self.consent_scope):
+    # The installation whose accepted declaration this provider serves: a
+    # grant given to another installation that had the same id never counts.
+    install = _usable_app_model_install(self.app_id, self.declaration, self.consent_scope)
+    if install is None:
       return RelayKeyRead(None, f"{self.name} is unavailable until its app's model access is accepted.")
-    path = Path(data_dir) / "app-secrets" / str(self.app_id) / self.declaration["secret_name"]
-    if not path.is_file():
-      return RelayKeyRead(None, f"Connect {self.name} in its app to use these models.")
-    try:
-      from app.app_secret_crypto import decrypt_app_secret
-      key = decrypt_app_secret(path).strip()
+    from app import key_vault
+    # The declared secret name is the vault key the app asked for; the owner's
+    # grant to this app, for the provider's own site, makes the models
+    # available. An availability check never reads the value itself.
+    secret, base_url = self.declaration["secret_name"], self.declaration["base_url"]
+    destination = {"install": install, "protocol": self.protocol, "endpoint": endpoint}
+    if not authorize:
+      if key_vault.model_provider_key_sync(self.app_id, secret, base_url, **destination):
+        return RelayKeyRead(None, None)
+    else:
+      key = key_vault.reveal_model_provider_key(self.app_id, secret, base_url, **destination)
       if key:
         return RelayKeyRead(key, None)
-    except Exception:
-      pass
-    return RelayKeyRead(None, f"Reconnect {self.name} in its app; its saved key is unavailable.")
+    return RelayKeyRead(None, (
+      f"Connect {self.name} in its app, then approve its key request for "
+      f"{urlsplit(base_url).hostname} in Settings › Keys to use these models."
+    ))
 
   async def fetch_models(self, data_dir: str) -> list[Any]:
     return self.declaration["models"]
@@ -1702,27 +1779,33 @@ async def refresh_app_model_providers(data_dir: str, *, force: bool = False) -> 
       _apply_app_model_declarations(declarations)
 
 
-def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
-  """``(app_id, declaration, relay scope)`` for each app whose consent is active.
+def _usable_app_model_rows(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app row, declaration, relay scope)`` for each app whose consent is active.
 
-  Loads only the contract and consent columns, never app source or icon blobs:
-  the registry refresh runs about once a second and the relay on every request.
+  Loads only the contract, consent and installation columns, never app source
+  or icon blobs: the registry refresh runs about once a second and the relay
+  on every request.
   """
   from sqlalchemy.orm import load_only
   from app import app_consent, models
   query = db.query(models.App).options(load_only(
-    models.App.id, models.App.capability_contract, models.App.manifest_url,
+    models.App.id, models.App.install_id, models.App.capability_contract, models.App.manifest_url,
     models.App.accepted_consent, models.App.project_templates_json,
   )).filter(models.App.deleted_at.is_(None))
   if app_id is not None:
     query = query.filter(models.App.id == app_id)
   return [
-    (app.id, app.capability_contract["model_provider"], _app_model_relay_scope(app))
+    (app, app.capability_contract["model_provider"], _app_model_relay_scope(app))
     for app in query.all()
     if isinstance(app.capability_contract, dict)
     and isinstance(app.capability_contract.get("model_provider"), dict)
     and not app_consent.dormant(app)
   ]
+
+
+def _usable_app_model_declarations(db, app_id: int | None = None) -> list[tuple[Any, dict, str]]:
+  """``(app_id, declaration, relay scope)`` for each app whose consent is active."""
+  return [(app.id, declaration, scope) for app, declaration, scope in _usable_app_model_rows(db, app_id)]
 
 
 def _read_app_model_declarations() -> list[tuple[Any, dict, str]] | None:
@@ -1745,10 +1828,12 @@ def _app_model_relay_scope(app) -> str:
   return f"{accepted_id or ''}:{fingerprint}"
 
 
-def _app_model_declaration_usable(
+def _usable_app_model_install(
   app_id: int, declaration: dict, consent_scope: str,
-) -> bool:
-  """Fail closed for stale provider objects, consent changes, and read errors.
+) -> str | None:
+  """The installation of the app whose accepted ``declaration`` a provider
+  serves, read with the consent check; None (fail closed) for stale provider
+  objects, consent changes, and read errors.
 
   A registry snapshot is deliberately throttled; it cannot authorize a new
   relay request after revocation or contract replacement.
@@ -1756,10 +1841,13 @@ def _app_model_declaration_usable(
   try:
     from app.database import SessionLocal
     with SessionLocal() as db:
-      return (app_id, declaration, consent_scope) in _usable_app_model_declarations(db, app_id)
+      return next((
+        app.install_id for app, usable, scope in _usable_app_model_rows(db, app_id)
+        if (usable, scope) == (declaration, consent_scope)
+      ), None)
   except Exception as exc:
     _model_registry_log.warning("app model authorization read failed: %s", exc)
-    return False
+    return None
 
 
 def _apply_app_model_declarations(
@@ -1771,8 +1859,11 @@ def _apply_app_model_declarations(
   if declarations is None:
     return
   next_ids: set[str] = set()
-  claimed_models = {mid for ids in KNOWN_MODELS.values() for mid in ids}
-  claimed_models.update(known_model_ids("mobius"))
+  # Built-in, Möbius and earlier apps' declared ids collide, exactly as for the
+  # Möbius catalogue. Claude/Codex discovery does not: an id both list is
+  # shared by (provider, model), so registration never depends on discovery
+  # timing and an app update cannot evict a live provider and orphan its chats.
+  claimed_models = _declared_model_ids(("claude", "codex", "mobius"))
   for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
@@ -1897,12 +1988,20 @@ def resolve_default_provider(
   return provider_id
 
 
-def provider_of_model(model: str | None) -> str | None:
-  """The provider a model id belongs to, or None for unknown/blank ids."""
+def provider_of_model(
+  model: str | None, *, preferred: str | None = None,
+) -> str | None:
+  """The provider a model id belongs to, or None for unknown/blank ids.
+
+  ``preferred`` (a chat's saved provider or the picker's mirrored one) wins
+  when it also owns the id, so a shared id keeps its (provider, model) pair.
+  """
   from app.config import get_settings
   sync_app_model_providers(get_settings().data_dir)
   if not isinstance(model, str) or not model:
     return None
+  if isinstance(preferred, str) and preferred in PROVIDERS and model in known_model_ids(preferred):
+    return preferred
   for provider_id in PROVIDERS:
     if model in known_model_ids(provider_id):
       return provider_id
@@ -1912,6 +2011,8 @@ def provider_of_model(model: str | None) -> str | None:
 def owner_default_provider(
   data_dir: str,
   configured_provider: str | None = None,
+  *,
+  settings: dict | None = None,
 ) -> str:
   """The provider from the owner's latest atomic picker choice.
 
@@ -1941,11 +2042,11 @@ def owner_default_provider(
 
   Background agents are deliberately NOT routed here: they carry their own
   configured provider/model block, a separate selection from the interactive
-  last-used model.
+  last-used model. ``settings`` lets a caller reuse one file read.
   """
-  settings = _load_agent_settings(data_dir)
+  settings = settings if settings is not None else _load_agent_settings(data_dir)
   model = settings.get("model")
-  prov = provider_of_model(model)
+  prov = provider_of_model(model, preferred=settings.get("provider"))
   if prov is not None and provider_selectable(data_dir, prov):
     return prov
   mirrored_provider = settings.get("provider")

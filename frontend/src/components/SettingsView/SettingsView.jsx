@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ArrowLeft, Bell, Folder, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, Bell, Credits, Folder, Key, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
@@ -28,10 +28,10 @@ import NotificationChannelsPage, { NotificationChannelsSummary } from './Notific
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
+import KeysSummary, { KeyPage, KeyPageSubtitle, KeysPage } from './KeysSection.jsx'
 import SharedFoldersSummary from './SharedFoldersSummary.jsx'
-import WalletSection, { WalletConnect } from './WalletSection.jsx'
+import AccountCredits from './AccountCredits.jsx'
 import { useWallet } from './useWallet.js'
-import { creditsSection } from '../../lib/creditsWallet.js'
 import SharedFoldersPage from './SharedFoldersPage.jsx'
 import { useSettingsFocus } from './useSettingsFocus.js'
 import MobiusAccountPage, { MobiusModelAccess } from './MobiusAccountPage.jsx'
@@ -41,6 +41,7 @@ import { PROVIDER_INFO, PROVIDER_ORDER, providerInfoFor, providerOrderFor } from
 import { saveThemeThenRefreshStatusBar } from '../../lib/statusBarThemeReload.js'
 import '../ui/StatusDot.css'
 import '../ui/ModelSheet.css'
+import './settingsButtons.css'
 import './SettingsView.css'
 import './SettingsPage.css'
 
@@ -48,7 +49,11 @@ const MobiusLogo = PROVIDER_INFO.mobius?.Logo
 // The detail pages that are not providers; every other detailPage value is a provider id.
 const SHARED_FOLDERS_PAGE = 'shared-folders'
 const NOTIFICATIONS_ELSEWHERE_PAGE = 'notifications-elsewhere'
+// The key list; each key's page (`key:<name>`, '' for a new key) returns here.
+const KEYS_PAGE = 'keys'
 const MOBIUS_ACCOUNT_PAGE = 'mobius-account'
+// Opened from the account page; its back arrow returns there.
+const CREDITS_PAGE = 'credits'
 
 const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
@@ -219,10 +224,10 @@ function BackgroundProviderRow({
   )
 }
 
-function SettingsSubhead({ title, mark, round = false, subtitle, onBack }) {
+function SettingsSubhead({ title, mark, round = false, subtitle, onBack, backLabel = 'Back to Settings' }) {
   return (
     <header className="settings-subhead">
-      <button type="button" className="settings-subhead__back" aria-label="Back to Settings" onClick={onBack}>
+      <button type="button" className="settings-subhead__back" aria-label={backLabel} onClick={onBack}>
         <ArrowLeft width={18} height={18} aria-hidden="true" />
       </button>
       {mark && <span className={`settings-subhead__mark${round ? ' settings-subhead__mark--round' : ''}`} aria-hidden="true">{mark}</span>}
@@ -252,7 +257,6 @@ export default function SettingsView({
   // The owner's own accounts (Möbius with its model credit, and GitHub) are
   // never shown to a shared-browser guest, and their reads never run.
   const showOwnerAccounts = !isSharedBrowserAuth()
-  const wallet = useWallet({ active: active && showOwnerAccounts })
   const [themeMode, setThemeMode] = useState(() => (
     typeof document !== 'undefined'
     && document.documentElement.getAttribute('data-theme') === 'light'
@@ -270,13 +274,20 @@ export default function SettingsView({
   const [signOutConfirm, setSignOutConfirm] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
   const [githubAccountOpen, setGithubAccountOpen] = useState(false)
-  // null shows the overview; a provider id shows that provider's page. A page
-  // is one Back-stack entry, so the phone's back gesture returns to Settings.
+  // null shows the overview; a provider id shows that provider's page, and
+  // `key:<name>` a vault key's page (`key:` alone adds a key). A page is one
+  // Back-stack entry, so the phone's back gesture returns to Settings.
   const [detailPage, setDetailPage] = useState(null)
+  const keyPage = typeof detailPage === 'string' && detailPage.startsWith('key:') ? detailPage.slice(4) : null
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
   const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
   const notificationsElsewhereOpen = detailPage === NOTIFICATIONS_ELSEWHERE_PAGE
-  const selectedProvider = sharedFoldersOpen || mobiusAccountOpen || notificationsElsewhereOpen ? null : detailPage
+  const creditsOpen = detailPage === CREDITS_PAGE
+  const keysOpen = detailPage === KEYS_PAGE
+  const selectedProvider = keyPage !== null || keysOpen || sharedFoldersOpen || mobiusAccountOpen || creditsOpen || notificationsElsewhereOpen ? null : detailPage
+  // One wallet for the account page's Credits row and the Credits page: read
+  // once per visit, and a checkout keeps being watched across the two pages.
+  const wallet = useWallet({ active: active && showOwnerAccounts && (mobiusAccountOpen || creditsOpen) })
   const { open: openDetailHistory, close: closeDetailHistory } = useHistoryDismiss(() => setDetailPage(null))
 
   useEffect(() => {
@@ -438,7 +449,7 @@ export default function SettingsView({
   }, [settingsQuery.data])
 
   const openDetailPage = useCallback((page) => {
-    if (page === MOBIUS_ACCOUNT_PAGE && !showOwnerAccounts) return
+    if ((page === MOBIUS_ACCOUNT_PAGE || page === CREDITS_PAGE) && !showOwnerAccounts) return
     // Remember who was connected when the page opened, so a provider that
     // connects from its page gets the curated first-connection defaults.
     authProvidersAtStartRef.current = new Set(configuredProvidersRef.current)
@@ -968,7 +979,44 @@ export default function SettingsView({
         onBack={closeDetailPage}
       />
     )
-    detailBody = <MobiusAccountPage active={active} onOpenModels={() => openDetailPage('mobius')} />
+    // Credits are the owner's money: a guest neither sees nor reads them.
+    detailBody = (
+      <MobiusAccountPage
+        active={active}
+        creditsSummary={wallet.summary}
+        onOpenCredits={showOwnerAccounts ? () => openDetailPage(CREDITS_PAGE) : null}
+        onOpenModels={() => openDetailPage('mobius')}
+      />
+    )
+  } else if (creditsOpen) {
+    subhead = (
+      <SettingsSubhead
+        title="Credits"
+        mark={<Credits width={20} height={20} />}
+        subtitle={<span>Balance and activity</span>}
+        backLabel="Back to Möbius"
+        onBack={() => openDetailPage(MOBIUS_ACCOUNT_PAGE)}
+      />
+    )
+    detailBody = <AccountCredits wallet={wallet} />
+  } else if (keysOpen) {
+    subhead = <SettingsSubhead title="Keys" mark={<Key width={20} height={20} />} onBack={closeDetailPage} />
+    detailBody = (
+      <KeysPage
+        onOpenKey={(name) => openDetailPage(`key:${name}`)}
+        onAddKey={() => openDetailPage('key:')}
+        onOpenChat={onOpenChat}
+      />
+    )
+  } else if (keyPage !== null) {
+    subhead = <SettingsSubhead title={keyPage || 'New key'} mark={<Key width={20} height={20} />} subtitle={<KeyPageSubtitle name={keyPage} />} backLabel="Back to Keys" onBack={() => openDetailPage(KEYS_PAGE)} />
+    detailBody = (
+      <KeyPage
+        name={keyPage}
+        onOpenKey={(name) => openDetailPage(`key:${name}`)}
+        onClose={() => openDetailPage(KEYS_PAGE)}
+      />
+    )
   } else if (notificationsElsewhereOpen) {
     subhead = <SettingsSubhead title="Notifications elsewhere" mark={<Bell width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = <NotificationChannelsPage active={active} />
@@ -1118,6 +1166,8 @@ export default function SettingsView({
           </div>
         </section>}
 
+        <KeysSummary onOpen={() => openDetailPage(KEYS_PAGE)} />
+
         <section
           className={`settings-group settings-ai${attentionSection === 'ai-providers' ? ' settings-setup-target' : ''}`}
           id="settings-ai-providers"
@@ -1183,26 +1233,6 @@ export default function SettingsView({
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
 
         <NotificationChannelsSummary active={active} onOpen={() => openDetailPage(NOTIFICATIONS_ELSEWHERE_PAGE)} />
-
-        {showOwnerAccounts && creditsSection(wallet.summary) === 'wallet' && (
-          <WalletSection
-            summary={wallet.summary}
-            terms={wallet.terms}
-            activity={wallet.activity}
-            busy={wallet.busy}
-            notice={wallet.notice}
-            refusal={wallet.refusal}
-            onBuy={wallet.buy}
-            onReconnect={wallet.pairWithAccount}
-          />
-        )}
-        {showOwnerAccounts && creditsSection(wallet.summary) === 'connect' && (
-          <WalletConnect
-            busy={wallet.busy}
-            refusal={wallet.refusal}
-            onConnect={wallet.pairWithAccount}
-          />
-        )}
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

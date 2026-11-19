@@ -71,6 +71,9 @@ class ListingEdit:
   screenshots: tuple[ListingScreenshot, ...] = ()
   hero: ListingImage | None = None
   icon: ListingImage | None = None
+  # The Store category slug. None keeps whatever the listing already has, so a
+  # client that does not know the field never clears it; "" removes it.
+  category: str | None = None
   # An SPDX id the Store offers. None keeps the current license; there is
   # no way to remove one, since publishing requires it.
   license: str | None = None
@@ -291,7 +294,7 @@ def _saved_license_text_only(
 
 # The store fields the editor writes. Any other store key is curated
 # elsewhere and must not change through a listing save.
-_EDITOR_STORE_FIELDS = frozenset({"tagline", "description", "hero", "screenshots"})
+_EDITOR_STORE_FIELDS = frozenset({"tagline", "description", "hero", "screenshots", "category"})
 
 
 def _manifest_change_is_listing(accepted: dict, candidate: dict) -> bool:
@@ -710,6 +713,11 @@ def write_listing(root: Path, app: models.App, edit: ListingEdit) -> Callable[[]
     else:
       store.pop("hero", None)
     store["screenshots"] = screenshots
+    if edit.category is not None:
+      if edit.category:
+        store["category"] = edit.category
+      else:
+        store.pop("category", None)
 
     previous_art = _referenced_art(current.get("store"))
     manifest = dict(current)

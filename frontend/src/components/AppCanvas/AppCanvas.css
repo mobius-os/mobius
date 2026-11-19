@@ -172,6 +172,8 @@
 .canvas-owner-confirm .canvas-file-export__actions { flex-wrap: wrap; }
 .canvas-owner-confirm .canvas-file-export__actions button { flex: 1 1 9.5rem; }
 .canvas-owner-confirm .canvas-file-export__actions .canvas-file-export__primary { flex-basis: 11rem; }
+/* Asleep until the answer guard wakes it; it stays clickable so a held press keeps its click. */
+.canvas-owner-confirm .canvas-file-export__actions button[aria-disabled="true"] { opacity: .6; }
 
 .canvas-file-export__actions .canvas-file-export__primary.canvas-owner-confirm__caution {
   border-color: var(--danger-fill, var(--danger));

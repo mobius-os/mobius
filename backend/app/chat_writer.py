@@ -464,14 +464,18 @@ class AcknowledgeProviderSuccess(_Command):
 
   Provider admission is intentionally earlier: it prevents ambiguous replay
   of an execution attempt. It is not proof that the provider accepted the
-  prompt. This later acknowledgement both heals an older provider-limit signal
-  and records what the provider received — the peer-note cursor, the Wait
-  results and the added side questions the turn carried — in the same
-  writer-owned transaction.
+  prompt. This later acknowledgement records what the provider received — the
+  peer-note cursor, the Wait results and the added side questions the turn
+  carried — and, only with ``provider_responded``, heals an older
+  provider-limit signal, in the same writer-owned transaction. Input receipt
+  and availability are separate facts: a Stop after submission but before any
+  provider output still delivered the input, yet proves nothing about quota.
   """
 
   chat_id: str = ""
   run_token: str = ""
+  # The runner's RunnerResult.provider_responded evidence for this attempt.
+  provider_responded: bool = False
   peer_message_through_created_at: datetime | None = None
   peer_message_through_id: str | None = None
   wait_results: tuple[str, ...] = ()
@@ -3123,7 +3127,7 @@ class ChatWriterActor:
   def _acknowledge_provider_success(
     self, db, cmd: AcknowledgeProviderSuccess,
   ) -> None:
-    """Heal availability and record what the provider received."""
+    """Record what the provider received; heal availability on a response."""
     from app.models import ChatRun
 
     delivered_at = cmd.peer_message_through_created_at
@@ -3159,12 +3163,13 @@ class ChatWriterActor:
         run.peer_message_through_created_at = delivered_at
         run.peer_message_through_id = delivered_id
       run.peer_message_delivery_pending = False
-    from app.provider_availability import (
-      clear_provider_availability_after_success,
-    )
-    clear_provider_availability_after_success(
-      db, run.provider, run.started_at,
-    )
+    if cmd.provider_responded:
+      from app.provider_availability import (
+        clear_provider_availability_after_response,
+      )
+      clear_provider_availability_after_response(
+        db, run.provider, run.started_at,
+      )
     from app.chat_waits import stage_wait_results_delivered
     stage_wait_results_delivered(db, cmd.chat_id, cmd.wait_results, run_id=run.id)
     from app.goal_dependencies import stage_dependency_results_delivered

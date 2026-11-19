@@ -6,7 +6,8 @@ line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 (an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
 and merge it with local edits, or record a conflict),
-``GET /update-progress`` (the active Apply phase),
+``GET /update-progress`` (the active Apply or overlay-finish phase),
+``POST /overlay-finish`` (the backend-owned finish of a staged resolution),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart through the same drained,
 supervisor-handled path as the normal Settings restart). Read failures are
@@ -398,6 +399,50 @@ async def keep_settling_platform_update(
     raise HTTPException(
       status_code=exc.status_code, detail={"code": exc.code, "message": exc.message},
     ) from exc
+
+
+class PlatformOverlayFinishIn(BaseModel):
+  """The release whose parked resolution the caller has staged."""
+
+  target_sha: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+  # Run a failed finish of this exact answer again. Without it, repeating a
+  # request returns the recorded operation instead of running it twice.
+  retry_operation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post(
+  "/overlay-finish",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+async def finish_platform_overlay_update(
+  request: PlatformOverlayFinishIn,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> PlatformUpdateProgress:
+  """Start or join the backend-owned finish of a staged parked resolution.
+
+  Answers once the operation is admitted; its phases and outcome follow in
+  ``GET /update-progress`` under the returned ``plan_id``. A refused request
+  (stale or unstaged answer, another update running) changes nothing.
+  """
+  try:
+    return await platform_update.finish_platform_overlay_update(
+      target_sha=request.target_sha,
+      retry_operation_id=request.retry_operation_id,
+    )
+  except PlatformUpdateError as exc:
+    code = str(exc)
+    detail = (
+      {"code": code, "message": (
+        "Another platform update task is running. Nothing changed: repeat "
+        "this same request shortly, and it joins this finish if it is the "
+        "one running."
+      )} if code == "platform_update_in_progress"
+      else _plan_error_detail(exc) if code in _PLAN_ERROR_MESSAGES
+      # The resolver acts on the precise refusal: which file, which stage.
+      else {"code": "overlay_finish_refused", "message": code}
+    )
+    raise HTTPException(status_code=409, detail=detail) from exc
 
 
 class ConflictResolverChatIn(BaseModel):

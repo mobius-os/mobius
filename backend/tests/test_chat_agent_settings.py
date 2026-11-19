@@ -143,6 +143,32 @@ def test_new_chat_provider_follows_live_model_picker_pair(tmp_path):
   assert owner_default_provider(str(tmp_path), "claude") == "codex"
 
 
+def test_send_keeps_saved_provider_for_shared_or_cold_model_id(
+  db, chat, monkeypatch,
+):
+  """A chat's provider/model pair beats catalogue order and owner defaults."""
+  from app import providers
+  from app.routes.chats_stream import _next_execution_provider
+
+  chat.provider = "codex"
+  chat.agent_settings_json = {"model": "shared-discovered-id"}
+  db.commit()
+  original_known = providers.known_model_ids
+
+  def shared_known(provider_id, **kwargs):
+    if provider_id in {"claude", "codex"}:
+      return ["shared-discovered-id"]
+    return original_known(provider_id, **kwargs)
+
+  monkeypatch.setattr(providers, "known_model_ids", shared_known)
+  assert _next_execution_provider(db, chat) == "codex"
+
+  chat.provider = "mobius"
+  chat.agent_settings_json = {"model": "cold-service-id"}
+  db.commit()
+  assert _next_execution_provider(db, chat) == "mobius"
+
+
 def test_known_model_repairs_contradictory_picker_provider(tmp_path):
   """A known model remains self-identifying if an old writer or manual edit
   leaves a contradictory provider beside it."""

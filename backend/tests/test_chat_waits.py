@@ -178,6 +178,156 @@ def test_declare_caps_armed_waits_per_chat(client, owner_token, db):
                   command="true")
 
 
+def test_identical_retry_after_a_lost_reply_returns_the_armed_wait_instead_of_a_duplicate(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  first = _command_wait(db, chat_id=chat_id, description="PR merged",
+                        command="true", created_by_run_id=run_id)
+  retried = _command_wait(db, chat_id=chat_id, description="PR merged",
+                          command="true", created_by_run_id=run_id)
+  timer = declare_wait(db, chat_id=chat_id, description="check back",
+                       kind="timer", delay_secs=600, created_by_run_id=run_id)
+  timer_retry = declare_wait(db, chat_id=chat_id, description="check back",
+                             kind="timer", delay_secs=600, created_by_run_id=run_id)
+
+  assert retried.id == first.id and timer_retry.id == timer.id
+  assert db.query(models.ChatWait).filter_by(chat_id=chat_id).count() == 2
+
+
+def test_a_different_declaration_or_another_run_still_arms_its_own_wait(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  other_run = _seed_declaring_run(db, chat_id, run_id="later-run")
+  first = _command_wait(db, chat_id=chat_id, description="PR merged",
+                        command="true", created_by_run_id=run_id)
+  changed = [
+    _command_wait(db, chat_id=chat_id, description="PR merged",
+                  command="false", created_by_run_id=run_id),
+    _command_wait(db, chat_id=chat_id, description="PR merged",
+                  command="true", deadline_secs=7200, created_by_run_id=run_id),
+    _command_wait(db, chat_id=chat_id, description="PR merged",
+                  command="true", created_by_run_id=other_run),
+  ]
+  assert len({first.id, *(row.id for row in changed)}) == 4
+
+
+def test_an_identical_retry_keeps_the_callers_unsaved_changes(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  settled = _command_wait(db, chat_id=chat_id, description="checks pass",
+                          command="true", created_by_run_id=run_id)
+  first = _command_wait(db, chat_id=chat_id, description="PR merged",
+                        command="true", created_by_run_id=run_id)
+  settled.status = "met"
+  retried = _command_wait(db, chat_id=chat_id, description="PR merged",
+                          command="true", created_by_run_id=run_id)
+
+  assert retried.id == first.id
+  db.expire_all()
+  assert db.get(models.ChatWait, settled.id).status == "met"
+
+
+def test_an_identical_retry_at_the_armed_wait_cap_returns_the_armed_wait(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  waits = [
+    _command_wait(db, chat_id=chat_id, description=f"wait {index}",
+                  command="true", created_by_run_id=run_id)
+    for index in range(chat_waits_mod.MAX_ARMED_WAITS_PER_CHAT)
+  ]
+  retried = _command_wait(db, chat_id=chat_id, description="wait 0",
+                          command="true", created_by_run_id=run_id)
+
+  assert retried.id == waits[0].id
+  assert db.query(models.ChatWait).filter_by(chat_id=chat_id).count() == len(waits)
+
+
+def test_an_identical_retry_after_the_wait_fired_returns_it_instead_of_waking_twice(
+  client, owner_token, db,
+):
+  # Command waits are probed on the next sweep, so an already-true condition
+  # has usually fired before a lost-reply retry arrives.
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  fired = {}
+  for status in ("met", "expired", "failed"):
+    row = _command_wait(db, chat_id=chat_id, description=f"{status} gate",
+                        command="true", created_by_run_id=run_id)
+    row.status = status
+    fired[status] = row.id
+  db.commit()
+
+  retried = {
+    status: _command_wait(db, chat_id=chat_id, description=f"{status} gate",
+                          command="true", created_by_run_id=run_id)
+    for status in fired
+  }
+
+  assert {status: row.id for status, row in retried.items()} == fired
+  assert {status: row.status for status, row in retried.items()} == {
+    status: status for status in fired
+  }
+  assert db.query(models.ChatWait).filter_by(chat_id=chat_id).count() == 3
+
+
+def test_the_declare_route_reports_a_retry_that_finds_its_fired_wait_truthfully(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  db.add(models.ChatRun(id="declaring-run", root_run_id="declaring-run",
+                        chat_id=chat_id, status="running", provider="claude"))
+  db.commit()
+  auth = _agent_run_auth(db, chat_id, "declaring-run")
+  payload = {"description": "PR merged", "condition_owner": "Maintainers",
+             "kind": "command", "command": "true", "deadline_secs": 3600}
+  first = client.post("/api/chat-waits", json=payload, headers=auth)
+  assert first.status_code == 200, first.text
+  db.get(models.ChatWait, first.json()["id"]).status = "met"
+  db.commit()
+
+  retried = client.post("/api/chat-waits", json=payload, headers=auth)
+
+  assert retried.status_code == 200, retried.text
+  body = retried.json()
+  assert body["id"] == first.json()["id"]
+  assert body["status"] == "met" and body["delivery_pending"] is True
+  assert db.query(models.ChatWait).filter_by(chat_id=chat_id).count() == 1
+
+
+def test_an_identical_declaration_rearms_a_wait_that_was_withdrawn(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  run_id = _seed_declaring_run(db, chat_id)
+  cancelled = _command_wait(db, chat_id=chat_id, description="armed gate",
+                            command="true", created_by_run_id=run_id)
+  withdrawn = _command_wait(db, chat_id=chat_id, description="fired gate",
+                            command="true", created_by_run_id=run_id)
+  withdrawn.status = "met"
+  db.commit()
+  cancel_wait(db, cancelled)
+  cancel_wait(db, withdrawn)
+  assert (cancelled.status, withdrawn.status) == ("cancelled", "met")
+  assert withdrawn.result_disposition == "withdrawn"
+
+  rearmed = [
+    _command_wait(db, chat_id=chat_id, description=description,
+                  command="true", created_by_run_id=run_id)
+    for description in ("armed gate", "fired gate")
+  ]
+
+  assert {row.id for row in rearmed}.isdisjoint({cancelled.id, withdrawn.id})
+  assert [row.status for row in rearmed] == ["armed", "armed"]
+
+
 def test_active_wait_context_is_compact_safe_lifecycle_data(
   client, owner_token, db,
 ):
@@ -204,6 +354,59 @@ def test_active_wait_context_is_compact_safe_lifecycle_data(
 
   cancel_wait(db, row)
   assert build_active_waits_context(db, chat_id) == ""
+
+
+def test_wait_cancelled_from_its_chip_between_turns_is_named_on_the_next_turn(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  base = now_naive_utc() - timedelta(minutes=5)
+  db.add(models.ChatRun(id="turn-armed", root_run_id="turn-armed", chat_id=chat_id,
+                        status="completed", provider="claude", started_at=base))
+  db.commit()
+  row = _command_wait(
+    db, chat_id=chat_id, description="https://site.example/ loads the plan page",
+    condition_owner="Owner adds the DNS records", kind="command",
+    command="false", deadline_secs=3600,
+  )
+  cancel_wait(db, row)
+  db.add(models.ChatRun(id="turn-next", root_run_id="turn-next", chat_id=chat_id,
+                        status="running", provider="claude",
+                        started_at=now_naive_utc()))
+  db.commit()
+
+  context = build_active_waits_context(db, chat_id, "turn-next")
+
+  assert "<active_waits>" not in context
+  assert f'"id":"{row.id}"' in context
+  assert "never describe them as still checking" in context
+  # Only the turn right after the cancellation is told; later turns are not.
+  db.add(models.ChatRun(id="turn-later", root_run_id="turn-later", chat_id=chat_id,
+                        status="running", provider="claude",
+                        started_at=now_naive_utc() + timedelta(seconds=1)))
+  db.commit()
+  assert build_active_waits_context(db, chat_id, "turn-later") == ""
+
+
+def test_cancelled_waits_sit_beside_armed_waits_without_hiding_them(
+  client, owner_token, db,
+):
+  chat_id = _owner_chat(client, owner_token)
+  db.add(models.ChatRun(id="turn-a", root_run_id="turn-a", chat_id=chat_id,
+                        status="completed", provider="claude",
+                        started_at=now_naive_utc() - timedelta(minutes=1)))
+  db.commit()
+  kwargs = dict(chat_id=chat_id, condition_owner="CI", kind="command",
+                command="false", deadline_secs=3600)
+  kept = _command_wait(db, description="checks finish", **kwargs)
+  dropped = _command_wait(db, description="old domain loads", **kwargs)
+  cancel_wait(db, dropped)
+
+  context = build_active_waits_context(db, chat_id, "turn-b")
+
+  active, cancelled = context.split("</active_waits>")
+  assert f'"id":"{kept.id}"' in active and dropped.id not in active
+  assert f'"id":"{dropped.id}"' in cancelled
 
 
 def test_active_wait_context_cannot_close_its_platform_envelope(

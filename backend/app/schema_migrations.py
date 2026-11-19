@@ -7309,6 +7309,30 @@ def _add_browser_grant_full_access(eng) -> None:
       ))
 
 
+def _add_app_install_ids(eng) -> None:
+  """Give every app row its own never-changing installation id.
+
+  Each existing row, a trashed one included, gets a fresh random value; a
+  retry after a crash fills only the rows still without one. The key vault
+  adopts these ids for its existing grants at the server's next start.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "install_id" not in {c["name"] for c in sa_inspect(eng).get_columns("apps")}:
+    with eng.begin() as conn:
+      conn.execute(text("ALTER TABLE apps ADD COLUMN install_id VARCHAR(32)"))
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE UNIQUE INDEX IF NOT EXISTS ix_apps_install_id ON apps (install_id)"
+    ))
+    missing = conn.execute(text("SELECT id FROM apps WHERE install_id IS NULL")).scalars().all()
+    for app_id in missing:
+      conn.execute(
+        text("UPDATE apps SET install_id = :install WHERE id = :id"),
+        {"install": secrets.token_hex(16), "id": app_id},
+      )
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7437,6 +7461,7 @@ _SCHEMA_MIGRATIONS = (
   ("0104_claude_session_costs", _repair_claude_session_costs),
   ("0105_autopilot_push_mode", _add_autopilot_push_mode),
   ("0106_browser_grant_full_access", _add_browser_grant_full_access),
+  ("0107_app_install_id", _add_app_install_ids),
 )
 
 

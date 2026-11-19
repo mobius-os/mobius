@@ -523,6 +523,7 @@ export function upsertQuestionItem(prev, incoming) {
     if (existing.platform_action && !merged.platform_action) {
       merged.platform_action = existing.platform_action
     }
+    if (existing.key_request && !merged.key_request) merged.key_request = existing.key_request
     if (existing.message && !merged.message) merged.message = existing.message
     if (existing.answers && !merged.answers) merged.answers = existing.answers
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool

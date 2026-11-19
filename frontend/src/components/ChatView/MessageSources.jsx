@@ -26,6 +26,9 @@ function MessageSources({
   groups,
   refs,
   disclosureKey,
+  // Kept in place and unusable while its answer continues: hidden when
+  // closed, still shown when open (see ChatView.css).
+  held = false,
 }) {
   const [open, setOpen] = useDisclosureState(chatId, disclosureKey)
   const { sources, hasSources, count, failed, complete, retry } = useMessageSources({
@@ -45,7 +48,11 @@ function MessageSources({
   }
 
   return (
-    <section className={`chat__sources${open ? ' chat__sources--open' : ''}`}>
+    <section
+      className={`chat__sources${open ? ' chat__sources--open' : ''}${held ? ' chat__sources--held' : ''}`}
+      // inert removes it from focus, input and the accessibility tree.
+      inert={held || undefined}
+    >
       <button
         ref={toggleRef}
         type="button"

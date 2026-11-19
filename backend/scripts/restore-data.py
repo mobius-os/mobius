@@ -34,8 +34,9 @@ holding an old DB fd cannot corrupt the restored file. Run with the app
 STOPPED and start it after; the restored DB is opened fresh.
 
 Cold restore is an operator action run from a maintenance container: Python +
-tar + (for encrypted secrets) age and the identity file, writing only under
-/data. Managed Recovery attaches to one live Railway service instance and is
+tar + (for encrypted secrets) age and the identity file, plus the
+``cryptography`` package to open a kept key vault, writing only under /data.
+Managed Recovery attaches to one live Railway service instance and is
 not a cold-restore transport. Modern backups omit retired embedded-recovery
 credentials and sentinels while preserving a legacy `recovery_chat.jsonl`
 transcript as owner data. Restoring an older artifact may temporarily recreate
@@ -69,17 +70,19 @@ realistic DR shape ("bring the app down, restore, bring it back").
 
 Exit codes: 0 ok, 2 usage/config error, 3 verification/capacity failed
 (or a full rollback — /data unchanged), 4 refused (a guard tripped: needs
---force / --server-stopped / the ack), 5 restore failed AND rollback was
-INCOMPLETE — unrecovered originals preserved in .restore-rollback.* for
-hand recovery.
+--force / --server-stopped / the ack, or the kept key vault can't be opened),
+5 restore failed AND rollback was INCOMPLETE — unrecovered originals preserved
+in .restore-rollback.* for hand recovery.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tarfile
 import tempfile
@@ -94,7 +97,17 @@ import backup_lib as lib  # noqa: E402
 SECRET_FILE_MODE = 0o600
 SECRET_DIR_MODE = 0o700
 SECRET_FILES = ("service-token.txt", ".secret-key")
-SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push")
+SECRET_DIRS = ("cli-auth", "app-secrets", "credits-client", "push", ".vault")
+
+# The key vault program: a restore whose backup carries no vault keeps the
+# current vault and withdraws every app grant whose installation the restored
+# database does not hold (KeptVault), keeping every key's value. It resolves to
+# /app/vault/keyvault.py in the image (the Dockerfile ships backend/vault
+# beside backend/scripts), never to agent-editable /data, because a restore
+# runs as root; --vault-program overrides it deliberately.
+VAULT_PROGRAM = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "..", "vault", "keyvault.py")
+DB_RELPATH = os.path.join("db", "ultimate.db")
 
 # Rough gz -> uncompressed expansion for the capacity preflight.
 EXPAND_FACTOR = 4
@@ -229,6 +242,162 @@ def harden_secret_perms(data_dir):
         os.chmod(os.path.join(dirpath, f), SECRET_FILE_MODE)
 
 
+def app_installs(db_path):
+  """App id -> its installation id (``apps.install_id``) in a Möbius
+  database, or None when it can't be read.
+
+  An installation id is never reused and never changes, so a vault grant
+  naming one is for that app in any database that holds it. A database from
+  before installation ids reads every one as None, which matches no grant.
+  """
+  if not os.path.isfile(db_path):
+    return None
+  try:
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+      columns = {row[1] for row in conn.execute("PRAGMA table_info(apps)")}
+      install = "install_id" if "install_id" in columns else "NULL"
+      rows = conn.execute(f"SELECT id, {install} FROM apps").fetchall()
+    finally:
+      conn.close()
+  except sqlite3.Error:
+    return None
+  return {int(app_id): install_id for app_id, install_id in rows}
+
+
+def apps_without_installs(installs):
+  """The app ids a readable restored database gives no installation id: apps
+  from before installation ids (a whole old backup, or rows an older release
+  wrote after a rollback), whose key grants can never be matched."""
+  return {app_id for app_id, install in (installs or {}).items() if install is None}
+
+
+def old_backup_notice(app_ids):
+  """Said where the kept vault is checked and again at the very end, so it is
+  not lost in the output between."""
+  return (f"NOTE: apps {app_ids} in this backup are from before Möbius gave each "
+          "app an installation id, so their key permissions could not be matched "
+          "and were withdrawn. Your keys are all kept. In Settings › Keys, let "
+          "each of those apps use its keys again, or open the app: it asks again "
+          "when it next needs a key.")
+
+
+def installs_not_held(named, installs):
+  """The ``(app id, install)`` pairs among ``named`` (what the kept vault's
+  grants and requests name) that the restored database (``installs``) does
+  not hold.
+
+  A grant is kept only when the restored database gives its id the very
+  installation it was given to. One that names no installation (a store from
+  before installation ids, not yet stamped by a server start), and every one
+  when the database can't be read, proves nothing and is withdrawn.
+  """
+  return sorted(
+    (pair for pair in named
+     if installs is None or pair[1] is None or installs.get(pair[0]) != pair[1]),
+    key=lambda pair: (pair[0], pair[1] or ""),
+  )
+
+
+class VaultBusy(RuntimeError):
+  """A key vault is running on the folder the restore must update."""
+
+
+class VaultUnreadable(RuntimeError):
+  """The restore's vault program can't open the current vault store."""
+
+
+class KeptVault:
+  """The current key vault, opened offline under its single-instance lock
+  for a restore that keeps it (the backup carries no vault).
+
+  Opened and updated before the swap, so a vault that can't be updated stops
+  the restore while /data is unchanged, and held until the restore ends, so
+  no vault starts on the folder in between.
+  """
+
+  def __init__(self, vault_dir, program=VAULT_PROGRAM):
+    if not os.path.isfile(program):
+      raise VaultUnreadable(f"vault program not found at {program}")
+    spec = importlib.util.spec_from_file_location("mobius_restore_vault", program)
+    vault_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = vault_module  # its dataclasses resolve their own module
+    spec.loader.exec_module(vault_module)
+    from pathlib import Path
+    try:
+      self._lock = vault_module.hold_single_instance_lock(Path(vault_dir))
+    except SystemExit as exc:  # a vault is running on the folder
+      raise VaultBusy(str(exc)) from None
+    try:
+      self._vault = vault_module.Vault(Path(vault_dir))
+    except (SystemExit, Exception) as exc:  # SystemExit: the vault refuses its store
+      os.close(self._lock)
+      raise VaultUnreadable(str(exc)) from None
+
+  @classmethod
+  def open_if_any(cls, data_dir, program=VAULT_PROGRAM):
+    """The kept vault, or None when the current install has no vault state."""
+    vault_dir = os.path.join(data_dir, ".vault")
+    if not any(os.path.isfile(os.path.join(vault_dir, name))
+               for name in ("keys.json", "requests.json")):
+      return None
+    return cls(vault_dir, program)
+
+  def withdraw_grants_not_held(self, installs):
+    """Withdraw, in one vault change, the grants and requests of every app
+    installation the restored database does not hold (``installs_not_held``);
+    return those app ids.
+
+    Values are kept: a key an app saved for itself becomes the owner's, so the
+    owner can let an app use it again. The agents' requests name no app and
+    stay.
+    """
+    named = {(r["app"], r.get("install")) for r in self._vault.list_requests() if r["app"] is not None}
+    for key in self._vault.list_keys():
+      named.update((grant["id"], grant.get("install")) for grant in key["grants"]["apps"])
+    stale = installs_not_held(named, installs)
+    if stale:
+      self._vault.withdraw_apps(stale, actor="platform:restore", why="not installed after a restore")
+    return sorted({app_id for app_id, _install in stale})
+
+  def close(self):
+    os.close(self._lock)
+
+
+def restored_database(staging, data_dir):
+  """Where the database will be once the staged entries are swapped in: the
+  backup's when it carries ``db``, otherwise the current one, which stays."""
+  root = staging if os.path.lexists(os.path.join(staging, "db")) else data_dir
+  return os.path.join(root, DB_RELPATH)
+
+
+def reconcile_kept_vault(kept_vault, after_db):
+  """Before the swap of a restore that keeps the current vault: withdraw every
+  app grant whose installation the restored database does not hold, keeping
+  every value, and tell the owner to review. Returns the withdrawn ids and,
+  among them, those of apps from before installation ids, for the notice the
+  restore repeats at its end; raises when the vault can't be updated, which
+  can leave grants withdrawn but never a value lost."""
+  log("WARNING: the backup has no key vault, so the key vault (/data/.vault) "
+      "is KEPT from the current install. Its app grants name app "
+      "installations, which the restored database may not hold.")
+  installs = app_installs(after_db)
+  if installs is None:
+    log("WARNING: could not read the apps from the restored database, so no "
+        "app grant can be kept; withdrawing every one.")
+  stale = kept_vault.withdraw_grants_not_held(installs)
+  if stale:
+    log(f"withdrew key grants and requests for app ids {stale}: the restored "
+        "database does not hold the installations they were given to. Every "
+        "key is kept, with its value; one an app saved for itself is now yours.")
+  unmatched = sorted(set(stale) & apps_without_installs(installs))
+  if unmatched:
+    log(old_backup_notice(unmatched))
+  log("Review the app grants in Settings › Keys, and allow an app again "
+      "there if it needs a key.")
+  return stale, unmatched
+
+
 def refuse_if_server_up(health_url, phase):
   """Refuses when a server answers at health_url — restoring under a live
   SQLite pool risks lost writes through stale fds."""
@@ -265,6 +434,10 @@ def main():
                   help="required when the target already holds data")
   ap.add_argument("--dry-run", action="store_true",
                   help="verify + report, never touch /data")
+  ap.add_argument("--vault-program", default=VAULT_PROGRAM,
+                  help="the key vault program that opens a kept vault (default: "
+                       "the one beside this script). Runs as root: name only "
+                       "trusted code, such as a newer image's copy.")
   args = ap.parse_args()
 
   data_dir = os.path.abspath(args.data_dir)
@@ -354,6 +527,7 @@ def main():
   staging = tempfile.mkdtemp(dir=data_dir, prefix=".restore-staging.")
   rollback_dir = os.path.join(data_dir, f".restore-rollback.{ts}")
   preserve_rollback = False  # set only when rollback itself failed
+  kept_vault = None
   try:
     if "data.tar.gz" in art_names:
       safe_extract(os.path.join(backup_dir, "data.tar.gz"), staging)
@@ -373,6 +547,36 @@ def main():
       log("WARNING: backup has NO secrets (skipped at backup time); "
           ".secret-key + provider auth will NOT be restored — the owner "
           "may need to re-authenticate and JWTs will be re-signed")
+
+    # A backup without a vault (no secrets, or secrets from before the vault)
+    # keeps the current one, whose app grants name app installations.
+    # Withdraw those the restored database does not hold before swapping: if
+    # that fails nothing changed, and if the swap then fails only grants the
+    # owner can allow again are gone.
+    withdrawn, unmatched = [], []
+    if ".vault" not in os.listdir(staging):
+      try:
+        kept_vault = KeptVault.open_if_any(data_dir, args.vault_program)
+      except VaultBusy as exc:
+        die(f"the backup has no key vault, so the current one must be kept "
+            f"and its app grants checked, but a key vault is running on it "
+            f"({exc}). Stop Möbius and its key vault, then restore again; "
+            f"/data unchanged.", code=4)
+      except VaultUnreadable as exc:
+        die(f"the backup has no key vault, so the current one must be kept "
+            f"and its app grants checked, but the vault program "
+            f"{args.vault_program} can't open it ({exc}). A platform update "
+            f"newer than this restore script may have changed the store: run "
+            f"the restore from a matching image, or name a trusted newer "
+            f"vault program with --vault-program; /data unchanged.", code=4)
+      if kept_vault is not None:
+        try:
+          withdrawn, unmatched = reconcile_kept_vault(
+            kept_vault, restored_database(staging, data_dir))
+        except Exception as exc:  # noqa: BLE001 - nothing restored, no value lost
+          die(f"could not update the key vault ({exc}); /data unchanged and "
+              f"no key erased. If some app grants were withdrawn, allow those "
+              f"apps again in Settings › Keys.", code=3)
 
     # Re-probe just before the swap: a server that came back between the
     # early check and now must not have the DB swapped underneath it.
@@ -397,13 +601,17 @@ def main():
     except Exception as exc:  # noqa: BLE001
       # swap already rolled every completed swap back before re-raising,
       # so /data is the exact original tree.
+      kept = (" The key grants withdrawn for it stay withdrawn; allow an app "
+              "again in Settings › Keys if it needs a key.") if withdrawn else ""
       die(f"restore failed mid-swap and was fully rolled back; /data "
-          f"unchanged: {exc}", code=3)
+          f"unchanged: {exc}.{kept}", code=3)
     log(f"restored top-level entries: {moved}")
     # Success: the displaced originals in rollback_dir are no longer
     # needed.
     shutil.rmtree(rollback_dir, ignore_errors=True)
   finally:
+    if kept_vault is not None:
+      kept_vault.close()
     shutil.rmtree(staging, ignore_errors=True)
     # Delete rollback_dir ONLY when it does not hold unrecovered originals
     # — the one case (RollbackError) where it must survive for hand
@@ -415,6 +623,8 @@ def main():
   log("hardened secret perms (600/700)")
   log("restore complete. Start uvicorn / the container now so it opens "
       "the restored DB fresh.")
+  if unmatched:
+    log(old_backup_notice(unmatched))
 
 
 if __name__ == "__main__":

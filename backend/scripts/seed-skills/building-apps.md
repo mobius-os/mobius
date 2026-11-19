@@ -207,6 +207,11 @@ of the app's source, so it is reviewed, versioned and published with the code:
   don't pick one for them. Never overwrite or
   delete license text that is already there: a remix must keep its
   upstream copyright notices.
+- `store.category` is optional and places the app on a Store shelf. It is a
+  category id from the Store's own list: lowercase letters, digits and
+  hyphens, at most 40 characters (`productivity`, not `Productivity`). The
+  choice is the owner's, made in the Store editor's category picker, so don't
+  pick one for them; the editor treats any other value as no category.
 - Screenshots must be truthful and private: capture the app's real UI in an
   empty, demo, or fixture state, never the owner's own records, names,
   accounts, chats, or machines. Build a small demo state if the app has none.
@@ -503,6 +508,16 @@ most 16384.
 - Every block is captioned "From this conversation": its title, facts and
   badges are the agent's words, not status the app verified. The caption is
   hidden only while a passive session shows the app's own confirmation rows.
+- `"status_placement": "footer"` opts an inline block with an `action` and
+  `"expand": false` in to a compact card: there is no header row, and the
+  title, its mark and badges sit in the footer beside the control, under the
+  app's name, which the host always draws there. The footer keeps its height
+  while the control is hidden (for example while your title reports work),
+  your rows' `links` are drawn in that footer in place of the control, and
+  the "From this conversation" caption is kept for assistive technology only.
+  Only the block sets this; an app report cannot. On any other block (no
+  `action`, an inline view, or not `"interaction": "inline"`) it is ignored,
+  as it is by older hosts: they draw the ordinary card.
 - To act on many records, put a short app-owned handle in the intent (for
   example `send-batch:sel-7f3a`) and resolve it in the app to the exact
   records it names. A twelve-id list does not fit the 256-character payload.
@@ -526,7 +541,17 @@ runs a hidden, inert instance of the app; it cannot navigate, open chats or
 apps, or use other host requests, and it never reads or writes the app's saved
 shell place. At most 3 idle hidden instances run per app (the blocks nearest
 the viewport, measured as the page scrolls); further blocks stay static with
-an explicit open, and an instance that reports `retain` always keeps its frame.
+an explicit open unless they have a saved display (below), and an instance that reports `retain` always keeps its frame.
+An idle instance is released when its block leaves the viewport, but the block
+keeps showing your last complete (not `loading`) report, read-only, for the
+same block, app revision, chat and `latest` verdict. Scrolling back does not
+start your app again; it reads again on the next entry after a refresh hint it
+did not answer, or when that saved display no longer applies. A tap on a
+saved action starts a new document and sends `activate` only once that
+document has reported the action as available; Confirm, Cancel and asks are
+never sent from a saved display. A tapped block gets a hidden instance at
+once, even when the idle ones are taken. If the block leaves the viewport
+area before that instance is ready, the tap is dropped, never sent later.
 A view the reader opened in a static block stays open until they close it,
 even if a slot frees up. Module startup and
 session hydration must be read-only. The host draws every control; the app
@@ -559,7 +584,9 @@ same app and that `intent` (check `intent` before relying on `latest` as
 `false` (in a new `app-block-init`) as soon as a newer one appears. Use
 `chatId` to scope what the block shows to that chat's own data, so a block
 printed in one chat can never act on another chat's records; use `latest` to
-let only the newest block of a kind stay live. The host also posts
+let only the newest block of a kind stay live. The host does not lock older
+blocks itself: their controls still send events, so report them `hidden` or
+`open` when your app wants only the newest one to act. The host also posts
 window messages; read them with `subscribe` or a `message` listener that checks
 `event.source === window.parent`:
 
@@ -579,6 +606,7 @@ window messages; read them with `subscribe` or a `message` listener that checks
   settled) or `visible` (the tab became visible again). It is sent only to a
   mounted document of a visible chat, carries no data and grants nothing.
   Read cheaply (local storage); leave network checks to an owner action.
+  The document is not reloaded for it; report again if your state changed.
 - `{type:'moebius:app-block-action', sessionId, generation, key, event, nonce}`,
   `event` one of `activate | confirm | cancel`. Each reader click sends one
   event; the host sends no other event until you acknowledge that `nonce`.
@@ -697,6 +725,12 @@ included.
   `chat.blocks.passive`, accepted by the owner and applied; without it the host
   neither lists `ask-v1` nor draws an ask, so keep your earlier action.
 - `notice` (500) and `summary` (240): plain text shown in the block.
+- `loading: true`: this report is an incomplete read, not an empty result
+  (for example while you read local storage after a refresh). The host keeps
+  showing your last complete report and sends no owner event until a report
+  without it arrives, so always follow up with `loading: false` (or omit it),
+  including when the read failed, or the failure stays hidden behind the old
+  display. Older hosts ignore it and draw the report as it is.
 - `ackNonce`: the `nonce` of the last owner event you accepted. Acknowledge
   without acting twice on the same nonce.
 - `retain: true` while you own a confirmation, an operation in progress or an
@@ -792,33 +826,39 @@ await window.mobius.storage.pendingCount()  // unsynced writes — for sync logi
 
 Conflict policy for `set()`/`setText()`/`setBlob()` is last-write-wins per path; where a lost edit would matter, either store one file per record (`items/<uuid>.json`) so concurrent edits to different records don't clobber, or compare-and-swap a genuinely shared file (below). In the default opaque shell frame, use `window.mobius.storage`: raw IndexedDB/OPFS cannot open under an opaque origin. A future reviewed high-capability/per-app-origin architecture may add those APIs without weakening the shell-origin default; do not restore `allow-same-origin` to get them today.
 
-### Secrets — use the app-scoped encrypted store
+### Keys — ask once, then borrow through the vault
 
-Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs. The platform has a deliberately small encrypted secret surface: at most 16 named values per app and no listing endpoint. An app can store, replace, delete, or check its own values, but only the owner or owner-scoped chat agent can decrypt them.
+Never put API keys, access tokens, or passwords in `window.mobius.storage`, source files, shared storage, chat, or logs, and never build a field that asks the owner to paste a key into the app. Keys live in the owner's key vault (**Settings › Keys**). The owner and the owner's agents may read them; **an app never receives a value**, not in its frame, service or job. An app borrows a key: it names the key and the destination, and Möbius sends the request with the key added.
+
+1. **Ask once.** `POST /api/keys/requests` with the app's own token. It answers `granted`, `pending` or `denied`, and asking again is how the app checks. Nothing notifies the owner: Möbius asks them in a dialog over your app while they have it open (straight away, or the next time they open it), so ask when the owner does something that needs the key. Describe exactly what the app needs: the sites, methods and paths, and how the key is sent (a header, with an optional prefix, or a query parameter; headers sites log as metadata, such as `User-Agent`, are refused). Name exact hosts: a request for `*.example.com` is refused, because on a shared domain (`*.workers.dev`, `*.vercel.app`, `*.supabase.co`) anyone can own a subdomain. Only the owner can allow every subdomain, on the key's page. The owner sees the app's name, your reason, the sites and methods and, for a new key, how it is sent; only what they approve takes effect, and the sites they approve are for your app alone. An app may hold at most ten open requests. If the app already has the key and asks for sites it lacks, the answer stays `granted` for the sites it has, lists the missing ones in `sites_not_allowed`, and reports the owner's answer on them in `sites_request` (`pending` or `denied`); asking again is how the app checks. If the owner switched the app off on the key's page, the answer is `paused` and borrows are refused until they switch it back on; tell the owner rather than asking again.
+2. **Borrow.** Send the ordinary HTTPS request to `/api/keys/use/<key>/<host>/<path>?<query>` with the app's token. Möbius identifies the app from that token, the vault checks the owner's grant and the sites approved for your app, adds the key, and returns the site's answer. HTTPS on port 443 only. Redirects come back unfollowed: the status is the site's 3xx and its target is in the `X-Vault-Location` header (there is no `Location`, so `fetch` never follows it). An echoed key is redacted. Answers stream back as they arrive, so server events and streamed model output work, though the last few hundred bytes of each piece wait for the next one (that hold-back is what keeps redaction safe), so an event can arrive slightly late. Of the site's answer headers only these reach the app: `Content-Type`, `Content-Language`, `Content-Disposition`, `ETag`, `Last-Modified`, `Expires`, `Vary`, `Retry-After` and the `RateLimit*` and `X-RateLimit-*` families. A service or job reads them all. The app's frame is a separate origin, so its `fetch` reads all but `Vary`, and of the rate-limit families only `RateLimit`, `RateLimit-Policy`, `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` and `X-RateLimit-Reset`; any other (such as `X-RateLimit-Used`) reads as `null` there. Both read `X-Vault-Location` and `X-Vault-Denied`. A broken-off answer ends as a failed read, never as a short complete one. A borrow ends after 300 seconds. A busy vault answers 429, and so does a borrow while the same app already has 8 running: retry later.
 
 ```jsx
-await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'PUT',
-  headers: {
-    Authorization: `Bearer ${token}`,
-    'Content-Type': 'application/json',
-  },
-  body: JSON.stringify({ value: key }),
-})
+const auth = { Authorization: `Bearer ${token}` }
+const asked = await (await fetch('/api/keys/requests', {
+  method: 'POST',
+  headers: { ...auth, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    key: 'openweather',
+    reason: 'Shows the forecast for your saved cities.',
+    sites: [{ host: 'api.openweathermap.org', methods: ['GET'], paths: ['/data/2.5/*'] }],
+    inject: { type: 'query', name: 'appid' },
+  }),
+})).json()
+if (asked.status !== 'granted') { /* show "Waiting for your approval": Möbius asks the owner over this app while it is open */ }
 
-const configured = (await fetch(`/api/apps/${appId}/secrets/provider-key`, {
-  method: 'HEAD',
-  headers: { Authorization: `Bearer ${token}` },
-})).ok
+const res = await fetch('/api/keys/use/openweather/api.openweathermap.org/data/2.5/weather?q=Paris', { headers: auth })
+if (res.headers.get('X-Vault-Denied')) { /* not approved, or wrong site/path */ }
+const forecast = await res.json()
 ```
 
-`DELETE` the same path to clear it. An app-token `GET` is deliberately forbidden: a later UI compromise must not recover a credential the user entered months earlier. An app that teaches the agent a workflow can ship a manifest-declared skill and a helper script. The helper runs inside the owner-scoped chat turn, fetches the value with `$AGENT_TOKEN`, calls the provider, saves output under `/data/chats/$CHAT_ID/media/`, and prints only the resulting media path—not the secret:
+A service or job does the same with its `APP_TOKEN` against `$API_BASE_URL`. The app's Möbius token never travels to the third party; send any other headers the site needs, and choose a key slot other than `Authorization` only when the site authenticates that way. Answers are served with a sandboxing policy, so treat them as data, never as a page. Keep request bodies under 10 MiB and responses under 20 MiB.
 
-```bash
-KEY=$(mapi -f /api/apps/<app-id>/secrets/provider-key)
-```
+An agent setting an app up saves a key the owner provides through a sealed card (`python3 /data/platform/backend/scripts/store-key.py NAME` as the consumer, saved without sites: the first borrow asks the owner for its site with `request_key`, and you add `--site HOST:METHODS:PATHS` only when the owner already said where the key goes; it refuses to replace a key that already has that name unless you add `--replace`, which you do only when the owner asked to replace it; a failed receipt does not say why, so check `mapi /api/keys` for the name before opening the card) and tests it by borrowing it the same way (`mapi /api/keys/use/NAME/<host>/<path>`). Read the value (`GET /api/keys/<name>/value`) only when a tool needs the raw key, and never print it: command output stays in the chat log. Only the owner's own input can approve an app's request, add an app to a key, give an app or the agents more sites, or switch a paused app back on; the server refuses agents. When you need a key on a site it does not list, or a key the owner has not saved yet, your borrow is refused with an `ask` hint: ask the owner with the `request_key` tool (`key`, a one-sentence `reason`, exact `sites`, optional `inject` for a new key or one nothing sends yet, and your closing `message`). If you may already use the key there, or the owner already said no, it answers at once with no card (`answered_without_card` and the vault's `granted`, `paused` or `denied`) and your turn continues. The same happens when a request for that key is already waiting: the note says where the owner answers it (Settings › Keys, which lists every waiting request, and the asking chat's card while it shows one). Otherwise it saves a key card in this chat and ends your turn like any other owner card: the chat shows that it is waiting for the owner, who answers on that card (pasting a new key there, never into chat), and the answer resumes you as **Allow** or **Not now**, so do not poll. No notification is sent: the card is the ask. An agent that replaces a key's value or changes how it is sent through `/api/keys` notifies the owner; `store-key.py` writes to the vault directly and notifies no one, so tell the owner when you replace a key with it. To change one thing, send only that field with the key's `revision` (from the list): an omitted `inject` or `grants` keeps the current one. A key whose Agents switch is off can be neither borrowed nor read by agents, and only the owner can turn it back on. Delegated helpers may borrow a key but never read its value.
 
-Keep that variable inside the helper process. Never echo it, pass it on a command line, or persist it in browser storage, React Query, a file, or a log.
+The vault adds a key only as a header or a query parameter. A secret used any other way has no borrow path, so an app cannot use it: a webhook signing secret, HMAC or SigV4 request signing, an OAuth client secret sent in a form body, a private key. Do not work around that by asking the owner to paste it into the app.
+
+The old `/api/apps/{id}/secrets/{name}` routes still answer for one release, deprecated, on top of the vault: an app can save, check and delete its own values there, but nothing reads one back with an app token, including the app's own service and jobs. Code that read a value that way stops working when this vault ships; move it to the handshake above.
 
 ### Concurrent writers — compare-and-swap, not last-write-wins
 
@@ -1054,6 +1094,28 @@ and make the copyable element `user-select: all` so long-press/tap-to-select
 works on touch. Do not add `allow-same-origin` or an app-specific parent bridge
 to reach the clipboard; the shared helper already owns the attributed host
 fallback.
+
+## Sharing — `navigator.share` from a tap
+
+App frames in the shell, standalone, and public-link hosts, and web-service
+apps, are delegated `web-share`, so a Share button calls the ordinary Web Share
+API. The browser requires a live user gesture and shows its own share sheet.
+Many desktop browsers have no `navigator.share`, so feature-detect it and keep
+the clipboard as the fallback. A dismissed sheet rejects with `AbortError`;
+treat that as a cancel, not a failure:
+
+```jsx
+async function onShare() {
+  if (!navigator.share) return onCopy() // the clipboard path above
+  try {
+    await navigator.share({ title, text, url })
+  } catch (err) {
+    if (err.name !== 'AbortError') onCopy()
+  }
+}
+```
+
+Before sharing files, check `navigator.canShare?.({ files })`.
 
 ## Owner confirmation — `window.mobius.ownerGrant.request`
 
@@ -1425,6 +1487,61 @@ useEffect(() => {
   can show status without reading transcripts.
 - Keep the chat as the interaction surface; it gives the user a persistent
   transcript, normal agent tooling, and follow-up questions in one place.
+
+### What the app's agents can reach — `agent`
+
+Declare one access scope for every agent the app starts. The owner sees it in
+the app's permission popup, and Möbius enforces it outside the agent:
+
+```json
+"agent": {
+  "scope": "edit",
+  "allow_tools": ["web"],
+  "reason": "Builds and edits the sites you make here."
+}
+```
+
+| Scope | The app's files and data | Use it for |
+|---|---|---|
+| `tools` | none (an empty folder) | work done only through its tools, with no private data |
+| `read` | read | summaries, insights, answers |
+| `edit` | read and change | building and editing the app's own work |
+| `admin` | everything the owner can do | trusted apps that manage Möbius |
+
+- Every agent keeps its AI program's own tools (shell, reading and editing
+  files, planning), which work inside its room. `allow_tools` adds Möbius
+  tools that reach beyond the room:
+  - `web`: search the web and open public pages;
+  - `notify`: send the owner push notifications;
+  - `ask`: ask the owner a question or for approval before a key step (the
+    card ends the turn; the answer starts the next);
+  - `screenshot`: see this app's own screens; Möbius opens the app's page as
+    the owner, outside the room;
+  - `helpers`: start helper agents; they run in a room with the same scope
+    and tools, never more;
+  - `keys`: use the keys the owner lets this app use, on the sites approved
+    for it, through `$API_BASE_URL/api/keys/use/<key>/<host>/<path>` with
+    `$AGENT_TOKEN`; the agent never sees a value and cannot ask for a new key
+    (the app asks from its own window);
+  - `<app>.<tool>`: one tool another installed app offers agents, such as
+    `memory.search`.
+
+  `web` and `keys` may be declared for any scope. Beside private data (the
+  app's files, its screens or another app's tool) the popup tells the owner
+  that app data may reach the web, or the sites approved for the app's keys.
+- `reason` is the app's own reason, 1–80 characters. The popup shows it beside
+  the platform's own description of what the scope grants.
+- Tools, Read and Edit agents run in a room the kernel locks: their folder is
+  the app's storage directory (`APP_STORAGE_DIR`), the app's stored data is
+  reachable with `$AGENT_TOKEN` at `$API_BASE_URL/api/storage/apps/<id>/`, and
+  everything else (other apps, the owner's accounts, the internet) is refused
+  with a short reason. They run on Claude, Codex or Möbius models.
+- `admin` omits `allow_tools`: its agents keep full access, as do apps that
+  declare no scope. Prefer the narrowest scope that does the job; Admin is
+  shown to the owner as full access to their Möbius.
+- An update that adds reach (Read to Edit, a new tool) asks the owner again;
+  one that narrows asks nothing. Removing an accepted scope counts as asking
+  for full access. The older `agent_role` field is refused, never ignored.
 
 ---
 

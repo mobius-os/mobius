@@ -257,3 +257,18 @@ test('pending question and live-turn guards also block exact Goal Resume', async
   assert.equal(await h.result.current.resume(), false)
   assert.equal(sent, false)
 })
+
+for (const [code, message, expected] of [
+  ['helper_recovery_unavailable', 'Resume the parent Goal first.', /Resume the parent Goal first/],
+  ['delegation_managed', 'helper', /controlled by its parent chat/],
+]) {
+  test(`Resume explains ${code} without hiding it behind a generic confirmation error`, async () => {
+    const h = fixture(async () => {
+      throw Object.assign(new Error(message), { status: 409, code })
+    })
+    assert.equal(await h.result.current.resume(), false)
+    assert.match(h.result.current.state.error, expected)
+    assert.deepEqual(h.accepted, [])
+    assert.equal(h.refreshes.length, 1)
+  })
+}

@@ -51,8 +51,21 @@ def _call(method: str, path: str, payload: dict | None = None) -> dict:
   except HTTPError as exc:
     detail = exc.read().decode("utf-8", errors="replace")[:500]
     raise SystemExit(f"request failed ({exc.code}): {detail}")
-  except URLError as exc:
-    raise SystemExit(f"request failed: {exc.reason}")
+  except (TimeoutError, URLError) as exc:
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, TimeoutError):
+      # The server may have committed before the reply was lost; never
+      # report that as a plain failure the caller would answer with a new one.
+      retry = (
+        " Retrying an identical declare_wait in the same turn returns the wait"
+        " it already declared, with its original deadline and current status."
+        if (method, path) == ("POST", "/api/chat-waits") else ""
+      )
+      raise SystemExit(
+        f"no reply within 30 seconds; the {method} {path} request may "
+        f"already have taken effect, so do not treat it as failed.{retry}"
+      )
+    raise SystemExit(f"request failed: {reason}")
 
 
 def declare_wait(

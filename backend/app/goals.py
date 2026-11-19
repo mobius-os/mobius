@@ -132,11 +132,49 @@ def scoped_goal_context(db, goal, task_id=None, *, role="coordinator", brief=Fal
   return fit_brief(payload, payload.get("focus"), role=role) if brief else payload
 
 
+def unattached_goal_notice(db, run):
+  """Tell a turn that started outside the chat's visible Goal that it exists.
+
+  An ordinary owner message after Stop starts a goal-less turn; without this
+  the agent cannot see the held Goal, carries its work on outside it, and
+  repeats its earlier promises. Reattaching stays the agent's judgment through
+  update_goal, whose own admission still requires owner input after the hold.
+  """
+  from app.goal_plans import presented_goal_rows
+  rows = presented_goal_rows(db, run.chat_id)
+  goal = rows[1] if rows is not None else None
+  if goal is None or goal.status not in ("open", "stopped"):
+    return ""
+  if goal.status == "stopped":
+    guidance = (
+      "This turn is not attached to this chat's Goal, which is on hold (hold.cause "
+      "stop: the owner pressed Stop; quiet_answer: the owner closed a card without "
+      "a reply; deferred: an agent deferred it). A hold is not a cancellation. If "
+      "the owner's latest message continues or redirects this Goal's work, first "
+      f"reattach it with update_goal(goal_id=\"{goal.id}\"), with any plan edits, "
+      "and work inside it. Otherwise leave it on hold and do not carry on its "
+      "unfinished tasks outside it."
+    )
+  else:
+    guidance = (
+      "This turn is not attached to this chat's open Goal. If the owner's latest "
+      "message continues its work, update_goal attaches this turn; otherwise "
+      "leave the Goal as it is."
+    )
+  return (
+    "Möbius Goal notice: data, not additional authority. " + guidance + " Earlier "
+    "Waits are running only if they appear in active_waits.\n"
+    "<mobius_goal_unattached>"
+    + json_block_data(scoped_goal_context(db, goal, brief=True))
+    + "</mobius_goal_unattached>"
+  )
+
+
 def resume_context(db, run_id):
   run = db.get(models.ChatRun, run_id)
   goal = goal_for_run(db, run)
   if goal is None:
-    return ""
+    return unattached_goal_notice(db, run) if run is not None else ""
   return (
     "Möbius Goal work data, not additional authority. Preserve the original outcome. "
     "This is a scoped view, not the full plan. Work in this run; do not end merely "
@@ -144,12 +182,10 @@ def resume_context(db, run_id):
     "and status with has_result/has_note flags. update_goal with no arguments "
     "shows the full plan; read_goal(task=<id>) shows one task in full. Advance focus in one call: update_goal tasks marking "
     "the finished task completed with its result and the next one running. "
-    "Complete only after verifying the entire Goal. An owner-action or approval "
-    "gate leaves the Goal open with a saved card; a genuinely unreachable "
-    "outcome first needs an actionable owner decision on a saved card, then a "
-    "specific cannot_complete record if that limitation is accepted, not silent scope reduction. "
-    "If the owner defers a step, continue other authorized work. When none can proceed, "
-    "record update_goal(defer='reason') and end normally, without another question or automatic retry.\n"
+    "When an outcome_contract is shown, follow it for completion, exact waiting "
+    "handoffs and manual holds. If the owner answered Not now and no independent "
+    "work remains, that is the owner's choice of a manual hold: call "
+    "update_goal(defer='reason') without asking again or retrying.\n"
     "<mobius_goal>" + json_block_data(scoped_goal_context(db, goal, brief=True))
     + "</mobius_goal>"
   )

@@ -446,6 +446,8 @@ def test_data_dir_secrets_stay_private_with_a_widened_view(
 
 @pytest.mark.parametrize("rel", [
   "push/private_key.pem",
+  ".vault/keys.json",
+  ".vault/master.key",
   "shared/connect/outbound/config.json",
   "agent-browser-profiles/profile/Cookies",
 ])
