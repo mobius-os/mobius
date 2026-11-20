@@ -307,7 +307,7 @@ def test_theme_bg_is_the_owner_winning_root_value():
   assert theme._theme_bg(_ensure_core_vars(":root { --bg: #102030; }\n:root { --bg: #f0eeeb; }\n")) == "#f0eeeb"
   # With no plain-:root --bg, the first hex --bg declared anywhere, as for the mode.
   assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == "#ffffff"
-  assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#0d0d0d"
+  assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#000000"
 
 
 def test_role_cases():
@@ -425,8 +425,15 @@ def _composed_states():
   ]
   # (label, text colour expr, background expr, backdrop expr)
   return [(label, _prop(rule, "color"), _prop(rule, "background"), "var(--bg)") for label, rule in badges] + [
+    # A hovered tab (unselected) shows its text on the hover fill.
+    ("hovered tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab:not(.shell__tab--active):hover .shell__tab-open"), "color"),
+     _prop(_rule("components/Shell/Shell.css", ".shell__tab:not(.shell__tab--active):hover"), "background"), "var(--bg)"),
+    # A resting unselected tab: muted text on the page.
+    ("resting tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab-open"), "color"),
+     "transparent", "var(--bg)"),
+    # The selected row is a bold title with no wash: its text sits on the page.
     ("active drawer row", _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "color"),
-     _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "background"), "var(--bg)"),
+     "transparent", "var(--bg)"),
     ("question nudge at rest", _prop(nudge, "color"), _prop(nudge, "background"), "var(--bg)"),
     ("secure receipt (green)",
      _prop(_rule("components/ChatView/SecureInputCard.css", ".secure-card__receipt strong"), "color"),

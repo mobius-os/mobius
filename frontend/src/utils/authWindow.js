@@ -16,7 +16,7 @@ export function reserveAuthWindow(title = 'Opening sign-in...') {
       authWindow.document.title = title
       authWindow.document.body.style.margin = '0'
       authWindow.document.body.style.fontFamily = 'system-ui, sans-serif'
-      authWindow.document.body.style.background = '#0d0d0d'
+      authWindow.document.body.style.background = '#000000'
       authWindow.document.body.style.color = '#d4d4d8'
       authWindow.document.body.innerHTML = '<main style="min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;text-align:center"><div><h1 style="font-size:20px;margin:0 0 8px">Opening sign-in...</h1><p style="margin:0;color:#a1a1aa">You can come back to Möbius when this is done.</p></div></main>'
     } catch {

@@ -149,3 +149,25 @@ test('the handoff stack respects measured keyboard room and owns the only helper
   assert.match(stack, /overflow-y: auto/)
   assert.doesNotMatch(ruleBody('.chat__helper-list'), /max-height|overflow/)
 })
+
+test('the composer is see-through only while idle and empty', () => {
+  const rule = css.match(/\.chat__pill:focus-within,\n\.chat__pill:not\(:has\(\.cm-placeholder\)\),[\s\S]*?\{([^}]*)\}/)
+  assert.ok(rule, 'a focused, filled or attaching composer must get its own backing')
+  assert.match(rule[0], /\.chat__plus/, 'the paired Brain button follows the pill')
+  assert.match(rule[1], /background: color-mix\(in srgb, var\(--surface\) 92%, transparent\)/)
+  const pill = css.match(/\n\.chat__pill \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(pill, /background: color-mix\(in srgb, var\(--surface\) 3%, transparent\)/, 'idle stays see-through')
+  assert.match(pill, /backdrop-filter: blur\(0\.5px\)/)
+})
+
+test('every error card keeps its icon on the title line', () => {
+  assert.match(css, /\n\.chat__text--error > \.chat__lifecycle-icon \{ height: 18px; \}/)
+  assert.doesNotMatch(css, /\.chat__text--(error|parked) > \.chat__lifecycle-icon \{[^}]*align-self: center/,
+    'opening Technical details must never move the icon')
+})
+
+test('a plain error icon box matches its 24px head row', () => {
+  assert.match(css, /\.chat__text--error:has\(\.chat__error-head \.chat__msg-copy\) > \.chat__lifecycle-icon \{ height: 24px; \}/)
+  const copy = css.match(/\n\.chat__msg-copy,\n\.chat__msg-branch \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(copy, /min-height: 24px;/, 'the icon height follows the copy button that sets the head row')
+})

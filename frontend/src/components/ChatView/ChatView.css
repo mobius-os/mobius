@@ -29,9 +29,13 @@
    ║      padding would drift the logo every keystroke.         ║
    ║                                                            ║
    ║   4. Pill + + button are a UNIFIED PAIR:                   ║
-   ║        - Same background: color-mix(srgb, --surface 60%,   ║
-   ║          transparent).                                     ║
-   ║        - Same backdrop-filter: blur(16px) saturate(140%).  ║
+   ║        - Same see-through background: color-mix(srgb,      ║
+   ║          --surface 3%, transparent), so chat text behind   ║
+   ║          them stays readable as text.                      ║
+   ║        - Same light backdrop-filter: blur(0.5px), declared ║
+   ║          -webkit- first, standard last (the build keeps    ║
+   ║          the standard one; current Chrome ignores the      ║
+   ║          prefixed form).                                   ║
    ║        - Pill min-height 48px === + button 48×48.          ║
    ║        - Same hairline border-color.                       ║
    ║      Touching one without the other breaks the visual      ║
@@ -798,13 +802,22 @@
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
-  margin: 6px 0;
+  /* The same 10px separation as a marker card that follows other content. */
+  margin: 10px 0;
   /* Cancel the assistant-bubble background that would otherwise be
      inherited from .chat__text--assistant — we want the error to
      read as standalone, not as something the agent typed. */
   max-width: none;
 }
 .chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
+/* The icon keeps the marker's 28px column and 10px gap and stays on the
+   title line (18px) for every error card: plain errors and the rate-limit,
+   model-busy and refusal cards all carry an expandable "Technical details",
+   so a centred icon would move when it opens. */
+.chat__text--error > .chat__lifecycle-icon { height: 18px; }
+/* A plain error's head row is 24px tall when it carries the copy button,
+   so the icon box takes that height and sits on the title's centre. */
+.chat__text--error:has(.chat__error-head .chat__msg-copy) > .chat__lifecycle-icon { height: 24px; }
 .chat__error-status { min-width: 0; }
 
 .chat__error-head {
@@ -841,8 +854,10 @@
 .chat__recovery-copy {
   margin-top: 4px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  /* Secondary text is one step below the title, the same size as a marker's
+     context line, so explanations do not compete with the headline. */
+  font-size: var(--chat-status-font-size);
+  line-height: 16px;
 }
 .chat__recovery-details {
   margin-top: 4px;
@@ -1465,7 +1480,9 @@
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  color: var(--muted); /* CONTRACT: low-contrast structural glyphs */
+  /* Activity glyphs carry the accent so the tool lane reads as one system;
+     the label next to them stays muted. */
+  color: var(--accent-text);
 }
 .chat__tool-icon--running { color: var(--accent); /* CONTRACT: vivid accent marks the active child step */ }
 
@@ -2079,6 +2096,21 @@
   color: var(--text); /* CONTRACT: high-contrast lift marks the tappable line */
 }
 
+/* While a thinking line is running its dots light up one after another. */
+.chat__activity-header:has(.chat__activity-label-sweep) .chat__thinking-dots circle {
+  animation: chat-thinking-dot 1.2s steps(1, end) infinite;
+  opacity: 0.35;
+}
+.chat__activity-header:has(.chat__activity-label-sweep) .chat__thinking-dots circle:nth-child(2) { animation-delay: 0.4s; }
+.chat__activity-header:has(.chat__activity-label-sweep) .chat__thinking-dots circle:nth-child(3) { animation-delay: 0.8s; }
+@keyframes chat-thinking-dot {
+  0% { opacity: 1; }
+  33.4%, 100% { opacity: 0.35; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat__activity-header:has(.chat__activity-label-sweep) .chat__thinking-dots circle { animation: none; opacity: 1; }
+}
+
 .chat__activity-icon {
   display: inline-flex;
   align-items: center;
@@ -2086,7 +2118,7 @@
   flex-shrink: 0;
   width: 14px;
   height: 14px;
-  color: var(--muted); /* CONTRACT: low-contrast status glyph */
+  color: var(--accent-text); /* the same accent as the tool glyphs */
 }
 
 .chat__activity-label {
@@ -2375,6 +2407,8 @@
 
 .chat__marker-header {
   display: flex;
+  /* Icon and chevron are centred on the whole title + context block, like
+     the icon of the error and limit cards. */
   align-items: center;
   gap: 10px;
   width: 100%;
@@ -2413,7 +2447,7 @@
 }
 
 .chat__marker-sub {
-  font-size: 11.5px;
+  font-size: var(--chat-status-font-size);
   color: var(--muted); /* CONTRACT: low-contrast context line on opaque fill */
   line-height: 1.3;
   overflow: hidden;
@@ -2475,11 +2509,14 @@
    layer. z-index -1 keeps it inside the foot's stacking context (z:5) so it sits
    ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
    (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
-   the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
+   the blur band below can share its box. The ramp is pinned to the field, not to a
+   percentage of the footer (which is taller on phones and covered the last content
+   with black): clear all the way down to the pill's bottom edge, so the last reply
+   line and its copy actions stay readable, 70% page colour where the safe area
+   starts, and solid only behind the gesture strip.
    `bottom` extends through the device safe area independently of the interactive
    foot, so keeping the controls safe cannot expose scrolling text beneath the
-   gesture bar. Percentage stops give the embedded (shorter) composer a proportional
-   fade. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   gesture bar. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
    colour. */
 .chat__foot::before {
   content: "";
@@ -2490,12 +2527,29 @@
   bottom: calc(0px - var(--chat-foot-safe-bottom));
   background: linear-gradient(
     to bottom,
-    transparent 0%,
-    color-mix(in srgb, var(--bg) 0%, transparent) 68%,
-    color-mix(in srgb, var(--bg) 12%, transparent) 76%,
-    color-mix(in srgb, var(--bg) 42%, transparent) 88%,
-    var(--bg) 98%
+    transparent calc(100% - var(--chat-foot-safe-bottom) - var(--chat-foot-pad-block)),
+    color-mix(in srgb, var(--bg) 70%, transparent) calc(100% - var(--chat-foot-safe-bottom)),
+    var(--bg) 100%
   );
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* The composer's light blur continues in the band above it: the same 0.5px,
+   easing in from nothing at the top of the band to full strength near the
+   field, so the last reply line and its copy actions stay sharp. Same box as
+   the fade; a mask, not a gradient colour, controls only where the blur shows. */
+.chat__foot::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -100px;
+  bottom: calc(0px - var(--chat-foot-safe-bottom));
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 30%, #000 70%);
+  mask-image: linear-gradient(to bottom, transparent 30%, #000 70%);
   pointer-events: none;
   z-index: -1;
 }
@@ -2522,6 +2576,10 @@
    device gesture strip to fill and the shorter, flat-bottomed foot doesn't want
    the tall fade. Keep it subtle: just enough to soften content under the pill. */
 .chat-embed .chat__foot::before {
+  top: -44px;
+  bottom: 0;
+}
+.chat-embed .chat__foot::after {
   top: -44px;
   bottom: 0;
 }
@@ -2732,9 +2790,9 @@
   opacity: 0.5;
 }
 
-/* The pill: TRANSLUCENT surface with backdrop-blur — chat content
-   visibly softens through the pill background. Hairline border and
-   slight surface tint keep it readable as a card. ~48px tall to
+/* The pill: SEE-THROUGH surface — chat text behind it stays readable
+   as text, softened only by a 0.5px blur. The hairline border marks the
+   field; the placeholder and typed text read over the content. ~48px tall to
    match a WhatsApp-style composer; send/mic buttons live INSIDE
    at 32×32. */
 .chat__pill {
@@ -2758,14 +2816,27 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 3%, transparent);
   border: var(--pill-border) solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 24px;
   padding: var(--pill-pad);
   min-height: 48px;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
   transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+/* See-through only while idle and empty. Once the field has focus, text or
+   attached files (the editor shows .cm-placeholder only while it is empty),
+   the pill and its paired Brain button get a near-solid
+   surface so the draft and placeholder never paint over message lines. The
+   0.5px blur and the hairline stay. */
+.chat__pill:focus-within,
+.chat__pill:not(:has(.cm-placeholder)),
+.chat__pill--with-attach,
+.chat__input-row:has(.chat__pill:focus-within, .chat__pill--with-attach) .chat__plus:not(:hover):not(.chat__plus--active),
+.chat__input-row:not(:has(.cm-placeholder)) .chat__plus:not(:hover):not(.chat__plus--active) {
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
 }
 
 /* Multi-line: pill grows downward and the send/mic anchor to the
@@ -3195,7 +3266,7 @@
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same
-   frosted-glass surface tint (60%) and same hairline border so
+   see-through surface tint (3%), light blur and hairline border so
    the two read as a unified pair. When the popover opens, the
    accent border marks the active state without obscuring the gauge. */
 .chat__plus {
@@ -3203,15 +3274,15 @@
   height: 48px;
   border-radius: 50%;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 3%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   display: grid;
   place-items: center;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
   flex-shrink: 0;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
 }
 
 .chat__plus:hover {
@@ -4789,9 +4860,13 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   flex: 0 0 28px;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
   color: var(--lifecycle-tone, var(--accent));
-  background: color-mix(in srgb, var(--lifecycle-tone, var(--accent)) 12%, transparent);
+}
+/* A 16px glyph with no tile: the 28px slot keeps every row's rhythm, the
+   smaller glyph draws the thinner line the activity rows use. */
+.chat__lifecycle-icon svg {
+  width: 16px;
+  height: 16px;
 }
 .chat__lifecycle-icon svg,
 .chat__lifecycle-outcome {

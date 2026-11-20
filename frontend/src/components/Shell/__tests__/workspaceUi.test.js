@@ -414,11 +414,11 @@ test('pane chrome carries no always-on focus ring or underline', () => {
   assert.doesNotMatch(chrome, /data-focus-ring/)
   assert.doesNotMatch(chrome, /workspace__focus-ring/)
   assert.doesNotMatch(css, /\.workspace__focus-ring\s*\{/)
-  // Active tabs retain their pill tint and border treatment, but focused panes
-  // do not add a persistent accent mark.
-  assert.doesNotMatch(css, /\.workspace__strip--focused \.shell__tab--active\s*\{[^}]*box-shadow:/)
-  assert.match(css, /\.workspace__strip--focused \.shell__tab--active/)
-  assert.match(css, /\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active/)
+  // The active tab is a fill only: no accent edge, ring or shadow in any pane,
+  // and an unfocused pane's active tab drops even the fill.
+  assert.doesNotMatch(css, /\.shell__tab--active\s*\{[^}]*(box-shadow|border-color: color-mix)/)
+  assert.doesNotMatch(shellCss, /\.shell__tab--active\s*\{[^}]*var\(--accent\)/)
+  assert.match(css, /\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active\s*\{\s*background: transparent;/)
 })
 
 test('keyboard pane focus is visible but stays off for mouse and touch', () => {
@@ -849,6 +849,33 @@ test('an active overflowing chat title cycles once, then becomes idle', () => {
   assert.match(shellCss, /\.shell__tab-text-inner \{ animation: none !important; \}/)
 })
 
+test('tab hover and selection never change a tab\'s size or tint its text', () => {
+  const base = shellCss.match(/\n\.shell__tab \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(base, /border: 1px solid var\(--border-light\);/, 'unselected tabs keep visible bounds')
+  const active = shellCss.match(/\n\.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(active, /border-color: transparent;/)
+  assert.doesNotMatch(active, /width|padding|font-weight/)
+  assert.doesNotMatch(shellCss, /\.shell__tab(-open|-text)[^{,]*\{[^}]*color: var\(--accent/,
+    'tab text never turns purple (the project and artifact identity icons may)')
+  // The close X is always laid out; with a pointer it only fades in.
+  const close = shellCss.match(/\n\.shell__tab-close \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(close, /display: flex;/)
+  assert.doesNotMatch(shellCss, /\.shell__tab[^{]*:hover[^{]*\{[^}]*(padding|width|display)/)
+  assert.match(shellCss, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:not\(\.shell__tab--active\) \.shell__tab-close \{ opacity: 0; \}/)
+})
+
+test('tab hover is lighter than selection, pointer-only, and an unfocused pane keeps a selected cue', () => {
+  const hover = shellCss.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:not\(\.shell__tab--active\):hover \{([^}]*)\}/)
+  assert.ok(hover, 'the hover fill only applies with a pointer')
+  assert.match(hover[1], /color-mix\(in srgb, var\(--surface-2\) 50%, transparent\)/,
+    'hover is lighter than the selected --surface-2 fill')
+  assert.doesNotMatch(shellCss, /\n\.shell__tab:hover \{/, 'no unconditional hover fill')
+  assert.doesNotMatch(shellCss, /\.shell__tab:hover \{/,
+    'hover must exclude the selected tab (:not(.shell__tab--active)), or it would lighten it')
+  const quiet = css.match(/\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active \{([^}]*)\}/)
+  assert.match(quiet[1], /border-color: var\(--border\);/)
+})
+
 test('the pane focus action uses one unambiguous accessible state contract', () => {
   assert.match(paneStrip, /const label = focused \? 'Show all panes' : 'Focus pane'/)
   assert.match(paneStrip, /aria-label=\{label\}/)
@@ -1052,12 +1079,26 @@ test('a selected project-owned chat Recent includes its project chip in one row 
   assert.match(drawer, /projectChip \? ' drawer__row--project-owned'/)
   assert.match(
     drawerCss,
-    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*var\(--accent-dim\)/,
+    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*transparent/,
   )
   assert.match(
     drawerCss,
     /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
   )
+})
+
+test('a selected Recent is its bold title, with no wash and no accent text', () => {
+  const active = drawerCss.match(/\n\.drawer__item--active \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(active, /color: var\(--text\);/)
+  assert.match(active, /font-weight: 600;/)
+  assert.doesNotMatch(active, /background/)
+  assert.doesNotMatch(drawerCss, /drawer__row--active[^{]*\{[^}]*(accent-dim|var\(--accent)/)
+})
+
+test('the Pinned heading is styled by its own modifier, not by excluding the switch', () => {
+  assert.match(drawer, /className="drawer__label drawer__label--section"/)
+  assert.match(drawerCss, /\.drawer__label\.drawer__label--section \{[^}]*font-size: 13px;[^}]*color: var\(--muted\);/)
+  assert.doesNotMatch(drawerCss, /\.drawer__label:not\(\.drawer__tabs\)/)
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
@@ -1362,11 +1403,9 @@ test('the builder preview cannot outlive its drag session past one visibility bo
 })
 
 test('workspace focus, drag label, and cancel visuals remain coherent', () => {
-  // The focused pane keeps a quieter active-pill border without restoring the
-  // persistent underline that previously appeared beneath the tab.
-  const focused = css.match(/\.workspace__strip--focused \.shell__tab--active \{[\s\S]*?\n\}/)?.[0] || ''
-  assert.doesNotMatch(focused, /box-shadow:/)
-  assert.match(focused, /border-color: color-mix\(in srgb, var\(--accent\) 45%, var\(--border-light\)\)/)
+  // The focused pane's active tab is the base fill: no workspace override that
+  // could restore an accent border or the old persistent underline.
+  assert.doesNotMatch(css, /\.workspace__strip--focused \.shell__tab--active \{/)
   // Fixed drag chrome remains clamped inside the viewport edge.
   assert.match(dragBinding, /const viewportWidth = viewport\.width \|\| window\.innerWidth/)
   assert.match(dragBinding, /const maxLeft = Math\.max\(margin, viewportWidth - chipWidth - margin\)/)

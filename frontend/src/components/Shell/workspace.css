@@ -136,23 +136,19 @@ html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-draw
   scroll-margin-inline-end: 34px;
 }
 
-/* Which tab is open in each pane reads from the strips' active pill — there is
+/* Which tab is open in each pane reads from the strips' active tab — there is
    NO ring, underline, or border around any pane's content (owner call, live
-   testing). The base `.shell__tab--active` (Shell.css) already tints the active
-   pill with the accent; here we only soften its border by degree, scoped to the
-   tiled workspace so the single-pane top nav keeps its own look. The focused
-   pane stays slightly stronger than the unfocused panes without adding a
-   persistent focus mark. */
-.workspace__strip--focused .shell__tab--active {
-  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-light));
-}
+   testing). The base `.shell__tab--active` (Shell.css) fills the active tab;
+   the focused pane keeps that fill, while an unfocused pane's active tab reads
+   as open but quiet: no fill, but a stronger --border outline than the
+   unselected tabs' hairline and the full text colour, so it still stands out. */
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border-light));
-  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  background: transparent;
+  border-color: var(--border);
 }
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active
   .shell__tab-open {
-  opacity: 0.72;
+  color: var(--text);
 }
 
 /* Keyboard-only pane-focus signal. The strips carry no default focus ring

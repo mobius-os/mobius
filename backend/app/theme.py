@@ -41,8 +41,11 @@ DEFAULT_THEME = """\
 
      Palette neutralized in 2026-05: dropped the slight blue tint
      (--bg #0d0f14 → #0d0d0d, surfaces same step) so the dark
-     mode reads as a true charcoal stack rather than blue-grey. */
-  --bg: #0d0d0d;
+     mode reads as a true charcoal stack rather than blue-grey.
+     2026-11: --bg #0d0d0d → #000000, a true black page; the
+     surfaces stay one step lighter, so depth still comes from
+     lighter panels rather than shadows. */
+  --bg: #000000;
   --surface: #171717;
   --surface-2: #212121;
   --border: #2a2a2a;
@@ -94,10 +97,16 @@ DEFAULT_THEME = """\
   --accent-fill-hover: #7053cf;
   --danger-fill: #dc2626;
   --green-fill: #047857;
+  /* A warning bar fill (no label on it). Intentionally independent of the
+     warning base colour: the same orange in both modes, so the light theme's
+     darker, text-safe warning never turns the bar brown. */
+  --warning-fill: #d8922f;
 
-  /* Typography. */
-  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+  /* Typography: each platform's own UI font (San Francisco on Apple, Segoe UI
+     on Windows, Roboto on Android), so one face covers every script; code keeps
+     JetBrains Mono with the platform monospace fonts behind it. */
+  --font: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
 }
 """
 
@@ -355,7 +364,7 @@ def reset_theme_override(data_dir: str) -> dict:
 # --accent-hover, the fills and --font/--mono are mode-agnostic, so they
 # stay sourced from DEFAULT_THEME for both modes.
 _LIGHT_DEFAULTS = {
-  "--bg": "#f0eeeb",
+  "--bg": "#ffffff",
   "--surface": "#ffffff",
   "--surface-2": "#e8e6e2",
   "--border": "#d4d1cc",
@@ -973,7 +982,7 @@ def _theme_bg(effective_css: str) -> str:
   if bg:
     return bg
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)
-  return m.group(1) if m else "#0d0d0d"
+  return m.group(1) if m else "#000000"
 
 
 # =============================================================

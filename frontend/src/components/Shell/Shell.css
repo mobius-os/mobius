@@ -531,12 +531,28 @@
   max-width: 160px;
   border-radius: 8px;
   border: 1px solid var(--border-light);
-  background: color-mix(in srgb, var(--bg) 92%, var(--text) 6%);
+  background: transparent;
   overflow: hidden;
 }
+/* Selection is a background change only: same box, same width, no accent edge
+   and no accent text. An unselected tab keeps its hairline so its bounds read;
+   hover is a light fill. Nothing here changes a tab's size. */
+/* Hover (unselected tabs only, so the selected tab never changes under the
+   pointer) is a lighter fill than the selected tab, and only with a pointer, so
+   a touch tab left in a hover state never looks selected. Muted text drops
+   under 4.5:1 on the fill in light mode, so a hovered tab's text takes the
+   full text colour. */
+@media (hover: hover) and (pointer: fine) {
+  .shell__tab:not(.shell__tab--active):hover {
+    background: color-mix(in srgb, var(--surface-2) 50%, transparent);
+  }
+  .shell__tab:not(.shell__tab--active):hover .shell__tab-open {
+    color: var(--text);
+  }
+}
 .shell__tab--active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 14%, var(--bg));
+  border-color: transparent;
+  background: var(--surface-2);
 }
 .shell__tab-open {
   display: flex;
@@ -545,10 +561,13 @@
   padding: 5px 4px 5px 9px;
   background: none;
   border: none;
-  color: var(--text);
+  color: var(--muted);
   cursor: pointer;
   font-size: 12.5px;
   -webkit-tap-highlight-color: transparent;
+}
+.shell__tab--active .shell__tab-open {
+  color: var(--text);
 }
 /* The tab button reserves one-finger motion so the browser cannot cancel a
    post-hold horizontal drag. Before the hold, the drag controller pans the strip
@@ -611,6 +630,15 @@
   -webkit-tap-highlight-color: transparent;
 }
 .shell__tab-close:hover { opacity: 1; }
+/* With a pointer, an unselected tab's close X appears on hover or keyboard
+   focus. It is always laid out, so it fades in without moving anything; touch
+   screens and the selected tab keep it visible. */
+@media (hover: hover) and (pointer: fine) {
+  .shell__tab:not(.shell__tab--active) .shell__tab-close { opacity: 0; }
+  .shell__tab:not(.shell__tab--active):hover .shell__tab-close,
+  .shell__tab:not(.shell__tab--active):focus-within .shell__tab-close { opacity: 0.55; }
+  .shell__tab:not(.shell__tab--active) .shell__tab-close:hover { opacity: 1; }
+}
 
 /* The install affordance lives in the first-sign-in walkthrough now
    (see frontend/src/components/Walkthrough/WalkthroughOverlay.jsx).

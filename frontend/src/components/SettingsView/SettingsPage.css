@@ -310,7 +310,10 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
   background: var(--accent);
   transition: width 0.3s var(--ease-out-soft, ease);
 }
-.settings-meter--warning .settings-meter__fill { background: var(--warning); }
+/* Near the limit the bar uses --warning-fill, the same orange in both modes.
+   The light theme's --warning is darkened for text contrast and reads as
+   brown on a bar; the percentage beside the bar carries the value as text. */
+.settings-meter--warning .settings-meter__fill { background: var(--warning-fill); }
 .settings-meter--danger .settings-meter__fill { background: var(--danger); }
 .settings-meter__label {
   display: flex;

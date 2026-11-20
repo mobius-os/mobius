@@ -245,6 +245,13 @@
   margin: 12px 0 4px;
 }
 .drawer__label span { line-height: inherit; }
+/* A section title (Pinned) sits one step below the rows and in the muted
+   colour, so it labels the list without competing with it. The doubled class
+   also outranks the phone-size .drawer__label rule below. */
+.drawer__label.drawer__label--section {
+  font-size: 13px;
+  color: var(--muted);
+}
 
 .drawer__label .drawer__label-count {
   margin-left: auto;
@@ -456,15 +463,17 @@
   }
 }
 
+/* The selected row is the open chat's title in bold: no wash, no accent text.
+   Hover keeps its light surface, so a pointer still sees the row. */
 .drawer__item--active {
-  color: var(--accent-text, var(--accent));
-  background: var(--accent-dim);
+  color: var(--text);
+  font-weight: 600;
 }
 
 /* Press feedback stays on the row surface rather than scaling the button.
    Scaling a drawer row rasterizes its text at a transient smaller size, which
    makes chat names visibly shrink and grow during otherwise unrelated chat
-   handoffs. The selected row already has its own steady accent wash. */
+   handoffs. The selected row is marked by its bold title instead. */
 .drawer__item:not(.drawer__item--active):active {
   background-color: var(--surface);
 }
@@ -558,13 +567,14 @@
 }
 
 .drawer__row--project-owned.drawer__row--active {
-  color: var(--accent-text, var(--accent));
-  background: var(--accent-dim);
+  color: var(--text);
+  background: transparent;
 }
 
 .drawer__row--project-owned.drawer__row--active .drawer__item {
   color: inherit;
   background: transparent;
+  font-weight: 600;
 }
 
 @media (hover: hover) and (pointer: fine) {
@@ -577,7 +587,7 @@
   }
 
   .drawer__row--project-owned.drawer__row--active:hover {
-    background: var(--accent-dim);
+    background: var(--surface);
   }
 }
 
@@ -615,15 +625,7 @@
 }
 .drawer__project-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 
-/* The default accent wash is deliberately quiet in dark mode, but that same
-   mix loses the selected row and project identity against a light canvas. */
-[data-theme="light"] .drawer__row--project-owned.drawer__row--active {
-  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
-}
-[data-theme="light"] .drawer__row--project-owned.drawer__row--active:hover {
-  background: color-mix(in srgb, var(--accent) 16%, var(--bg));
-}
+/* The project chip needs more colour to hold its identity on a light canvas. */
 [data-theme="light"] .drawer__project-chip {
   color: color-mix(in srgb, var(--project-color) 72%, var(--text));
   border-color: color-mix(in srgb, var(--project-color) 42%, var(--border-light));
@@ -877,7 +879,6 @@
   .drawer__label {
     font-size: 15px;
   }
-
   .drawer__item-icon {
     width: 20px;
     height: 20px;

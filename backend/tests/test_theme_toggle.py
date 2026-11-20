@@ -62,11 +62,11 @@ def toggle_once(css: str, from_mode: str) -> tuple[str, str]:
 
 def test_structural_colours_swap_and_a_custom_accent_survives():
   persisted, painted = toggle_once(CUSTOM_DARK.replace("#ff00ff", "#abcdef"), "dark")
-  assert root_var(persisted, "--bg") == "#f0eeeb"
+  assert root_var(persisted, "--bg") == "#ffffff"
   assert root_var(persisted, "--accent") == "#abcdef"
-  assert theme._theme_bg(painted) == "#f0eeeb"
+  assert theme._theme_bg(painted) == "#ffffff"
   persisted, painted = toggle_once(CUSTOM_DARK.replace("#0d0f14", "#f0eeeb"), "light")
-  assert theme._theme_bg(painted) == "#0d0d0d"
+  assert theme._theme_bg(painted) == "#000000"
 
 
 def test_selectors_containing_double_dashes_stay_selectors():
@@ -85,7 +85,7 @@ def test_a_stripped_theme_gets_its_missing_tokens_back():
   persisted, _ = toggle_once(stripped, "light")
   for token in ("--accent", "--accent-hover", "--accent-dim", "--danger", "--green"):
     assert root_var(persisted, token), token
-  assert root_var(persisted, "--bg") == "#0d0d0d"
+  assert root_var(persisted, "--bg") == "#000000"
 
 
 def test_the_label_follows_the_kept_accent_and_is_painted_not_saved():

@@ -12,11 +12,23 @@ import {
   Terminal,
 } from '@openai/apps-sdk-ui/components/Icon'
 
+// Thinking is three dots: they light up one after another while the model
+// thinks (CSS keys off the running label sweep) and stay still afterwards.
+function ThinkingDots({ width, height }) {
+  return (
+    <svg className="chat__thinking-dots" width={width} height={height} viewBox="0 0 16 16" fill="currentColor">
+      <circle cx="3" cy="8" r="1.6" />
+      <circle cx="8" cy="8" r="1.6" />
+      <circle cx="13" cy="8" r="1.6" />
+    </svg>
+  )
+}
+
 // Every activity line uses the same fixed-width glyph lane. Tool kinds select
 // their matching glyph; reasoning has its own mark so a thinking-only stretch
 // remains visibly part of the activity system instead of becoming bare text.
 const ACTIVITY_ICONS = {
-  reasoning: Sparkle,
+  reasoning: ThinkingDots,
   terminal: Terminal,
   files: FileDocument,
   search: Search,
