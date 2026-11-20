@@ -639,11 +639,20 @@ def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
       detail="Frontend and standalone host are out of sync.",
       headers={"Retry-After": "1"},
     )
-  html = _replace_html_text(
-    html,
-    '<meta name="theme-color" content="#000000" />',
+  # Match the meta tag by pattern, like the icon link above: a change of the
+  # default colour in index.html must not leave this host out of sync.
+  html, theme_color_replacements = re.subn(
+    r'<meta\s+name="theme-color"[^>]*>',
     f'<meta name="theme-color" content="{app_bg}" />',
+    html,
+    count=1,
   )
+  if theme_color_replacements != 1:
+    raise HTTPException(
+      status_code=503,
+      detail="Frontend and standalone host are out of sync.",
+      headers={"Retry-After": "1"},
+    )
 
   theme_payload = _script_json(theme_data(get_settings().data_dir))
   html = _replace_html_text(
