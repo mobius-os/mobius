@@ -254,6 +254,22 @@
   transition: color 300ms ease;
 }
 
+/* Shown only while this Möbius runs on the staging launcher, so a developer
+   can tell at a glance which account service they are signed in through. */
+.shell__launcher-badge {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 55%, transparent);
+  background: color-mix(in srgb, var(--warning, #f59e0b) 16%, transparent);
+  color: var(--warning-text, color-mix(in srgb, var(--warning, #f59e0b) 70%, var(--text)));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
 
 /* ── Immersive mode (moebius:immersive, .pm/128) ───── */
 
@@ -948,6 +964,22 @@
   .shell:not(.shell--drawer-docked) .shell__wordmark,
   .shell:not(.shell--drawer-docked) .shell__bar-actions {
     display: none;
+  }
+
+  /* The collapsed rail is only as wide as the logo, so the Staging pill
+     shrinks to a dot on the logo's corner. The label stays for screen readers
+     and the hover title. */
+  .shell:not(.shell--drawer-docked) .shell__launcher-badge {
+    position: absolute;
+    top: 0;
+    left: 21px;
+    width: 10px;
+    height: 10px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+    border: 2px solid var(--bg);
+    background: var(--warning, #f59e0b);
   }
 
   .shell--drawer-docked .shell__bar {
