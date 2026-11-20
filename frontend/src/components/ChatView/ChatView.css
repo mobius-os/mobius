@@ -1475,7 +1475,9 @@
   flex: 0 0 14px;
   width: 14px;
   height: 14px;
-  color: var(--muted); /* CONTRACT: low-contrast structural glyphs */
+  /* Activity glyphs carry the accent so the tool lane reads as one system;
+     the label next to them stays muted. */
+  color: var(--accent-text);
 }
 .chat__tool-icon--running { color: var(--accent); /* CONTRACT: vivid accent marks the active child step */ }
 
@@ -2111,7 +2113,7 @@
   flex-shrink: 0;
   width: 14px;
   height: 14px;
-  color: var(--muted); /* CONTRACT: low-contrast status glyph */
+  color: var(--accent-text); /* the same accent as the tool glyphs */
 }
 
 .chat__activity-label {
