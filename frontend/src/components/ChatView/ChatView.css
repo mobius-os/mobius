@@ -802,13 +802,18 @@
   color: var(--text);
   font-size: 13px;
   line-height: 1.45;
-  margin: 6px 0;
+  /* The same 10px separation as a marker card that follows other content. */
+  margin: 10px 0;
   /* Cancel the assistant-bubble background that would otherwise be
      inherited from .chat__text--assistant — we want the error to
      read as standalone, not as something the agent typed. */
   max-width: none;
 }
 .chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
+/* The icon keeps the marker's 28px column and 10px gap, and sits on the
+   title line (18px) instead of hanging below it in a 28px-tall slot. */
+.chat__text--error > .chat__lifecycle-icon { height: 18px; }
+.chat__marker-header .chat__lifecycle-icon { height: 17px; }
 .chat__error-status { min-width: 0; }
 
 .chat__error-head {
@@ -845,8 +850,10 @@
 .chat__recovery-copy {
   margin-top: 4px;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.45;
+  /* Secondary text is one step below the title, the same size as a marker's
+     context line, so explanations do not compete with the headline. */
+  font-size: var(--chat-status-font-size);
+  line-height: 16px;
 }
 .chat__recovery-details {
   margin-top: 4px;
@@ -2379,7 +2386,9 @@
 
 .chat__marker-header {
   display: flex;
-  align-items: center;
+  /* Icon, title and chevron share the title line, like the error and limit
+     cards, so every event row's icon sits at the same height. */
+  align-items: flex-start;
   gap: 10px;
   width: 100%;
   padding: 10px 12px;
@@ -2417,7 +2426,7 @@
 }
 
 .chat__marker-sub {
-  font-size: 11.5px;
+  font-size: var(--chat-status-font-size);
   color: var(--muted); /* CONTRACT: low-contrast context line on opaque fill */
   line-height: 1.3;
   overflow: hidden;
