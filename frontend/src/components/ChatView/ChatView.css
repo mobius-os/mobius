@@ -810,10 +810,9 @@
   max-width: none;
 }
 .chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
-/* The icon keeps the marker's 28px column and 10px gap, and sits on the
-   title line (18px) instead of hanging below it in a 28px-tall slot. */
-.chat__text--error > .chat__lifecycle-icon { height: 18px; }
-.chat__marker-header .chat__lifecycle-icon { height: 17px; }
+/* The icon keeps the marker's 28px column and 10px gap and is centred on
+   the card's text block, like the icon of a marker card. */
+.chat__text--error > .chat__lifecycle-icon { grid-row: 1; align-self: center; }
 .chat__error-status { min-width: 0; }
 
 .chat__error-head {
@@ -2386,9 +2385,9 @@
 
 .chat__marker-header {
   display: flex;
-  /* Icon, title and chevron share the title line, like the error and limit
-     cards, so every event row's icon sits at the same height. */
-  align-items: flex-start;
+  /* Icon and chevron are centred on the whole title + context block, like
+     the icon of the error and limit cards. */
+  align-items: center;
   gap: 10px;
   width: 100%;
   padding: 10px 12px;
