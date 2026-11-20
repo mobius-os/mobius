@@ -11,6 +11,10 @@
   background: var(--surface, rgba(255,255,255,.06));
   border: 1px solid var(--border-light, var(--border));
 }
+/* The card is a programmatic landing spot for links to a saved question, not
+   a control. Focusing it must not paint the UA ring around the whole card;
+   its options, answer box and Submit keep their own keyboard indicators. */
+.qcard:focus { outline: none; }
 .qcard--answered {
   /* Keep the card geometry unchanged after submission. Individual controls
      are disabled, while the Submit slot remains visible as "Submitted". */
