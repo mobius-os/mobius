@@ -864,6 +864,16 @@ test('tab hover and selection never change a tab\'s size or tint its text', () =
   assert.match(shellCss, /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:not\(\.shell__tab--active\) \.shell__tab-close \{ opacity: 0; \}/)
 })
 
+test('tab hover is lighter than selection, pointer-only, and an unfocused pane keeps a selected cue', () => {
+  const hover = shellCss.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:hover \{([^}]*)\}/)
+  assert.ok(hover, 'the hover fill only applies with a pointer')
+  assert.match(hover[1], /color-mix\(in srgb, var\(--surface-2\) 50%, transparent\)/,
+    'hover is lighter than the selected --surface-2 fill')
+  assert.doesNotMatch(shellCss, /\n\.shell__tab:hover \{/, 'no unconditional hover fill')
+  const quiet = css.match(/\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active \{([^}]*)\}/)
+  assert.match(quiet[1], /border-color: var\(--border\);/)
+})
+
 test('the pane focus action uses one unambiguous accessible state contract', () => {
   assert.match(paneStrip, /const label = focused \? 'Show all panes' : 'Focus pane'/)
   assert.match(paneStrip, /aria-label=\{label\}/)

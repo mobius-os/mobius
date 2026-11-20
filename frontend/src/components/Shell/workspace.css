@@ -140,13 +140,15 @@ html[data-mode-view-transition="exit"]::view-transition-old(mode-navigation-draw
    NO ring, underline, or border around any pane's content (owner call, live
    testing). The base `.shell__tab--active` (Shell.css) fills the active tab;
    the focused pane keeps that fill, while an unfocused pane's active tab reads
-   as open but quiet: no fill, muted text, still without its hairline. */
+   as open but quiet: no fill, but a stronger --border outline than the
+   unselected tabs' hairline and the full text colour, so it still stands out. */
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active {
   background: transparent;
+  border-color: var(--border);
 }
 .workspace__strip:not(.workspace__strip--focused) .shell__tab--active
   .shell__tab-open {
-  color: var(--muted);
+  color: var(--text);
 }
 
 /* Keyboard-only pane-focus signal. The strips carry no default focus ring
