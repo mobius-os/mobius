@@ -165,3 +165,9 @@ test('every error card keeps its icon on the title line', () => {
   assert.doesNotMatch(css, /\.chat__text--(error|parked) > \.chat__lifecycle-icon \{[^}]*align-self: center/,
     'opening Technical details must never move the icon')
 })
+
+test('a plain error icon box matches its 24px head row', () => {
+  assert.match(css, /\.chat__text--error:has\(\.chat__error-head \.chat__msg-copy\) > \.chat__lifecycle-icon \{ height: 24px; \}/)
+  const copy = css.match(/\n\.chat__msg-copy,\n\.chat__msg-branch \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(copy, /min-height: 24px;/, 'the icon height follows the copy button that sets the head row')
+})

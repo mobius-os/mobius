@@ -815,6 +815,9 @@
    model-busy and refusal cards all carry an expandable "Technical details",
    so a centred icon would move when it opens. */
 .chat__text--error > .chat__lifecycle-icon { height: 18px; }
+/* A plain error's head row is 24px tall when it carries the copy button,
+   so the icon box takes that height and sits on the title's centre. */
+.chat__text--error:has(.chat__error-head .chat__msg-copy) > .chat__lifecycle-icon { height: 24px; }
 .chat__error-status { min-width: 0; }
 
 .chat__error-head {
