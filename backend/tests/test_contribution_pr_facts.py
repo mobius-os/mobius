@@ -167,6 +167,8 @@ def test_permission_is_the_strongest_grant_and_an_archived_repository_takes_no_w
   assert pr_facts.permission_of({"permissions": {"admin": True}}) == "ADMIN"
   assert pr_facts.permission_of({"permissions": {"pull": True}}) == "READ"
   assert pr_facts.permission_of({"archived": True, "permissions": {"admin": True}}) == "READ"
+  assert pr_facts.permission_of({}) == "unknown", "a repository that carries no permissions is not read-only"
+  assert pr_facts.permission_of({"permissions": {}}) == "unknown"
 
 
 def test_lifecycle_reads_merged_closed_draft_and_open():

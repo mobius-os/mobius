@@ -19,7 +19,7 @@ CASES = CORPUS["cases"]
 SPACE = {
   "role": ["author", "reviewer"], "lifecycle": ["draft", "open", "unknown"],
   "checks": ["pass", "fail", "pending", "none", "unknown"],
-  "mergeable": ["yes", "conflict", "unknown"], "permission": ["READ", "WRITE", "MAINTAIN"],
+  "mergeable": ["yes", "conflict", "unknown"], "permission": ["READ", "TRIAGE", "WRITE", "MAINTAIN", "unknown"],
   "reviews": [[], [{"by": "sam", "state": "APPROVED", "commit": "h2"}],
               [{"by": "sam", "state": "APPROVED", "commit": "h1"}],
               [{"by": "sam", "state": "CHANGES_REQUESTED", "commit": "h1"}],
@@ -66,6 +66,7 @@ def ready_to_merge(facts):
 # Take over is left out of OFFERED: it stays for maintainers.
 CHANGES_THE_PR = ("merge", "close", "open_for_review", "back_to_draft", "check_my_pr", "respond", "finish_it",
                   "review", "take_over")
+READS_ONLY = ("READ", "TRIAGE")
 OFFERED = {"author": ("check_my_pr", "respond", "finish_it", "open_for_review", "back_to_draft", "request_review",
                       "merge", "close"),
            "reviewer": ("review", "merge", "close")}
@@ -116,7 +117,17 @@ def with_nothing_in_the_way_every_action_of_yours_is_offered(decision, facts):
   in_the_way = (facts.get("readComplete") is False or facts["lifecycle"] not in ("open", "draft")
                 or (job is not None and job.get("state") != "stalled") or facts.get("outbox")
                 or facts.get("queued") is True)
-  return in_the_way or all((action(decision, action_id) or {}).get("enabled") for action_id in OFFERED[facts["role"]])
+  # Merge alone also waits for write access, and only when GitHub said the account has less.
+  offered = [item for item in OFFERED[facts["role"]] if item != "merge" or facts.get("permission") not in READS_ONLY]
+  return in_the_way or all((action(decision, action_id) or {}).get("enabled") for action_id in offered)
+
+
+def merge_is_off_with_the_reason_for_an_account_that_cannot_write(decision, facts):
+  merge = action(decision, "merge")
+  stopped = (facts["lifecycle"] in ("open", "draft") and facts.get("readComplete") is not False
+             and facts.get("queued") is not True and facts.get("permission") in READS_ONLY)
+  return not stopped or (not merge["enabled"] and merge["reason"]
+                         == f"Merging needs write access to this repository. Your account has {facts['permission'].lower()} access.")
 
 
 def a_queued_pr_reads_as_in_the_merge_queue(decision, facts):
@@ -162,6 +173,8 @@ INVARIANTS = {
   "a PR that cannot be read is never acted on": a_pr_that_cannot_be_read_is_never_acted_on,
   "with nothing in the way, every action of yours is offered, whatever the review standing":
     with_nothing_in_the_way_every_action_of_yours_is_offered,
+  "Merge is off, with the reason, for an account GitHub says has no write access; an unknown permission leaves it to the "
+  "platform": merge_is_off_with_the_reason_for_an_account_that_cannot_write,
   "a PR GitHub's merge queue holds reads as in the merge queue, and its Merge is off for that reason":
     a_queued_pr_reads_as_in_the_merge_queue,
   "take over is for maintainers only": lambda decision, facts: not (action(decision, "take_over") or {}).get("enabled")
