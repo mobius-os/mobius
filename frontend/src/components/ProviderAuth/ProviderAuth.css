@@ -40,7 +40,7 @@
 }
 
 .pa__input {
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   border: 1px solid var(--border, #252b36);
   border-radius: 8px;
   color: var(--text, #d4d4d8);

@@ -116,7 +116,7 @@
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--border, #252b36);
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #d4d4d8);
   font: inherit;
   font-size: 15px;

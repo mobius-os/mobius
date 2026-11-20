@@ -307,7 +307,7 @@ def test_theme_bg_is_the_owner_winning_root_value():
   assert theme._theme_bg(_ensure_core_vars(":root { --bg: #102030; }\n:root { --bg: #f0eeeb; }\n")) == "#f0eeeb"
   # With no plain-:root --bg, the first hex --bg declared anywhere, as for the mode.
   assert theme._theme_bg(_ensure_core_vars(".x { --bg: #ffffff; }\n")) == "#ffffff"
-  assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#0d0d0d"
+  assert theme._theme_bg(_ensure_core_vars(".x { gap: 1px; }\n")) == "#000000"
 
 
 def test_role_cases():

@@ -121,8 +121,8 @@ def test_api_theme_returns_default_when_no_override(client, auth):
   assert res.status_code == 200
   body = res.json()
   assert body["css"] == DEFAULT_THEME
-  # DEFAULT_THEME has --bg: #0d0d0d (neutralized 2026-05).
-  assert body["bg"] == "#0d0d0d"
+  # DEFAULT_THEME has --bg: #000000 (true black, 2026-11).
+  assert body["bg"] == "#000000"
 
 
 def test_api_theme_returns_user_override_augmented(client, auth):
@@ -270,7 +270,7 @@ def test_ensure_core_vars_missing_bg_defaults_to_dark():
   css = ":root {\n  --accent: #ff00aa;\n}\n"
   out = _ensure_core_vars(css)
   assert "--surface-2: #212121" in out  # dark default
-  assert "--bg: #0d0d0d" in out
+  assert "--bg: #000000" in out
 
 
 def test_api_theme_returns_default_when_override_is_empty(client, auth):
@@ -335,7 +335,7 @@ def test_theme_data_returns_default_bundle(tmp_path):
   shared = tmp_path / "shared"
   shared.mkdir()
   d = theme_data(str(tmp_path))
-  assert d == {"css": DEFAULT_THEME, "bg": "#0d0d0d", "mode": "dark"}
+  assert d == {"css": DEFAULT_THEME, "bg": "#000000", "mode": "dark"}
 
 
 def test_theme_data_returns_light_override(tmp_path):

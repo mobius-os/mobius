@@ -6,7 +6,7 @@
      the page keeps it above the home indicator / navigation bar, as the shell
      does for its app view. The strip shows the page background. */
   padding-bottom: env(safe-area-inset-bottom, 0px);
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #e8e8e8);
 }
 
@@ -42,7 +42,7 @@
     max(16px, env(safe-area-inset-right))
     max(24px, env(safe-area-inset-bottom))
     max(16px, env(safe-area-inset-left));
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
 }
 
 .standalone-app__crash {

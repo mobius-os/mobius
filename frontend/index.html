@@ -12,7 +12,7 @@
          its gesture locally so it can transform without moving the shell. -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content" />
     <!-- Default theme-color; applyTheme updates this to the active theme's --bg. -->
-    <meta name="theme-color" content="#0d0d0d" />
+    <meta name="theme-color" content="#000000" />
     <!-- Android/Chrome consults color-scheme before JS/CSS fully applies.
          Dark is the static fallback because Möbius defaults dark, but the
          pre-paint script rewrites this to `light dark` when the active theme
@@ -131,7 +131,7 @@
         }
       } catch (e) {}
     }
-    if (!bg) bg = '#0d0d0d';
+    if (!bg) bg = '#000000';
     if (!mode) mode = 'dark';
     if (css) {
       // Match applyTheme.js: pull CSS @import-url rules out of the body and
@@ -319,12 +319,12 @@
     </style>
   </head>
   <!-- Theme bg comes from var(--bg), set by the pre-paint script above. -->
-  <body style="margin:0;background:var(--bg,#0d0d0d)">
+  <body style="margin:0;background:var(--bg,#000000)">
     <!-- Keep startup visually continuous with the saved theme without adding a
          second brand mark after the device's native splash screen. Its only
          decoration is the delayed, artwork-free progress line styled above,
          so a slow boot reads as working rather than frozen. -->
-    <div id="splash" aria-hidden="true" style="position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg,#0d0d0d);z-index:9999;transition:opacity .3s ease;contain:strict"></div>
+    <div id="splash" aria-hidden="true" style="position:fixed;top:0;left:0;right:0;bottom:0;background:var(--bg,#000000);z-index:9999;transition:opacity .3s ease;contain:strict"></div>
     <div id="root"></div>
     <script>
       // The embedded document must remain blank while its one-use capability

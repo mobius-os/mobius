@@ -641,7 +641,7 @@ def _standalone_index_html(app: models.App, install_pass: str = "") -> str:
     )
   html = _replace_html_text(
     html,
-    '<meta name="theme-color" content="#0d0d0d" />',
+    '<meta name="theme-color" content="#000000" />',
     f'<meta name="theme-color" content="{app_bg}" />',
   )
 

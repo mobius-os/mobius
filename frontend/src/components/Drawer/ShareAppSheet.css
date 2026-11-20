@@ -118,7 +118,7 @@
   overflow-wrap: anywhere;
   border: 1px solid var(--border, #252b36);
   border-radius: 8px;
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #d4d4d8);
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 11px;

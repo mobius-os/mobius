@@ -41,8 +41,11 @@ DEFAULT_THEME = """\
 
      Palette neutralized in 2026-05: dropped the slight blue tint
      (--bg #0d0f14 → #0d0d0d, surfaces same step) so the dark
-     mode reads as a true charcoal stack rather than blue-grey. */
-  --bg: #0d0d0d;
+     mode reads as a true charcoal stack rather than blue-grey.
+     2026-11: --bg #0d0d0d → #000000, a true black page; the
+     surfaces stay one step lighter, so depth still comes from
+     lighter panels rather than shadows. */
+  --bg: #000000;
   --surface: #171717;
   --surface-2: #212121;
   --border: #2a2a2a;
@@ -355,7 +358,7 @@ def reset_theme_override(data_dir: str) -> dict:
 # --accent-hover, the fills and --font/--mono are mode-agnostic, so they
 # stay sourced from DEFAULT_THEME for both modes.
 _LIGHT_DEFAULTS = {
-  "--bg": "#f0eeeb",
+  "--bg": "#ffffff",
   "--surface": "#ffffff",
   "--surface-2": "#e8e6e2",
   "--border": "#d4d1cc",
@@ -973,7 +976,7 @@ def _theme_bg(effective_css: str) -> str:
   if bg:
     return bg
   m = re.search(r"--bg:\s*(#[0-9a-fA-F]{3,8})", effective_css)
-  return m.group(1) if m else "#0d0d0d"
+  return m.group(1) if m else "#000000"
 
 
 # =============================================================

@@ -7,7 +7,7 @@
   inset: 0;
   z-index: 899;
   pointer-events: auto;
-  background: color-mix(in srgb, var(--bg, #0d0d0d) 46%, transparent);
+  background: color-mix(in srgb, var(--bg, #000000) 46%, transparent);
   -webkit-backdrop-filter: blur(3px) saturate(1.1);
   backdrop-filter: blur(3px) saturate(1.1);
   animation: wt-fade-in .5s ease both;
