@@ -537,15 +537,16 @@
 /* Selection is a background change only: same box, same width, no accent edge
    and no accent text. An unselected tab keeps its hairline so its bounds read;
    hover is a light fill. Nothing here changes a tab's size. */
-/* Hover is a lighter fill than the selected tab, and only with a pointer, so
+/* Hover (unselected tabs only, so the selected tab never changes under the
+   pointer) is a lighter fill than the selected tab, and only with a pointer, so
    a touch tab left in a hover state never looks selected. Muted text drops
    under 4.5:1 on the fill in light mode, so a hovered tab's text takes the
    full text colour. */
 @media (hover: hover) and (pointer: fine) {
-  .shell__tab:hover {
+  .shell__tab:not(.shell__tab--active):hover {
     background: color-mix(in srgb, var(--surface-2) 50%, transparent);
   }
-  .shell__tab:hover .shell__tab-open {
+  .shell__tab:not(.shell__tab--active):hover .shell__tab-open {
     color: var(--text);
   }
 }

@@ -426,8 +426,8 @@ def _composed_states():
   # (label, text colour expr, background expr, backdrop expr)
   return [(label, _prop(rule, "color"), _prop(rule, "background"), "var(--bg)") for label, rule in badges] + [
     # A hovered tab (unselected) shows its text on the hover fill.
-    ("hovered tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab:hover .shell__tab-open"), "color"),
-     _prop(_rule("components/Shell/Shell.css", ".shell__tab:hover"), "background"), "var(--bg)"),
+    ("hovered tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab:not(.shell__tab--active):hover .shell__tab-open"), "color"),
+     _prop(_rule("components/Shell/Shell.css", ".shell__tab:not(.shell__tab--active):hover"), "background"), "var(--bg)"),
     # A resting unselected tab: muted text on the page.
     ("resting tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab-open"), "color"),
      "transparent", "var(--bg)"),

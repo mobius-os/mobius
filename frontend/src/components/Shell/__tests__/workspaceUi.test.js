@@ -865,11 +865,13 @@ test('tab hover and selection never change a tab\'s size or tint its text', () =
 })
 
 test('tab hover is lighter than selection, pointer-only, and an unfocused pane keeps a selected cue', () => {
-  const hover = shellCss.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:hover \{([^}]*)\}/)
+  const hover = shellCss.match(/@media \(hover: hover\) and \(pointer: fine\) \{\s*\.shell__tab:not\(\.shell__tab--active\):hover \{([^}]*)\}/)
   assert.ok(hover, 'the hover fill only applies with a pointer')
   assert.match(hover[1], /color-mix\(in srgb, var\(--surface-2\) 50%, transparent\)/,
     'hover is lighter than the selected --surface-2 fill')
   assert.doesNotMatch(shellCss, /\n\.shell__tab:hover \{/, 'no unconditional hover fill')
+  assert.doesNotMatch(shellCss, /\.shell__tab:hover \{/,
+    'hover must exclude the selected tab (:not(.shell__tab--active)), or it would lighten it')
   const quiet = css.match(/\.workspace__strip:not\(\.workspace__strip--focused\) \.shell__tab--active \{([^}]*)\}/)
   assert.match(quiet[1], /border-color: var\(--border\);/)
 })
