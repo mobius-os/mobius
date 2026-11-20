@@ -810,9 +810,12 @@
   max-width: none;
 }
 .chat__text--error > :not(.chat__lifecycle-icon) { grid-column: 2; }
-/* The icon keeps the marker's 28px column and 10px gap and is centred on
-   the card's text block, like the icon of a marker card. */
-.chat__text--error > .chat__lifecycle-icon { grid-row: 1; align-self: center; }
+/* The icon keeps the marker's 28px column and 10px gap. A plain error can
+   be a long message with expandable details, so its icon stays on the title
+   line (18px). The fixed paused, limit and retry cards centre it on their
+   text block, like a marker card. */
+.chat__text--error > .chat__lifecycle-icon { height: 18px; }
+.chat__text--parked > .chat__lifecycle-icon { height: 28px; grid-row: 1; align-self: center; }
 .chat__error-status { min-width: 0; }
 
 .chat__error-head {
