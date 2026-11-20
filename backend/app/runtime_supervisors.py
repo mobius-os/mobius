@@ -475,6 +475,13 @@ class RuntimeSupervisors:
         with SessionLocal() as db:
           return sweep_expired_leases(db)
 
+      def sweep_reviews_once() -> int:
+        # A review whose agent died never reports, so only a clock moves it:
+        # this tick runs with no screen open (the lazy tick covers a read).
+        from app.routes.contribution_reviews import sweep_review_lifecycles
+        with SessionLocal() as db:
+          return sweep_review_lifecycles(db)
+
       while True:
         await asyncio.sleep(AUTOPILOT_LEASE_RECOVERY_INTERVAL_SECS)
         try:
@@ -485,6 +492,14 @@ class RuntimeSupervisors:
         except Exception as exc:
           self.log.error(
             "autopilot lease sweep failed: %s", exc, exc_info=True,
+          )
+        try:
+          await asyncio.to_thread(sweep_reviews_once)
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error(
+            "review lifecycle sweep failed: %s", exc, exc_info=True,
           )
 
     async def browser_profile_loop():

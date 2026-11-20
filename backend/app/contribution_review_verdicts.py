@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 from app import chat_queue, models, settled, contribution_review_runs as reviews
 from app import contribution_pr_facts as pr_facts, contribution_review_public as public
+from app import contribution_review_lifecycle as review_lifecycle
 from app.contribution_errors import ContributionSubmitError
 from app.decision_cards import fence_owner
 from app.github_connection import _github_connection_transaction
@@ -139,7 +140,12 @@ def _persist_result(db, row, item_key, proposal_id, result):
   fields.update({k: v for k, v in (("review_id", receipt.get("id")), ("url", receipt.get("url"))) if v is not None})
   if result.reason:
     fields["summary"] = result.reason
-  _settle(db, row, item_key, proposal_id, fields)
+  if result.state == "unknown":
+    _settle(db, row, item_key, proposal_id, fields)
+  else:
+    # The clock may have marked this same proposal `unknown` while the request was still in flight:
+    # what its own dispatcher then learns for certain (a review id, a refusal) is the better fact.
+    _settle_unconfirmed(db, row, item_key, proposal_id, fields)
 
 
 async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
@@ -178,6 +184,8 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, 
 
 
 NEVER_SENT = "This verdict was never sent to GitHub, so nothing is waiting on you."
+NO_ANSWER = ("GitHub did not answer within 5 minutes. This verdict is not sent again; "
+             "it is only read back from GitHub.")
 DISMISSED = "You dismissed this verdict. GitHub never confirmed it and nothing more will be sent."
 
 
@@ -187,7 +195,9 @@ def _settle_unconfirmed(db, row, item_key, proposal_id, fields):
     saved = current.get("verdict_proposal") or {}
     if saved.get("id") != proposal_id or saved.get("state") not in {"posting", "unknown"}:
       return None
-    return {**current, "verdict_proposal": {**saved, **fields}}
+    # The clock's "no answer" line stops being true once an answer arrives.
+    kept = {k: v for k, v in saved.items() if not (k == "summary" and v == NO_ANSWER and "summary" not in fields)}
+    return {**current, "verdict_proposal": {**kept, **fields}}
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
@@ -213,6 +223,26 @@ def settle_observed(db, row, item_key, proposal, review, *, complete_scan, read_
   _settle_unconfirmed(db, row, item_key, proposal["id"], fields)
 
 
+def answer_overdue(proposal: dict | None, now: int) -> dict | None:
+  """A posting verdict that never got an answer, as the unconfirmed verdict it now is; None while it may still land.
+
+  The request that armed it ends within its own timeouts, so a proposal still `posting` after the machine's
+  5 minutes lost its answer (the process died, say). It becomes `unknown`: read back from GitHub, never
+  resent, and the owner can discard it. The marker search that can settle it is `settle_observed`.
+
+  The 5 minutes start when the proposal is armed (`submitted_at`), which is before the second proof read
+  and the dispatch. Under a very slow GitHub the flip can therefore come first: the request that is still
+  in flight records its own definitive result over it (a review id, or a refusal after the post), and a post
+  that never reports back is read back by `settle_observed`. A proof that fails before the post can no longer
+  settle `not_dispatched` (an `unknown` verdict is refused that), so the owner discards it. Safe: nothing is
+  ever resent.
+  """
+  vector = review_lifecycle.verdict_timeout(proposal, now) if proposal else None
+  if vector is None:
+    return None
+  return {**proposal, "state": "unknown", "summary": NO_ANSWER, review_lifecycle.KEY: vector}
+
+
 def dismiss(db, row, item_key, proposal_id):
   """The owner's word that an unconfirmed verdict is not worth waiting on.
 
@@ -221,7 +251,7 @@ def dismiss(db, row, item_key, proposal_id):
   """
   saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
   if saved.get("id") != proposal_id or saved.get("state") != "unknown":
-    raise HTTPException(409, "Only a verdict GitHub never confirmed can be dismissed. Refresh to see its result.")
+    raise HTTPException(409, "Only a verdict GitHub never confirmed can be discarded. Refresh to see its result.")
   _settle_unconfirmed(db, row, item_key, proposal_id,
                       {"state": "not_dispatched", "summary": DISMISSED, "dismissed_at": reviews.utc_now_iso()})
 

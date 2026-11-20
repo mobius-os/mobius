@@ -332,7 +332,7 @@
     "role": "reviewer"
    },
    "state": "reviewer.mergeable",
-   "next": "merge",
+   "next": "",
    "enabled": [
     "review",
     "merge",
@@ -2301,6 +2301,233 @@
     "request_review",
     "ask_rereview",
     "ask_approval",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Their PR is in GitHub’s merge queue",
+   "rule": "merge queue",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "alex",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "queued": true
+   },
+   "state": "in_merge_queue",
+   "next": "",
+   "enabled": [
+    "review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your change request of an older version still stands, and you kept a clean review of the new one private",
+   "rule": "own request outranks a private review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "alex",
+      "state": "CHANGES_REQUESTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "CHANGES_REQUESTED",
+     "commit": "h1"
+    },
+    "job": null,
+    "result": {
+     "head": "h2",
+     "outcome": "clear",
+     "setAside": true
+    },
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.re_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "draft_verdict",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "Your own approval of an older commit, and the PR’s own work is the same",
+   "rule": "carry-over (own)",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "alex",
+      "state": "APPROVED",
+      "commit": "h1",
+      "bot": false,
+      "sameWork": true
+     }
+    ],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h1",
+     "sameWork": true
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer"
+   },
+   "state": "reviewer.mergeable",
+   "next": "",
+   "enabled": [
+    "review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "The only other reviewer’s review was dismissed, so nobody can be asked",
+   "rule": "askable: a dismissed review",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "DISMISSED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
+    "back_to_draft",
+    "request_review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "The only other reviewer is a deleted account, so nobody can be asked",
+   "rule": "askable: a deleted account",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [
+     {
+      "by": "ghost",
+      "state": "COMMENTED",
+      "commit": "h1",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
+    "back_to_draft",
+    "request_review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "You reviewed this version, and GitHub lists you as a requested reviewer again",
+   "rule": "re-request",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": {
+     "state": "APPROVED",
+     "commit": "h2"
+    },
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "reviewRequested": true
+   },
+   "state": "reviewer.re_requested",
+   "next": "review",
+   "enabled": [
+    "review",
     "merge",
     "close"
    ]

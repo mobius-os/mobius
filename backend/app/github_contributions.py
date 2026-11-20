@@ -27,6 +27,8 @@ from sqlalchemy.orm import Session
 
 from app import (
   app_git,
+  contribution_lifecycle as lifecycle,
+  contribution_lifecycle_moves as lifecycle_moves,
   contribution_screenshots,
   contribution_staging,
   fs_locks,
@@ -72,6 +74,22 @@ _PERSONAL_PUBLIC_INPUT_FIELDS = (
 )
 
 log = logging.getLogger(__name__)
+
+
+def stamped(
+  before: dict | None, after: dict, move: lifecycle.Move, record_path: Path, *, as_dict: bool = False,
+) -> dict:
+  """The record a route writes: the route's own, with the engine's word and vector in engine mode.
+
+  Every write of a contribution record's `status` goes through here. An engine refusal of a move
+  that has not touched GitHub yet is the route's normal 409 with a plain reason.
+  """
+  try:
+    return lifecycle.stamp(before, after, move, record_path)
+  except lifecycle.LifecycleRefused as refused:
+    detail = {"message": refused.message, "code": "lifecycle_refused"} if as_dict else refused.message
+    raise HTTPException(status_code=409, detail=detail) from refused
+
 
 _PREPARED_PR_ACTIONS = frozenset(("pr", "pr_update"))
 # GitHub counts description characters, not UTF-8 bytes.
@@ -1152,8 +1170,28 @@ def _merged_upstream_sha(record: dict, repo: Path) -> str | None:
   return github_merge_commit(record, repo)
 
 
+def _reads_default_branch(repo: Path, repo_slug: str, base: object) -> bool:
+  """Whether the PR's base branch is the repository's default branch.
+
+  A merge into any other branch has not landed the work, so it neither promotes
+  the "already merged" marker nor connects an app. A base GitHub did not name,
+  or a default branch that cannot be read, says nothing against landing.
+  """
+  if not isinstance(base, str) or not base:
+    return True
+  try:
+    proc = _git_ops._gh(
+      repo, "repo", "view", repo_slug, "--json", "defaultBranchRef",
+      "--jq", ".defaultBranchRef.name", check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return True
+  default = (proc.stdout or "").strip() if proc.returncode == 0 else ""
+  return not default or default == base
+
+
 def github_merge_commit(record: dict, repo: Path) -> str | None:
-  """GitHub's merge commit for a merged pull request record, or None.
+  """GitHub's merge commit for a pull request merged into the default branch, or None.
 
   Asks GitHub rather than trusting the record's own SHA fields, as settling a
   personal publication does (``routes.github._personal_merge_commit``).
@@ -1170,7 +1208,7 @@ def github_merge_commit(record: dict, repo: Path) -> str | None:
       repo,
       "pr", "view", str(number),
       "-R", repo_slug,
-      "--json", "state,mergeCommit",
+      "--json", "state,mergeCommit,baseRefName",
       check=False,
     )
   except (OSError, subprocess.SubprocessError):
@@ -1187,7 +1225,9 @@ def github_merge_commit(record: dict, repo: Path) -> str | None:
     if isinstance(merge_commit, dict) and payload.get("state") == "MERGED"
     else ""
   )
-  return candidate if _GIT_SHA.fullmatch(candidate) else None
+  if not _GIT_SHA.fullmatch(candidate):
+    return None
+  return candidate if _reads_default_branch(repo, repo_slug, payload.get("baseRefName")) else None
 
 
 def _mark_superseded_draft(
@@ -1281,6 +1321,21 @@ _TERMINAL_RECORD_STATUSES = frozenset({
 })
 
 
+def finished_record(record: dict, record_path: Path | None = None) -> bool:
+  """Whether nothing of the record is left to follow or to check out.
+
+  The status word says so. When the owning app runs the lifecycle engine (`lifecycle_writer`, read from
+  the app's storage beside `record_path`) the lifecycle says so too: a discarded update is `abandoned`
+  while its pull request is still public, and that PR goes on. In shadow mode, and with no path to look
+  beside, the word alone decides, as it always did: the app's half of that fix is off as well, so
+  keeping a checkout for a discard the app still treats as the end of the PR would be retention
+  nobody can undo.
+  """
+  if record.get("status") not in _TERMINAL_RECORD_STATUSES:
+    return False
+  return lifecycle.writer_mode(record_path) != lifecycle.ENGINE or lifecycle.pr_finished(record)
+
+
 def _separate_git_dir(repo: Path, git_dir: Path) -> bool:
   """Whether ``git_dir`` is ``repo``'s sibling ``git`` folder, removed with it."""
   return git_dir.name == "git" and git_dir.parent == repo.parent
@@ -1329,7 +1384,7 @@ def checkout_kept_for(app_id: int, record_id: str, repo: Path) -> str | None:
       other = _read_record(path)
     except HTTPException:
       continue
-    if other.get("status") in _TERMINAL_RECORD_STATUSES:
+    if finished_record(other, path):
       continue
     plan = other.get("plan") if isinstance(other.get("plan"), dict) else {}
     raw = plan.get("repo_path")
@@ -1363,7 +1418,8 @@ def terminal_checkout_cleanup(
   Returns whether the checkout is gone, and the id of the unfinished
   contribution it was kept for when that is why it stays.
   """
-  if record.get("status") not in _TERMINAL_RECORD_STATUSES:
+  record_name = record_id or str(record.get("id") or "")
+  if not finished_record(record, _records_dir(app_id) / f"{record_name}.json"):
     return False, None
   plan = record.get("plan") if isinstance(record.get("plan"), dict) else {}
   raw_repo = plan.get("repo_path")
@@ -1377,7 +1433,7 @@ def terminal_checkout_cleanup(
   roots = _staging_roots()
   if not any(repo.is_relative_to(root) for root in roots):
     return False, None
-  kept_for = checkout_kept_for(app_id, record_id or str(record.get("id") or ""), repo)
+  kept_for = checkout_kept_for(app_id, record_name, repo)
   if kept_for is not None:
     return False, kept_for
   cleaned = not repo.exists() or _remove_staging_checkout(repo, data_dir)
@@ -1560,13 +1616,13 @@ def _claim_record(
     return claimed, record_path, diff_path
   _require_all_clear_review(record)
   now = _now_iso()
-  claimed = {
+  claimed = stamped(record, {
     **record,
     "status": "submitting",
     "submitter": submitter,
     "submit_started_at": now,
     "updated_at": now,
-  }
+  }, lifecycle_moves.claim(record), record_path)
   claimed["personal_submit_input_sha256"] = (
     _personal_publication_input_sha256(claimed)
   )
@@ -1794,20 +1850,27 @@ def _claim_stack_records(
     phase_actions=claimable_actions,
     submitter=submitter,
   )
-  ordered = []
   now = _now_iso()
+  # Every layer is judged before the first is written: a layer the engine
+  # refuses leaves the whole stack exactly as it was.
+  claims = {
+    record_id: stamped(row["record"], {
+      **row["record"],
+      "status": "submitting",
+      "submitter": submitter,
+      "submit_started_at": now,
+      "updated_at": now,
+    }, lifecycle_moves.claim(row["record"], "claim_stack"), row["record_path"])
+    for record_id, row in by_id.items()
+    if _claims_publication_phase(row["record"], claimable_actions)
+  }
+  ordered = []
   for item in validated:
     row = by_id[item["record"]["id"]]
     record = row["record"]
     resumed = record.get("status") == "submitting"
-    if _claims_publication_phase(record, claimable_actions):
-      record = {
-        **record,
-        "status": "submitting",
-        "submitter": submitter,
-        "submit_started_at": now,
-        "updated_at": now,
-      }
+    if record["id"] in claims:
+      record = claims[record["id"]]
       record["personal_submit_input_sha256"] = (
         _personal_publication_input_sha256(record)
       )
@@ -1942,6 +2005,7 @@ def _claim_stack_landing(
         "updated_at": now,
       }
       record.pop("last_land_error", None)
+      record = stamped(row["record"], record, lifecycle_moves.land_started(), row["record_path"])
       _write_record(row["record_path"], record)
       repaired.append({**row, "record": record})
     return repaired, "recover"
@@ -1975,6 +2039,7 @@ def _claim_stack_landing(
       "updated_at": now,
     }
     record.pop("last_land_error", None)
+    record = stamped(row["record"], record, lifecycle_moves.land_started(), row["record_path"])
     _write_record(row["record_path"], record)
     claimed.append({**row, "record": record})
   return claimed, "new"
@@ -2053,12 +2118,12 @@ def _mark_stack_land_failure(rows: list[dict], message: str) -> list[dict]:
   for row in rows:
     current = _read_record(row["record_path"])
     if current.get("status") == "landing":
-      current = {
+      current = stamped(current, {
         **current,
         "status": "open",
         "last_land_error": message,
         "updated_at": now,
-      }
+      }, lifecycle_moves.land_released(), row["record_path"])
       _write_record(row["record_path"], current)
     snapshots.append(current)
   return snapshots
@@ -2089,7 +2154,7 @@ def _mark_stack_land_success(
     if is_settled:
       snapshots.append(current)
       continue
-    current = {
+    landed = {
       **current,
       "status": "merged",
       "merged_at": now,
@@ -2099,7 +2164,8 @@ def _mark_stack_land_success(
       "last_land_head_sha": landed_sha,
       "updated_at": now,
     }
-    current.pop("last_land_error", None)
+    landed.pop("last_land_error", None)
+    current = stamped(current, landed, lifecycle_moves.land_settled(), row["record_path"])
     _write_record(row["record_path"], current)
     snapshots.append(current)
   return snapshots
@@ -2140,6 +2206,7 @@ def _mark_submit_failure(
     next_record["last_submit_error_code"] = effective_code
   else:
     next_record.pop("last_submit_error_code", None)
+  next_record = stamped(record, next_record, lifecycle_moves.send_failed(record, next_record), record_path)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2164,6 +2231,7 @@ def _note_submit_unconfirmed(
     next_record["last_submit_error_detail"] = detail
   else:
     next_record.pop("last_submit_error_detail", None)
+  next_record = stamped(record, next_record, lifecycle_moves.update_unconfirmed(record), record_path)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2197,6 +2265,7 @@ def _mark_submit_success(
   # Only the Send that opened this PR over an overlap may say it conflicts.
   if not (record_patch or {}).get("last_submit_upstream_conflict"):
     next_record.pop("last_submit_upstream_conflict", None)
+  next_record = stamped(record, next_record, lifecycle_moves.pr_created(next_record), record_path)
   _write_record(record_path, next_record)
   return next_record
 
@@ -2239,6 +2308,7 @@ def _mark_existing_pr_update_success(
   next_record.pop("last_submit_error_code", None)
   # An update publishes only after it merges cleanly with upstream.
   next_record.pop("last_submit_upstream_conflict", None)
+  next_record = stamped(record, next_record, lifecycle_moves.pr_updated(), record_path)
   _write_record(record_path, next_record)
   return next_record
 
@@ -3083,10 +3153,13 @@ def observe_publication_effect(record: dict, attempt: dict) -> dict:
   if live.get("merged_at") and (state != "closed" or not _GIT_SHA.fullmatch(str(live.get("merge_commit_sha") or ""))):
     return changed("GitHub returned an inconsistent merge identity.")
   status = "merged" if live.get("merged_at") else ("closed" if state == "closed" else ("draft" if live["draft"] else "open"))
+  default_branch = base_repo.get("default_branch")
   return answer("settled", "GitHub confirmed the exact reviewed publication.", {
     "url": url, "number": raw_number, "head_repository": head_repo,
     "publication_stage": "draft" if live["draft"] else "ready",
     "status": status, "head_sha": head_sha, "base_branch": base,
+    # Whether the PR targets the repository's default branch; None when GitHub did not say.
+    "base_is_default": base == default_branch if isinstance(default_branch, str) and default_branch else None,
     **labels,
   })
 
@@ -3504,6 +3577,7 @@ def _settle_personal_pr_ready(
   updated.pop("readying", None)
   updated.pop("last_ready_error", None)
   updated.pop("last_ready_error_code", None)
+  updated = stamped(current, updated, lifecycle_moves.ready_settled(current, updated), record_path)
   _write_record(record_path, updated)
   return updated
 
@@ -3526,6 +3600,7 @@ def _release_personal_pr_ready(
   if confirmed_draft:
     updated["status"] = "draft"
     updated["publication_stage"] = "draft"
+    updated = stamped(current, updated, lifecycle_moves.ready_released(current, updated), record_path)
   updated.pop("readying", None)
   _write_record(record_path, updated)
   return updated

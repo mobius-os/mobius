@@ -23,19 +23,43 @@ UNCONFIRMED = {"code": "post_unconfirmed",
                "message": "GitHub may have posted it. Check the pull request before trying again."}
 CHANGED = "This review changed since you read it. Nothing was posted. Open it again to read the current text."
 HELD_RECEIPTS = {"posting", "posted", "unknown"}
+# Why a saved item has nothing to post. The codes are what a client mirrors (the run view carries one per
+# item, see `offer`); the words are what the owner reads in the 409.
+REFUSALS = {
+  "blocked": "This review did not finish, so there is nothing to post. Review again first.",
+  "no_result": "This review has no finished result to post.",
+  "has_verdict": "This review already has a verdict. Submit or discard that one.",
+  "already_sent": "This review was already sent to GitHub. Check the pull request.",
+}
+
+
+def refusal_code(item: dict) -> str | None:
+  """The first reason, in the order the owner would fix them, that this saved item cannot be posted; None when it can."""
+  if item.get("blocked"):
+    return "blocked"
+  if item.get("state") not in {"all_clear", "needs_you"} or not (item.get("summary") or "").strip():
+    return "no_result"
+  if item.get("verdict_proposal"):
+    return "has_verdict"
+  if (item.get("public_review") or {}).get("state") in HELD_RECEIPTS:
+    return "already_sent"
+  return None
+
+
+def offer(item: dict) -> dict:
+  """What a saved item says about posting its findings, for the run view: `allowed`, and `code` when it is not.
+
+  Only the saved item decides this. Posting also needs somebody else's PR that is still open and the exact words
+  previewed; those are read from GitHub when the owner posts, never here.
+  """
+  code = refusal_code(item)
+  return {"allowed": True} if code is None else {"allowed": False, "code": code}
 
 
 def _refusal(item: dict) -> str | None:
   """Why this saved item has no private result to post, in the owner's words."""
-  if item.get("blocked"):
-    return "This review did not finish, so there is nothing to post. Review again first."
-  if item.get("state") not in {"all_clear", "needs_you"} or not (item.get("summary") or "").strip():
-    return "This review has no finished result to post."
-  if item.get("verdict_proposal"):
-    return "This review already has a verdict. Submit or discard that one."
-  if (item.get("public_review") or {}).get("state") in HELD_RECEIPTS:
-    return "This review was already sent to GitHub. Check the pull request."
-  return None
+  code = refusal_code(item)
+  return None if code is None else REFUSALS[code]
 
 
 def preview(item: dict, target: dict) -> dict:
