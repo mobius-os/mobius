@@ -2822,11 +2822,15 @@
 }
 
 /* See-through only while idle and empty. Once the field has focus, text or
-   attached files, the pill and its paired Brain button get a near-solid
+   attached files (the editor shows .cm-placeholder only while it is empty),
+   the pill and its paired Brain button get a near-solid
    surface so the draft and placeholder never paint over message lines. The
    0.5px blur and the hairline stay. */
-.chat__input-row:has(.chat__pill:focus-within, .chat__input:not(:placeholder-shown), .chat__pill--with-attach) .chat__pill,
-.chat__input-row:has(.chat__pill:focus-within, .chat__input:not(:placeholder-shown), .chat__pill--with-attach) .chat__plus:not(:hover):not(.chat__plus--active) {
+.chat__pill:focus-within,
+.chat__pill:not(:has(.cm-placeholder)),
+.chat__pill--with-attach,
+.chat__input-row:has(.chat__pill:focus-within, .chat__pill--with-attach) .chat__plus:not(:hover):not(.chat__plus--active),
+.chat__input-row:not(:has(.cm-placeholder)) .chat__plus:not(:hover):not(.chat__plus--active) {
   background: color-mix(in srgb, var(--surface) 92%, transparent);
 }
 

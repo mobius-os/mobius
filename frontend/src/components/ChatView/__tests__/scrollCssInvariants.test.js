@@ -151,8 +151,8 @@ test('the handoff stack respects measured keyboard room and owns the only helper
 })
 
 test('the composer is see-through only while idle and empty', () => {
-  const rule = css.match(/\.chat__input-row:has\(\.chat__pill:focus-within, \.chat__input:not\(:placeholder-shown\), \.chat__pill--with-attach\) \.chat__pill,[\s\S]*?\{([^}]*)\}/)
-  assert.ok(rule, 'a focused or filled composer must get its own backing')
+  const rule = css.match(/\.chat__pill:focus-within,\n\.chat__pill:not\(:has\(\.cm-placeholder\)\),[\s\S]*?\{([^}]*)\}/)
+  assert.ok(rule, 'a focused, filled or attaching composer must get its own backing')
   assert.match(rule[0], /\.chat__plus/, 'the paired Brain button follows the pill')
   assert.match(rule[1], /background: color-mix\(in srgb, var\(--surface\) 92%, transparent\)/)
   const pill = css.match(/\n\.chat__pill \{[\s\S]*?\n\}/)?.[0] || ''
