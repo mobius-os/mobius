@@ -36,11 +36,14 @@ The rules, in plain words:
     PR's own change the same: a merge of the base is a new commit, not new work.
     That words the PR's standing and its highlighted next step (not_ready_to_merge);
     it does not switch your own Merge off: GitHub's merge rules refuse what cannot
-    land. The agent's own unattended merge has no tap behind it, so it still asks it.
+    land. The one exception is rights: an account GitHub says can only read or triage
+    the repository gets Merge stopped, with that reason. The agent's own unattended
+    merge has no tap behind it, so it still asks it.
   - Only four things stop an action of yours, each where it matters: the PR cannot be
     read and it is closed or merged (every action); an agent is already working on it
     (an agent job, Take over, Merge, Open for review, Back to draft, Close); something
-    sent to GitHub is not confirmed (an agent job, Take over, Merge). Ask for re-review,
+    sent to GitHub is not confirmed (an agent job, Take over, Merge); and for Merge alone, an
+    account with only read or triage access. Ask for re-review,
     Ask for approval and Request review check only the first, since a note or a review
     request races nothing. An action tied to a thing waits for that thing (a draft to
     send, a person to ask, a result to set aside). Asking works for anyone who reviewed or commented
@@ -446,8 +449,18 @@ def _not_queued(facts: dict) -> str:
   return IN_MERGE_QUEUE if facts.get("queued") is True else ""
 
 
+def _lacks_merge_rights(facts: dict) -> str:
+  # GitHub says up front when an account cannot merge here, so Merge stops with that reason instead of spending the owner's
+  # confirmation on a refusal. Only a known permission below Write stops it; an unknown one is left to the merge guard.
+  permission = facts.get("permission")
+  if permission not in ("READ", "TRIAGE"):
+    return ""
+  return f"Merging needs write access to this repository. Your account has {permission.lower()} access."
+
+
 def _merge_stops(facts: dict, d: dict) -> str:
-  return _first_reason(_readable(facts), _still_open(facts), _not_queued(facts), _nothing_in_flight(d), _job_idle(facts))
+  return _first_reason(_readable(facts), _still_open(facts), _not_queued(facts), _lacks_merge_rights(facts),
+                       _nothing_in_flight(d), _job_idle(facts))
 
 
 def _status_stops(facts: dict, d: dict) -> str:

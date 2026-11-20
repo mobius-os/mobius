@@ -198,7 +198,9 @@ def permission_of(repo: dict) -> str:
   """The connected account's rights here; an archived or disabled repository takes no writes."""
   if repo.get("archived") or repo.get("disabled"):
     return "READ"
-  granted = repo.get("permissions") or {}
+  granted = repo.get("permissions")
+  if not granted:
+    return "unknown"  # GitHub did not say: Merge is left to the merge guard, not stopped as read-only
   return next((level for name, level in PERMISSIONS if granted.get(name) is True), "READ")
 
 

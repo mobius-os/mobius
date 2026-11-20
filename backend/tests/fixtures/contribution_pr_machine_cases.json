@@ -572,6 +572,82 @@
     "open_for_review",
     "back_to_draft",
     "request_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Your PR approved, with triage access only",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "TRIAGE",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved_no_rights",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
+    "back_to_draft",
+    "request_review",
+    "close"
+   ]
+  },
+  {
+   "name": "Merge stays offered when GitHub did not say what you may do",
+   "rule": "R2",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "unknown",
+    "reviews": [
+     {
+      "by": "sam",
+      "state": "APPROVED",
+      "commit": "h2",
+      "bot": false
+     }
+    ],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author"
+   },
+   "state": "author.approved_no_rights",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
+    "back_to_draft",
+    "request_review",
     "merge",
     "close"
    ]
@@ -1122,7 +1198,6 @@
     "open_for_review",
     "back_to_draft",
     "request_review",
-    "merge",
     "close"
    ]
   },
