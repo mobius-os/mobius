@@ -66,7 +66,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
@@ -92,7 +91,7 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
-import { orderPickerModels, withRecentModel } from '../../lib/modelPickerOrder.js'
+import { orderPickerModels } from '../../lib/modelPickerOrder.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
 import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
 import ModelPickerRow, { providerSetupLink } from './ModelPickerRow.jsx'
@@ -103,7 +102,7 @@ import './ChatSettingsPanel.css'
  *
  *  Rules (matches the codex-review spec):
  *    - Preserve registry order among models with no owner recency. The
- *      flattened picker moves confirmed recent choices ahead of them.
+ *      flattened picker moves recently used models ahead of them.
  *    - Hide entries whose ID appears in `hiddenIds`, UNLESS that ID
  *      is the chat's currently-selected model (`selectedId`). The
  *      currently-selected model is always visible so the user can
@@ -150,7 +149,6 @@ export default function ChatSettingsPanel({
   providerUsage = null,
 }) {
   const [saving, setSaving] = useState(false)
-  const queryClient = useQueryClient()
   const [localError, setLocalError] = useState('')
   const pendingSwitchPreviousRef = useRef(null)
   // Synchronous guard for the paid atomic handoff. Routine picker writes use
@@ -262,11 +260,6 @@ export default function ChatSettingsPanel({
           provider: data.provider,
           effective: data.effective,
         })
-        if (body.agent_settings_json?.model) {
-          queryClient.setQueryData(modelQueries.prefs.key, previous => (
-            withRecentModel(previous, body.agent_settings_json.model)
-          ))
-        }
         return ''
       } catch {
         return 'Network error.'
@@ -279,7 +272,7 @@ export default function ChatSettingsPanel({
       setSaving(false)
     })
     return operation
-  }, [chatId, onChange, queryClient, settingsSaveTailRef])
+  }, [chatId, onChange, settingsSaveTailRef])
 
   const switchProviderWithHandoff = useCallback(async ({
     provider: nextProvider,
@@ -340,9 +333,6 @@ export default function ChatSettingsPanel({
         return false
       }
       completeProviderSwitch(chatId, request, data)
-      queryClient.setQueryData(modelQueries.prefs.key, previous => (
-        withRecentModel(previous, model)
-      ))
       return true
     } catch {
       failProviderSwitch(
@@ -352,7 +342,7 @@ export default function ChatSettingsPanel({
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, queryClient, settingsSaveTailRef])
+  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, settingsSaveTailRef])
 
   const handleEffortChange = useCallback((value) => {
     // Remember this effort under the active provider so a later

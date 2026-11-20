@@ -1,4 +1,4 @@
-"""One service snapshot drives discovery, execution, and explicit retirement."""
+"""One service snapshot drives discovery and listed-model execution."""
 import copy
 import json
 from contextlib import contextmanager
@@ -13,7 +13,7 @@ from app.mobius_catalogue import parse_catalogue
 def contract():
   return {
     'contract_version': 1, 'default_model': 'new-vision',
-    'replacements': {'retired-vision': 'new-vision'},
+    'replacements': {},
     'data': [{'id': 'new-vision', 'name': 'New vision', 'owned_by': 'mobius',
               'context_window': 200000, 'effort_levels': ['low', 'high'],
               'default_effort': 'low', 'input_modalities': ['text', 'image'],
@@ -54,18 +54,17 @@ def discovery(monkeypatch):
   return provider, state
 
 
-def test_one_snapshot_updates_runtime_picker_and_explicit_successor(discovery, tmp_path):
+def test_one_snapshot_updates_runtime_picker_without_replacing_removed_id(discovery, tmp_path):
   provider, state = discovery
   provider._refresh_catalogue(str(tmp_path))
   assert providers.DEFAULT_MODELS['mobius'] == 'new-vision'
   assert provider.switch_efforts == {'low', 'high'}
-  assert provider.resolve_model('retired-vision') == 'new-vision'
+  assert provider.resolve_model('retired-vision') is None
   assert provider.resolve_model('unknown') is None
   saved = {'model': 'retired-vision', 'effort': 'low'}
-  assert providers.effective_agent_settings(str(tmp_path), saved, 'mobius')['model'] == 'new-vision'
+  assert providers.effective_agent_settings(str(tmp_path), saved, 'mobius')['model'] is None
   assert saved['model'] == 'retired-vision'
-  assert providers.provider_of_model('retired-vision') == 'mobius'
-  assert providers.effective_agent_settings(str(tmp_path), saved, 'claude')['model'] is None
+  assert providers.provider_of_model('retired-vision') is None
   provider.build_env({}, str(tmp_path))
   runtime = json.loads((tmp_path / 'cli-auth/mobius/catalog.json').read_text())['models'][0]
   assert runtime['slug'] == 'new-vision'
@@ -76,13 +75,13 @@ def test_one_snapshot_updates_runtime_picker_and_explicit_successor(discovery, t
   assert providers._fallback_models('mobius')[0]['context_window'] == 180000
 
 
-def test_retired_model_changed_effort_uses_service_default_without_rewriting_saved_choice(discovery, tmp_path):
+def test_removed_model_does_not_inherit_service_default_or_rewrite_saved_choice(discovery, tmp_path):
   provider, _ = discovery
   provider._refresh_catalogue(str(tmp_path))
   saved = {'model': 'retired-vision', 'effort': 'medium',
            'effort_by_provider': {'mobius': 'medium'}}
   effective = providers.effective_agent_settings(str(tmp_path), saved, 'mobius')
-  assert (effective['model'], effective['effort']) == ('new-vision', 'low')
+  assert effective['model'] is None
   assert saved == {'model': 'retired-vision', 'effort': 'medium',
                    'effort_by_provider': {'mobius': 'medium'}}
 
@@ -97,13 +96,12 @@ async def test_refresh_adds_removes_models_and_offline_keeps_last_good(discovery
   assert cached == first and state['calls'] == 1
   _, fresh = await providers._fetch_model_entries(path, 'mobius', force_refresh=True)
   assert fresh[0]['label'] == 'Renamed remotely'
-  state['catalogue']['data'][0]['id'] = 'replacement-vision'
-  state['catalogue']['default_model'] = 'replacement-vision'
-  state['catalogue']['replacements'] = {'new-vision': 'replacement-vision'}
+  state['catalogue']['data'][0]['id'] = 'next-vision'
+  state['catalogue']['default_model'] = 'next-vision'
   _, fresh = await providers._fetch_model_entries(path, 'mobius', force_refresh=True)
-  assert [row['id'] for row in fresh] == ['replacement-vision']
-  assert provider.resolve_model('new-vision') == 'replacement-vision'
-  assert providers.DEFAULT_MODELS['mobius'] == 'replacement-vision'
+  assert [row['id'] for row in fresh] == ['next-vision']
+  assert provider.resolve_model('new-vision') is None
+  assert providers.DEFAULT_MODELS['mobius'] == 'next-vision'
   state['error'] = True
   _, offline = await providers._fetch_model_entries(path, 'mobius', force_refresh=True)
   assert offline == fresh
@@ -148,6 +146,7 @@ def test_account_change_discards_inflight_catalogue(discovery, tmp_path):
   lambda p: p['data'][0].update(effort_levels=[], default_effort={'bad': 'shape'}),
   lambda p: p.update(replacements={'retired': 'missing'}),
   lambda p: p.update(replacements={'new-vision': 'new-vision'}),
+  lambda p: p.update(replacements={'retired-vision': 'new-vision'}),
 ])
 def test_malformed_refresh_cannot_replace_working_snapshot(discovery, tmp_path, mutation):
   provider, state = discovery
@@ -159,7 +158,7 @@ def test_malformed_refresh_cannot_replace_working_snapshot(discovery, tmp_path, 
   assert provider.declaration == before
 
 
-def test_foreign_model_cannot_be_a_service_alias(discovery, tmp_path):
+def test_foreign_model_cannot_enter_service_catalogue(discovery, tmp_path):
   provider, state = discovery
   state['catalogue']['data'][0]['id'] = 'gpt-5.4'
   state['catalogue']['default_model'] = 'gpt-5.4'
@@ -208,7 +207,7 @@ async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, 
     user_message='synthetic', session_id=None, base_env={}, cwd=str(tmp_path),
     chat_id='synthetic', bc=None, pending_questions={}, db=None,
     provider_id='mobius', data_dir=str(tmp_path),
-    agent_settings={'model': 'retired-vision', 'effort': saved_effort},
+    agent_settings={'model': 'new-vision', 'effort': saved_effort},
   )
   assert result['error'] is None
   assert not captured['path'].exists()
@@ -219,7 +218,7 @@ async def test_running_agent_keeps_frozen_catalogue_and_cleans_it_up(discovery, 
   (['low', 'high'], 'low', 'model_reasoning_effort="low"'),
   ([], None, None),
 ])
-async def test_cold_compaction_resolves_retirement_and_freezes_catalogue_through_process(
+async def test_cold_compaction_uses_listed_model_and_freezes_catalogue_through_process(
   discovery, tmp_path, monkeypatch, efforts, default_effort, expected_effort,
 ):
   from app import compaction
@@ -259,7 +258,7 @@ async def test_cold_compaction_resolves_retirement_and_freezes_catalogue_through
   monkeypatch.setattr(compaction.asyncio, 'create_subprocess_exec', spawn)
   result = await compaction._run_codex_summarize_turn(
     'summarize', data_dir=str(tmp_path), provider_id='mobius',
-    model='retired-vision', effort='medium',
+    model='new-vision', effort='medium',
   )
   assert result == 'briefing'
   assert state['calls'] == 2
@@ -267,7 +266,7 @@ async def test_cold_compaction_resolves_retirement_and_freezes_catalogue_through
 
 
 @pytest.mark.asyncio
-async def test_compaction_unmapped_retired_model_never_dispatches(discovery, tmp_path, monkeypatch):
+async def test_compaction_removed_model_never_dispatches(discovery, tmp_path, monkeypatch):
   from app import compaction
   async def forbidden(*args, **kwargs):
     pytest.fail('unavailable model must not reach Codex')
@@ -275,12 +274,12 @@ async def test_compaction_unmapped_retired_model_never_dispatches(discovery, tmp
   with pytest.raises(compaction.CompactionError, match='unavailable'):
     await compaction._run_codex_summarize_turn(
       'summarize', data_dir=str(tmp_path), provider_id='mobius',
-      model='unknown-retired', effort='medium',
+      model='retired-vision', effort='medium',
     )
 
 
 @pytest.mark.asyncio
-async def test_unknown_model_fails_before_prompt_dispatch(discovery, tmp_path, monkeypatch):
+async def test_removed_model_fails_before_prompt_dispatch(discovery, tmp_path, monkeypatch):
   from app import codex_sdk_runner
   async def forbidden(**kwargs):
     pytest.fail('must not dispatch an unavailable model')
@@ -288,7 +287,7 @@ async def test_unknown_model_fails_before_prompt_dispatch(discovery, tmp_path, m
   result = await codex_sdk_runner.run_codex_sdk_turn(
     user_message='synthetic', session_id=None, base_env={}, cwd=str(tmp_path),
     chat_id='synthetic', bc=None, pending_questions={}, db=None,
-    provider_id='mobius', data_dir=str(tmp_path), agent_settings={'model': 'unknown'},
+    provider_id='mobius', data_dir=str(tmp_path), agent_settings={'model': 'retired-vision'},
   )
   assert result['prompt_sent'] is False
   assert 'unavailable' in result['error']
@@ -426,12 +425,12 @@ def test_cold_background_outage_is_explicit_not_a_wrong_default(discovery, tmp_p
     background_agents.resolve_background_chat_choice(str(tmp_path), None)
 
 
-def test_registry_route_exposes_same_default_and_replacements(discovery, client, auth):
+def test_registry_route_exposes_listed_default_without_replacements(discovery, client, auth):
   response = client.get('/api/models?refresh=true', headers=auth)
   assert response.status_code == 200
   body = response.json()
   assert body['defaults']['mobius'] == 'new-vision'
-  assert body['replacements']['mobius'] == {'retired-vision': 'new-vision'}
+  assert body['replacements']['mobius'] == {}
   assert [row['id'] for row in body['providers']['mobius']] == ['new-vision']
 
 
@@ -442,7 +441,6 @@ def test_registry_refresh_cannot_pair_old_rows_with_new_default(discovery, clien
     updated = contract()
     updated['data'][0]['id'] = 'next-model'
     updated['default_model'] = 'next-model'
-    updated['replacements'] = {'new-vision': 'next-model'}
     provider._publish_catalogue(parse_catalogue(updated))
     # Another provider finished discovery after the Mobius cached read.
     return {'mobius': old}
@@ -450,4 +448,4 @@ def test_registry_refresh_cannot_pair_old_rows_with_new_default(discovery, clien
   body = client.get('/api/models', headers=auth).json()
   assert [row['id'] for row in body['providers']['mobius']] == ['next-model']
   assert body['defaults']['mobius'] == 'next-model'
-  assert body['replacements']['mobius'] == {'new-vision': 'next-model'}
+  assert body['replacements']['mobius'] == {}

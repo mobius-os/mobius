@@ -33,6 +33,7 @@ import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.j
 import {
   chatMessagesQueryKey,
   chatQueries,
+  modelQueries,
   settingsQueries,
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -1884,6 +1885,7 @@ export default function ChatView({
     patchQuestionAnswers,
     lastReadAtRef: streamLastReadAtRef,
   } = useStreamConnection(chatId, {
+    onOwnerSendAccepted: () => { void modelQueries.prefs.invalidate(queryClient) },
     onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
@@ -1983,6 +1985,10 @@ export default function ChatView({
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      // Queue promotion, not enqueue, is when an owner row's actual model is
+      // known and the backend updates recency. A non-owner head just causes a
+      // harmless fresh read.
+      void modelQueries.prefs.invalidate(queryClient)
       setActiveAssistantMessageId(null)
       // A queued message is being promoted into its OWN run — the rail's
       // run-start boundary for queue drains. useStreamConnection fires this
