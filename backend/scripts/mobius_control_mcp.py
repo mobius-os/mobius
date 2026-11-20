@@ -1864,10 +1864,34 @@ _TOOL_DEFINITIONS = {
             "parts): {type: basic, username, password} naming two parts, or "
             "{type: slots, slots: [...]} with up to 8 slots, each {type: header, "
             "name, template} where template names parts like \"Token {id}:{secret}\", "
-            "{type: query, name, part}, or {type: body, format: json|form, field, part}."
+            "{type: query, name, part}, or {type: body, format: json|form, field, part}. "
+            "Signed by the vault: {type: aws_sigv4, access_key_id, secret_access_key, "
+            "session_token?, region, service} (service s3 for S3, R2 and B2; region auto "
+            "for R2), or {type: jwt_bearer, private_key, alg?: RS256|ES256, key_id?, "
+            "claims: {iss?, sub?, aud?, scope?}, lifetime_secs?, exchange?: {kind: google} "
+            "| {kind: github, installation_id}}: a Google service account pastes its whole "
+            "JSON file as private_key and names claims.scope; a GitHub App names claims.iss."
           ),
           "properties": {
-            "type": {"type": "string", "enum": ["header", "query", "basic", "slots"]},
+            "type": {"type": "string", "enum": ["header", "query", "basic", "slots", "aws_sigv4", "jwt_bearer"]},
+            "access_key_id": {"type": "string"},
+            "secret_access_key": {"type": "string"},
+            "session_token": {"type": "string"},
+            "region": {"type": "string"},
+            "service": {"type": "string"},
+            "private_key": {"type": "string"},
+            "alg": {"type": "string", "enum": ["RS256", "ES256"]},
+            "key_id": {"type": "string"},
+            "claims": {
+              "type": "object", "additionalProperties": False,
+              "properties": {name: {"type": "string"} for name in ("iss", "sub", "aud", "scope")},
+            },
+            "lifetime_secs": {"type": "integer", "minimum": 60, "maximum": 3600},
+            "exchange": {
+              "type": "object", "additionalProperties": False, "required": ["kind"],
+              "properties": {"kind": {"type": "string", "enum": ["google", "github"]},
+                             "installation_id": {"type": "string"}},
+            },
             "name": {"type": "string"},
             "prefix": {"type": "string"},
             "username": {"type": "string"},
@@ -1904,6 +1928,7 @@ _TOOL_DEFINITIONS = {
               "name": {"type": "string", "description": "e.g. account_sid"},
               "label": {"type": "string", "description": "What the owner sees, e.g. Account SID"},
               "secret": {"type": "boolean"},
+              "multiline": {"type": "boolean", "description": "True for a key file (PEM or service-account JSON)"},
             },
             "required": ["name"], "additionalProperties": False,
           },

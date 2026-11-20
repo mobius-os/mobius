@@ -370,8 +370,8 @@ trusted copy deliberately.
 
 ## Keys with several parts
 
-Status: phase 1 (parts, `basic`, `slots`, the multi-field card) is built;
-the signers in phases 2 and 3 are not.
+Status: phases 1 (parts, `basic`, `slots`, the multi-field card) and 2
+(`aws_sigv4`, `jwt_bearer`) are built; phase 3 (`oauth2_refresh`) is not.
 
 **The gap.** A key today is one value sent in one slot, and a borrow uses one
 key. Many services need more than that:
@@ -448,14 +448,18 @@ each minted token to the key's redaction set.
   As today, the caller's own header with a slot's name is dropped, and the
   caller cannot name a slot's field or part: both come from the approved
   recipe.
-- **Signers**, each a small, self-contained module beside the vault with
-  published test vectors:
+- **Signers**, in the vault itself, checked against published test vectors
+  or by verifying what they sign:
   - **`aws_sigv4`** `{access_key_id: <part>, secret_access_key: <part>,
     session_token?: <part>, region, service}`: the vault signs last, over the
     request it is about to send (the pinned host, the method, the path and
     query it checked, `x-amz-date`, `x-amz-content-sha256` of the buffered
     body, and every caller `x-amz-*` header). The caller can't send its own
-    `Authorization`, `X-Amz-Date` or `X-Amz-Security-Token`. This covers S3,
+    `Authorization`, `X-Amz-Date`, `X-Amz-Security-Token` or
+    `X-Amz-Content-Sha256`. Each path segment is encoded the AWS way and sent
+    as signed; every service but `s3` signs it encoded once more, and the
+    query is sent sorted, exactly as signed. The payload hash is sent as a
+    header only for `s3`, which requires it. This covers S3,
     R2, B2, Wasabi, MinIO and Spaces with one module. The vault never
     produces presigned URLs: a presigned URL is a portable credential.
   - **`jwt_bearer`** `{private_key: <part>, alg: RS256|ES256, claims,
@@ -467,7 +471,12 @@ each minted token to the key's redaction set.
     route) and sends the access token it gets back. For a Google
     service-account JSON pasted whole, the vault reads `client_email` and
     `private_key` out of it, but the token endpoint is the scheme's, never
-    the file's `token_uri`.
+    the file's `token_uri`. `exchange` is `{kind: google}` (RS256, `scope`
+    required, audience fixed to the token endpoint) or `{kind: github,
+    installation_id}` (RS256, `iss` the app; the JWT lives at most ten
+    minutes and starts a minute early). Without an exchange, `iss` is
+    required. `lifetime_secs` is 60 to 3600 (default 600). A request may mark
+    a part `multiline` so its card shows a box for the key file.
   - **`oauth2_refresh`** `{client_id: <part>, client_secret: <part>,
     refresh_token: <part>, token_endpoint}`: the vault exchanges the refresh
     token for an access token and sends that. When the provider rotates the
@@ -540,7 +549,11 @@ each minted token to the key's redaction set.
 2. **`aws_sigv4` and `jwt_bearer`.** Done when the signer passes AWS's SigV4
    test suite, a real S3-compatible store and a Google service account work
    from an app that never sees a value, and the minted token never appears in
-   any answer or log.
+   any answer or log. Built: the signer matches AWS's published vectors and
+   botocore; tokens verify against the key's public half, and the Google and
+   GitHub exchanges are tested against a stand-in for their endpoints. A
+   real store and a real service account still need the owner's
+   credentials to check.
 3. **`oauth2_refresh`**, then any per-provider signers that are actually
    asked for.
 

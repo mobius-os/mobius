@@ -76,7 +76,13 @@ several parts: give the card one field per part and add `--part NAME` for each
 `--basic USER_PART PASSWORD_PART` or `--slots JSON` (header templates such as
 `Token {id}:{secret}`, query parameters, or JSON or form body fields). Ask for
 such a key with `request_key`'s `parts` and a matching `inject`. Read one part
-with `?part=NAME`. It never replaces a key
+with `?part=NAME`. For services that sign requests or mint tokens, the vault
+does it and the secret never leaves: AWS-style storage (S3, R2, B2) and AWS
+APIs use an `aws_sigv4` recipe; a Google service account (its JSON file as one
+part, with `claims.scope`), a GitHub App (its PEM, `claims.iss` and an
+installation id) or a direct signed token use `jwt_bearer`. Pass the recipe
+with `--recipe JSON` and ask with `request_key`, marking a key-file part
+`multiline`. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
 consumer's receipt does not say why and the submitted value is discarded, so
 before opening the card check `mapi /api/keys` for the name; if it exists,

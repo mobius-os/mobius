@@ -106,17 +106,31 @@ export function KeyPasteField({ answer, disabled, autoFocus = false }) {
         {answer.parts.map((part, index) => (
           <label key={part.name} className="settings-keys__part">
             <span className="settings-keys__muted">{partLabel(part)}</span>
-            <input
-              className="settings-keys__input"
-              type={part.secret ? 'password' : 'text'}
-              value={answer.partValues[part.name] || ''}
-              onChange={event => answer.setPartValue(part.name, event.target.value)}
-              placeholder={part.secret ? 'Paste it here' : 'Type or paste it'}
-              autoComplete={part.secret ? 'new-password' : 'off'}
-              spellCheck={false}
-              disabled={disabled}
-              autoFocus={autoFocus && index === 0}
-            />
+            {part.multiline ? (
+              <textarea
+                className="settings-keys__input settings-keys__input--file"
+                value={answer.partValues[part.name] || ''}
+                onChange={event => answer.setPartValue(part.name, event.target.value)}
+                placeholder="Paste the whole file, including its first and last lines"
+                spellCheck={false}
+                autoCapitalize="off"
+                rows={5}
+                disabled={disabled}
+                autoFocus={autoFocus && index === 0}
+              />
+            ) : (
+              <input
+                className="settings-keys__input"
+                type={part.secret ? 'password' : 'text'}
+                value={answer.partValues[part.name] || ''}
+                onChange={event => answer.setPartValue(part.name, event.target.value)}
+                placeholder={part.secret ? 'Paste it here' : 'Type or paste it'}
+                autoComplete={part.secret ? 'new-password' : 'off'}
+                spellCheck={false}
+                disabled={disabled}
+                autoFocus={autoFocus && index === 0}
+              />
+            )}
           </label>
         ))}
         <p className="settings-keys__muted">{answer.words.pasteNote}</p>

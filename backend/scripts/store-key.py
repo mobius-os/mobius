@@ -8,7 +8,7 @@ on an existing key they replace only what is given.
 
   store-key.py NAME [--header NAME [--prefix TEXT] | --query NAME]
                [--site HOST[:METHODS[:PATHS]]]... [--no-agents] [--replace]
-  store-key.py NAME --part PART[:plain[:LABEL]]... (--basic USER PASS | --slots JSON)
+  store-key.py NAME --part PART[:plain[:LABEL]]... (--basic USER PASS | --slots JSON | --recipe JSON)
                [--site ...]... [--no-agents] [--replace]
 
   With --part, the key has several parts: each is read from the input field
@@ -16,7 +16,8 @@ on an existing key they replace only what is given.
   id, a username, a region: shown in Settings and not redacted). --basic
   sends two parts as "Authorization: Basic"; --slots takes the vault's slot
   list as JSON, e.g. '[{"type": "header", "name": "X-Id", "template": "{id}"}]'.
-  On an existing key, --part replaces only the parts it names.
+  --recipe takes any whole send recipe as JSON, such as an aws_sigv4 or
+  jwt_bearer one. On an existing key, --part replaces only the parts it names.
 
   --site api.example.com:GET,POST:/v1/*,/v2/*   (methods default to GET,
   paths to /*). Without --header or --query a new key is sent as
@@ -117,6 +118,7 @@ def main(argv: list[str] | None = None) -> int:
   slot.add_argument("--query")
   slot.add_argument("--basic", nargs=2, metavar=("USER_PART", "PASSWORD_PART"))
   slot.add_argument("--slots")
+  slot.add_argument("--recipe")
   parser.add_argument("--part", action="append", default=[])
   parser.add_argument("--prefix")
   parser.add_argument("--site", action="append", default=[])
@@ -148,9 +150,9 @@ def main(argv: list[str] | None = None) -> int:
       inject = {"type": "query", "name": args.query}
     elif args.basic:
       inject = {"type": "basic", "username": args.basic[0], "password": args.basic[1]}
-    elif args.slots:
+    elif args.slots or args.recipe:
       try:
-        inject = {"type": "slots", "slots": json.loads(args.slots)}
+        inject = {"type": "slots", "slots": json.loads(args.slots)} if args.slots else json.loads(args.recipe)
       except ValueError:
         return 2
     grants = dict(existing["grants"]) if existing else {"apps": [], "agents": True, "sites": []}

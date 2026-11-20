@@ -104,6 +104,13 @@ export function sentAs(inject) {
   if (!inject) return 'Authorization: Bearer …'
   if (inject.type === 'query') return `?${inject.name}=…`
   if (inject.type === 'basic') return `Authorization: Basic (${inject.username} and ${inject.password})`
+  if (inject.type === 'aws_sigv4') return `signed for AWS ${inject.service} in ${inject.region} (Signature Version 4)`
+  if (inject.type === 'jwt_bearer') {
+    const exchange = inject.exchange?.kind
+    if (exchange === 'google') return `a Google access token for ${inject.claims?.scope || 'its scope'}`
+    if (exchange === 'github') return `a GitHub App token for installation ${inject.exchange.installation_id}`
+    return `a token signed ${inject.alg || 'RS256'} for ${inject.claims?.aud || inject.claims?.iss}`
+  }
   if (inject.type === 'slots') {
     return inject.slots.map(slot => {
       if (slot.type === 'header') return `${slot.name}: ${slot.template}`

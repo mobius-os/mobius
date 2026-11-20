@@ -46,10 +46,13 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import calendar
 import contextlib
 import copy
 import fcntl
 import fnmatch
+import hashlib
+import hmac
 import http.client
 import ipaddress
 import json
@@ -72,6 +75,9 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
@@ -110,6 +116,27 @@ TEMPLATE_PART_RE = re.compile(r"\{([A-Za-z][A-Za-z0-9_-]{0,63})\}")
 QUERY_NAME_RE = re.compile(r"[A-Za-z0-9_.~-]{1,64}")
 BODY_FIELD_RE = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 BODY_FORMATS = {"json": "application/json", "form": "application/x-www-form-urlencoded"}
+# Signing recipes: the vault signs the request (AWS) or mints a token from a
+# private key (JWT) itself, so neither the secret nor what it makes leaves.
+AWS_NAME_RE = re.compile(r"[a-z0-9-]{1,32}")
+# What the vault sets on an AWS-signed request; a caller's copy never travels.
+AWS_SET_BY_VAULT = ("authorization", "x-amz-date", "x-amz-security-token", "x-amz-content-sha256")
+AWS_UNRESERVED = "-_.~"
+JWT_ALGS = ("RS256", "ES256")
+JWT_CLAIMS = ("iss", "sub", "aud", "scope")
+JWT_MAX_CLAIM = 512
+JWT_DEFAULT_LIFETIME = 600
+JWT_MAX_LIFETIME = 3600
+# Where a JWT is exchanged for an access token: fixed by the recipe's kind,
+# never named by the caller or the key file.
+GOOGLE_TOKEN = ("oauth2.googleapis.com", "/token")
+GOOGLE_AUDIENCE = "https://oauth2.googleapis.com/token"
+GITHUB_API = "api.github.com"
+# GitHub refuses an app JWT that lives longer than ten minutes.
+GITHUB_MAX_LIFETIME = 600
+MAX_TOKEN_ANSWER = 64 * 1024
+# A cached token is renewed this long before it expires.
+TOKEN_MARGIN_SECS = 60
 MAX_KEYS = 200
 # What the per-app secret store allowed; apps' own keys keep that bound.
 MAX_OWNED_PER_APP = 16
@@ -320,7 +347,83 @@ def validate_inject(raw) -> dict:
     if len({slot["format"] for slot in bodies}) > 1:
       raise VaultError(400, "A key's body slots all use one format: json or form.")
     return {"type": "slots", "slots": slots}
-  raise VaultError(400, "A key is sent in a header or a query parameter, as basic, or in slots.")
+  if kind == "aws_sigv4":
+    return _validate_aws(raw)
+  if kind == "jwt_bearer":
+    return _validate_jwt(raw)
+  raise VaultError(400, "A key is sent in a header or a query parameter, as basic, in slots, "
+                   "signed for AWS (aws_sigv4), or as a token from a private key (jwt_bearer).")
+
+
+def _validate_aws(raw: dict) -> dict:
+  recipe = {
+    "type": "aws_sigv4",
+    "access_key_id": _part_name(raw.get("access_key_id"), "The access key id"),
+    "secret_access_key": _part_name(raw.get("secret_access_key"), "The secret access key"),
+  }
+  if raw.get("session_token") is not None:
+    recipe["session_token"] = _part_name(raw.get("session_token"), "The session token")
+  if len(set(recipe.values())) != len(recipe):
+    raise VaultError(400, "An AWS key's id, secret and session token are different parts.")
+  for field in ("region", "service"):
+    value = str(raw.get(field) or "").strip()
+    if not AWS_NAME_RE.fullmatch(value):
+      raise VaultError(400, f"Name the AWS {field}, such as {'eu-central-1' if field == 'region' else 's3'}.")
+    recipe[field] = value
+  return recipe
+
+
+def _jwt_text(value, what: str) -> str:
+  text = str(value).strip()
+  if not text or len(text) > JWT_MAX_CLAIM or any(ch in text for ch in "\r\n\x00"):
+    raise VaultError(400, f"{what} is one line of at most {JWT_MAX_CLAIM} characters.")
+  return text
+
+
+def _validate_jwt(raw: dict) -> dict:
+  """A token signed with the key's private key, with claims fixed here.
+
+  Sent as ``Authorization: Bearer`` itself, or first exchanged at a fixed
+  endpoint: ``google`` (a service account; the scope is required and the
+  audience is Google's token endpoint) or ``github`` (an app, for one
+  installation). The caller never chooses a claim.
+  """
+  alg = raw.get("alg") or "RS256"
+  if alg not in JWT_ALGS:
+    raise VaultError(400, "A token is signed RS256 or ES256.")
+  claims_raw = raw.get("claims") or {}
+  if not isinstance(claims_raw, dict) or set(claims_raw) - set(JWT_CLAIMS):
+    raise VaultError(400, f"A token's claims are only {', '.join(JWT_CLAIMS)}.")
+  claims = {name: _jwt_text(value, f"The {name} claim") for name, value in claims_raw.items()}
+  lifetime = raw.get("lifetime_secs", JWT_DEFAULT_LIFETIME)
+  if isinstance(lifetime, bool) or not isinstance(lifetime, int) or not 60 <= lifetime <= JWT_MAX_LIFETIME:
+    raise VaultError(400, f"A token lives between 60 and {JWT_MAX_LIFETIME} seconds.")
+  recipe = {"type": "jwt_bearer", "private_key": _part_name(raw.get("private_key"), "The private key"),
+            "alg": alg, "claims": claims, "lifetime_secs": lifetime}
+  if raw.get("key_id") is not None:
+    recipe["key_id"] = _jwt_text(raw["key_id"], "The key id")
+  exchange = raw.get("exchange")
+  if exchange is None:
+    if "iss" not in claims:
+      raise VaultError(400, "A token sent as it is names its issuer (the iss claim).")
+    return recipe
+  kind = exchange.get("kind") if isinstance(exchange, dict) else None
+  if kind == "google":
+    if alg != "RS256" or "scope" not in claims:
+      raise VaultError(400, "A Google service account signs RS256 and names its scope.")
+    if claims.get("aud", GOOGLE_AUDIENCE) != GOOGLE_AUDIENCE:
+      raise VaultError(400, f"A Google service account's audience is {GOOGLE_AUDIENCE}.")
+    claims["aud"] = GOOGLE_AUDIENCE
+    recipe["exchange"] = {"kind": "google"}
+  elif kind == "github":
+    installation = str(exchange.get("installation_id") or "").strip()
+    if alg != "RS256" or "iss" not in claims or not re.fullmatch(r"[1-9][0-9]{0,19}", installation):
+      raise VaultError(400, "A GitHub App signs RS256, names its app (the iss claim) and one installation id.")
+    recipe["lifetime_secs"] = min(lifetime, GITHUB_MAX_LIFETIME)
+    recipe["exchange"] = {"kind": "github", "installation_id": installation}
+  else:
+    raise VaultError(400, "A token is exchanged with google or github, or not at all.")
+  return recipe
 
 
 def recipe_parts(inject: dict) -> list[str]:
@@ -330,6 +433,11 @@ def recipe_parts(inject: dict) -> list[str]:
     return [VALUE_PART]
   if kind == "basic":
     return [inject["username"], inject["password"]]
+  if kind == "aws_sigv4":
+    return [inject["access_key_id"], inject["secret_access_key"],
+            *([inject["session_token"]] if inject.get("session_token") else [])]
+  if kind == "jwt_bearer":
+    return [inject["private_key"]]
   names = []
   for slot in inject["slots"]:
     names += TEMPLATE_PART_RE.findall(slot["template"]) if slot["type"] == "header" else [slot["part"]]
@@ -351,7 +459,13 @@ def validate_part_specs(raw) -> list[dict]:
   for item in raw:
     if not isinstance(item, dict):
       raise VaultError(400, "Each part names itself and says whether it is secret.")
-    specs.append(_part_meta(item, None))
+    spec = _part_meta(item, None)
+    # A hint for the card: a key file is pasted into a box, not a line.
+    if item.get("multiline") is not None:
+      if not isinstance(item["multiline"], bool) or (item["multiline"] and not spec["secret"]):
+        raise VaultError(400, f"Only a secret part such as a key file has several lines ({spec['name']}).")
+      spec["multiline"] = item["multiline"]
+    specs.append(spec)
   if len({spec["name"] for spec in specs}) != len(specs):
     raise VaultError(400, "Two parts have the same name.")
   if not any(spec["secret"] for spec in specs):
@@ -955,12 +1069,17 @@ class Loan:
   values: dict
   secret: frozenset
 
-  def echoes(self) -> SecretEchoes:
+  def echoes(self, *minted: str) -> SecretEchoes:
+    """What to redact: every secret part sent, what the vault composed from
+    them, and any token it ``minted`` for this use."""
     secrets_sent = [self.values[name] for name in self.values if name in self.secret]
     if self.inject["type"] == "basic":
       # The pair as it travels, should a site echo the header back whole.
       secrets_sent.append(_basic_credentials(self.inject, self.values))
-    return secret_echoes(*secrets_sent)
+    if self.inject["type"] == "jwt_bearer":
+      # A private key is never sent; the token made from it is.
+      secrets_sent = [value for value in secrets_sent if value != self.values[self.inject["private_key"]]]
+    return secret_echoes(*secrets_sent, *minted)
 
 
 def _basic_credentials(inject: dict, values: dict) -> str:
@@ -1083,16 +1202,130 @@ def recipe_body(
   return urllib.parse.urlencode(pairs).encode("ascii"), add_type
 
 
+# -- signing ---------------------------------------------------------------
+
+def _aws_quote(text: str) -> str:
+  return urllib.parse.quote(text, safe=AWS_UNRESERVED)
+
+
+def aws_canonical_target(raw_path: str, raw_query: str, service: str) -> tuple[str, str, str, str]:
+  """The path and query as sent, and as signed.
+
+  Each path segment is decoded and encoded the AWS way (only unreserved
+  characters kept); every service but S3 signs that path encoded once more.
+  The query is sorted and encoded the same way, and sent exactly as signed
+  so the site computes the same string.
+  """
+  wire_path = "/".join(_aws_quote(urllib.parse.unquote(seg)) for seg in raw_path.split("/")) or "/"
+  signed_path = wire_path if service == "s3" else urllib.parse.quote(wire_path, safe="/" + AWS_UNRESERVED)
+  pairs = sorted((_aws_quote(k), _aws_quote(v))
+                 for k, v in urllib.parse.parse_qsl(raw_query, keep_blank_values=True))
+  query = "&".join(f"{k}={v}" for k, v in pairs)
+  return wire_path, signed_path, query, query
+
+
+def _aws_signed_header(name: str) -> bool:
+  lowered = name.lower()
+  return lowered in ("host", "content-type", "content-md5") or lowered.startswith("x-amz-")
+
+
+def aws_sigv4_authorization(
+  *, method: str, signed_path: str, signed_query: str, headers: list[tuple[str, str]],
+  payload_hash: str, access_key_id: str, secret_access_key: str, region: str, service: str, amz_date: str,
+) -> str:
+  """The ``Authorization`` value AWS Signature Version 4 gives this request.
+
+  ``headers`` are the request's own, ``X-Amz-Date`` (``amz_date``) included;
+  the signature covers ``Host``, ``Content-Type``, ``Content-MD5`` and every
+  ``X-Amz-*`` header among them.
+  """
+  canonical: dict[str, list[str]] = {}
+  for name, value in headers:
+    if _aws_signed_header(name):
+      canonical.setdefault(name.lower(), []).append(" ".join(value.split()))
+  names = sorted(canonical)
+  canonical_headers = "".join(f"{name}:{','.join(canonical[name])}\n" for name in names)
+  signed_headers = ";".join(names)
+  request = "\n".join([method, signed_path, signed_query, canonical_headers, signed_headers, payload_hash])
+  scope = f"{amz_date[:8]}/{region}/{service}/aws4_request"
+  to_sign = "\n".join(["AWS4-HMAC-SHA256", amz_date, scope, hashlib.sha256(request.encode()).hexdigest()])
+  key = ("AWS4" + secret_access_key).encode()
+  for step in (amz_date[:8], region, service, "aws4_request"):
+    key = hmac.new(key, step.encode(), hashlib.sha256).digest()
+  signature = hmac.new(key, to_sign.encode(), hashlib.sha256).hexdigest()
+  return (f"AWS4-HMAC-SHA256 Credential={access_key_id}/{scope}, "
+          f"SignedHeaders={signed_headers}, Signature={signature}")
+
+
+def _b64url(data: bytes) -> str:
+  return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def jwt_signing_key(text: str):
+  """The private key in a PEM part, or in a service-account JSON file pasted
+  whole, and the file's ``client_email`` (None for a PEM)."""
+  text = text.strip()
+  email = None
+  if text.startswith("{"):
+    try:
+      account = json.loads(text)
+    except ValueError:
+      raise VaultError(400, "The key file is not valid JSON.")
+    pem, email = account.get("private_key"), account.get("client_email")
+    if not isinstance(pem, str):
+      raise VaultError(400, "The key file has no private_key.")
+    text = pem
+  try:
+    key = serialization.load_pem_private_key(text.encode(), password=None)
+  except (ValueError, TypeError):
+    raise VaultError(400, "The private key isn't an unencrypted PEM key.")
+  return key, email if isinstance(email, str) else None
+
+
+def sign_jwt(inject: dict, private: str, now: float) -> tuple[str, float]:
+  """A JWT with the recipe's claims, signed with ``private``, and when it expires."""
+  key, email = jwt_signing_key(private)
+  alg = inject["alg"]
+  if alg == "RS256" and not isinstance(key, rsa.RSAPrivateKey):
+    raise VaultError(400, "RS256 needs an RSA private key.")
+  if alg == "ES256" and not (isinstance(key, ec.EllipticCurvePrivateKey) and key.curve.name == "secp256r1"):
+    raise VaultError(400, "ES256 needs a P-256 private key.")
+  claims = dict(inject["claims"])
+  if "iss" not in claims:
+    if email is None:
+      raise VaultError(400, "Name the token's issuer: the iss claim, or a key file with client_email.")
+    claims["iss"] = email
+  issued = int(now) - (60 if (inject.get("exchange") or {}).get("kind") == "github" else 0)
+  expires = int(now) + inject["lifetime_secs"]
+  header = {"alg": alg, "typ": "JWT", **({"kid": inject["key_id"]} if inject.get("key_id") else {})}
+  payload = {**claims, "iat": issued, "exp": expires}
+  signing_input = (_b64url(json.dumps(header, separators=(",", ":")).encode()) + "."
+                   + _b64url(json.dumps(payload, separators=(",", ":")).encode()))
+  if alg == "RS256":
+    signature = key.sign(signing_input.encode(), padding.PKCS1v15(), hashes.SHA256())
+  else:
+    r, s = decode_dss_signature(key.sign(signing_input.encode(), ec.ECDSA(hashes.SHA256())))
+    signature = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+  return f"{signing_input}.{_b64url(signature)}", float(expires)
+
+
 def build_upstream_request(
   *, method: str, host: str, raw_path: str, raw_query: str,
   caller_headers: list[tuple[str, str]], loan: Loan, body: bytes | None = None,
+  bearer: str | None = None, now: float | None = None,
 ) -> tuple[UpstreamRequest, bytes | None]:
   """Place the key's parts as its recipe says and drop anything that could
   displace them: the caller's own header or query parameter with a slot's
-  name never travels, nor a body field a slot fills."""
+  name never travels, nor a body field a slot fills. A ``jwt_bearer`` key is
+  sent as the token the vault minted (``bearer``); an ``aws_sigv4`` request
+  is signed last, over exactly what goes out, at ``now``."""
   inject, values = loan.inject, loan.values
   added_headers = recipe_headers(inject, values)
+  if inject["type"] == "jwt_bearer":
+    added_headers = [("Authorization", f"Bearer {bearer}")]
   slots = {name.lower() for name, _ in added_headers}
+  if inject["type"] == "aws_sigv4":
+    slots |= set(AWS_SET_BY_VAULT)
   body, content_type = recipe_body(inject, values, body, caller_headers)
   headers = []
   for name, header_value in caller_headers:
@@ -1126,7 +1359,30 @@ def build_upstream_request(
       if k not in names
     ]
     query = urllib.parse.urlencode(pairs + queries)
+  if inject["type"] == "aws_sigv4":
+    return _aws_signed(method, host, raw_path, query, headers, body, inject, values, now)
   target = raw_path + (f"?{query}" if query else "")
+  return UpstreamRequest(method=method, host=host, target=target, headers=headers), body
+
+
+def _aws_signed(method, host, raw_path, raw_query, headers, body, inject, values, now):
+  wire_path, signed_path, wire_query, signed_query = aws_canonical_target(raw_path, raw_query, inject["service"])
+  amz_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
+  payload_hash = hashlib.sha256(body or b"").hexdigest()
+  headers = [*headers, ("X-Amz-Date", amz_date)]
+  if inject["service"] == "s3":
+    # S3 and stores speaking its API need the payload hash as a header.
+    headers.append(("X-Amz-Content-Sha256", payload_hash))
+  if inject.get("session_token"):
+    headers.append(("X-Amz-Security-Token", values[inject["session_token"]]))
+  authorization = aws_sigv4_authorization(
+    method=method, signed_path=signed_path, signed_query=signed_query, headers=headers,
+    payload_hash=payload_hash, access_key_id=values[inject["access_key_id"]],
+    secret_access_key=values[inject["secret_access_key"]], region=inject["region"],
+    service=inject["service"], amz_date=amz_date,
+  )
+  headers.append(("Authorization", authorization))
+  target = wire_path + (f"?{wire_query}" if wire_query else "")
   return UpstreamRequest(method=method, host=host, target=target, headers=headers), body
 
 
@@ -2496,6 +2752,50 @@ class BorrowSlots:
         del self._held[caller]
 
 
+class TokenCache:
+  """Tokens minted from private keys, in memory only, until shortly before
+  they expire. Keyed by the key, its recipe and its private part, so any
+  change to them mints afresh; a restart forgets them all."""
+
+  def __init__(self) -> None:
+    self._lock = threading.Lock()
+    self._tokens: dict[str, tuple[str, float]] = {}
+
+  def get(self, key: str, mint) -> str:
+    now = time.time()
+    with self._lock:
+      held = self._tokens.get(key)
+    if held is not None and held[1] - TOKEN_MARGIN_SECS > now:
+      return held[0]
+    token, expires = mint()
+    with self._lock:
+      self._tokens = {k: v for k, v in self._tokens.items() if v[1] > now}
+      self._tokens[key] = (token, expires)
+    return token
+
+
+def _token_answer(host: str, status: int, data: bytes, jwt: str) -> dict:
+  if len(data) > MAX_TOKEN_ANSWER:
+    raise VaultError(502, f"{host} answered the token request with too much.")
+  try:
+    answer = json.loads(data or b"{}")
+  except ValueError:
+    answer = None
+  if not isinstance(answer, dict):
+    raise VaultError(502, f"{host} didn't answer the token request with JSON ({status}).")
+  if status >= 300:
+    said = answer.get("error_description") or answer.get("error") or answer.get("message") or ""
+    said = redact(str(said)[:200].encode(), secret_echoes(jwt)).decode(errors="replace").rstrip(". ")
+    raise VaultError(502, f"{host} refused the token ({status}){': ' + said if said else ''}.")
+  return answer
+
+
+def _usable_token(host: str, token) -> str:
+  if not isinstance(token, str) or not re.fullmatch(r"[\x21-\x7e]{8,4096}", token):
+    raise VaultError(502, f"{host} answered without a usable token.")
+  return token
+
+
 class VaultHandler(BaseHTTPRequestHandler):
   server_version = "MobiusKeyVault/2"
   sys_version = ""
@@ -2684,9 +2984,10 @@ class VaultHandler(BaseHTTPRequestHandler):
         path = normalized_request_path(raw_path)
         body = self._read_body()
         loan = self.vault.authorize(name, caller, method, host, path)
+        bearer = self._bearer(name, loan, deadline) if loan.inject["type"] == "jwt_bearer" else None
         request, body = build_upstream_request(
           method=method, host=host, raw_path=raw_path, raw_query=split.query,
-          caller_headers=list(self.headers.items()), loan=loan, body=body,
+          caller_headers=list(self.headers.items()), loan=loan, body=body, bearer=bearer,
         )
       except VaultError as exc:
         refused = exc.status < 500 and exc.status != 429
@@ -2700,11 +3001,69 @@ class VaultHandler(BaseHTTPRequestHandler):
           answer["ask"] = AGENT_ASK
         self._send_json(exc.status, answer, denied=True)
         return
-      self._relay(logged_name, caller_label, request, body, loan.echoes(), started, deadline)
+      self._relay(logged_name, caller_label, request, body, loan.echoes(*filter(None, [bearer])), started, deadline)
     finally:
       deadline.stop()
       if borrowing:
         self.server.borrows.give_back(caller_label)
+
+  # -- tokens from private keys -------------------------------------------
+
+  def _bearer(self, name: str, loan: Loan, deadline: BorrowDeadline) -> str:
+    inject = loan.inject
+    private = loan.values[inject["private_key"]]
+    key = hashlib.sha256(json.dumps([name, inject, private], sort_keys=True).encode()).hexdigest()
+    return self.server.tokens.get(key, lambda: self._mint(inject, private, deadline))
+
+  def _mint(self, inject: dict, private: str, deadline: BorrowDeadline) -> tuple[str, float]:
+    """A token for ``inject``: the signed JWT itself, or what its fixed
+    exchange endpoint gives for it."""
+    jwt, expires = sign_jwt(inject, private, time.time())
+    exchange = inject.get("exchange")
+    if exchange is None:
+      return jwt, expires
+    if exchange["kind"] == "google":
+      host, path = GOOGLE_TOKEN
+      body = urllib.parse.urlencode({
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer", "assertion": jwt,
+      }).encode()
+      headers = [("Content-Type", "application/x-www-form-urlencoded")]
+    else:
+      host, path = GITHUB_API, f"/app/installations/{exchange['installation_id']}/access_tokens"
+      body = b""
+      headers = [("Authorization", f"Bearer {jwt}"), ("Accept", "application/vnd.github+json"),
+                 ("X-GitHub-Api-Version", "2022-11-28"), ("User-Agent", "mobius-key-vault")]
+    status, data = self._token_request(host, path, headers, body, deadline)
+    answer = _token_answer(host, status, data, jwt)
+    now = time.time()
+    if exchange["kind"] == "google":
+      lifetime = answer.get("expires_in")
+      if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+        raise VaultError(502, f"{host} didn't say when its token expires.")
+      return _usable_token(host, answer.get("access_token")), now + lifetime
+    try:
+      expires_at = calendar.timegm(time.strptime(str(answer.get("expires_at")), "%Y-%m-%dT%H:%M:%SZ"))
+    except ValueError:
+      raise VaultError(502, f"{host} didn't say when its token expires.")
+    return _usable_token(host, answer.get("token")), float(expires_at)
+
+  def _token_request(self, host, path, headers, body, deadline: BorrowDeadline) -> tuple[int, bytes]:
+    connection = None
+    try:
+      connection = self.connect(host, deadline.time_left(UPSTREAM_TIMEOUT_SECS))
+      connection.putrequest("POST", path, skip_host=True, skip_accept_encoding=True)
+      for header, value in [("Host", host), ("Accept-Encoding", "identity"), *headers,
+                            ("Content-Length", str(len(body)))]:
+        connection.putheader(header, value)
+      connection.endheaders(body)
+      response = connection.getresponse()
+      return response.status, response.read(MAX_TOKEN_ANSWER + 1)
+    except (OSError, http.client.HTTPException) as exc:
+      deadline.raise_if_passed()
+      raise VaultError(502, f"{host} could not be reached for a token ({type(exc).__name__}).")
+    finally:
+      if connection is not None:
+        connection.close()
 
   def _relay(self, name, caller_label, request: UpstreamRequest, body, echoes, started, deadline: BorrowDeadline) -> None:
     method, host, raw_path = request.method, request.host, request.target.split("?", 1)[0]
@@ -2887,6 +3246,7 @@ class VaultServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
   def __init__(self, *args, **kwargs) -> None:
     super().__init__(*args, **kwargs)
     self.borrows = BorrowSlots(MAX_CONCURRENT_BORROWS, MAX_BORROWS_PER_CALLER)
+    self.tokens = TokenCache()
 
 
 def hold_single_instance_lock(data_dir: Path) -> int:

@@ -59,3 +59,13 @@ test('every recipe reads as how it is sent', () => {
   ] }), 'X-Api-Key: Key {secret} · ?app={app} · JSON field client_secret={secret}')
   assert.equal(sentAs({ type: 'header', name: 'Authorization', prefix: 'Bearer ' }), 'Authorization: Bearer …')
 })
+
+test('signing recipes read as what the vault does with the key', () => {
+  assert.equal(sentAs({ type: 'aws_sigv4', service: 's3', region: 'auto' }), 'signed for AWS s3 in auto (Signature Version 4)')
+  assert.equal(sentAs({ type: 'jwt_bearer', alg: 'RS256', claims: { scope: 'drive.readonly' }, exchange: { kind: 'google' } }),
+    'a Google access token for drive.readonly')
+  assert.equal(sentAs({ type: 'jwt_bearer', alg: 'RS256', claims: { iss: '1' }, exchange: { kind: 'github', installation_id: '42' } }),
+    'a GitHub App token for installation 42')
+  assert.equal(sentAs({ type: 'jwt_bearer', alg: 'ES256', claims: { iss: 'x', aud: 'appstoreconnect-v1' } }),
+    'a token signed ES256 for appstoreconnect-v1')
+})
