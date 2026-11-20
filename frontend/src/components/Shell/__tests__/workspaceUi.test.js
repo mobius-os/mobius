@@ -1067,12 +1067,20 @@ test('a selected project-owned chat Recent includes its project chip in one row 
   assert.match(drawer, /projectChip \? ' drawer__row--project-owned'/)
   assert.match(
     drawerCss,
-    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*var\(--accent-dim\)/,
+    /\.drawer__row--project-owned\.drawer__row--active\s*\{[\s\S]*?background:\s*transparent/,
   )
   assert.match(
     drawerCss,
     /\.drawer__row--project-owned\.drawer__row--active \.drawer__item\s*\{[\s\S]*?background:\s*transparent/,
   )
+})
+
+test('a selected Recent is its bold title, with no wash and no accent text', () => {
+  const active = drawerCss.match(/\n\.drawer__item--active \{[\s\S]*?\n\}/)?.[0] || ''
+  assert.match(active, /color: var\(--text\);/)
+  assert.match(active, /font-weight: 600;/)
+  assert.doesNotMatch(active, /background/)
+  assert.doesNotMatch(drawerCss, /drawer__row--active[^{]*\{[^}]*(accent-dim|var\(--accent)/)
 })
 
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {

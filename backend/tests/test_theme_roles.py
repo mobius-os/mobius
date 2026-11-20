@@ -425,8 +425,9 @@ def _composed_states():
   ]
   # (label, text colour expr, background expr, backdrop expr)
   return [(label, _prop(rule, "color"), _prop(rule, "background"), "var(--bg)") for label, rule in badges] + [
+    # The selected row is a bold title with no wash: its text sits on the page.
     ("active drawer row", _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "color"),
-     _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "background"), "var(--bg)"),
+     "transparent", "var(--bg)"),
     ("question nudge at rest", _prop(nudge, "color"), _prop(nudge, "background"), "var(--bg)"),
     ("secure receipt (green)",
      _prop(_rule("components/ChatView/SecureInputCard.css", ".secure-card__receipt strong"), "color"),
