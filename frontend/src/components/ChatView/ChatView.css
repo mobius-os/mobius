@@ -2475,7 +2475,9 @@
    layer. z-index -1 keeps it inside the foot's stacking context (z:5) so it sits
    ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
    (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
-   the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted.
+   the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted:
+   clear for the top 72%, so the last reply line and the copy actions under it
+   stay readable, and solid only at the very bottom.
    `bottom` extends through the device safe area independently of the interactive
    foot, so keeping the controls safe cannot expose scrolling text beneath the
    gesture bar. Percentage stops give the embedded (shorter) composer a proportional
@@ -2491,10 +2493,10 @@
   background: linear-gradient(
     to bottom,
     transparent 0%,
-    color-mix(in srgb, var(--bg) 0%, transparent) 68%,
-    color-mix(in srgb, var(--bg) 12%, transparent) 76%,
-    color-mix(in srgb, var(--bg) 42%, transparent) 88%,
-    var(--bg) 98%
+    color-mix(in srgb, var(--bg) 0%, transparent) 72%,
+    color-mix(in srgb, var(--bg) 10%, transparent) 82%,
+    color-mix(in srgb, var(--bg) 40%, transparent) 92%,
+    var(--bg) 100%
   );
   pointer-events: none;
   z-index: -1;
