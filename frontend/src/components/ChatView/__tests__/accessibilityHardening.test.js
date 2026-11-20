@@ -217,3 +217,12 @@ test('incidental message focus has no box while search and controls retain keybo
     assert.match(rule, /outline:\s*2px solid var\(--accent\)/)
   }
 })
+
+test('a revealed question card has no focus box while its controls retain keyboard indicators', () => {
+  const css = read('../QuestionCard.css')
+  assert.match(css, /\.qcard:focus\s*\{\s*outline:\s*none;\s*\}/)
+  for (const selector of ['.qcard__opt', '.qcard__attach', '.qcard__submit']) {
+    const rule = css.slice(css.indexOf(`${selector}:focus-visible`)).split('}')[0]
+    assert.match(rule, /outline:\s*2px solid var\(--accent\)/)
+  }
+})
