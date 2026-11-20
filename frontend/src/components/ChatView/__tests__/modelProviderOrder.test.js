@@ -146,3 +146,9 @@ test('the Claude mark keeps its brand orange in both modes; OpenAI stays monochr
   assert.match(claude, /fill="#d97757"/)
   assert.match(openai, /fill="currentColor"/)
 })
+
+test('a near-limit usage bar is the same orange in dark and light', async () => {
+  const { readFileSync } = await import('node:fs')
+  const css = readFileSync(new URL('../../SettingsView/SettingsPage.css', import.meta.url), 'utf8')
+  assert.match(css, /\.settings-meter--warning \.settings-meter__fill \{ background: #d8922f; \}/)
+})
