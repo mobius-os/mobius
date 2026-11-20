@@ -97,6 +97,8 @@ DEFAULT_THEME = """\
   --accent-fill-hover: #7053cf;
   --danger-fill: #dc2626;
   --green-fill: #047857;
+  /* A warning bar fill (no label on it), the same orange in both modes. */
+  --warning-fill: #d8922f;
 
   /* Typography: each platform's own UI font (San Francisco on Apple, Segoe UI
      on Windows, Roboto on Android), so one face covers every script; code keeps
