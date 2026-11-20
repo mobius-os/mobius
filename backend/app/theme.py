@@ -97,7 +97,9 @@ DEFAULT_THEME = """\
   --accent-fill-hover: #7053cf;
   --danger-fill: #dc2626;
   --green-fill: #047857;
-  /* A warning bar fill (no label on it), the same orange in both modes. */
+  /* A warning bar fill (no label on it). Intentionally independent of the
+     warning base colour: the same orange in both modes, so the light theme's
+     darker, text-safe warning never turns the bar brown. */
   --warning-fill: #d8922f;
 
   /* Typography: each platform's own UI font (San Francisco on Apple, Segoe UI
