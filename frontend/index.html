@@ -43,14 +43,9 @@
          import consumed by Vite) also preserves the URL app-frame.html loads. -->
     <link rel="stylesheet" href="/vendor/fonts/mobius-fonts.css" />
     <script src="/vendor/fonts/mobius-font-readiness.js"></script>
-    <!-- Preload exactly the faces the first shell screen renders (body text,
-         semibold labels, bold title/brand). Without these hints the browser only
-         discovers 600/700 after the shell JavaScript has run, which costs a whole
-         extra round trip before launch can finish on slow links. Weight 500 and
-         the monospace faces are left to load on demand. -->
-    <link rel="preload" href="/vendor/fonts/inter-400.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/vendor/fonts/inter-600.woff2" as="font" type="font/woff2" crossorigin />
-    <link rel="preload" href="/vendor/fonts/inter-700.woff2" as="font" type="font/woff2" crossorigin />
+    <!-- No font preloads: the default --font is the platform's own UI font,
+         which needs no download. The @font-face rules above stay for owner
+         themes that name Inter or JetBrains Mono; those load on demand. -->
     <!-- KaTeX CSS is self-hosted under the stable /vendor/katex/ alias (built
          into the image by the Dockerfile), so a KaTeX bump never edits this
          file. Its JS is an on-demand application chunk, loaded only when a
