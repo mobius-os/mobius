@@ -29,9 +29,13 @@
    ║      padding would drift the logo every keystroke.         ║
    ║                                                            ║
    ║   4. Pill + + button are a UNIFIED PAIR:                   ║
-   ║        - Same background: color-mix(srgb, --surface 60%,   ║
-   ║          transparent).                                     ║
-   ║        - Same backdrop-filter: blur(16px) saturate(140%).  ║
+   ║        - Same see-through background: color-mix(srgb,      ║
+   ║          --surface 3%, transparent), so chat text behind   ║
+   ║          them stays readable as text.                      ║
+   ║        - Same light backdrop-filter: blur(0.5px), declared ║
+   ║          -webkit- first, standard last (the build keeps    ║
+   ║          the standard one; current Chrome ignores the      ║
+   ║          prefixed form).                                   ║
    ║        - Pill min-height 48px === + button 48×48.          ║
    ║        - Same hairline border-color.                       ║
    ║      Touching one without the other breaks the visual      ║
@@ -2501,6 +2505,25 @@
   z-index: -1;
 }
 
+/* The composer's light blur continues in the band above it: the same 0.5px,
+   easing in from nothing at the top of the band to full strength near the
+   field, so the last reply line and its copy actions stay sharp. Same box as
+   the fade; a mask, not a gradient colour, controls only where the blur shows. */
+.chat__foot::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -100px;
+  bottom: calc(0px - var(--chat-foot-safe-bottom));
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 30%, #000 70%);
+  mask-image: linear-gradient(to bottom, transparent 30%, #000 70%);
+  pointer-events: none;
+  z-index: -1;
+}
+
 /* Installed iOS: a deliberate product decision, not a tuning leftover. The
    closed-keyboard composer matches the Android Möbius position (pill ~17 pt
    above the edge on a portrait iPhone) rather than UIKit's native rest on the
@@ -2523,6 +2546,10 @@
    device gesture strip to fill and the shorter, flat-bottomed foot doesn't want
    the tall fade. Keep it subtle: just enough to soften content under the pill. */
 .chat-embed .chat__foot::before {
+  top: -44px;
+  bottom: 0;
+}
+.chat-embed .chat__foot::after {
   top: -44px;
   bottom: 0;
 }
@@ -2733,9 +2760,9 @@
   opacity: 0.5;
 }
 
-/* The pill: TRANSLUCENT surface with backdrop-blur — chat content
-   visibly softens through the pill background. Hairline border and
-   slight surface tint keep it readable as a card. ~48px tall to
+/* The pill: SEE-THROUGH surface — chat text behind it stays readable
+   as text, softened only by a 0.5px blur. The hairline border marks the
+   field; the placeholder and typed text read over the content. ~48px tall to
    match a WhatsApp-style composer; send/mic buttons live INSIDE
    at 32×32. */
 .chat__pill {
@@ -2759,13 +2786,13 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 3%, transparent);
   border: var(--pill-border) solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 24px;
   padding: var(--pill-pad);
   min-height: 48px;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -3196,7 +3223,7 @@
 }
 
 /* Brain button: 48×48, matched 1:1 to the pill's min-height — same
-   frosted-glass surface tint (60%) and same hairline border so
+   see-through surface tint (3%), light blur and hairline border so
    the two read as a unified pair. When the popover opens, the
    accent border marks the active state without obscuring the gauge. */
 .chat__plus {
@@ -3204,15 +3231,15 @@
   height: 48px;
   border-radius: 50%;
   border: 1px solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--surface) 3%, transparent);
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   display: grid;
   place-items: center;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
   flex-shrink: 0;
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(0.5px);
+  backdrop-filter: blur(0.5px);
 }
 
 .chat__plus:hover {
