@@ -160,9 +160,8 @@ test('the composer is see-through only while idle and empty', () => {
   assert.match(pill, /backdrop-filter: blur\(0\.5px\)/)
 })
 
-test('a plain error keeps its icon on the title line; fixed cards centre it', () => {
+test('every error card keeps its icon on the title line', () => {
   assert.match(css, /\n\.chat__text--error > \.chat__lifecycle-icon \{ height: 18px; \}/)
-  assert.doesNotMatch(css, /\n\.chat__text--error > \.chat__lifecycle-icon \{[^}]*align-self: center/,
-    'a long error must not float its icon to the middle of the message')
-  assert.match(css, /\n\.chat__text--parked > \.chat__lifecycle-icon \{[^}]*align-self: center;/)
+  assert.doesNotMatch(css, /\.chat__text--(error|parked) > \.chat__lifecycle-icon \{[^}]*align-self: center/,
+    'opening Technical details must never move the icon')
 })
