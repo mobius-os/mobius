@@ -73,6 +73,8 @@
   font-size: 14px;
   outline: 0;
 }
+.settings-keys__part { display: grid; gap: 4px; }
+.settings-keys__input--file { min-height: 96px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; resize: vertical; -webkit-text-security: disc; }
 .settings-keys__input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
 /* Pasting a new key's value: its title, the field, then where it is saved. */
 .settings-keys__paste { display: grid; gap: 8px; }

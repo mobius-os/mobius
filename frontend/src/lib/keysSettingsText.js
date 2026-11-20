@@ -64,18 +64,61 @@ export function slotShown(request) {
   return request.sets_inject ? request.inject : null
 }
 
-/** What Allow sends: exactly what the card shows, and a new key's value. */
+/**
+ * What Allow sends: exactly what the card shows, and a new key's value. A new
+ * key the request lists several parts for takes ``value`` as a map of part
+ * name to pasted text, one per field on the card.
+ */
 export function approvalBody(request, value) {
   const body = { ticket: request.ticket, sites: request.sites || [] }
-  if (!request.key_exists) return { ...body, value, inject: slotShown(request) }
+  if (!request.key_exists) {
+    const pasted = newKeyParts(request) ? { parts: value } : { value }
+    return { ...body, ...pasted, inject: slotShown(request) }
+  }
   return request.sets_inject ? { ...body, inject: request.inject } : body
 }
 
+/** The parts a new key is pasted as on its card, or null for one value. */
+export function newKeyParts(request) {
+  return !request.key_exists && Array.isArray(request.parts) && request.parts.length ? request.parts : null
+}
+
+/** Whether every part of a multi-part paste has text. */
+export function partsFilled(parts, values) {
+  return parts.every(part => String(values?.[part.name] || '').trim())
+}
+
+/** A saved key's parts; a key listed before parts existed has its one value. */
+export function keyParts(key) {
+  return Array.isArray(key.parts) && key.parts.length
+    ? key.parts
+    : [{ name: 'value', label: '', secret: true, multiline: Boolean(key.multiline) }]
+}
+
+export function partLabel(part) {
+  return part.label || part.name
+}
+
+/** How a key is sent, as the card's Details and the key page show it. */
 export function sentAs(inject) {
   if (!inject) return 'Authorization: Bearer …'
-  return inject.type === 'query'
-    ? `?${inject.name}=…`
-    : `${inject.name}: ${inject.prefix || ''}…`
+  if (inject.type === 'query') return `?${inject.name}=…`
+  if (inject.type === 'basic') return `Authorization: Basic (${inject.username} and ${inject.password})`
+  if (inject.type === 'aws_sigv4') return `signed for AWS ${inject.service} in ${inject.region} (Signature Version 4)`
+  if (inject.type === 'jwt_bearer') {
+    const exchange = inject.exchange?.kind
+    if (exchange === 'google') return `a Google access token for ${inject.claims?.scope || 'its scope'}`
+    if (exchange === 'github') return `a GitHub App token for installation ${inject.exchange.installation_id}`
+    return `a token signed ${inject.alg || 'RS256'} for ${inject.claims?.aud || inject.claims?.iss}`
+  }
+  if (inject.type === 'slots') {
+    return inject.slots.map(slot => {
+      if (slot.type === 'header') return `${slot.name}: ${slot.template}`
+      if (slot.type === 'query') return `?${slot.name}={${slot.part}}`
+      return `${slot.format === 'form' ? 'form' : 'JSON'} field ${slot.field}={${slot.part}}`
+    }).join(' · ')
+  }
+  return `${inject.name}: ${inject.prefix || ''}…`
 }
 
 /** Hosts in plain words: "a", "a and b", "a, b and c", "a, b and 2 more". */
@@ -294,7 +337,9 @@ export function requestWording(request, names) {
     keptSlot: !slot && request.inject_kept ? { kept: request.key_inject, asked: request.inject } : null,
     says: `${who} says:`,
     denyNote: `Not now is a no: ${asked} can't ask for ${key} again until you let it in Settings › Keys.`,
-    pasteTitle: hosts ? `Paste your ${hosts} key` : 'Paste the key',
+    pasteTitle: newKeyParts(request)
+      ? (hosts ? `Paste your ${hosts} details` : 'Paste the key\'s details')
+      : (hosts ? `Paste your ${hosts} key` : 'Paste the key'),
     pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
   }
   const otherApp = subject.savedBy && {
