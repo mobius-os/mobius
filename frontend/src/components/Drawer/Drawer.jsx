@@ -1189,7 +1189,7 @@ export default function Drawer({
 
               {pinnedItems.length > 0 && (
                 <section className="drawer__section" aria-labelledby="drawer-pinned-label">
-                  <h2 id="drawer-pinned-label" className="drawer__label">
+                  <h2 id="drawer-pinned-label" className="drawer__label drawer__label--section">
                     <Pin className="drawer__section-icon" width={16} height={16} aria-hidden="true" />
                     <span>Pinned</span>
                     <span className="drawer__section-count">{pinnedItems.length}</span>

@@ -1093,6 +1093,12 @@ test('a selected Recent is its bold title, with no wash and no accent text', () 
   assert.doesNotMatch(drawerCss, /drawer__row--active[^{]*\{[^}]*(accent-dim|var\(--accent)/)
 })
 
+test('the Pinned heading is styled by its own modifier, not by excluding the switch', () => {
+  assert.match(drawer, /className="drawer__label drawer__label--section"/)
+  assert.match(drawerCss, /\.drawer__label\.drawer__label--section \{[^}]*font-size: 13px;[^}]*color: var\(--muted\);/)
+  assert.doesNotMatch(drawerCss, /\.drawer__label:not\(\.drawer__tabs\)/)
+})
+
 test('mixed recents reserve artwork for apps without redundant chat icons', () => {
   assert.match(drawer, /kind === 'app'[\s\S]*?<AppIcon/)
   // Section headings may carry an icon; chat rows never do.

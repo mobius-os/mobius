@@ -246,9 +246,9 @@
 }
 .drawer__label span { line-height: inherit; }
 /* A section title (Pinned) sits one step below the rows and in the muted
-   colour, so it labels the list without competing with it. The Recents /
-   Archived switch shares .drawer__label but keeps its own size. */
-.drawer__label:not(.drawer__tabs) {
+   colour, so it labels the list without competing with it. The doubled class
+   also outranks the phone-size .drawer__label rule below. */
+.drawer__label.drawer__label--section {
   font-size: 13px;
   color: var(--muted);
 }
@@ -879,10 +879,6 @@
   .drawer__label {
     font-size: 15px;
   }
-  .drawer__label:not(.drawer__tabs) {
-    font-size: 13px;
-  }
-
   .drawer__item-icon {
     width: 20px;
     height: 20px;
