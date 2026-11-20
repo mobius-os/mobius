@@ -2475,13 +2475,14 @@
    layer. z-index -1 keeps it inside the foot's stacking context (z:5) so it sits
    ABOVE the scrolling message list (fading the text) but BEHIND the composer pill
    (the pill's backdrop-blur stays crisp). `top` extends above the composer only so
-   the ramp's percentage stops map onto the pill; the ramp itself is bottom-weighted:
-   clear for the top 72%, so the last reply line and the copy actions under it
-   stay readable, and solid only at the very bottom.
+   the blur band below can share its box. The ramp is pinned to the field, not to a
+   percentage of the footer (which is taller on phones and covered the last content
+   with black): clear all the way down to the pill's bottom edge, so the last reply
+   line and its copy actions stay readable, 70% page colour where the safe area
+   starts, and solid only behind the gesture strip.
    `bottom` extends through the device safe area independently of the interactive
    foot, so keeping the controls safe cannot expose scrolling text beneath the
-   gesture bar. Percentage stops give the embedded (shorter) composer a proportional
-   fade. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
+   gesture bar. Follows var(--bg), so theme changes + deploy refreshes can't strand a wrong
    colour. */
 .chat__foot::before {
   content: "";
@@ -2492,10 +2493,8 @@
   bottom: calc(0px - var(--chat-foot-safe-bottom));
   background: linear-gradient(
     to bottom,
-    transparent 0%,
-    color-mix(in srgb, var(--bg) 0%, transparent) 72%,
-    color-mix(in srgb, var(--bg) 10%, transparent) 82%,
-    color-mix(in srgb, var(--bg) 40%, transparent) 92%,
+    transparent calc(100% - var(--chat-foot-safe-bottom) - var(--chat-foot-pad-block)),
+    color-mix(in srgb, var(--bg) 70%, transparent) calc(100% - var(--chat-foot-safe-bottom)),
     var(--bg) 100%
   );
   pointer-events: none;
