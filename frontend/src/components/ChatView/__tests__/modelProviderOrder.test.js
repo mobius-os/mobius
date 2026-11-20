@@ -137,3 +137,12 @@ test('real preference query degrades to show-all, marked unavailable, only after
     globalThis.fetch = originalFetch
   }
 })
+
+test('the Claude mark keeps its brand orange in both modes; OpenAI stays monochrome', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('../providerRegistry.jsx', import.meta.url), 'utf8')
+  const claude = src.slice(src.indexOf('function ClaudeLogo'), src.indexOf('function OpenAILogo'))
+  const openai = src.slice(src.indexOf('function OpenAILogo'), src.indexOf('function MobiusLogo'))
+  assert.match(claude, /fill="#d97757"/)
+  assert.match(openai, /fill="currentColor"/)
+})
