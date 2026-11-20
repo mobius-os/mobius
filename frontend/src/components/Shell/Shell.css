@@ -540,6 +540,11 @@
 .shell__tab:hover {
   background: var(--surface-2);
 }
+/* On the hover fill the muted text drops under 4.5:1 in light mode, so a
+   hovered tab's text takes the full text colour. */
+.shell__tab:hover .shell__tab-open {
+  color: var(--text);
+}
 .shell__tab--active {
   border-color: transparent;
   background: var(--surface-2);

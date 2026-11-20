@@ -425,6 +425,12 @@ def _composed_states():
   ]
   # (label, text colour expr, background expr, backdrop expr)
   return [(label, _prop(rule, "color"), _prop(rule, "background"), "var(--bg)") for label, rule in badges] + [
+    # A hovered tab (unselected) shows its text on the hover fill.
+    ("hovered tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab:hover .shell__tab-open"), "color"),
+     _prop(_rule("components/Shell/Shell.css", ".shell__tab:hover"), "background"), "var(--bg)"),
+    # A resting unselected tab: muted text on the page.
+    ("resting tab", _prop(_rule("components/Shell/Shell.css", ".shell__tab-open"), "color"),
+     "transparent", "var(--bg)"),
     # The selected row is a bold title with no wash: its text sits on the page.
     ("active drawer row", _prop(_rule("components/Drawer/Drawer.css", ".drawer__item--active"), "color"),
      "transparent", "var(--bg)"),
