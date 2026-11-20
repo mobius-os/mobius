@@ -4789,9 +4789,13 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
   flex: 0 0 28px;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
   color: var(--lifecycle-tone, var(--accent));
-  background: color-mix(in srgb, var(--lifecycle-tone, var(--accent)) 12%, transparent);
+}
+/* A 16px glyph with no tile: the 28px slot keeps every row's rhythm, the
+   smaller glyph draws the thinner line the activity rows use. */
+.chat__lifecycle-icon svg {
+  width: 16px;
+  height: 16px;
 }
 .chat__lifecycle-icon svg,
 .chat__lifecycle-outcome {
