@@ -41,6 +41,10 @@ def test_entrypoint_scrubs_managed_credentials_before_starting_the_app():
   )
   assert "-u MOBIUS_SSO_CLIENT_SECRET" in env_scrub
   assert "-u MOBIUS_COMPUTE_INSTANCE_TOKEN" in env_scrub
+  # A developer's staging launcher credential is the broker's alone too.
+  for name in ("MOBIUS_STAGING_CLIENT_SECRET", "MOBIUS_STAGING_BOOTSTRAP"):
+    assert name in scrubbed
+    assert f"-u {name}" in env_scrub
   assert source.index("identity_broker &") < source.index(
     "unset MOBIUS_SSO_CLIENT_SECRET"
   ) < source.index("exec $_env_scrub uvicorn")

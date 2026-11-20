@@ -18,6 +18,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from app.launcher_side import boot_side
 from app.runtime_identity import broker_async_transport, broker_socket_path
 
 
@@ -38,6 +39,8 @@ def community_base_url(environ: Mapping[str, str]) -> str:
   return configured.strip().rstrip("/")
 
 
+# The Store follows the launcher this boot settled on, whatever imports first.
+boot_side()
 COMMUNITY_BASE_URL = community_base_url(os.environ)
 MAX_RESPONSE_BYTES = 10_000_000
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")

@@ -1845,6 +1845,11 @@ export const api = {
       ...(body ? { body: JSON.stringify(body) } : {}),
     }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
+    launcherSide: () => apiFetch('/platform/launcher-side'),
+    chooseLauncherSide: (side) => apiFetch('/platform/launcher-side', {
+      method: 'POST',
+      body: JSON.stringify({ side }),
+    }),
   },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),
