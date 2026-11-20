@@ -98,9 +98,11 @@ DEFAULT_THEME = """\
   --danger-fill: #dc2626;
   --green-fill: #047857;
 
-  /* Typography. */
-  --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+  /* Typography: each platform's own UI font (San Francisco on Apple, Segoe UI
+     on Windows, Roboto on Android), so one face covers every script; code keeps
+     JetBrains Mono with the platform monospace fonts behind it. */
+  --font: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
 }
 """
 

@@ -84,8 +84,8 @@ body,
    owner --font/--mono -- unlayered or in an owner layer -- always wins. */
 @layer mobius-defaults {
   :where(:root) {
-    --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-    --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+    --font: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
   }
 }
 

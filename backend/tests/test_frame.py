@@ -268,7 +268,7 @@ def test_frame_self_themes_no_server_style_injection(client, auth):
     assert "__mobius-theme__" in html
     assert "data-theme" in html  # the IIFE sets it + the fallback CSS gates on it
     assert 'href="/vendor/fonts/mobius-fonts.css"' in html
-    assert "--font: 'Inter', 'Inter Fallback'" in html
+    assert "--font: -apple-system, BlinkMacSystemFont, system-ui" in html
     assert "--mono: 'JetBrains Mono', 'JetBrains Mono Fallback'" in html
     # The frame self-themes by luminance from localStorage/slot — it does NOT
     # carry a SERVER-injected <html data-theme="light"> attribute (that was the
