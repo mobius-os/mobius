@@ -536,6 +536,13 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
   assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
 })
 
+test('ShellBrand shows the Staging badge only on the staging launcher side', () => {
+  assert.match(shellBrand, /api\.platform\.launcherSide\(\)[\s\S]*?setOnStaging\(value\?\.side === 'staging'\)/)
+  assert.match(shellBrand, /\{onStaging && \(\s*<span className="shell__launcher-badge"/)
+  // The collapsed desktop rail is only as wide as the logo, so the pill becomes a dot there.
+  assert.match(shellCss, /\.shell:not\(\.shell--drawer-docked\) \.shell__launcher-badge \{[^}]*font-size: 0;/)
+})
+
 test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // The toggle builds one captured-scene plan and commits the durable world in the
