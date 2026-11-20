@@ -1,10 +1,9 @@
 /* Settings › Accounts › Möbius: a developer's switch between the production and staging account service. Renders nothing unless this Möbius has a staging configuration. */
 import { useEffect, useState } from 'react'
 import { api, jsonOrThrow } from '../../api/client.js'
+import { useSideSwitchWatch } from './useSideSwitchWatch.js'
 
 const LABEL = { production: 'Production', staging: 'Staging' }
-const RECHECK_MS = 3000
-const GIVE_UP_AFTER = 60
 
 const other = side => (side === 'staging' ? 'production' : 'staging')
 
@@ -14,7 +13,6 @@ export default function LauncherSideSection() {
   const [target, setTarget] = useState(null)
   const [error, setError] = useState('')
   const [pending, setPending] = useState(false)
-  const [stuck, setStuck] = useState(false)
 
   useEffect(() => {
     let live = true
@@ -24,19 +22,7 @@ export default function LauncherSideSection() {
     return () => { live = false }
   }, [])
 
-  // The restart drops the connection; reload once the server is back on the chosen side.
-  useEffect(() => {
-    if (!target) return undefined
-    let checks = 0
-    const timer = setInterval(() => {
-      checks += 1
-      if (checks > GIVE_UP_AFTER) setStuck(true)
-      api.platform.launcherSide().then(jsonOrThrow)
-        .then(value => { if (value.side === target) window.location.reload() })
-        .catch(() => {})
-    }, RECHECK_MS)
-    return () => clearInterval(timer)
-  }, [target])
+  const stuck = useSideSwitchWatch(target)
 
   if (!status?.available) return null
   const next = other(status.side)

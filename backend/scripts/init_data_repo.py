@@ -87,6 +87,8 @@ platform.crashloop-prev.*
 .platform-restart-needed
 .platform-apply-in-progress
 .platform-restart-requested
+# Which launcher the next boot uses is this instance's runtime choice, not owner content.
+launcher-side
 .platform-rolled-back
 .platform-update-progress.json
 # Boot's count of starts that never became ready, and its atomic staging file.

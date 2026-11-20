@@ -7,7 +7,9 @@ follows its answer (``app.launcher_side``).
 from __future__ import annotations
 
 import importlib.util
+import os
 import shutil
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -129,6 +131,45 @@ def test_only_the_exact_word_chooses_staging(tmp_path, content):
   assert environ == DEFAULT_ENV
 
 
+def test_an_unavailable_staging_side_never_reads_the_choice_file(tmp_path, monkeypatch):
+  def unread(_data_dir):
+    raise AssertionError("read the launcher-side file")
+
+  monkeypatch.setattr(broker_module, "_chosen_side", unread)
+
+  assert broker_module.select_launcher_side(dict(DEFAULT_ENV), tmp_path)["available"] is False
+
+
+def test_a_fifo_in_place_of_the_choice_file_cannot_stall_the_broker(tmp_path):
+  os.mkfifo(tmp_path / "launcher-side")
+  environ = {**DEFAULT_ENV, **STAGING_ENV}
+
+  assert broker_module.select_launcher_side(environ, tmp_path)["side"] == "production"
+
+
+def test_a_link_in_place_of_the_choice_file_is_not_followed(tmp_path):
+  target = tmp_path / "elsewhere"
+  target.write_text("staging\n", encoding="utf-8")
+  (tmp_path / "launcher-side").symlink_to(target)
+  environ = {**DEFAULT_ENV, **STAGING_ENV}
+
+  assert broker_module.select_launcher_side(environ, tmp_path)["side"] == "production"
+
+
+def test_a_device_in_place_of_the_choice_file_is_not_read(tmp_path):
+  (tmp_path / "launcher-side").symlink_to("/dev/zero")
+  environ = {**DEFAULT_ENV, **STAGING_ENV}
+
+  assert broker_module.select_launcher_side(environ, tmp_path)["side"] == "production"
+
+
+def test_an_oversized_choice_file_is_not_read_as_a_choice(tmp_path):
+  (tmp_path / "launcher-side").write_text("staging\n" + " " * 4096, encoding="utf-8")
+  environ = {**DEFAULT_ENV, **STAGING_ENV}
+
+  assert broker_module.select_launcher_side(environ, tmp_path)["side"] == "production"
+
+
 class _NoUpstreamRoutes:
   """A broker with nothing to forward, as for any path it does not know."""
 
@@ -165,10 +206,10 @@ def test_the_broker_reports_its_decision_only_on_the_private_socket(monkeypatch)
 
 
 @pytest.fixture
-def launcher_env(monkeypatch):
-  for name in ("MOBIUS_IDENTITY_ISSUER", "MOBIUS_SSO_ISSUER", *launcher_side.STAGING_ENV):
-    monkeypatch.delenv(name, raising=False)
-  monkeypatch.setenv("MOBIUS_SSO_ISSUER", "https://www.mobius.you")
+def launcher_env(monkeypatch, tmp_path):
+  """A broker whose socket exists and answers as each test says."""
+  monkeypatch.setattr(launcher_side.time, "sleep", lambda _seconds: None)
+  monkeypatch.setattr(launcher_side, "broker_socket_path", lambda: str(tmp_path))
   return monkeypatch
 
 
@@ -177,14 +218,14 @@ def _answer(monkeypatch, decision: dict) -> None:
 
 
 def test_the_server_follows_a_staging_decision(launcher_env):
-  import os
+  environ = {"MOBIUS_SSO_ISSUER": "https://www.mobius.you"}
   _answer(launcher_env, {"available": True, "side": "staging", "launcher": STAGING})
 
-  side = launcher_side._follow_broker()
+  side = launcher_side._follow_broker(environ)
 
   assert side == launcher_side.LauncherSide(available=True, side="staging")
-  assert os.environ["MOBIUS_SSO_ISSUER"] == STAGING
-  assert os.environ["MOBIUS_IDENTITY_ISSUER"] == STAGING
+  assert environ["MOBIUS_SSO_ISSUER"] == STAGING
+  assert environ["MOBIUS_IDENTITY_ISSUER"] == STAGING
 
 
 @pytest.mark.parametrize("decision", [
@@ -197,23 +238,26 @@ def test_the_server_follows_a_staging_decision(launcher_env):
 def test_the_server_keeps_its_launcher_without_a_complete_staging_decision(
   launcher_env, decision,
 ):
-  import os
+  environ = {"MOBIUS_SSO_ISSUER": "https://www.mobius.you"}
   _answer(launcher_env, decision)
 
-  side = launcher_side._follow_broker()
+  side = launcher_side._follow_broker(environ)
 
   assert side.side == "production"
   assert side.available is (decision.get("available") is True)
-  assert os.environ["MOBIUS_SSO_ISSUER"] == "https://www.mobius.you"
-  assert "MOBIUS_IDENTITY_ISSUER" not in os.environ
+  assert environ == {"MOBIUS_SSO_ISSUER": "https://www.mobius.you"}
 
 
 def test_the_settings_load_with_the_staging_address_the_broker_chose(launcher_env):
+  import os
   from app.config import Settings
+  # Recorded first, so the staging address does not outlive this test.
+  for name in ("MOBIUS_IDENTITY_ISSUER", "MOBIUS_SSO_ISSUER"):
+    launcher_env.setenv(name, "")
   launcher_env.setenv("MOBIUS_SSO_INSTANCE_ID", "mob_example")
   _answer(launcher_env, {"available": True, "side": "staging", "launcher": STAGING})
 
-  launcher_side._follow_broker()
+  launcher_side._follow_broker(os.environ)
 
   assert Settings().mobius_sso_issuer == STAGING
 
@@ -221,24 +265,61 @@ def test_the_settings_load_with_the_staging_address_the_broker_chose(launcher_en
 def test_a_missed_answer_is_asked_again_only_on_a_developer_instance(launcher_env):
   answers = iter([{}, {}, {"available": True, "side": "staging", "launcher": STAGING}])
   launcher_env.setattr(launcher_side, "_broker_decision", lambda: next(answers, {}))
-  launcher_env.setattr(launcher_side.time, "sleep", lambda _seconds: None)
 
   # An ordinary instance asks once and moves on.
-  assert launcher_side._follow_broker().side == "production"
+  assert launcher_side._follow_broker({}).side == "production"
 
-  launcher_env.setenv("MOBIUS_STAGING_ISSUER", STAGING)
-  assert launcher_side._follow_broker().side == "staging"
+  assert launcher_side._follow_broker({"MOBIUS_STAGING_ISSUER": STAGING}).side == "staging"
+
+
+def test_a_boot_step_with_no_broker_yet_does_not_wait_for_one(launcher_env, tmp_path):
+  sleeps = []
+  launcher_env.setattr(launcher_side.time, "sleep", sleeps.append)
+  launcher_env.setattr(launcher_side, "broker_socket_path", lambda: str(tmp_path / "absent.sock"))
+  _answer(launcher_env, {})
+
+  side = launcher_side._follow_broker({"MOBIUS_STAGING_ISSUER": STAGING})
+
+  assert side.side == "production"
+  assert sleeps == []
 
 
 def test_the_staging_credential_never_stays_in_the_server_environment(launcher_env):
-  import os
-  for name in launcher_side.STAGING_ENV:
-    launcher_env.setenv(name, "value")
+  environ = {name: "value" for name in launcher_side.STAGING_ENV}
   _answer(launcher_env, {})
 
-  launcher_side._follow_broker()
+  launcher_side._follow_broker(environ)
 
-  assert not [name for name in launcher_side.STAGING_ENV if name in os.environ]
+  assert environ == {}
+
+
+def test_the_settings_follow_the_side_the_broker_decided_first(monkeypatch):
+  from app import config
+  followed = []
+  monkeypatch.setattr(launcher_side, "boot_side", lambda: followed.append(1))
+  config.get_settings.cache_clear()
+  try:
+    config.get_settings()
+  finally:
+    config.get_settings.cache_clear()
+
+  assert followed == [1]
+
+
+def test_the_store_address_follows_the_side_even_when_it_is_imported_first(monkeypatch):
+  # Recorded first, so the staging address does not outlive this test.
+  for name in ("MOBIUS_IDENTITY_ISSUER", "MOBIUS_SSO_ISSUER", "MOBIUS_COMMUNITY_REGISTRY_URL"):
+    monkeypatch.setenv(name, "")
+  monkeypatch.setattr(launcher_side, "_boot_side", None)
+  _answer(monkeypatch, {"available": True, "side": "staging", "launcher": STAGING})
+  path = Path(__file__).parents[1] / "app" / "community_broker.py"
+  spec = importlib.util.spec_from_file_location("community_broker_import_probe", path)
+  probe = importlib.util.module_from_spec(spec)
+  monkeypatch.setitem(sys.modules, spec.name, probe)
+
+  spec.loader.exec_module(probe)
+
+  assert probe.COMMUNITY_BASE_URL == STAGING
 
 
 def test_no_reachable_broker_means_no_decision(monkeypatch, tmp_path):

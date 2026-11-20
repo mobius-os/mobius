@@ -100,6 +100,38 @@ def _is_https_origin(value: str) -> bool:
   )
 
 
+LAUNCHER_SIDE_FILE_LIMIT = 64
+
+
+def _chosen_side(data_dir: Path) -> str:
+  """The word in ``launcher-side``, or nothing when it cannot be trusted.
+
+  The broker runs as root and the app user can write this folder, so the file
+  is opened like the broker's other private files: no symlink followed, no
+  wait on a FIFO or device, and only a regular file of sensible size is read.
+  Anything else reads as no choice, which is the default launcher.
+  """
+  flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+  try:
+    descriptor = os.open(data_dir / "launcher-side", flags)
+  except OSError:
+    return ""
+  try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+      return ""
+    content = os.read(descriptor, LAUNCHER_SIDE_FILE_LIMIT + 1)
+  except OSError:
+    return ""
+  finally:
+    os.close(descriptor)
+  if len(content) > LAUNCHER_SIDE_FILE_LIMIT:
+    return ""
+  try:
+    return content.decode("utf-8").strip()
+  except UnicodeError:
+    return ""
+
+
 def select_launcher_side(
   environ: MutableMapping[str, str], data_dir: Path,
 ) -> dict[str, Any]:
@@ -122,11 +154,7 @@ def select_launcher_side(
     and len(secret) >= 32
     and bool(MANAGED_INSTANCE_RE.fullmatch(environ.get("MOBIUS_SSO_INSTANCE_ID", "")))
   )
-  try:
-    chosen = (data_dir / "launcher-side").read_text(encoding="utf-8").strip()
-  except (OSError, UnicodeError):
-    chosen = ""
-  if not available or chosen != "staging":
+  if not available or _chosen_side(data_dir) != "staging":
     return {"available": available, "side": "production", "launcher": None}
   environ["MOBIUS_IDENTITY_ISSUER"] = issuer
   environ["MOBIUS_SSO_ISSUER"] = issuer

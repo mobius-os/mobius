@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import os
 import time
+from collections.abc import MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
 
-from app.runtime_identity import broker_client
+from app.runtime_identity import broker_client, broker_socket_path
 
 PRODUCTION = "production"
 STAGING = "staging"
@@ -53,16 +54,19 @@ def _broker_decision() -> dict:
   return value if isinstance(value, dict) else {}
 
 
-def _follow_broker() -> LauncherSide:
-  staging_configured = bool(os.environ.get("MOBIUS_STAGING_ISSUER"))
+def _follow_broker(environ: MutableMapping[str, str]) -> LauncherSide:
+  staging_configured = bool(environ.get("MOBIUS_STAGING_ISSUER"))
   # Keeps the staging credential out of what this server passes on. Only the
   # image's start script can keep it out of this process's own environment.
   for name in STAGING_ENV:
-    os.environ.pop(name, None)
+    environ.pop(name, None)
   decision = _broker_decision()
   # A missed answer would leave this server on the default launcher beside a
-  # broker on staging, so ask again before settling for the whole boot.
-  for _ in range(BROKER_RETRIES if staging_configured else 0):
+  # broker on staging, so a running broker is asked again before the boot
+  # settles. Without its socket there is no broker yet (the boot steps that
+  # load settings before it starts), and waiting would only cost seconds.
+  broker_running = os.path.exists(broker_socket_path())
+  for _ in range(BROKER_RETRIES if staging_configured and broker_running else 0):
     if decision:
       break
     time.sleep(1.0)
@@ -71,8 +75,8 @@ def _follow_broker() -> LauncherSide:
   launcher = decision.get("launcher")
   if decision.get("side") != STAGING or not isinstance(launcher, str) or not launcher:
     return LauncherSide(available=available, side=PRODUCTION)
-  os.environ["MOBIUS_IDENTITY_ISSUER"] = launcher
-  os.environ["MOBIUS_SSO_ISSUER"] = launcher
+  environ["MOBIUS_IDENTITY_ISSUER"] = launcher
+  environ["MOBIUS_SSO_ISSUER"] = launcher
   return LauncherSide(available=True, side=STAGING)
 
 
@@ -83,7 +87,7 @@ def boot_side() -> LauncherSide:
   """The side this server started on. The first call follows the broker."""
   global _boot_side
   if _boot_side is None:
-    _boot_side = _follow_broker()
+    _boot_side = _follow_broker(os.environ)
   return _boot_side
 
 
