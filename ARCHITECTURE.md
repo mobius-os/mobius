@@ -481,11 +481,14 @@ physical client pixels so density does not change how far a finger must travel.
 Do not replace the root zoom with `transform: scale(...)`: transforms do not
 relayout the viewport and reintroduce gutters, clipping, and hit-test problems.
 Do not pass shell density into mini-app frames; the browser maps a scaled host
-frame into each app's native document. `currentCSSZoom` is preferred, with
-the document root's computed zoom as the older-browser fallback. The document
-root uses offset geometry because its client dimensions can remain painted-size
-under author zoom. Layout-space unit tests and the desktop-density browser test
-protect this policy.
+frame into each app's native document. WebKit is the exception: it paints that
+document at the host zoom without enlarging the frame's viewport, so an app
+covers only 90% of its pane. Pane-filling app and project-preview frames cancel
+the density under a WebKit-only `@supports` in `Shell.css`. `currentCSSZoom` is
+preferred, with the document root's computed zoom as the older-browser
+fallback. The document root uses offset geometry because its client dimensions
+can remain painted-size under author zoom. Layout-space unit tests and the
+desktop-density browser test protect this policy.
 
 ### Top-level components (`frontend/src/components/`)
 

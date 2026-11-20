@@ -872,6 +872,21 @@
     zoom: 0.9;
   }
 
+  /* WebKit applies the root zoom to a frame's content without growing the
+     frame's viewport to match, so an app filling its pane paints at 90% of it
+     and leaves a blank strip right and bottom. Blink compensates, so its
+     density is left untouched. hanging-punctuation is WebKit-only. Pane-filling
+     frames only: element zoom also scales a fixed-size embed's own px box. */
+  @supports (hanging-punctuation: first) {
+    iframe.canvas,
+    .artifact-preview__frame,
+    .shared-app__frame,
+    .project-preview iframe,
+    .project-finder__live-preview iframe {
+      zoom: calc(1 / 0.9);
+    }
+  }
+
   .shell {
     --desktop-rail-width: 58px;
     /* The desktop workspace starts at y=0, but the expanded drawer begins
