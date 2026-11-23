@@ -32,8 +32,10 @@ test('a usage-limit card offers Switch provider beside its other actions', () =>
   assert.match(html, />Switch provider<\/button>/)
   assert.match(html, />Auto-continue this chat<\/button>/)
   assert.match(html, />Try now<\/button>/)
-  assert.equal(html.match(/class="chat__recovery-actions"/g).length, 1,
-    'the toggle and the switch share one action row')
+  assert.equal(html.match(/chat__recovery-actionbar/g).length, 1, 'one action bar')
+  const order = ['>Try now<', '>Switch provider<', '>Auto-continue this chat<'].map(label => html.indexOf(label))
+  assert.deepEqual([...order].sort((a, b) => a - b), order,
+    'retry, then switch, then the quiet auto-continue, so the keyboard order is the visual order')
 })
 
 test('a usage-limit card without the auto-continue control still offers Switch provider', () => {

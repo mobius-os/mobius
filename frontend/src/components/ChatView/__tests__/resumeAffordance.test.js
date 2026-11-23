@@ -130,7 +130,7 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
   assert.match(resumeButton, /className="chat__resume chat__recovery-action"/)
   assert.match(
     msgContent,
-    /<ResumeButton[\s\S]*?onClick=\{\(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)\}/,
+    /<RecoveryActions[\s\S]*?onClick: \(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)/,
     'the Resume control delegates an action without manufacturing message text',
   )
 })

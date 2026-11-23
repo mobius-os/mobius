@@ -40,6 +40,7 @@ import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
 import { ownsRecoveryAction, ownsSwitchResume } from './recoveryCard.js'
 import ResumeButton from './ResumeButton.jsx'
+import RecoveryActions from './RecoveryActions.jsx'
 import { helperCanRetry } from './helperRecovery.js'
 import { ParentChatLink } from './HelperChatSendNotice.jsx'
 import { HELPER_CHAT_SEND_LINK_TEXT } from './sendFailure.js'
@@ -692,41 +693,6 @@ function MsgContentInner({
             } : null}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {(autoResumeToggleAvailable || switchProviderAvailable) && (
-              <div className="chat__recovery-actions">
-                {autoResumeToggleAvailable && (
-                  <button
-                    type="button"
-                    className={`chat__recovery-action${autoResumeEnabled
-                      ? ' chat__recovery-action--quiet'
-                      : ''}`}
-                    onClick={() => onAutoResumeChange(!autoResumeEnabled)}
-                    disabled={!!autoResumeSaving || submissionBlocked}
-                  >
-                    {autoResumeSaving
-                      ? 'Saving…'
-                      : autoResumeEnabled
-                        ? 'Turn off auto-continue'
-                        : 'Auto-continue this chat'}
-                  </button>
-                )}
-                {switchProviderAvailable && (
-                  <button
-                    type="button"
-                    className="chat__recovery-action"
-                    onClick={onChooseModel}
-                    disabled={submissionBlocked}
-                  >
-                    Switch provider
-                  </button>
-                )}
-                {autoResumeToggleAvailable && autoResumeError && (
-                  <span className="chat__recovery-action-error" role="alert">
-                    {autoResumeError}
-                  </span>
-                )}
-              </div>
-            )}
             {recoveryOwner && providerRefusal && (onChooseModel || onRefusalFreshSession) && (
               <div className="chat__recovery-actions">
                 {onChooseModel && (
@@ -761,19 +727,26 @@ function MsgContentInner({
                   : HELPER_CHAT_SEND_LINK_TEXT}.
               </span>
             )}
-            {(manualResumeAvailable || continueAnywayAvailable) && (
-              <ResumeButton
-                label={continueAnywayAvailable
+            <RecoveryActions
+              resume={(manualResumeAvailable || continueAnywayAvailable) ? {
+                label: continueAnywayAvailable
                   ? 'Continue anyway'
                   : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
-                  : 'Resume'}
-                pendingLabel={continueAnywayAvailable ? 'Continuing…' : 'Resuming…'}
-                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
-                resumeState={resumeState}
-                submissionBlocked={submissionBlocked}
-              />
-            )}
+                  : 'Resume',
+                pendingLabel: continueAnywayAvailable ? 'Continuing…' : 'Resuming…',
+                onClick: () => onResume({ allowLowStorage: continueAnywayAvailable }),
+              } : null}
+              onSwitchProvider={switchProviderAvailable ? onChooseModel : null}
+              autoResume={autoResumeToggleAvailable ? {
+                enabled: !!autoResumeEnabled,
+                saving: !!autoResumeSaving,
+                error: autoResumeError,
+                onToggle: () => onAutoResumeChange(!autoResumeEnabled),
+              } : null}
+              resumeState={resumeState}
+              submissionBlocked={submissionBlocked}
+            />
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">
                 {resumeState.error}
