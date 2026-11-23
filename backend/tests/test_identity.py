@@ -862,17 +862,31 @@ def test_signed_out_railway_dashboard_uses_configured_account_not_request_origin
   }
 
 
+def _launched_from(monkeypatch, auth, issuer):
+  """Make this instance one a launcher deployed; the owner signs in again.
+
+  A session belongs to the launcher it was issued under, so the test owner's
+  local-sign-in session would no longer be accepted.
+  """
+  from app.auth import create_access_token
+  from app.config import get_settings
+
+  settings = get_settings()
+  monkeypatch.setattr(settings, "mobius_sso_issuer", issuer)
+  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
+  auth["Authorization"] = "Bearer " + create_access_token(
+    {"sub": "test"}, token_epoch=0,
+  )
+
+
 @pytest.mark.parametrize("status, access", [(200, "available"), (503, "unavailable")])
 def test_managed_railway_dashboard_uses_issuer_even_when_inventory_unavailable(
   client, auth, monkeypatch, status, access,
 ):
-  from app.config import get_settings
   from app.routes import identity
 
+  _launched_from(monkeypatch, auth, "https://issuer.example")
   granted = _app_auth(client, auth, granted=True, railway_granted=True)
-  settings = get_settings()
-  monkeypatch.setattr(settings, "mobius_sso_issuer", "https://issuer.example")
-  monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
   calls = []
 
   async def managed_response(method, path, **_kwargs):
@@ -934,7 +948,6 @@ def _railway_cost(**changes):
 def test_railway_metrics_cost_opt_in_forwards_and_preserves_older_services(
   client, auth, monkeypatch, managed, with_cost,
 ):
-  from app.config import get_settings
   from app.routes import identity
 
   public = _railway_metrics()
@@ -947,10 +960,8 @@ def test_railway_metrics_cost_opt_in_forwards_and_preserves_older_services(
     })
 
   if managed:
+    _launched_from(monkeypatch, auth, "https://issuer.example")
     granted = _app_auth(client, auth, granted=True, railway_granted=True)
-    settings = get_settings()
-    monkeypatch.setattr(settings, "mobius_sso_issuer", "https://issuer.example")
-    monkeypatch.setattr(settings, "mobius_sso_instance_id", "mob_managed")
     calls = []
 
     async def managed_response(method, path, **kwargs):

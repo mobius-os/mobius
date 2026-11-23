@@ -142,10 +142,18 @@ class FakeLauncher:
 
 
 @pytest.fixture
-def launcher(monkeypatch):
+def launcher(monkeypatch, request):
   """This Möbius was launched from mobius.you and can reach its launcher."""
   monkeypatch.setattr(get_settings(), "mobius_sso_issuer", "https://www.mobius.you")
   monkeypatch.setattr(get_settings(), "mobius_sso_instance_id", "mob_example")
+  if "auth" in request.fixturenames:
+    # A session belongs to the launcher it was issued under, so the test's
+    # owner signs in again now that the instance uses mobius.you.
+    from app.auth import create_access_token
+    headers = request.getfixturevalue("auth")
+    headers["Authorization"] = "Bearer " + create_access_token(
+      {"sub": "test"}, token_epoch=0,
+    )
   fake = FakeLauncher()
   monkeypatch.setattr(credits_client, "broker_client", fake)
   return fake

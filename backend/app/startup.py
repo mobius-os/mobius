@@ -342,6 +342,14 @@ def _verify_app_identity_cutover(context: StartupContext) -> None:
     raise RuntimeError("app identity database/filesystem cutover is incomplete")
 
 
+def _settle_launcher_sessions(context: StartupContext) -> None:
+  from app import launcher_side
+  from app.database import SessionLocal
+
+  with SessionLocal() as db:
+    launcher_side.settle_sessions(db, Path(context.settings.data_dir))
+
+
 def _purge_expired_chats(context: StartupContext) -> None:
   from app.chat_retention import purge_expired_chat_tombstones
 
@@ -777,6 +785,9 @@ DATABASE_STARTUP_TASKS = (
     _verify_app_identity_cutover,
     database_failure_reason="app_identity_cutover_incomplete",
   ),
+  # Before anything mints a token: a boot on another launcher than the
+  # sessions came from signs everyone out first.
+  StartupTask("settle launcher sessions", _settle_launcher_sessions),
   # Transcript migrations below are writer domain commands. Start ownership as
   # soon as the schema and required identity cutover exist; later startup
   # failures still fail open exactly as they did when the writer started near

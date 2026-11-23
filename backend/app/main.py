@@ -78,7 +78,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models, stall_recorder, tracing
+from app import activity, launcher_side, models, stall_recorder, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -1259,6 +1259,10 @@ def health(response: Response):
     # Served source can be newer than the running image. The account service
     # accepts this baked capability only when the marker belongs to this boot.
     "container_replacement_handoff": None,
+    # Where this instance sends people to sign in: public, and what the staging
+    # phone app checks before it opens a workspace. None with local sign-in or
+    # while a switch to the other launcher waits for its restart.
+    "issuer": launcher_side.published_issuer(),
   }
   from app.deployment_control import managed_cutover_ready
   from app.platform_update import BOOT_PROTOCOL, image_activates_updates
