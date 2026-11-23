@@ -57,7 +57,6 @@ BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL = _MANIFEST_URL.format(
   repo="app-connections",
 )
 BOOTSTRAP_SOCIAL_MANIFEST_URL = _MANIFEST_URL.format(repo="app-social")
-BOOTSTRAP_CHANNELS_MANIFEST_URL = _MANIFEST_URL.format(repo="app-channels")
 
 
 @dataclass(frozen=True)
@@ -101,11 +100,6 @@ _CORE_BOOTSTRAP_APPS = (
   # open, and the owner explicitly opts in to join before they can post.
   _BootstrapApp(
     "social", "Social", BOOTSTRAP_SOCIAL_MANIFEST_URL, False,
-  ),
-  # Channels is the only management surface for outside channels (Slack,
-  # Discord, ntfy, webhooks) since the Settings section moved into the app.
-  _BootstrapApp(
-    "channels", "Channels", BOOTSTRAP_CHANNELS_MANIFEST_URL, False,
   ),
 )
 

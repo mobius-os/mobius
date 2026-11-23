@@ -16,7 +16,6 @@ from fastapi import HTTPException
 
 from app import app_git, install, models
 from app.bootstrap import (
-  BOOTSTRAP_CHANNELS_MANIFEST_URL,
   BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
   BOOTSTRAP_INTEGRATIONS_PREDECESSOR_MANIFEST_URL,
   BOOTSTRAP_MEMORY_MANIFEST_URL,
@@ -60,7 +59,6 @@ def _bootstrap_urls():
     BOOTSTRAP_REFLECTION_MANIFEST_URL,
     BOOTSTRAP_INTEGRATIONS_MANIFEST_URL,
     BOOTSTRAP_SOCIAL_MANIFEST_URL,
-    BOOTSTRAP_CHANNELS_MANIFEST_URL,
   ]
 
 
@@ -75,7 +73,6 @@ def _installed_default_rows(created_at, *, deleted=()):
     ("reflection", "Reflection", BOOTSTRAP_REFLECTION_MANIFEST_URL),
     ("integrations", "Integrations", BOOTSTRAP_INTEGRATIONS_MANIFEST_URL),
     ("social", "Social", BOOTSTRAP_SOCIAL_MANIFEST_URL),
-    ("channels", "Channels", BOOTSTRAP_CHANNELS_MANIFEST_URL),
   )
   deleted_at = datetime.now(timezone.utc)
   return [
@@ -384,17 +381,6 @@ async def test_bootstrap_applies_per_app_uninstall_policy(db, monkeypatch):
       ),
       deleted_at=deleted_at,
     ),
-    models.App(
-      source_dir="/tmp/mobius-tests/channels",
-      name="Channels",
-      description="owner uninstalled",
-      jsx_source="export default function App() {}",
-      slug="channels",
-      manifest_url=_canonical_identity_key(
-        BOOTSTRAP_CHANNELS_MANIFEST_URL, "channels",
-      ),
-      deleted_at=deleted_at,
-    ),
   ])
   db.commit()
 
@@ -474,16 +460,6 @@ async def test_bootstrap_skips_live_apps_by_canonical_manifest(db, monkeypatch):
       slug="social-custom",
       manifest_url=_canonical_identity_key(
         BOOTSTRAP_SOCIAL_MANIFEST_URL, "social",
-      ),
-    ),
-    models.App(
-      source_dir="/tmp/mobius-tests/channels-custom",
-      name="Channels",
-      description="already here",
-      jsx_source="export default function App() {}",
-      slug="channels-custom",
-      manifest_url=_canonical_identity_key(
-        BOOTSTRAP_CHANNELS_MANIFEST_URL, "channels",
       ),
     ),
   ])
