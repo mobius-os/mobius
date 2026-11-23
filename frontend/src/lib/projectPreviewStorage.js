@@ -3,12 +3,13 @@
 export const PROJECT_PREVIEW_STORAGE_EVENT = 'mobius:project-preview-storage-local'
 export const PROJECT_PREVIEW_STORAGE_LIMIT = 512 * 1024
 
-function cleanPart(value) {
-  return encodeURIComponent(String(value ?? '').slice(0, 240))
-}
-
 export function projectPreviewStorageKey(projectId, sourcePath) {
-  return `mobius:project-preview:v1:${cleanPart(projectId)}:${cleanPart(sourcePath || 'index.html')}`
+  const project = String(projectId ?? '')
+  const source = String(sourcePath || 'index.html')
+  // Old keys at the truncation boundary may belong to several previews.
+  // Keep them untouched and reuse v1 only where it could not have clipped.
+  const version = project.length >= 240 || source.length >= 240 ? 'v2' : 'v1'
+  return `mobius:project-preview:${version}:${encodeURIComponent(project)}:${encodeURIComponent(source)}`
 }
 
 export function validProjectPreviewPath(path, { allowEmpty = false } = {}) {
