@@ -606,3 +606,19 @@ def test_a_form_that_is_not_utf8_is_refused_not_mangled():
   inject = kv.validate_inject({"type": "slots", "slots": [{"type": "body", "format": "form", "field": "s", "part": "s"}]})
   with pytest.raises(kv.VaultError, match="as UTF-8"):
     kv.recipe_body(inject, {"s": "x"}, b"name=Ren%E9", [("Content-Type", "application/x-www-form-urlencoded")])
+  with pytest.raises(kv.VaultError, match="as UTF-8"):
+    kv.recipe_body(inject, {"s": "x"}, b"name=Ren%E9", [("Content-Type", "application/x-www-form-urlencoded")])
+
+
+def test_a_store_whose_label_does_not_match_what_it_holds_is_rewritten_at_start(tmp_path):
+  folder = tmp_path / "vault"
+  v = kv.Vault(folder)
+  v.put_key("echo", {"value": SECRET, "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+  payload = json.loads(v.store_path.read_text())
+  [part] = kv.Vault(folder)._records["echo"]["parts"]
+  payload["keys"]["echo"] = {**{k: val for k, val in payload["keys"]["echo"].items() if k not in ("nonce", "sealed", "multiline")},
+                             "parts": [part]}
+  payload["version"] = 4  # labelled 4 though every key is a single value
+  v.store_path.write_text(json.dumps(payload))
+  kv.Vault(folder)
+  assert json.loads(v.store_path.read_text())["version"] == 3

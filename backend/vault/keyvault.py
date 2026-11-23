@@ -1569,9 +1569,10 @@ class Vault:
         record["origin"].setdefault("install", None)
     if version != STORE_VERSION:
       records = {name: _migrated_to_parts(record) for name, record in records.items()}
-    # Version 3 is still what single-value stores are written as, so only an
-    # older one (installation ids to stamp) is rewritten at start.
-    return records, version < 3
+    # Rewritten at start when it is older (installation ids to stamp) or its
+    # label doesn't match what it holds: version 3 holding parts would stop an
+    # older vault, and version 4 holding only single values needlessly would.
+    return records, version < 3 or version != _store_payload(records)["version"]
 
   def _load_requests(self) -> dict:
     """Open requests. A damaged file is set aside rather than stopping the vault:
