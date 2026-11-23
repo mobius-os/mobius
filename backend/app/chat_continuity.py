@@ -36,6 +36,18 @@ def note_path(data_dir: str | Path, chat_id: str) -> Path:
   return Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
 
 
+def read_note(data_dir: str | Path, chat_id: str) -> str:
+  """Return the chat's note text, or "" when it has none that can be read.
+
+  A missing or damaged note must never fail the turn or switch that only
+  wanted its help: the caller continues from the transcript alone.
+  """
+  try:
+    return note_path(data_dir, chat_id).read_text(encoding="utf-8")
+  except (OSError, UnicodeDecodeError):
+    return ""
+
+
 def _split_frontmatter(text: str) -> tuple[list[str], str]:
   if text.startswith("---\n"):
     end = text.find("\n---", 3)

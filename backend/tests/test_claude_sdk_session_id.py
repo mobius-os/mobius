@@ -296,6 +296,8 @@ def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
   assert "Building the notes app." in block
   assert "TAIL follow-up" in block
   assert "COVERED first answer" not in block
+  # What the digest stands in for stays readable from the originals.
+  assert f"/api/chats/{row.id}?limit=100&before=3" in block
 
 
 def test_resumed_context_truncates_to_budget(db):
@@ -340,5 +342,5 @@ def test_a_reseeded_helper_always_keeps_its_task(db):
   assert len(block.encode("utf-8")) < HANDOVER_MAX_BYTES + 2000
 
   short = _build_resumed_context(_chat_row(db, msgs[:1] + msgs[-1:]), keep_task=True)
-  assert "omitted" not in short
+  assert "are omitted here" not in short
   assert short.count("TASK: audit") == 1

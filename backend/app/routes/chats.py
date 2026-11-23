@@ -3046,25 +3046,18 @@ def _switch_handover(
   data_dir: str, chat_id: str, messages: list[dict],
 ) -> tuple[str, str | None]:
   """Return the handover text and the digest hash its commit must still match."""
-  from app.chat_continuity import note_path
+  from app.chat_continuity import digest_fingerprint, read_note
   from app.chat_notes import extract_full_digest
   from app.compaction import CompactionError
   from app.direct_handover import build_direct_handover
 
-  try:
-    note = note_path(data_dir, chat_id).read_text(encoding="utf-8")
-  except OSError:
-    note = ""
+  note = read_note(data_dir, chat_id)
   try:
     handover = build_direct_handover(note, messages)
   except CompactionError as exc:
     raise HTTPException(status_code=422, detail=str(exc))
   digest = extract_full_digest(note)
-  digest_hash = (
-    hashlib.sha256(digest.encode("utf-8")).hexdigest()
-    if digest is not None else None
-  )
-  return handover, digest_hash
+  return handover, digest_fingerprint(digest) if digest is not None else None
 
 
 async def _switch_chat_provider_locked(
@@ -3255,7 +3248,7 @@ async def compact_chat(
     except CompactionError as exc:
       raise HTTPException(422, str(exc)) from exc
   from app.chat_queue import get_transition_lock
-  from app.chat_continuity import note_path, recovery_source
+  from app.chat_continuity import read_note, recovery_source
   from app.chat_notes import extract_full_digest
   from app.chat_writer import (
     PersistCompaction, alloc_run_token, await_ack, get_writer,
@@ -3288,10 +3281,7 @@ async def compact_chat(
       messages = list(transcript_rows.history(chat))
       data_dir = get_settings().data_dir
       try:
-        try:
-          note = note_path(data_dir, chat_id).read_text(encoding="utf-8")
-        except OSError:
-          note = ""
+        note = read_note(data_dir, chat_id)
         source_digest = extract_full_digest(note)
         source_messages = messages
         source_note_hash = None

@@ -12,6 +12,7 @@ its transcript row; a lost session rebuilds it for the turn that restarts it.
 from __future__ import annotations
 
 import re
+from typing import NamedTuple
 
 from app.chat_continuity import recovery_source
 from app.chat_notes import extract_chat_summary, extract_full_digest
@@ -21,9 +22,10 @@ from app.continuations import not_owner_speech_label
 # The ceiling a stored model-written briefing already has, so the replayed
 # block stays one bounded first-turn cost whichever way it was produced.
 HANDOVER_MAX_BYTES = 60_000
-# Messages after the digest are normally the last turn or two. A bounded share
-# keeps an unusually long uncovered tail from crowding out the digest.
-_RECENT_MESSAGES_MAX_BYTES = 20_000
+# Messages after the digest are normally the last turn or two. They always
+# get this share, and whatever the note leaves unused, so neither a long digest
+# nor a long uncovered tail crowds the other out.
+_RECENT_MESSAGES_RESERVED_BYTES = 20_000
 # Reserved for the introduction, section titles and omission markers.
 _FRAMING_BYTES = 2_000
 _PARAGRAPH = "\n\n"
@@ -53,6 +55,12 @@ _DIGEST_OMITTED = (
 _MESSAGES_OMITTED = (
   "Earlier messages are omitted here; the originals remain in this chat."
 )
+_SUMMARY_OMITTED = (
+  "The start of the summary is omitted here; this chat's saved note has all of it."
+)
+_OPENING_OMITTED = (
+  "Only the start of the opening request is shown; the original remains in this chat."
+)
 
 
 def build_direct_handover(
@@ -73,30 +81,57 @@ def build_direct_handover(
   if not digest and not transcript:
     raise CompactionError("Nothing to hand over — the chat has no content yet.")
 
-  budget = HANDOVER_MAX_BYTES - _FRAMING_BYTES
-  opening, _ = _newest_within(
-    _opening_request(messages) if keep_opening_request else "", budget,
+  parts = _fit_to_budget(
+    opening=_opening_request(messages) if keep_opening_request else "",
+    recent=transcript,
+    summary=(extract_chat_summary(note) or "").strip(),
+    digest=digest,
   )
-  budget -= _utf8_size(opening)
-  recent_text, recent_cut = _newest_within(
-    transcript, min(budget, _RECENT_MESSAGES_MAX_BYTES) if digest else budget,
-  )
-  budget -= _utf8_size(recent_text)
-  summary, _ = _newest_within((extract_chat_summary(note) or "").strip(), budget)
-  budget -= _utf8_size(summary)
-  digest_text, digest_cut = _newest_within(digest, budget)
+  return _render(parts, recent_title=_recent_title(has_digest=bool(digest), covered=covered))
 
+
+class _Parts(NamedTuple):
+  """Each part's kept text and whether anything of it was left out."""
+
+  opening: tuple[str, bool]
+  recent: tuple[str, bool]
+  summary: tuple[str, bool]
+  digest: tuple[str, bool]
+
+
+def _fit_to_budget(*, opening: str, recent: str, summary: str, digest: str) -> _Parts:
+  """Share ``HANDOVER_MAX_BYTES`` between the parts, most at risk of loss first.
+
+  The opening request and the recent messages exist nowhere else in the
+  handover, so they are sized before the note. Recent messages get their
+  reserved share plus whatever the note does not need.
+  """
+  budget = HANDOVER_MAX_BYTES - _FRAMING_BYTES
+  reserved = _RECENT_MESSAGES_RESERVED_BYTES
+  kept_opening = _oldest_within(opening, min(budget, reserved))
+  budget -= _utf8_size(kept_opening[0])
+  unused_by_note = budget - _utf8_size(summary) - _utf8_size(digest)
+  kept_recent = _newest_within(recent, max(min(budget, reserved), unused_by_note))
+  budget -= _utf8_size(kept_recent[0])
+  kept_summary = _newest_within(summary, budget)
+  budget -= _utf8_size(kept_summary[0])
+  return _Parts(kept_opening, kept_recent, kept_summary, _newest_within(digest, budget))
+
+
+def _render(parts: _Parts, *, recent_title: str) -> str:
+  opening, opening_cut = parts.opening
+  recent, recent_cut = parts.recent
+  # Repeating a request the recent messages already show would read as two.
+  shows_opening = bool(opening) and opening not in recent
   sections = [
     _INTRO,
-    _section("CHAT SUMMARY", summary),
-    _section("CHAT DIGEST", digest_text, _DIGEST_OMITTED if digest_cut else None),
-    # Repeating a request the recent messages already show would read as two.
-    _section("OPENING REQUEST", "" if opening in recent_text else opening),
+    _section("CHAT SUMMARY", parts.summary[0], parts.summary[1] and _SUMMARY_OMITTED),
+    _section("CHAT DIGEST", parts.digest[0], parts.digest[1] and _DIGEST_OMITTED),
     _section(
-      _recent_title(has_digest=bool(digest), covered=covered),
-      recent_text,
-      _MESSAGES_OMITTED if recent_cut else None,
+      "OPENING REQUEST", opening if shows_opening else "",
+      shows_opening and opening_cut and _OPENING_OMITTED,
     ),
+    _section(recent_title, recent, recent_cut and _MESSAGES_OMITTED),
   ]
   return _PARAGRAPH.join(section for section in sections if section)
 
@@ -104,20 +139,21 @@ def build_direct_handover(
 def _transcript(messages: list[dict]) -> str:
   """Render owner and assistant turns as the dialogue a fresh session reads."""
   turns = [
-    _without_write_frames(message) for message in messages
+    _readable_turn(message) for message in messages
     if isinstance(message, dict) and message.get("role") in ("user", "assistant")
   ]
   return build_transcript_text(turns, max_chars=None).strip()
 
 
-def _without_write_frames(message: dict) -> dict:
+def _readable_turn(message: dict) -> dict:
+  """One transcript row as the plain dialogue text a fresh session can read."""
   content = message.get("content")
-  if (
-    message.get("role") != "assistant"
-    or not isinstance(content, str) or "MOBIUS_WRITE" not in content
-  ):
-    return message
-  return {**message, "content": _WRITE_FRAME.sub("", content)}
+  if not isinstance(content, str):
+    # Structured content is not dialogue; peer notes on the row still render.
+    return {**message, "content": ""}
+  if message.get("role") == "assistant" and "MOBIUS_WRITE" in content:
+    return {**message, "content": _WRITE_FRAME.sub("", content)}
+  return message
 
 
 def _opening_request(messages: list[dict]) -> str:
@@ -155,12 +191,16 @@ def _recent_title(*, has_digest: bool, covered: bool) -> str:
   return "RECENT MESSAGES (may repeat what the digest covers)"
 
 
-def _section(title: str, body: str, omitted: str | None = None) -> str:
-  """Render one titled part, or nothing when that part is empty."""
-  if not body:
+def _section(title: str, body: str, omitted: str | bool | None = None) -> str:
+  """Render one titled part, or nothing when there is nothing to say about it.
+
+  ``omitted`` is the marker for text left out. A part cut away entirely still
+  renders its marker, so nothing is ever dropped without saying so.
+  """
+  if not body and not omitted:
     return ""
   marker = f"[{omitted}]\n" if omitted else ""
-  return f"--- {title} ---\n{marker}{body}"
+  return f"--- {title} ---\n{marker}{body}".rstrip()
 
 
 def _utf8_size(text: str) -> int:
@@ -178,6 +218,19 @@ def _newest_within(text: str, max_bytes: int) -> tuple[str, bool]:
     return text, False
   if max_bytes <= 0:
     return "", True
-  newest = encoded[-max_bytes:].decode("utf-8", "ignore")
-  _, boundary, whole_paragraphs = newest.partition(_PARAGRAPH)
-  return (whole_paragraphs if boundary else newest).strip(), True
+  start = len(encoded) - max_bytes
+  # A paragraph that begins exactly at the cut is whole, so the search starts
+  # on the break just before it. One paragraph larger than the limit has no
+  # break to start from and keeps its newest bytes.
+  paragraph_break = encoded.find(b"\n\n", max(start - 2, 0))
+  if paragraph_break != -1:
+    start = paragraph_break + 2
+  return encoded[start:].decode("utf-8", "ignore").strip(), True
+
+
+def _oldest_within(text: str, max_bytes: int) -> tuple[str, bool]:
+  """Keep the start of ``text`` that fits ``max_bytes``: a request reads from its top."""
+  encoded = text.encode("utf-8")
+  if len(encoded) <= max_bytes:
+    return text, False
+  return encoded[:max(max_bytes, 0)].decode("utf-8", "ignore").rstrip(), True

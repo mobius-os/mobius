@@ -185,3 +185,92 @@ def test_chat_with_no_content_has_nothing_to_hand_over(messages):
 def test_summary_alone_is_not_a_handover_when_the_chat_has_no_digest_or_messages():
   with pytest.raises(CompactionError, match="Nothing to hand over"):
     build_direct_handover(_unbound_note("Only a summary.", ""), [])
+
+
+def test_a_long_uncovered_turn_uses_the_room_a_short_digest_leaves():
+  """The reserved share is a floor, not a ceiling: an unusually long final
+  turn is cut only when the note really needs the space."""
+  covered = _turn("COVERED")
+  note = _bound_note(covered, summary="Short.", digest="Decision: keep it small.")
+  tail = [
+    {"role": "user", "content": f"MSG-{index:03d} " + "y" * 1_000}
+    for index in range(40)
+  ]
+
+  handover = build_direct_handover(note, covered + tail)
+
+  assert "MSG-000" in handover and "MSG-039" in handover
+  assert MESSAGES_OMITTED not in handover
+  assert _size(handover) <= HANDOVER_MAX_BYTES
+
+
+def test_a_row_whose_content_is_not_text_is_skipped_instead_of_failing_the_turn():
+  messages = [
+    {"role": "user", "content": [{"type": "text", "text": "STRUCTURED"}]},
+    {"role": "assistant", "content": None},
+    {"role": "user", "content": "PLAIN follow-up"},
+  ]
+
+  handover = build_direct_handover("", messages)
+
+  assert "PLAIN follow-up" in handover
+  assert "STRUCTURED" not in handover
+
+
+def test_a_paragraph_starting_exactly_at_the_cut_is_kept_whole():
+  from app.direct_handover import _newest_within
+
+  text = "OLD " + "o" * 96 + "\n\n" + "NEW " + "n" * 96
+
+  kept, cut = _newest_within(text, 100)
+
+  assert cut is True
+  assert kept == "NEW " + "n" * 96
+
+
+def test_a_part_cut_away_entirely_still_says_it_was_left_out():
+  """A summary far larger than the whole budget leaves the digest no room."""
+  note = _unbound_note("s" * 70_000, "DIGEST-MARK decision")
+
+  handover = build_direct_handover(note, _turn("RECENT"))
+
+  assert "DIGEST-MARK" not in handover
+  assert DIGEST_TITLE in handover and DIGEST_OMITTED in handover
+  assert _size(handover) <= HANDOVER_MAX_BYTES
+
+
+def test_an_oversized_opening_request_keeps_its_start_and_says_it_was_cut():
+  task = "TASK-START audit the runs. " + "t" * 80_000
+  messages = [{"role": "user", "content": task}] + [
+    {"role": "assistant", "content": f"STEP-{index:02d} " + "p" * 3_000}
+    for index in range(30)
+  ]
+
+  handover = build_direct_handover("", messages, keep_opening_request=True)
+
+  assert "USER: TASK-START audit the runs." in handover
+  assert "Only the start of the opening request is shown" in handover
+  assert "STEP-29" in handover
+  assert _size(handover) <= HANDOVER_MAX_BYTES
+
+
+def test_a_kept_opening_request_is_not_repeated_when_recent_messages_show_it():
+  messages = [
+    {"role": "user", "content": "TASK: audit the three runs"},
+    {"role": "assistant", "content": "LATEST progress"},
+  ]
+
+  handover = build_direct_handover("", messages, keep_opening_request=True)
+
+  assert handover.count("TASK: audit the three runs") == 1
+  assert "--- OPENING REQUEST ---" not in handover
+
+
+def test_a_note_that_cannot_be_read_counts_as_no_note(tmp_path):
+  from app.chat_continuity import note_path, read_note
+
+  assert read_note(tmp_path, "missing-chat") == ""
+  damaged = note_path(tmp_path, "damaged-chat")
+  damaged.parent.mkdir(parents=True)
+  damaged.write_bytes(b"## Digest\n\xff\xfe not utf-8")
+  assert read_note(tmp_path, "damaged-chat") == ""

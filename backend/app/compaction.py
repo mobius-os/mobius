@@ -520,8 +520,8 @@ def _provider_compaction_failure(
 ) -> str:
   """Return only fixed, actionable messages for known synthesis refusals.
 
-  The summarizer serves both provider switches and manual /compact, so the
-  wording must hold for either caller.
+  The summarizer serves /compact and manual recovery, so the wording must
+  hold for either caller.
   """
   unchanged = " Your existing conversation is unchanged."
   kind = classify_provider_error(text, status=status, error_type=error_type)

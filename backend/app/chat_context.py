@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models, schemas
-from app.chat_continuity import note_path
+from app.chat_continuity import read_note
 from app.compaction import CompactionError
 from app.config import get_settings
 from app.continuations import not_owner_speech_label
@@ -527,18 +527,22 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   """
   if chat_row is None:
     return None
-  try:
-    note = note_path(get_settings().data_dir, chat_row.id).read_text(encoding="utf-8")
-  except OSError:
-    note = ""
+  from app.manual_compaction import evidence_reference
+
+  messages = list(transcript_rows.history(chat_row))
   try:
     handover = build_direct_handover(
-      note, list(transcript_rows.history(chat_row)), keep_opening_request=keep_task,
+      read_note(get_settings().data_dir, chat_row.id), messages,
+      keep_opening_request=keep_task,
     )
   except CompactionError:
     return None
-  # The handover is recalled text inside one tagged block; none of it may end it.
-  body = as_block_data(handover, "resumed_context")
+  # The handover is recalled text inside one tagged block; none of it may end
+  # it. Anything it left out stays readable through the evidence reference.
+  body = as_block_data(
+    handover + "\n\n" + evidence_reference(chat_row.id, len(messages)),
+    "resumed_context",
+  )
   return (
     "The <resumed_context> block below is the earlier history of THIS "
     "same chat. The underlying provider session could not be resumed, so "

@@ -157,3 +157,14 @@ test('the row before the tail is the nearest visible one', () => {
   assert.equal(previousVisibleMessage(rows, 1).id, 1)
   assert.equal(previousVisibleMessage(rows, 0), null)
 })
+
+test('a second switch in a row still finds the paused turn to continue', () => {
+  const switched = { role: 'assistant', kind: 'compaction', handover: 'direct' }
+  const rows = [usageLimit, { ...switched, to_provider: 'codex' }, { ...switched, to_provider: 'claude' }]
+  const previousMsg = previousVisibleMessage(rows, 2)
+
+  assert.equal(previousMsg, usageLimit)
+  assert.equal(ownsSwitchResume({
+    msg: rows[2], previousMsg, isLastMessage: true, canResume: true,
+  }), true)
+})

@@ -30,8 +30,7 @@ export function ownsSwitchResume({
 }) {
   const previousTail = previousMsg?.blocks?.at(-1)
   return !!(
-    msg?.kind === 'compaction'
-    && msg.handover === 'direct'
+    isDirectSwitchRow(msg)
     && previousTail?.resumable
     && !questionOwnsTurn
     && isLastMessage
@@ -39,10 +38,18 @@ export function ownsSwitchResume({
   )
 }
 
-// The visible row before `index`: what a switch card checks for a paused turn.
+// The visible row a switch card at `index` follows. Earlier switch cards
+// directly before it are passed over, so the paused turn is still found when
+// the chat was switched twice in a row.
 export function previousVisibleMessage(messages, index) {
   for (let i = index - 1; i >= 0; i -= 1) {
-    if (!messages[i].hidden) return messages[i]
+    const row = messages[i]
+    if (row.hidden || isDirectSwitchRow(row)) continue
+    return row
   }
   return null
+}
+
+function isDirectSwitchRow(msg) {
+  return msg?.kind === 'compaction' && msg.handover === 'direct'
 }

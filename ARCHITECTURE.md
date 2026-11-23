@@ -1643,7 +1643,7 @@ messages. The writer actor then stores that handover, changes
 provider/settings, clears the outgoing session, and supersedes outgoing
 `parked`/`resume_pending` runs in one conditional transaction; sends, settings
 PATCHes, app-chat PATCHes, and auto-resume share the same per-chat transition lock,
-while a Summary or transcript change invalidates the commit. Provider-switch UI
+while a Digest or transcript change invalidates the commit. Provider-switch UI
 state is keyed by chat outside the keyed `ChatView`, so navigation cannot unlock a
 handoff or lose its idempotent retry id. The handover is replayed into the incoming provider's first
 real turn as a `<compacted_chat>` block, so the new agent continues rather than

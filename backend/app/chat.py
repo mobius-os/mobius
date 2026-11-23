@@ -6261,7 +6261,10 @@ async def _run_chat_impl_with_db(
     if activity_delivery.text:
       user_message = f"{activity_delivery.text}\n\n{user_message}"
 
-  if starts_fresh and run_policy is None:
+  # A retired session is reseeded below from the chat's current saved state,
+  # exactly as a lost session is. Replaying a stored handover as well would
+  # hand the same digest over twice.
+  if starts_fresh and not session_retired and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
       # A direct handover carries owner and assistant text word for word, so
