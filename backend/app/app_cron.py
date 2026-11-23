@@ -379,6 +379,23 @@ def crontab_command_path(line: str) -> str:
   return tokens[0] if tokens else ""
 
 
+def replace_managed_schedule(current: str, app_id: str, job_path: Path, entry: str) -> str:
+  """Replace this app's supervised schedule, even if its job was renamed."""
+  kept = []
+  for line in current.splitlines():
+    tokens = _crontab_command_tokens(line)
+    previous_job = _supervised_job_path(tokens)
+    if previous_job is not None:
+      # The supported runner CLI ends with APP_ID JOB.
+      if tokens[-2] == app_id and Path(previous_job).parent == job_path.parent:
+        continue
+    elif crontab_command_path(line) == str(job_path):
+      # Replace the old direct-invocation form for this exact job.
+      continue
+    kept.append(line)
+  return "\n".join([*kept, entry]) + "\n"
+
+
 def crontab_without_app(current: str, source_dir: Path) -> str | None:
   """Return `current` crontab text with every line whose COMMAND runs a
   script under `source_dir` removed — or None if nothing matched, so the

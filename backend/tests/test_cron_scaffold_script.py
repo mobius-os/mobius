@@ -278,3 +278,53 @@ def test_live_write_failure_leaves_complete_durable_retry_point(
   init_text = init_path.read_text()
   assert 'SCHEDULE_TZ="Europe/Belgrade"' in init_text
   assert f'SCHEDULE_SOURCE="{zone_cron}"' in init_text
+
+
+def test_managed_job_change_replaces_only_this_apps_previous_schedule(tmp_path):
+  app_base = tmp_path / "apps"
+  app_dir = app_base / "memory"
+  app_dir.mkdir(parents=True)
+  state = tmp_path / "crontab.txt"
+  new_path = app_dir / "second.sh"
+  neighbors = [
+    f"# keep this comment about {new_path}",
+    f"0 8 * * * {app_base}/archive/report.sh --input {new_path}",
+    f"2 8 * * * python3 /live/app-job-runner.py --scheduled 58 {app_base}/memory-other/job.sh",
+    f"3 8 * * * {app_dir}/manual.sh",
+  ]
+  state.write_text("\n".join(neighbors) + "\n")
+  fake_bin = tmp_path / "bin"
+  fake_bin.mkdir()
+  crontab = fake_bin / "crontab"
+  crontab.write_text(
+    '#!/bin/sh\n'
+    '[ "$1" = "-u" ] && shift 2\n'
+    'case "$1" in\n'
+    '  -l) cat "$CRONTAB_STATE" ;;\n'
+    '  -) cat > "$CRONTAB_STATE" ;;\n'
+    '  *) exit 2 ;;\n'
+    'esac\n'
+  )
+  crontab.chmod(0o755)
+  env = {
+    **os.environ,
+    "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    "CRONTAB_STATE": str(state),
+    "MOBIUS_APP_BASE": str(app_base),
+    "MOBIUS_ALLOW_TEST_CRON": "1",
+    "DATA_DIR": str(tmp_path / "data"),
+    "MOBIUS_APP_CRON_STATE_DIR": str(tmp_path / "schedule"),
+    "MOBIUS_APP_JOB_RUNNER": "/live/app-job-runner.py",
+  }
+  script = Path(__file__).parents[1] / "scripts" / "init-cron-scaffold.sh"
+  for args in (
+    ["* * * * *", "first.sh", "57", "Etc/UTC", "0 9 * * *"],
+    ["30 10 * * *", "second.sh", "57"],
+  ):
+    result = subprocess.run([str(script), "memory", *args], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+  kept = state.read_text().splitlines()
+  assert kept[:-1] == neighbors
+  assert kept[-1].startswith("30 10 * * * ")
+  assert kept[-1].endswith(f"--scheduled 57 {new_path}")

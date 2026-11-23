@@ -195,6 +195,7 @@ fi
 mkdir -p "$INIT_DIR"
 INIT_TMP="$(mktemp "${INIT_PATH}.tmp.XXXXXX")"
 trap 'rm -f "$INIT_TMP"' EXIT
+BACKEND_ROOT_ARG="$(printf '%q' "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)")"
 cat > "$INIT_TMP" <<INIT
 #!/bin/sh
 # Declares the cron entry for "$SLUG" across container restarts.
@@ -203,13 +204,10 @@ cat > "$INIT_TMP" <<INIT
 # parses ENTRY below without executing this app-owned script, then rewrites a
 # current supervised entry before cron is allowed to start.
 #
-# Drop any prior line for this job path, then re-add the canonical
-# entry. Idempotent (no duplicates) AND self-healing: a stale entry
-# written before the app id was appended is replaced, not skipped.
-# grep -vF on the full job path is prefix-safe (news vs news-2). A
-# contrived line that puts this exact path in ITS OWN args would be an
-# over-match, but it self-heals on the next boot reconciliation; the install-side
-# delete path (_crontab_without_app) anchors on the command precisely.
+# Managed entries follow the app's identity, not the job filename. Leave
+# other apps' entries and unrelated commands alone, even when their arguments
+# mention this job path. Standalone jobs retain their original path-based
+# behavior.
 #
 # Capture the existing crontab ONCE and check rc. Piping a second live
 # crontab listing into the rewrite risks a transient empty read collapsing
@@ -228,9 +226,22 @@ ERRFILE=\$(mktemp)
 EXISTING=\$(crontab -u mobius -l 2>"\$ERRFILE"); RC=\$?
 STATUS=0
 if [ "\$RC" -eq 0 ]; then
-  # Authoritative read — keep every other app's line, replace only ours.
-  (printf '%s\\n' "\$EXISTING" | grep -vF "$JOB_PATH"; echo "\$ENTRY") \\
-    | crontab -u mobius - || STATUS=\$?
+  if [ -n "$APP_ID" ]; then
+    if UPDATED=\$(printf '%s' "\$EXISTING" | PYTHONPATH=$BACKEND_ROOT_ARG python3 -PB -c '
+import sys
+from pathlib import Path
+from app.app_cron import replace_managed_schedule
+
+sys.stdout.write(replace_managed_schedule(sys.stdin.read(), sys.argv[1], Path(sys.argv[2]), sys.argv[3]))
+' "$APP_ID" "$JOB_PATH" "\$ENTRY"); then
+      printf '%s\\n' "\$UPDATED" | crontab -u mobius - || STATUS=\$?
+    else
+      STATUS=\$?
+    fi
+  else
+    (printf '%s\\n' "\$EXISTING" | grep -vF "$JOB_PATH"; echo "\$ENTRY") \\
+      | crontab -u mobius - || STATUS=\$?
+  fi
 elif grep -qi 'no crontab for' "\$ERRFILE"; then
   # Genuinely no crontab yet — safe to install just this entry; lifespan
   # reconciles every other live app declaration before cron starts.
