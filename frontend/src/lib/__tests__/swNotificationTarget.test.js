@@ -167,3 +167,8 @@ test('a tagged push replaces its predecessor and still alerts', async () => {
   assert.equal('tag' in worker.shown[1].options, false)
   assert.equal('renotify' in worker.shown[1].options, false)
 })
+
+test('a push for the Projects list opens the Projects list', () => {
+  assert.equal(safeTarget('/shell/?projects=1'), '/shell/?projects=1')
+  assert.equal(safeTarget('/shell/?projects=0'), '/shell/')
+})

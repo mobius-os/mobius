@@ -219,6 +219,36 @@
 }
 .project-collab__invite > div > button:first-child,
 .project-collab__invite-result button { color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); }
+.project-collab__invite > .project-collab__invite-via {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--bg);
+}
+.project-collab__invite > .project-collab__invite-via > button[role="radio"] {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.project-collab__invite > .project-collab__invite-via > button[role="radio"][aria-checked="true"] {
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--text) 12%, transparent);
+}
+.project-collab__invite-hint { color: var(--muted); font-size: 9px; font-weight: 500; }
 .project-collab__invite-roles { min-width: 0; margin: 0; padding: 0; border: 0; }
 .project-collab__invite-roles legend { margin-bottom: 5px; color: var(--muted); font-size: 10px; font-weight: 650; }
 .project-collab__invite-roles > div { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }

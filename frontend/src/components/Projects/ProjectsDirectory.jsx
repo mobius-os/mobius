@@ -6,6 +6,7 @@ import ProjectActions from './ProjectActions.jsx'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
 import ProjectTypeIcon from './ProjectTypeIcon.jsx'
 import { formatProjectDate } from '../../lib/relativeTime.js'
+import ProjectInvitations from './ProjectInvitations.jsx'
 import './Projects.css'
 
 // The Projects launcher: one readable list plus the focused creation menu.
@@ -41,6 +42,7 @@ export default function ProjectsDirectory({
       </header>
       {projects.length > 0 && <label className="projects-directory__search"><Search width={18} height={18} aria-hidden="true" /><input type="search" aria-label="Find a project" placeholder="Find a project" value={query} onChange={event => setQuery(event.target.value)} /></label>}
       <div className="projects-directory__scroll">
+        <ProjectInvitations />
         {status === 'loading' ? (
           <p className="projects-empty" role="status">Loading projects…</p>
         ) : status === 'error' ? (
