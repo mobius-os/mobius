@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import time
 from collections.abc import MutableMapping
 from dataclasses import dataclass
@@ -36,8 +37,12 @@ log = logging.getLogger(__name__)
 PRODUCTION = "production"
 STAGING = "staging"
 SIDE_FILE = "launcher-side"
+# The broker's own bound (LAUNCHER_SIDE_FILE_LIMIT): both read the same choice.
+SIDE_FILE_LIMIT = 64
 # The issuer the sessions in the database were issued under, recorded at boot.
 SESSION_ISSUER_FILE = "session-issuer"
+# An issuer is one HTTPS origin, far shorter than this.
+SESSION_ISSUER_FILE_LIMIT = 4096
 BROKER_RETRIES = 3
 STAGING_ENV = (
   "MOBIUS_STAGING_ISSUER",
@@ -111,12 +116,38 @@ def choose_side(side: str, data_dir: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def _read_control_file(path: Path, limit: int) -> str:
+  """The stripped text of a small control file in the data directory.
+
+  The app user can put anything at these names, so they are opened the way the
+  broker opens ``launcher-side``: no symlink followed, no wait on a FIFO or
+  device, only a regular file read, and never more than ``limit`` bytes.
+  Raises FileNotFoundError when there is no file, and OSError or ValueError
+  for anything that is not a small UTF-8 regular file.
+  """
+  descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+  try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+      raise ValueError(f"{path.name} is not a regular file")
+    content = os.read(descriptor, limit + 1)
+  finally:
+    os.close(descriptor)
+  if len(content) > limit:
+    raise ValueError(f"{path.name} is larger than {limit} bytes")
+  return content.decode("utf-8").strip()
+
+
+def _choice(data_dir: Path) -> str:
+  """The word in ``launcher-side``, accepted exactly as the broker accepts it."""
+  try:
+    return _read_control_file(data_dir / SIDE_FILE, SIDE_FILE_LIMIT)
+  except (OSError, ValueError):
+    return ""
+
+
 def _chosen_side(data_dir: Path) -> str:
   """The side the next boot will run, by the broker's rule."""
-  try:
-    chosen = (data_dir / SIDE_FILE).read_text(encoding="utf-8").strip()
-  except (OSError, UnicodeError):
-    chosen = ""
+  chosen = _choice(data_dir)
   return STAGING if chosen == STAGING and boot_side().available else PRODUCTION
 
 
@@ -168,10 +199,10 @@ def settle_sessions(db, data_dir: Path) -> bool:
   current = session_issuer()
   path = data_dir / SESSION_ISSUER_FILE
   try:
-    recorded: str | None = path.read_text(encoding="utf-8").strip()
+    recorded: str | None = _read_control_file(path, SESSION_ISSUER_FILE_LIMIT)
   except FileNotFoundError:
     recorded = None
-  except (OSError, UnicodeError):
+  except (OSError, ValueError):
     # Where earlier sessions came from is unknown: treat it as a switch.
     recorded = "unreadable"
   if recorded == current:

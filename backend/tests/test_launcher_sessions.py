@@ -7,6 +7,9 @@ anyone which launcher the instance signs people in with.
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
 from pathlib import Path
 
 import jwt
@@ -121,6 +124,25 @@ def test_a_token_from_before_issuers_is_refused_on_a_developer_instance(
   assert not _signed_in(client, _legacy_token(db))
 
 
+class _Blocked(Exception):
+  """Not an OSError, so a reader that swallows those cannot hide the stall."""
+
+
+@contextlib.contextmanager
+def _fails_instead_of_hanging(seconds: int = 5):
+  """Turns a read that blocks on a FIFO into a failure, not a stuck suite."""
+  def stop(_signum, _frame):
+    raise _Blocked("blocked reading a control file")
+
+  previous = signal.signal(signal.SIGALRM, stop)
+  signal.alarm(seconds)
+  try:
+    yield
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
 def _epoch(db) -> int:
   db.expire_all()
   return db.query(models.Owner).one().token_epoch
@@ -187,6 +209,29 @@ def test_a_developer_instance_signs_everyone_out_on_its_first_boot(
   assert _epoch(db) == before + 1
 
 
+@pytest.mark.parametrize("planted", ["fifo", "oversized", "link"])
+def test_an_issuer_record_that_is_not_a_small_file_counts_as_a_switch(
+  owner_token, db, instance, planted,
+):
+  record = instance.data_dir / launcher_side.SESSION_ISSUER_FILE
+  if planted == "fifo":
+    os.mkfifo(record)
+  elif planted == "oversized":
+    record.write_text(PRODUCTION + "\n" + " " * 4096, encoding="utf-8")
+  else:
+    target = instance.data_dir / "elsewhere"
+    target.write_text(PRODUCTION + "\n", encoding="utf-8")
+    record.symlink_to(target)
+  before = _epoch(db)
+
+  with _fails_instead_of_hanging():
+    assert launcher_side.settle_sessions(db, instance.data_dir) is True
+
+  assert _epoch(db) == before + 1
+  assert not record.is_symlink()
+  assert _record(instance) == PRODUCTION
+
+
 def _health_issuer(client):
   response = client.get("/api/health")
   assert response.status_code == 200
@@ -224,6 +269,22 @@ def test_a_staging_choice_without_staging_variables_is_not_a_pending_switch(
   (instance.data_dir / launcher_side.SIDE_FILE).write_text("staging\n", encoding="utf-8")
 
   assert _health_issuer(client) == PRODUCTION
+
+
+def test_an_oversized_choice_file_is_not_a_pending_switch(client, instance):
+  # The broker ignores it and boots production, so health must not wait on it.
+  (instance.data_dir / launcher_side.SIDE_FILE).write_text(
+    "staging\n" + " " * 4096, encoding="utf-8",
+  )
+
+  assert _health_issuer(client) == PRODUCTION
+
+
+def test_a_fifo_in_place_of_the_choice_file_cannot_hang_health(instance):
+  os.mkfifo(instance.data_dir / launcher_side.SIDE_FILE)
+
+  with _fails_instead_of_hanging():
+    assert launcher_side.published_issuer() == PRODUCTION
 
 
 def test_short_lived_tokens_follow_the_same_rule(db, owner_token, instance):
