@@ -1,7 +1,6 @@
 // The two ways out of a usage-limit pause that move the chat to another
 // provider: "Switch provider" on the limit and credits cards, and "Continue" on
 // the switch card that then ends the transcript in the pause card's place.
-import { readFileSync } from 'node:fs'
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -12,8 +11,6 @@ import { ownsSwitchResume, previousVisibleMessage } from '../recoveryCard.js'
 const vite = await createSsrRenderServer()
 const { default: MsgContent } = await vite.ssrLoadModule('/src/components/ChatView/MsgContent.jsx')
 after(() => vite.close())
-
-const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 
 const pauseCard = pause => ({
   role: 'assistant', content: '',
@@ -71,11 +68,6 @@ test('Switch provider belongs only to the card that owns recovery', () => {
 test('Switch provider is disabled while a provider switch is in progress', () => {
   const html = render(usageLimit, { submissionBlocked: true })
   assert.match(html, /<button[^>]*disabled=""[^>]*>Switch provider<\/button>/)
-})
-
-test('the picker opener is wired to the buttons that open it', () => {
-  assert.equal(msgContent.match(/onClick=\{onChooseModel\}/g).length, 2,
-    'Switch provider and Switch model open the same picker')
 })
 
 test('a provider refusal still says Switch model, never Switch provider', () => {

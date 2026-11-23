@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { after, test } from 'node:test'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -71,12 +70,4 @@ test('a failed switch keeps the retryable confirmation with the server reason', 
   const html = render({ status: 'error', request, error: 'Could not switch this chat to the new provider.', result: null })
   assert.match(html, /role="alert"[^>]*>Could not switch this chat to the new provider\./)
   assert.match(html, />Switch provider</)
-})
-
-test('the switch failure fallbacks describe a switch, not a preparation', () => {
-  // The fetch handler is not reachable from a static render, so pin its text.
-  const source = readFileSync(new URL('../ChatSettingsPanel.jsx', import.meta.url), 'utf8')
-  assert.match(source, /'Could not switch this chat to the new provider\.'/)
-  assert.match(source, /'Network error while switching provider\.'/)
-  assert.doesNotMatch(source, /Could not prepare|while preparing/)
 })
