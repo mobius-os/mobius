@@ -705,6 +705,10 @@ async def _record_failed_live_read(db, row, item_key, body, principal, error):
     outcome.update(state=body.state if posting else "needs_you", live_blocker=str(error.detail))
     if posting:
       outcome["public_review"] = {"state": "not_dispatched", "summary": str(error.detail)}
+    else:
+      # The display state is downgraded to "needs_you", but the reviewed verdict must survive the delivery
+      # failure so "Post it anyway" proposes the judgment the run actually reached, not a request for changes.
+      outcome["reviewed_state"] = body.state
     reviews.save_outcome(db, row, item_key, outcome)
 
 

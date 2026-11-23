@@ -63,9 +63,11 @@ async def propose(db, row, item_key, target, *, proposes_verdict, gh, cwd, autho
   except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
     raise HTTPException(409, UNCONFIRMED) from exc
   pr_facts.require_allowed({**facts, "heldReview": {"head": target["head_sha"]}}, "post_at_reviewed_commit")
-  outcome = {**item, "head_sha": target["head_sha"]}
+  # Build the proposal from the reviewed judgment, not the "needs_you" display state the delivery failure left behind,
+  # so an all-clear review proposes APPROVE rather than a request for changes.
+  outcome = {**item, "head_sha": target["head_sha"], "state": item.get("reviewed_state", item["state"])}
   proposal = verdicts.propose(outcome, target, moved_to=now)
   authorize()
-  saved = {key: value for key, value in item.items() if key != "live_blocker"}
+  saved = {key: value for key, value in item.items() if key not in ("live_blocker", "reviewed_state")}
   reviews.save_outcome(db, row, item_key, {**saved, "frozen_evidence": public.evidence(outcome), "verdict_proposal": proposal},
                        expected=item)

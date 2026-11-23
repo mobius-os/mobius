@@ -110,6 +110,19 @@ def test_post_it_anyway_saves_the_exact_proposal_worded_with_both_commits_and_se
   assert "live_blocker" not in item and "held_back" not in item["post_findings"]
 
 
+def test_post_it_anyway_keeps_an_all_clear_review_an_approve(setup, monkeypatch):
+  events = _record_posts(monkeypatch)
+  _verdict_run(setup)
+  _github(monkeypatch)
+  held_reply = report(setup, publish=True, state="all_clear", summary="Full diff reviewed")["not_posted"]
+  assert held_reply["reviewed_head"] == ITEM["head_sha"] and held_reply["current_head"] == MOVED
+  item = _post_anyway(setup)["run"]["items"][0]
+  proposal = item["verdict_proposal"]
+  assert events == []
+  assert proposal["event"] == "APPROVE" and proposal["state"] == "proposed" and proposal["moved_to"] == MOVED
+  assert item["frozen_evidence"]["state"] == "all_clear" and "reviewed_state" not in item
+
+
 def test_a_submitted_held_proposal_is_posted_against_the_reviewed_commit_while_the_pr_is_ahead(setup, monkeypatch):
   events = _record_posts(monkeypatch)
   _held_review(setup, monkeypatch)
