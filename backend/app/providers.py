@@ -359,7 +359,7 @@ RECENT_MODEL_LIMIT = 20
 
 
 def recent_model_ids(model_prefs: Any) -> list[str]:
-  """Confirmed owner picker choices, newest first; stale catalog ids are safe."""
+  """Models used in admitted owner sends, newest first; stale ids are safe."""
   raw = model_prefs.get("recent_ids", []) if isinstance(model_prefs, dict) else []
   if not isinstance(raw, list):
     return []
@@ -369,22 +369,8 @@ def recent_model_ids(model_prefs: Any) -> list[str]:
   ))[:RECENT_MODEL_LIMIT]
 
 
-def picker_recent_model_ids(model_prefs: Any, data_dir: str) -> list[str]:
-  """Seed an upgraded owner's empty history from their explicit last pick.
-
-  This reads only the saved global choice, never the runtime/provider default.
-  It does not write synthetic history; the next confirmed pick starts it.
-  """
-  recent = recent_model_ids(model_prefs)
-  if recent:
-    return recent
-  saved = _load_agent_settings(data_dir)
-  model_id = saved.get("model")
-  return [model_id] if isinstance(model_id, str) and model_id.strip() else []
-
-
 def remember_recent_model(model_prefs: Any, model_id: str) -> dict:
-  """Move a committed picker choice to the front without changing visibility."""
+  """Move a used model to the front without changing visibility."""
   prefs = dict(model_prefs) if isinstance(model_prefs, dict) else {}
   prefs["recent_ids"] = [
     model_id, *(old for old in recent_model_ids(prefs) if old != model_id)
@@ -1265,11 +1251,9 @@ class MobiusProvider(BaseProvider):
     }
 
   def resolve_model(self, model: str | None) -> str | None:
-    """Resolve only service-declared retirement edges; never guess a successor."""
+    """Accept only a currently selectable model; never redirect a saved ID."""
     if not model or not self.declaration["models"]:
       return model
-    if model in self.declaration.get("replacements", {}):
-      return self.declaration["replacements"][model]
     return model if model in {m["id"] for m in self.declaration["models"]} else None
 
   def model_effort_levels(self, model: str | None) -> list[str] | None:

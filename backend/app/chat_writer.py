@@ -720,6 +720,9 @@ class StartTurn(_Command):
   user_msg: dict = field(default_factory=dict)
   title_source: str = ""
   default_provider: str = "claude"
+  # Already-resolved settings, frozen when this admitted turn inherits a model.
+  initial_agent_settings: dict | None = None
+  remember_owner_model_use: bool = False
   initiated_by_app_id: int | None = None
   browser_grant_id: str | None = None
   # The rendered recovery control names its exact interrupted physical run.
@@ -1047,6 +1050,7 @@ class AppendSteeredUserMessage(_Command):
   user_msg: dict = field(default_factory=dict)
   user_msgs: list[dict] = field(default_factory=list)
   consume_pending_cids: list[str] = field(default_factory=list)
+  active_model: str | None = None
 
 
 @dataclass
@@ -3987,6 +3991,12 @@ class ChatWriterActor:
     _require_browser_grant(db, grant_id)
     if not existing:
       chat.provider = cmd.default_provider or "claude"
+    if cmd.initial_agent_settings is not None:
+      from app.chat_visibility import coerce_agent_settings
+      chat.agent_settings_json = {
+        **cmd.initial_agent_settings,
+        **(coerce_agent_settings(chat.agent_settings_json) or {}),
+      }
     # Build the agent history as schemas.ChatMessage objects, exactly as the
     # production initial-send path in routes/chats_stream.py does — run_chat
     # consumes `messages[-1].content` (attribute access), so a raw dict would
@@ -4099,6 +4109,11 @@ class ChatWriterActor:
         if resuming else None
       ),
     ))
+    if cmd.remember_owner_model_use:
+      from app.chat_visibility import coerce_agent_settings
+      self._remember_admitted_owner_model_use(
+        db, (coerce_agent_settings(chat.agent_settings_json) or {}).get("model"),
+      )
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
     if goal_id is not None:
@@ -5164,6 +5179,39 @@ class ChatWriterActor:
       stored_messages.append(new_msg)
     _stamp_provider_batch(stored_messages)
     transcript_rows.append_many(db, chat, stored_messages)
+    # The cut, not the fast-forwarding POST, owns delivery. Prefer the current
+    # durable row's provenance. Stop may have removed it after the route's
+    # queue selection but before this deferred cut: only for a selected cid
+    # missing from pending, use that server-captured row. AppendPending stamped
+    # its owner/app/browser provenance; the route never accepts client-supplied
+    # transcript rows. A duplicate cut has no newly stored cid to promote.
+    stored_cids = {cid_of(msg) for msg in stored_messages}
+    pending_by_cid = {cid_of(row): row for row in pending}
+    captured_by_cid = {}
+    for row in raw_user_msgs:
+      captured_by_cid.setdefault(cid_of(row), row)
+    selected_cids = set(cmd.consume_pending_cids)
+    from app.continuations import continuation_reason
+
+    def admitted_owner_row(cid):
+      row = pending_by_cid.get(cid)
+      if row is None and cid in selected_cids:
+        row = captured_by_cid.get(cid)
+      return bool(
+        row and row.get("_owner_input_at") and not row.get("hidden")
+        and continuation_reason(row) != "question_answer"
+        and row.get("_initiated_by_app_id") is None
+        and row.get("_browser_grant_id") is None
+      )
+
+    if (
+      cmd.active_model and stored_cids
+      and any(admitted_owner_row(cid) for cid in stored_cids)
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    ):
+      self._remember_admitted_owner_model_use(db, cmd.active_model)
     # The steer cut is where a steered helper result reaches its provider, so
     # its delivery is recorded in this same commit.
     from app.delegations import carrier_results, mark_results_delivered
@@ -5515,6 +5563,18 @@ class ChatWriterActor:
         raise _PersistFailed("RejectBrowserPending did not persist")
     return {"rejected": rejected}
 
+  @staticmethod
+  def _remember_admitted_owner_model_use(db, model_id: str | None) -> None:
+    """Include model recency in the same commit as a new owner-driven run."""
+    if not isinstance(model_id, str) or not model_id.strip():
+      return
+    from app import providers
+    owner = db.query(models.Owner).first()
+    if owner is not None:
+      owner.model_prefs_json = providers.remember_recent_model(
+        owner.model_prefs_json, model_id,
+      )
+
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
 
@@ -5601,6 +5661,7 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = transcript_rows.read_all(db, chat)
     from app.continuations import (
+      continuation_reason,
       pending_message_group_key,
       product_result_run_token,
     )
@@ -5756,6 +5817,32 @@ class ChatWriterActor:
       goal_objective=goal_objective,
       goal_id=goal_id,
     )
+    # This group's own provenance, not the POST that happened to wake a stale
+    # queue, decides whether it records owner use. Freeze the resolved model
+    # before the runner can observe later global-default edits.
+    owner_model_use = (
+      grant_id is None
+      and any(row.get("_owner_input_at")
+              and row.get("_initiated_by_app_id") is None
+              and not row.get("hidden")
+              and continuation_reason(row) != "question_answer"
+              for row in promoted_group)
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    )
+    if owner_model_use:
+      from app import providers
+      from app.chat_visibility import coerce_agent_settings
+      from app.config import get_settings
+      settings = coerce_agent_settings(chat.agent_settings_json) or {}
+      effective = providers.effective_agent_settings(
+        get_settings().data_dir, settings or None, provider=chat.provider,
+      )
+      if not settings.get("model") and effective.get("model"):
+        settings["model"] = effective["model"]
+        chat.agent_settings_json = settings
+      self._remember_admitted_owner_model_use(db, effective.get("model"))
     self._commit_admitted_run_start(
       db, chat, new_run, assistant_ts,
       failure_message="PromotePending did not persist",
