@@ -2228,3 +2228,17 @@ def test_an_agent_asks_for_a_key_of_several_parts_and_the_owner_pastes_each(clie
   })
   assert approved.status_code == 200, approved.text
   assert client.get("/api/keys/twilio/value?part=token", headers=_agent_auth(db)).json()["value"] == DUMMY
+
+
+@pytest.mark.parametrize("inject", [
+  {"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "value", "region": "us-east-1", "service": "s3"},
+  {"type": "slots", "slots": [{"type": "header", "name": "X-Api-Key", "template": "Key {value}"}]},
+])
+def test_a_model_provider_never_sends_a_key_the_vault_signs_or_builds(client, auth, db, vault, inject):
+  """The relay sends ``value`` as a bearer token: a key whose secret the vault
+  signs with, or places in a template, must not leave as it is."""
+  app = _app(db, "router-signed")
+  grants = {"apps": [{"id": app.id, "install": app.install_id, "sites": [SITE]}], "agents": False, "sites": [SITE]}
+  vault.put_key("signed-provider", {"parts": [{"name": "id", "value": "AKIDEXAMPLE", "secret": False},
+                                              {"name": "value", "value": DUMMY}], "inject": inject, "grants": grants})
+  assert _reveal(app, "signed-provider", "https://api.example.com/v1") is None

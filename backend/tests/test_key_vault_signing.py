@@ -344,7 +344,8 @@ def test_an_aws_signed_request_reaches_the_site_with_the_secret_redacted(vault, 
   answer = _use(client, "bucket", method="PUT", content=b"file body")
   assert answer.status_code == 200, answer.text
   echoed = answer.json()["headers"]
-  assert echoed["Authorization"].startswith(f"AWS4-HMAC-SHA256 Credential={AWS_ID}/")
+  # The signature is valid for this exact request for a while, so it is hidden too.
+  assert echoed["Authorization"] == "[redacted by key vault]"
   assert echoed["X-Amz-Content-Sha256"] == hashlib.sha256(b"file body").hexdigest()
   assert AWS_SECRET not in answer.text
 
@@ -396,3 +397,80 @@ def test_store_key_takes_a_whole_recipe(monkeypatch, vault):
   [key] = vault.list_keys()
   assert key["inject"] == recipe
   assert [(p["name"], p["secret"]) for p in key["parts"]] == [("id", False), ("secret", True)]
+
+
+# -- hardening found in review ------------------------------------------------------
+
+def _aws_loan(service="s3"):
+  return kv.Loan({"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
+                  "region": "us-east-1", "service": service},
+                 {"id": AWS_ID, "secret": AWS_SECRET}, frozenset({"secret"}))
+
+
+def _aws_build(raw_query="", headers=(), service="s3", raw_path="/bucket/key"):
+  return kv.build_upstream_request(method="GET", host="echo.example.com", raw_path=raw_path, raw_query=raw_query,
+                                   caller_headers=list(headers), loan=_aws_loan(service), now=AWS_NOW)
+
+
+@pytest.mark.parametrize("query", [
+  "X-Amz-Expires=604800", "x-amz-signedheaders=host", "X-Amz-Credential=AKID%2F20150830",
+  "a=1&X-Amz-Algorithm=AWS4-HMAC-SHA256",
+])
+def test_a_borrow_cannot_turn_the_signature_into_a_presigned_url(query):
+  with pytest.raises(kv.VaultError, match="the vault signs it") as refused:
+    _aws_build(query, service="execute-api")
+  assert refused.value.status == 400
+
+
+@pytest.mark.parametrize("query", ["policy", "acl", "cors=", "website", "versioning", "publicAccessBlock"])
+def test_s3_bucket_configuration_is_never_signed_for_a_borrow(query):
+  with pytest.raises(kv.VaultError, match="through a borrowed key is refused"):
+    _aws_build(query)
+  _aws_build("list-type=2&prefix=a", service="s3")  # ordinary reads still sign
+
+
+def test_a_copy_source_cannot_read_outside_the_grant():
+  with pytest.raises(kv.VaultError, match="reads outside the paths"):
+    _aws_build(headers=[("X-Amz-Copy-Source", "/other-bucket/private.txt")])
+  with pytest.raises(kv.VaultError, match="reads outside the paths"):
+    _aws_build(headers=[("x-amz-copy-source-range", "bytes=0-9")])
+
+
+def test_a_signed_header_must_be_ascii_and_the_query_utf8():
+  with pytest.raises(kv.VaultError, match="plain ASCII"):
+    _aws_build(headers=[("X-Amz-Meta-Name", "caf\xe9")])
+  with pytest.raises(kv.VaultError, match="as UTF-8"):
+    _aws_build("%FF=1")
+
+
+def test_the_signature_is_hidden_wherever_the_site_echoes_it(vault, client):
+  vault.put_key("bucket", {"grants": GRANTS, "parts": [
+    {"name": "id", "value": AWS_ID, "secret": False}, {"name": "secret", "value": AWS_SECRET}],
+    "inject": {"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
+               "region": "auto", "service": "s3"}})
+  answer = _use(client, "bucket")
+  echoed = answer.json()
+  assert echoed["headers"]["Authorization"] == "[redacted by key vault]"
+  assert "Signature=" not in answer.text
+
+
+def test_simultaneous_borrows_mint_one_token_and_a_refused_token_is_dropped():
+  cache, minted = kv.TokenCache(), []
+
+  def mint():
+    minted.append(1)
+    time.sleep(0.2)
+    return f"token-{len(minted)}", time.time() + 3600
+  threads = [threading.Thread(target=cache.get, args=("k", mint)) for _ in range(6)]
+  for thread in threads:
+    thread.start()
+  for thread in threads:
+    thread.join()
+  assert len(minted) == 1
+  cache.drop("k")
+  assert cache.get("k", mint) == "token-2"
+
+
+def test_a_claim_must_be_text():
+  with pytest.raises(kv.VaultError, match="is text"):
+    kv.validate_inject({"type": "jwt_bearer", "private_key": "key", "claims": {"iss": "x", "aud": ["a", "b"]}})

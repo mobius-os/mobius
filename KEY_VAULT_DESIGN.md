@@ -404,23 +404,38 @@ each minted token to the key's redaction set.
   `secret`. Secret parts are sealed one by one under the key name and part
   name as associated data. Plain parts (a client id, an access key id, an
   account SID, a region) are stored in clear, shown in Settings, never
-  redacted, and may be short.
-- Every key that exists today becomes a key with one secret part named
-  `value`, migrated with the store (version 4). The part `value` stays sealed
-  under the key name alone, exactly as before, so migrating re-encrypts
-  nothing; any other part is sealed under `<key>#<part>`. The file it
-  migrated from is kept once as `keys.v<version>.json`, for an older vault
-  (the recovery fallback, `restore-data.py` from an older image) that can't
-  read version 4. Each single-value route keeps
+  redacted, and may be short. The part a recipe treats as the secret itself
+  (Basic's password, `secret_access_key`, `session_token`, `private_key`) is
+  always secret, whoever proposes it, and the card names every plain part
+  before the owner pastes into it ("shown as typed and not hidden from
+  answers"). A secret part sent by `basic`, `slots` or a signer is at least
+  eight characters: a site that echoes what it is sent could otherwise tell a
+  caller which of its guesses is a short secret (the one that comes back
+  redacted). A single value sent as before keeps its old rules.
+- Every key that exists today is a key with one secret part named `value`.
+  It stays sealed under the key name alone, exactly as before, so nothing is
+  re-encrypted; any other part is sealed under `<key>#<part>`. The store is
+  still written as version 3 while every key is that one value sent in a
+  header or query parameter, so an older vault (the recovery fallback, a
+  restore from an older image, a rollback) keeps reading it. It is written as
+  version 4 once a key has more parts or another recipe, and goes back to 3
+  when no key does. An older vault meeting a version 4 store refuses to start
+  ("unknown store version"); deleting or simplifying the keys that need
+  version 4 with this vault, before going back, avoids that. A damaged old
+  record still loads, and only its own use fails. Each single-value route keeps
   its meaning for a one-part key; for others, reading names the part
   (`GET /api/keys/<name>/value?part=<part>`), and the same read rules apply
   (owner and top-level agents unless the Agents switch is off; never helpers
   or apps).
 - Replacing one part keeps the others, so rotating a secret never retypes its
-  id. Settings › Keys can replace or delete a part. It still only narrows:
-  adding a part, or changing the recipe, comes from a request card.
-- A multiline part (a PEM key, a service-account JSON) is never placed in a
-  header or query; only the signing recipes below read it.
+  id, and a part's label or secrecy can change without its value (an item
+  with no `value`), which counts as no new value. Settings › Keys replaces a
+  part; it still only narrows. A request proposes parts only for a key it
+  creates (kept with the request, so a key deleted before the owner answers
+  is created from them); parts are otherwise added or removed with
+  `PUT /api/keys/<name>` (`parts`, `remove_parts`) or `store-key.py`.
+- A part with line breaks (a PEM key) is never placed in a header; a query or
+  body slot can carry it, and the signing recipes read it.
 
 ### Send recipes
 
@@ -430,11 +445,14 @@ each minted token to the key's redaction set.
 - **`basic`** `{username: <part>, password: <part>}`: the vault sends
   `Authorization: Basic base64(username:password)`, so the owner pastes the two
   halves as two fields. The redaction set includes the encoded pair as well as
-  the secret halves.
+  the secret halves. A username with a colon is refused.
 - **`slots`** `[slot, ...]` with at most eight slots. Each slot is one of:
   - `{type: header, name, template}`: `template` is fixed text with `{part}`
     placeholders, so `Token {id}:{secret}` and `Bearer {token}` both fit. A
-    header slot obeys today's rules: the forbidden names, one line, latin-1.
+    header slot obeys today's rules: the forbidden names (now also the
+    method- and path-override headers and `Range`, which the vault strips
+    from callers), one line, latin-1. A rendered header holding a secret part
+    is redacted whole.
   - `{type: query, name, part}`.
   - `{type: body, format: json|form, field, part}`: `field` is a top-level
     JSON member or form field. The vault already buffers the whole body
@@ -442,8 +460,11 @@ each minted token to the key's redaction set.
     refuses a body that doesn't parse, replaces any value the caller gave for
     that field, serializes again and sets `Content-Length`. JSON with a
     duplicate member at the top level is refused, so a parser difference
-    between the vault and the site can't decide which value wins. No nested
-    paths in this step.
+    between the vault and the site can't decide which value wins. Strings are
+    written back escaped, so a lone surrogate stays as sent; a body nested
+    too deeply, or a form that isn't UTF-8, is refused. A request with no body
+    (a GET included) gets one holding only the fields. No nested paths in
+    this step.
 
   As today, the caller's own header with a slot's name is dropped, and the
   caller cannot name a slot's field or part: both come from the approved
@@ -461,7 +482,15 @@ each minted token to the key's redaction set.
     query is sent sorted, exactly as signed. The payload hash is sent as a
     header only for `s3`, which requires it. This covers S3,
     R2, B2, Wasabi, MinIO and Spaces with one module. The vault never
-    produces presigned URLs: a presigned URL is a portable credential.
+    produces presigned URLs: a presigned URL is a portable credential, so a
+    caller's own `X-Amz-*` query parameter is refused, and the signature
+    (valid for that exact request for a while, and echoed by S3 errors) is
+    redacted. A caller's `x-amz-copy-source*` header, which would read from
+    any bucket the access key can, is refused, and so is a query naming an S3
+    configuration sub-resource that changes who may reach a bucket or object
+    (`acl`, `policy`, `cors`, `website`, `publicAccessBlock`, `lifecycle`,
+    `versioning`, ...), which a path rule can't tell apart. Signed header
+    values must be ASCII and the path and query UTF-8.
   - **`jwt_bearer`** `{private_key: <part>, alg: RS256|ES256, claims,
     exchange?}`: the vault signs a short-lived JWT with fixed claims from the
     recipe (`iss`, `sub`, `aud`, `scope`, and `iat`/`exp` it sets itself),
@@ -486,8 +515,10 @@ each minted token to the key's redaction set.
     pastes one or a later connect flow writes it.
 
   Minted access tokens live only in the vault's memory, cached until about a
-  minute before they expire, keyed by key, recipe revision and scope, and
-  dropped when any part or the recipe changes. The exchange endpoint is
+  minute before they expire, keyed by the key, its recipe and its private
+  part, so any change mints afresh; simultaneous borrows wait for one mint,
+  and a token the site answers 401 to is dropped. The card shows every
+  claim, the key id and the exchange, since `sub` acts as that user. The exchange endpoint is
   part of the recipe the owner approves and is checked like a site (HTTPS,
   443, public address, pinned), but it is not a site the caller can borrow
   against. A failed exchange answers 502 with the provider's error, redacted.
@@ -507,25 +538,33 @@ each minted token to the key's redaction set.
   that decide when a request's slot applies stay the same: a recipe applies
   only to a key that nothing can send yet, and a key in use keeps its recipe,
   with the card saying so.
-- The card shows the recipe in plain words ("sent as a username and
-  password", "signs requests to AWS S3 in eu-central-1", "gets a Google
-  access token for the Drive read-only scope") and, for a new key, one paste
-  field per part, labelled by the request. Plain parts are visible as typed;
-  secret parts are password fields, and a multiline part gets a text area
-  that accepts a dropped file. Saving is still paste and save: no extra
-  settings.
+- The card's details say how the key is sent, naming parts by their labels
+  (`Authorization: Basic (Account SID and Auth token)`, "an AWS signature
+  (s3, region auto)", "a Google access token for <scope>"), and, for a new
+  key, give one paste field per part, labelled by the request. Plain parts
+  are visible as typed, with the warning above; secret parts are password
+  fields, and a multiline part gets a text area that takes a dropped key file
+  (read into the box, never opened by the browser or attached to a chat
+  message). Saving is still paste and save: no extra settings.
+- Asking again while a request for the key waits with another recipe or
+  other parts is refused (409): the owner answers the waiting one first.
 - `store-key.py` maps the sealed card's fields (at most eight, matching
-  `request_secret`) onto parts one to one, with `--part NAME[:plain]`, and
-  takes `--basic USER_PART PASS_PART`, `--slots JSON` or `--scheme NAME
-  --param K=V` for the recipe.
+  `request_secret`, so part names are lowercase letters, digits and `_`)
+  onto parts one to one, with `--part NAME[:plain|:secret[:LABEL]]` (an
+  existing part keeps its secrecy unless told), and takes `--basic USER_PART
+  PASS_PART`, `--slots JSON` or `--recipe JSON` for the recipe.
 - Sites, methods and paths are unchanged and still checked first; a recipe
   only decides what the vault adds to a request that is already allowed.
 
 ### Security notes
 
 - Redaction covers every secret part, every composite the vault builds from
-  them (the Basic pair, each header template's output) and every minted token.
-  Plain parts are not redacted, so a short id never mangles answers.
+  them (the Basic pair, each header built around a secret), every minted
+  token and every AWS signature. Plain parts are not redacted, so a short id
+  never mangles answers.
+- The model relay sends a key's `value` as a bearer token only for a key
+  sent that plainly (`header` or `query`), never one the vault signs or
+  builds from parts.
 - A signature or minted token never leaves the vault. A caller can make a site
   act within the approved sites, as with any key today, but it cannot obtain a
   credential it could use elsewhere.
@@ -545,7 +584,9 @@ each minted token to the key's redaction set.
    two-header key, a JSON body key and a form body key each work for the
    owner, an agent, a helper and an app through a live borrow; echoes of each
    part and of the Basic pair come back redacted; and Settings can replace one
-   part without touching the others.
+   part without touching the others. Built and used live by an agent and a
+   helper, and by the owner on the card; an app's borrow is covered by tests
+   through the real routes.
 2. **`aws_sigv4` and `jwt_bearer`.** Done when the signer passes AWS's SigV4
    test suite, a real S3-compatible store and a Google service account work
    from an app that never sees a value, and the minted token never appears in

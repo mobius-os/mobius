@@ -10,7 +10,6 @@ or see a secret part come back.
 from __future__ import annotations
 
 import base64
-import contextlib
 import http.client
 import importlib.util
 import json
@@ -111,31 +110,57 @@ def _seen(vault, key, monkeypatch, **borrow):
 
 # -- storage ---------------------------------------------------------------------
 
-def test_an_older_store_becomes_parts_and_keeps_its_old_file(tmp_path):
+FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "key_vault_store_v3.json").read_text())
+
+
+def test_a_store_the_previous_vault_wrote_opens_with_every_value(tmp_path):
+  folder = tmp_path / "vault"
+  folder.mkdir()
+  (folder / "master.key").write_bytes(bytes.fromhex(FIXTURE["master_key_hex"]))
+  (folder / "keys.json").write_text(json.dumps(FIXTURE["store"]))
+  v = kv.Vault(folder)
+  for name, value in FIXTURE["values"].items():
+    assert v.reveal(name, ("owner", "")) == value
+  listed = {key["name"]: key for key in v.list_keys()}
+  assert listed["maps"]["parts"] == [{"name": "value", "label": "", "secret": True, "multiline": True}]
+  assert listed["weather"]["grants"]["apps"][0]["install"] == f"{7:032x}"
+  # Loading it rewrote nothing, and no copy was made: it is still what the previous vault reads.
+  assert json.loads((folder / "keys.json").read_text()) == FIXTURE["store"]
+  assert sorted(p.name for p in folder.glob("keys*")) == ["keys.json"]
+
+
+def test_the_store_stays_readable_by_an_older_vault_until_a_key_needs_parts(tmp_path):
+  v = kv.Vault(tmp_path / "vault")
+  v.put_key("echo", {"value": SECRET, "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+  stored = json.loads(v.store_path.read_text())
+  assert stored["version"] == 3 and set(stored["keys"]["echo"]) >= {"nonce", "sealed"}
+  v.put_key("pair", {"parts": BASIC_PARTS, "inject": BASIC, "grants": GRANTS})
+  assert json.loads(v.store_path.read_text())["version"] == kv.STORE_VERSION == 4
+  v.revoke_key("pair")
+  assert json.loads(v.store_path.read_text())["version"] == 3
+  reopened = kv.Vault(tmp_path / "vault")
+  assert reopened.reveal("echo", ("owner", "")) == SECRET
+
+
+def test_a_damaged_old_record_fails_only_its_own_use(tmp_path):
   folder = tmp_path / "vault"
   v = kv.Vault(folder)
-  v.put_key("echo", {"value": SECRET, "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
-  payload = json.loads(v.store_path.read_text())
-  [part] = payload["keys"]["echo"].pop("parts")
-  payload["keys"]["echo"].update(nonce=part["nonce"], sealed=part["sealed"], multiline=False)
-  payload["version"] = 3
-  v.store_path.write_text(json.dumps(payload))
-  old = v.store_path.read_bytes()
-
-  migrated = kv.Vault(folder)
-  assert json.loads(migrated.store_path.read_text())["version"] == kv.STORE_VERSION == 4
-  assert (folder / "keys.v3.json").read_bytes() == old
-  [listed] = migrated.list_keys()
-  assert listed["parts"] == [{"name": "value", "label": "", "secret": True, "multiline": False}]
-  assert migrated.reveal("echo", ("owner", "")) == SECRET
-  assert migrated.authorize("echo", APP, "GET", "echo.example.com", "/anything/x").values == {"value": SECRET}
+  v.put_key("good", {"value": SECRET, "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+  v.put_key("bad", {"value": OTHER_SECRET, "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+  store = json.loads(v.store_path.read_text())
+  del store["keys"]["bad"]["sealed"]
+  v.store_path.write_text(json.dumps(store))
+  reopened = kv.Vault(folder)
+  assert reopened.reveal("good", ("owner", "")) == SECRET
+  with pytest.raises(kv.VaultError, match="can't be decrypted"):
+    reopened.reveal("bad", ("owner", ""))
 
 
 def test_each_part_is_sealed_under_its_own_name(vault):
   vault.put_key("pair", {"parts": BASIC_PARTS, "inject": BASIC, "grants": GRANTS})
   stored = vault.store_path.read_text()
   assert SECRET not in stored and ACCOUNT in stored  # a plain part is kept as text
-  vault.put_key("other", {"parts": [{"name": "token", "value": OTHER_SECRET}, {"name": "account", "value": "x"}],
+  vault.put_key("other", {"parts": [{"name": "token", "value": OTHER_SECRET}, {"name": "account", "value": "x", "secret": False}],
                           "inject": BASIC, "grants": GRANTS})
   # A part sealed for another key or another part never opens in its place.
   vault._records["pair"]["parts"][1]["sealed"] = vault._records["other"]["parts"][0]["sealed"]
@@ -254,7 +279,8 @@ def test_slots_place_several_parts_and_drop_the_callers_copies(vault, client, mo
   assert [v for k, v in headers if k == "x-api-key"] == [f"Key {SECRET}"]
   assert sent["request"].target == f"/anything/x?q=1&app={ACCOUNT}"
   echoed = answer.json()
-  assert echoed["headers"]["X-Api-Key"] == "Key [redacted by key vault]"
+  # The whole header the vault built around the secret is hidden, not just the secret.
+  assert echoed["headers"]["X-Api-Key"] == "[redacted by key vault]"
   assert echoed["headers"]["X-App-Id"] == ACCOUNT  # plain parts are not redacted
   assert "attacker" not in answer.text and SECRET not in answer.text
 
@@ -462,9 +488,15 @@ def test_a_recipe_must_send_a_secret_part(vault):
   with pytest.raises(kv.VaultError, match="no secret part"):
     vault.request_for_agents(_ask(inject=plain_only), actor="agent:c1")
   vault.put_key("pair", {"parts": [*BASIC_PARTS, {"name": "spare", "value": OTHER_SECRET}], "inject": BASIC, "grants": GRANTS})
-  # Making the only secret it sends plain is refused too, though another stays secret.
-  with pytest.raises(kv.VaultError, match="without any secret part"):
+  # Making the password it sends plain is refused too, though another part stays secret.
+  with pytest.raises(kv.VaultError, match="is the secret itself"):
     vault.put_key("pair", {"parts": [{"name": "token", "value": "x", "secret": False}]})
+  # A slots key whose only sent secret turns plain is sent with nothing secret.
+  slots = {"type": "slots", "slots": [{"type": "header", "name": "X-Key", "template": "{key}"}]}
+  vault.put_key("hdr", {"parts": [{"name": "key", "value": SECRET}, {"name": "spare", "value": OTHER_SECRET}],
+                        "inject": slots, "grants": GRANTS})
+  with pytest.raises(kv.VaultError, match="without any secret part"):
+    vault.put_key("hdr", {"parts": [{"name": "key", "secret": False}]})
 
 
 def test_with_nothing_secret_redaction_changes_nothing():
@@ -475,3 +507,102 @@ def test_parts_to_remove_are_named_by_text(vault):
   vault.put_key("pair", {"parts": BASIC_PARTS, "inject": BASIC, "grants": GRANTS})
   with pytest.raises(kv.VaultError, match="Name the parts"):
     vault.put_key("pair", {"remove_parts": [["token"]]})
+
+
+# -- hardening found in review ------------------------------------------------------
+
+@pytest.mark.parametrize("inject, parts", [
+  (BASIC, [{"name": "account", "value": ACCOUNT, "secret": False}, {"name": "token", "value": SECRET, "secret": False},
+           {"name": "spare", "value": OTHER_SECRET}]),
+  ({"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "s", "region": "us-east-1", "service": "s3"},
+   [{"name": "id", "value": "AKIDEXAMPLE", "secret": False}, {"name": "s", "value": SECRET, "secret": False},
+    {"name": "spare", "value": OTHER_SECRET}]),
+])
+def test_the_part_that_is_the_secret_can_never_be_plain(vault, inject, parts):
+  with pytest.raises(kv.VaultError, match="is the secret itself"):
+    vault.put_key("k", {"parts": parts, "inject": inject, "grants": GRANTS})
+
+
+def test_a_request_cannot_propose_the_secret_as_plain(vault):
+  with pytest.raises(kv.VaultError, match="is the secret itself"):
+    vault.request_for_agents(_ask(parts=[{"name": "account", "secret": False},
+                                         {"name": "token", "secret": False}, {"name": "pin"}]), actor="agent:c1")
+
+
+def test_a_short_secret_part_is_refused_where_an_echo_could_reveal_it(vault):
+  with pytest.raises(kv.VaultError, match="shorter than 8"):
+    vault.put_key("pin", {"parts": [{"name": "account", "value": ACCOUNT, "secret": False},
+                                    {"name": "token", "value": "4821"}], "inject": BASIC, "grants": GRANTS})
+  # A single value sent as before keeps its old rules.
+  vault.put_key("legacy", {"value": "abc", "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+
+
+def test_a_label_or_secrecy_change_keeps_the_value(vault):
+  vault.put_key("pair", {"parts": [*BASIC_PARTS, {"name": "region", "value": "eu-west-1", "secret": False}],
+                         "inject": BASIC, "grants": GRANTS})
+  vault.put_key("pair", {"parts": [{"name": "account", "label": "Account SID (live)"}, {"name": "region", "secret": True}]})
+  listed = {p["name"]: p for p in vault.list_keys()[0]["parts"]}
+  assert listed["account"]["label"] == "Account SID (live)" and listed["account"]["text"] == ACCOUNT
+  assert listed["region"]["secret"] is True and "text" not in listed["region"]
+  assert vault.reveal("pair", ("owner", ""), "region") == "eu-west-1"
+  with pytest.raises(kv.VaultError, match="needs a value"):
+    vault.put_key("pair", {"parts": [{"name": "nope", "label": "x"}]})
+
+
+def test_a_label_cannot_reorder_how_the_card_reads(vault):
+  with pytest.raises(kv.VaultError, match="plain text"):
+    vault.put_key("k", {"parts": [{"name": "value", "value": SECRET, "label": "API key‮"}],
+                        "inject": {"type": "header", "name": "X-Key"}, "grants": GRANTS})
+
+
+def test_a_basic_username_with_a_colon_is_refused(vault):
+  vault.put_key("pair", {"parts": [{"name": "account", "value": "a:b", "secret": False}, {"name": "token", "value": SECRET}],
+                         "inject": BASIC, "grants": GRANTS})
+  with pytest.raises(kv.VaultError, match="colon"):
+    vault.authorize("pair", APP, "GET", "echo.example.com", "/anything/x")
+
+
+@pytest.mark.parametrize("header", ["X-HTTP-Method-Override", "X-Original-URL", "Range"])
+def test_headers_the_vault_strips_cannot_be_slots(header):
+  with pytest.raises(kv.VaultError, match="can't carry a key"):
+    kv.validate_inject({"type": "slots", "slots": [{"type": "header", "name": header, "template": "/admin/{p}"}]})
+
+
+def test_asking_again_with_another_recipe_is_refused_while_one_waits(vault):
+  vault.request_for_agents(_ask(inject=None, parts=None), actor="agent:c1")
+  with pytest.raises(kv.VaultError, match="already waiting with another way") as refused:
+    vault.request_for_agents(_ask(), actor="agent:c1")
+  assert refused.value.status == 409
+  assert vault.request_for_agents(_ask(inject=None, parts=None), actor="agent:c1")["status"] == "pending"
+
+
+def test_a_request_whose_key_was_deleted_meanwhile_is_still_answerable(vault):
+  vault.put_key("twilio", {"value": SECRET, "inject": {"type": "header", "name": "X-K"},
+                           "grants": {"apps": [], "agents": False, "sites": []}})
+  vault.request_for_agents(_ask(), actor="agent:c1")
+  vault.revoke_key("twilio")
+  [request] = vault.list_requests()
+  assert [p["name"] for p in request["parts"]] == ["account", "token"]
+  vault.approve_request(request["id"], {"ticket": request["ticket"], "sites": [SITE],
+                                        "parts": {"account": ACCOUNT, "token": SECRET}})
+  assert vault.reveal("twilio", ("owner", ""), "token") == SECRET
+
+
+@pytest.mark.parametrize("body, message", [
+  (b'{"a":"\\ud800"}', None),
+  (b'[' * 5000 + b']' * 5000, "nested too deeply"),
+])
+def test_unusual_json_is_kept_or_refused_never_crashes(body, message):
+  inject = kv.validate_inject({"type": "slots", "slots": [{"type": "body", "format": "json", "field": "s", "part": "s"}]})
+  if message is None:
+    out, _ = kv.recipe_body(inject, {"s": "x"}, body, [("Content-Type", "application/json")])
+    assert json.loads(out) == {"a": "\ud800", "s": "x"}
+    return
+  with pytest.raises(kv.VaultError, match=message):
+    kv.recipe_body(inject, {"s": "x"}, b'{"a":' + body + b'}', [("Content-Type", "application/json")])
+
+
+def test_a_form_that_is_not_utf8_is_refused_not_mangled():
+  inject = kv.validate_inject({"type": "slots", "slots": [{"type": "body", "format": "form", "field": "s", "part": "s"}]})
+  with pytest.raises(kv.VaultError, match="as UTF-8"):
+    kv.recipe_body(inject, {"s": "x"}, b"name=Ren%E9", [("Content-Type", "application/x-www-form-urlencoded")])

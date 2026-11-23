@@ -377,9 +377,12 @@ def model_provider_key_in(
     return None
   record = next(k for k in keys if k["name"] == key)
   grant = _grant_of(record, app_id, install)
-  # A provider sends the one secret ``value`` as a bearer token.
+  # A provider sends the one secret ``value`` as a bearer token: only a key
+  # sent that plainly qualifies, never one the vault signs or builds from
+  # parts, whose secret is not meant to leave as it is.
   has_value = any(part["name"] == "value" and part["secret"] for part in record.get("parts") or [])
-  if not has_value or record.get("multiline") or grant.get("paused"):
+  plain_recipe = (record.get("inject") or {}).get("type") in ("header", "query")
+  if not has_value or not plain_recipe or record.get("multiline") or grant.get("paused"):
     return None
   allowed = _vault_rules().site_allows(
     grant["sites"], site["host"], "POST",

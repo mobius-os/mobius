@@ -7,7 +7,7 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 
 const vite = await createSsrRenderServer()
 const {
-  approvalBody, newKeyParts, partsFilled, keyParts, partLabel, sentAs, requestWording,
+  approvalBody, newKeyParts, partsFilled, keyParts, partLabel, sentAs, requestWording, tokenClaims, plainPartsNote,
 } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -39,7 +39,7 @@ test('Allow waits until every part has text', () => {
 })
 
 test('the paste step names details rather than one key', () => {
-  assert.equal(requestWording(ask(), {}).pasteTitle, 'Paste your api.twilio.com details')
+  assert.equal(requestWording(ask(), {}).pasteTitle, 'Paste the parts of your api.twilio.com key')
   assert.equal(requestWording(ask({ parts: null, inject: null }), {}).pasteTitle, 'Paste your api.twilio.com key')
 })
 
@@ -61,11 +61,30 @@ test('every recipe reads as how it is sent', () => {
 })
 
 test('signing recipes read as what the vault does with the key', () => {
-  assert.equal(sentAs({ type: 'aws_sigv4', service: 's3', region: 'auto' }), 'signed for AWS s3 in auto (Signature Version 4)')
+  assert.equal(sentAs({ type: 'aws_sigv4', service: 's3', region: 'auto' }), 'an AWS signature (s3, region auto)')
   assert.equal(sentAs({ type: 'jwt_bearer', alg: 'RS256', claims: { scope: 'drive.readonly' }, exchange: { kind: 'google' } }),
     'a Google access token for drive.readonly')
   assert.equal(sentAs({ type: 'jwt_bearer', alg: 'RS256', claims: { iss: '1' }, exchange: { kind: 'github', installation_id: '42' } }),
     'a GitHub App token for installation 42')
   assert.equal(sentAs({ type: 'jwt_bearer', alg: 'ES256', claims: { iss: 'x', aud: 'appstoreconnect-v1' } }),
     'a token signed ES256 for appstoreconnect-v1')
+})
+
+test('recipes name parts by their labels when the card lists them', () => {
+  assert.equal(sentAs(BASIC, PARTS), 'Authorization: Basic (Account SID and token)')
+  assert.equal(sentAs({ type: 'slots', slots: [{ type: 'header', name: 'X-Key', template: 'Token {account}:{token}' }] }, PARTS),
+    'X-Key: Token {Account SID}:{token}')
+  assert.equal(sentAs({ type: 'jwt_bearer', alg: 'RS256', claims: { iss: 'bot' } }), 'a token signed RS256, issued by bot')
+})
+
+test('a card that would mint a token shows every claim, so an act-as-user sub is never hidden', () => {
+  assert.equal(tokenClaims({ type: 'jwt_bearer', claims: { scope: 'drive', sub: 'ceo@example.com' }, exchange: { kind: 'google' } }),
+    'scope drive · sub ceo@example.com · exchanged with Google')
+  assert.equal(tokenClaims({ type: 'jwt_bearer', claims: { iss: 'i', aud: 'a' }, key_id: 'K1' }), 'iss i · aud a · key id K1 · sent as it is')
+  assert.equal(tokenClaims(BASIC), null)
+})
+
+test('parts that are not secret are named before the owner pastes into them', () => {
+  assert.equal(plainPartsNote(PARTS), "Account SID isn't secret: shown as typed and not hidden from answers. Paste only what is meant to be seen there.")
+  assert.equal(plainPartsNote([PARTS[1]]), null)
 })

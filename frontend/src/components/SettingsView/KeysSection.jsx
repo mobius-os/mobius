@@ -14,6 +14,7 @@ import {
   BEARER, relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
   REQUESTS_SHOWN, VAULT_DOWN, keyParts, partLabel,
 } from '../../lib/keysSettingsText.js'
+import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import KeyRequest from './KeyRequest.jsx'
 import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
 import './KeysSection.css'
@@ -449,14 +450,18 @@ function AppRow({ grant, row, busy, onSwitch, onSites, onRemove }) {
   )
 }
 
-/** The value field: one masked line, or a box for keys with several lines. */
-function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFocus }) {
+/**
+ * The value field: one line (masked unless ``plain``), or a box for keys with
+ * several lines that also takes a dropped key file.
+ */
+function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFocus, plain = false }) {
   return multiline ? (
     <textarea
       id={id}
       className="settings-input settings-input--multiline"
       value={value}
       onChange={e => onChange(e.target.value)}
+      {...keyFileDropProps(onChange)}
       placeholder="Paste the whole key, including its first and last lines"
       aria-label={label}
       spellCheck={false}
@@ -468,7 +473,7 @@ function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFo
     <input
       id={id}
       className="settings-input"
-      type="password"
+      type={plain ? 'text' : 'password'}
       value={value}
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
@@ -546,13 +551,23 @@ function ValueRow({ keyRecord: key, part, names, save, busy }) {
         </span>
         <span className="settings-actions settings-keys-value__actions">
           {part.secret && (
-            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => (shown === null ? show() : setShown(null))}>
+            <button
+              type="button"
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              aria-label={single ? undefined : `${shown === null ? 'Show' : 'Hide'} ${label}`}
+              onClick={() => (shown === null ? show() : setShown(null))}
+            >
               {shown === null ? <Eye {...BUTTON_ICON} /> : <EyeOff {...BUTTON_ICON} />}
               {shown === null ? 'Show' : 'Hide'}
             </button>
           )}
           {!replacing && (
-            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => setReplacing(true)}>
+            <button
+              type="button"
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              aria-label={single ? undefined : `Replace ${label}`}
+              onClick={() => setReplacing(true)}
+            >
               <EditPencil {...BUTTON_ICON} /> Replace
             </button>
           )}
@@ -565,6 +580,7 @@ function ValueRow({ keyRecord: key, part, names, save, busy }) {
             value={next}
             onChange={setNext}
             multiline={multiline}
+            plain={!part.secret}
             placeholder={single ? 'Paste the new key' : `Paste the new ${label}`}
             label={single ? 'New key value' : `New ${label}`}
             autoFocus

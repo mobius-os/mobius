@@ -1925,8 +1925,8 @@ _TOOL_DEFINITIONS = {
           "items": {
             "type": "object",
             "properties": {
-              "name": {"type": "string", "description": "e.g. account_sid"},
-              "label": {"type": "string", "description": "What the owner sees, e.g. Account SID"},
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$", "description": "e.g. account_sid"},
+              "label": {"type": "string", "maxLength": 80, "description": "What the owner sees, e.g. Account SID"},
               "secret": {"type": "boolean"},
               "multiline": {"type": "boolean", "description": "True for a key file (PEM or service-account JSON)"},
             },

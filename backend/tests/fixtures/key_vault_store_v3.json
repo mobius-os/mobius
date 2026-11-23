@@ -1,0 +1,75 @@
+{
+ "about": "A key vault store written by the vault before keys had parts (store version 3, base a3e10358d), with its throwaway master key. Values are fake.",
+ "master_key_hex": "8d9187b6b0d8dcd613a1ac0f148e0d38ed35aaf15522a793334854ad0b986ec1",
+ "store": {
+  "keys": {
+   "maps": {
+    "created_at": "2026-11-23T11:47:53Z",
+    "grants": {
+     "agents": false,
+     "apps": [],
+     "sites": []
+    },
+    "inject": {
+     "name": "key",
+     "type": "query"
+    },
+    "multiline": true,
+    "nonce": "jd+OEmJ7JXJk6gQV",
+    "revision": 1,
+    "sealed": "mDIJtx2Skvoa8LBNDKX/S7lPJRLD36RPqPSEbcg2kruhc6blAOgekmcI+ffRjh6uZYhNcQ==",
+    "updated_at": "2026-11-23T11:47:53Z"
+   },
+   "weather": {
+    "created_at": "2026-11-23T11:47:53Z",
+    "grants": {
+     "agents": true,
+     "apps": [
+      {
+       "id": 7,
+       "install": "00000000000000000000000000000007",
+       "paused": false,
+       "sites": [
+        {
+         "host": "echo.example.com",
+         "methods": [
+          "GET"
+         ],
+         "paths": [
+          "/anything/*"
+         ]
+        }
+       ]
+      }
+     ],
+     "sites": [
+      {
+       "host": "echo.example.com",
+       "methods": [
+        "GET"
+       ],
+       "paths": [
+        "/anything/*"
+       ]
+      }
+     ]
+    },
+    "inject": {
+     "name": "X-Api-Key",
+     "prefix": "",
+     "type": "header"
+    },
+    "multiline": false,
+    "nonce": "iZvsVw52g1ZIuREn",
+    "revision": 1,
+    "sealed": "Le77Pul4DAyuJeiDqLISSFLz9WRceNsa1pXD9AhcoOo1OTlixKZ+hnQ/c0gccQ==",
+    "updated_at": "2026-11-23T11:47:53Z"
+   }
+  },
+  "version": 3
+ },
+ "values": {
+  "maps": "fixture-maps-key-9876543210\nline-two",
+  "weather": "fixture-weather-key-0123456789"
+ }
+}

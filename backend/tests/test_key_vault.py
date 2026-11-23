@@ -62,8 +62,9 @@ def _apps(*ids, sites=None):
 def _as_version_one(payload):
   """A current store as version 1 wrote it: one sealed value per key."""
   for record in payload["keys"].values():
-    [part] = record.pop("parts")
-    record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
+    if "parts" in record:  # a store with parts; single-value stores are already flat
+      [part] = record.pop("parts")
+      record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
   payload["version"] = 1
   return payload
 
@@ -238,7 +239,7 @@ def test_a_version_one_store_keeps_each_apps_reach_when_migrated(tmp_path):
   _as_version_one(payload)
   v.store_path.write_text(json.dumps(payload))
   migrated = kv.Vault(folder)
-  assert json.loads(migrated.store_path.read_text())["version"] == kv.STORE_VERSION
+  assert json.loads(migrated.store_path.read_text())["version"] == 3  # single-value keys are still written as version 3
   [listed] = migrated.list_keys()
   assert listed["grants"]["apps"] == [{**grant, "install": None} for grant in _apps(WEATHER)]
   # Unstamped until the platform names the app's installation.
@@ -2211,8 +2212,9 @@ def _as_version_two(vault) -> None:
   store = json.loads(vault.store_path.read_text())
   store["version"] = 2
   for record in store["keys"].values():
-    [part] = record.pop("parts")
-    record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
+    if "parts" in record:  # a store with parts; single-value stores are already flat
+      [part] = record.pop("parts")
+      record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
     for grant in record["grants"]["apps"]:
       del grant["install"]
     if record.get("origin"):
@@ -2238,7 +2240,7 @@ def unstamped(vault):
 
 def test_entries_from_before_installations_never_authorize_an_app(unstamped):
   store = json.loads(unstamped.store_path.read_text())
-  assert store["version"] == kv.STORE_VERSION
+  assert store["version"] == 3  # single-value keys are still written as version 3
   assert all(g["install"] is None for k in unstamped.list_keys() for g in k["grants"]["apps"])
   for installation in (install(WEATHER), REUSED):
     with pytest.raises(kv.VaultError, match="may not use"):

@@ -213,3 +213,50 @@ test("a request no longer waiting says what the vault shows, and takes only the 
     assert.deepEqual(calls.map(([kind]) => kind), ['answer'])
   } finally { view.unmount() }
 })
+
+const PARTS = [
+  { name: 'account', label: 'Account SID', secret: false },
+  { name: 'token', label: 'Auth token', secret: true },
+  { name: 'pem', label: 'Key file', secret: true, multiline: true },
+]
+
+test('each part gets its own field: plain in the open, secret masked, a key file in a box that takes a drop', () => {
+  const answer = {
+    parts: PARTS, partValues: {}, setPartValue() {}, words: { pasteTitle: 'Paste the parts', pasteNote: 'Saved as x' },
+  }
+  const view = renderHook(() => KeyPasteField({ answer, disabled: false }))
+  try {
+    const tree = view.result.current
+    const inputs = elements(tree).filter(node => node.type === 'input' || node.type === 'textarea')
+    assert.deepEqual(inputs.map(node => [node.type, node.props.type ?? null]),
+      [['input', 'text'], ['input', 'password'], ['textarea', null]])
+    assert.equal(inputs[2].props['data-own-file-drop'], '', 'the key-file box takes a dropped file itself')
+    assert.ok(elements(tree).some(node => /Account SID isn't secret/.test(node.props?.description || '')))
+  } finally { view.unmount() }
+})
+
+test('Allow sends exactly this request\'s parts, and only once every one has a value', async () => {
+  globalThis.__keyCard.vault.requests = [pending({
+    key_exists: false, parts: PARTS,
+    inject: { type: 'slots', slots: [{ type: 'header', name: 'X-Key', template: '{account}:{token}' }] },
+  })]
+  now += 100_000
+  const shown = now
+  const view = renderCard()
+  try {
+    choose(view, 'Allow')
+    const answer = () => find(view.result.current.card, node => node.type === KeyPasteField).props.answer
+    answer().setPartValue('stale', 'typed for an earlier request')
+    answer().setPartValue('account', 'AC-made-up')
+    answer().setPartValue('token', 'made-up-token-0123')
+    assert.equal(view.result.current.keyCard.ready('allow'), false, 'every part needs a value')
+    answer().setPartValue('pem', '-----BEGIN KEY-----')
+    assert.equal(view.result.current.keyCard.ready('allow'), true)
+    tapSubmit(view, shown + 2_000)
+    for (let i = 0; i < 5; i += 1) await tick()
+    const [kind, , body] = calls[0]
+    assert.equal(kind, 'approve')
+    assert.deepEqual(body.parts, { account: 'AC-made-up', token: 'made-up-token-0123', pem: '-----BEGIN KEY-----' })
+    assert.equal(body.value, undefined)
+  } finally { view.unmount() }
+})

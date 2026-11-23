@@ -8,12 +8,15 @@ on an existing key they replace only what is given.
 
   store-key.py NAME [--header NAME [--prefix TEXT] | --query NAME]
                [--site HOST[:METHODS[:PATHS]]]... [--no-agents] [--replace]
-  store-key.py NAME --part PART[:plain[:LABEL]]... (--basic USER PASS | --slots JSON | --recipe JSON)
+  store-key.py NAME --part PART[:plain|:secret[:LABEL]]... (--basic USER PASS | --slots JSON | --recipe JSON)
                [--site ...]... [--no-agents] [--replace]
 
   With --part, the key has several parts: each is read from the input field
-  of the same name (one card field per part), secret unless marked plain (an
-  id, a username, a region: shown in Settings and not redacted). --basic
+  of the same name (one card field per part, so part names are lowercase
+  letters, digits and _), secret unless marked plain (an id, a username, a
+  region: shown in Settings and not redacted). On an existing key a part keeps
+  its secrecy unless :plain or :secret says otherwise. A label follows a
+  second colon: account:plain:Account SID, token:secret:Auth token. --basic
   sends two parts as "Authorization: Basic"; --slots takes the vault's slot
   list as JSON, e.g. '[{"type": "header", "name": "X-Id", "template": "{id}"}]'.
   --recipe takes any whole send recipe as JSON, such as an aws_sigv4 or
@@ -103,7 +106,9 @@ def _parts(raw: dict, specs: list[str]) -> list[dict] | None:
     value = raw.get(name)
     if not isinstance(value, str) or not value.strip():
       return None
-    part = {"name": name, "value": value.strip(), "secret": kind != "plain"}
+    part = {"name": name, "value": value.strip()}
+    if kind in ("plain", "secret"):
+      part["secret"] = kind == "secret"
     if label:
       part["label"] = label
     parts.append(part)

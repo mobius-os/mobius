@@ -150,9 +150,13 @@ def _agent_changes(existing: dict, body: dict) -> list[str]:
   changes = []
   if body.get("value") is not None:
     changes.append("replaced its value")
-  replaced = [item.get("name") for item in body.get("parts") or [] if isinstance(item, dict)]
+  items = [item for item in body.get("parts") or [] if isinstance(item, dict)]
+  replaced = [item.get("name") for item in items if item.get("value") is not None]
   if replaced:
     changes.append(f"replaced {', '.join(map(str, replaced))}")
+  shown = [item.get("name") for item in items if item.get("secret") is False]
+  if shown:
+    changes.append(f"made {', '.join(map(str, shown))} not secret")
   if body.get("remove_parts"):
     changes.append(f"removed {', '.join(map(str, body['remove_parts']))}")
   if body.get("inject") is not None and key_vault.stored_slot(body["inject"]) != existing["inject"]:

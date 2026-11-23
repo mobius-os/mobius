@@ -5,8 +5,9 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
 import {
-  approvalBody, newKeyParts, partLabel, partsFilled, requestWording, sentAs, siteLine,
+  approvalBody, newKeyParts, partLabel, partsFilled, plainPartsNote, requestWording, sentAs, siteLine, tokenClaims,
 } from '../../lib/keysSettingsText.js'
+import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import './settingsButtons.css'
 import './KeysSection.css'
 
@@ -28,8 +29,11 @@ export function useKeyAnswer(request, names) {
   const guard = useKeyAnswerGuard({ enabled: Boolean(request) })
   const parts = request ? newKeyParts(request) : null
   async function send(kind) {
+    // Only this request's parts: a request replaced under the same id must
+    // never carry values typed for the one before.
+    const pasted = parts && Object.fromEntries(parts.map(part => [part.name, partValues[part.name] || '']))
     const response = kind === 'allow'
-      ? await api.keys.approve(request.id, approvalBody(request, parts ? partValues : value))
+      ? await api.keys.approve(request.id, approvalBody(request, parts ? pasted : value))
       : await api.keys.deny(request.id, request.ticket)
     await jsonOrThrow(response, kind === 'allow' ? 'Allow' : 'Not now')
     setValue('')
@@ -64,12 +68,13 @@ export function KeyRequestBody({ request, words, note = true }) {
         <summary>Details</summary>
         <ul className="settings-keys__details-list">
           {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
-          {words.slot && <li>Sent as <code>{sentAs(words.slot)}</code></li>}
+          {words.slot && <li>Sent as <code>{sentAs(words.slot, request.parts)}</code></li>}
+          {tokenClaims(words.slot) && <li>Token: {tokenClaims(words.slot)}</li>}
           {newKeyParts(request) && <li>In {request.parts.length} parts: {request.parts.map(partLabel).join(', ')}</li>}
           {words.keptSlot && (
             <li>
-              Sent as <code>{sentAs(words.keptSlot.kept)}</code>, not <code>{sentAs(words.keptSlot.asked)}</code> as
-              asked, since something already uses it
+              Sent as <code>{sentAs(words.keptSlot.kept)}</code>, not <code>{sentAs(words.keptSlot.asked, request.parts)}</code> as
+              asked: the key keeps how it is sent
             </li>
           )}
           <li>Saved as “{request.key}”</li>
@@ -99,9 +104,11 @@ export function KeyAnyway({ anyway, onOpen, children }) {
  */
 export function KeyPasteField({ answer, disabled, autoFocus = false }) {
   const id = useId()
+  const [dropError, setDropError] = useState('')
   if (answer.parts) {
+    const plainNote = plainPartsNote(answer.parts)
     return (
-      <div className="settings-keys__paste" role="group" aria-labelledby={id}>
+      <div className="settings-keys__paste" role="group" aria-labelledby={id} aria-describedby={`${id}-note`}>
         <p className="settings-keys__request-lead" id={id}><strong>{answer.words.pasteTitle}</strong></p>
         {answer.parts.map((part, index) => (
           <label key={part.name} className="settings-keys__part">
@@ -111,6 +118,7 @@ export function KeyPasteField({ answer, disabled, autoFocus = false }) {
                 className="settings-keys__input settings-keys__input--file"
                 value={answer.partValues[part.name] || ''}
                 onChange={event => answer.setPartValue(part.name, event.target.value)}
+                {...keyFileDropProps(text => { setDropError(''); answer.setPartValue(part.name, text) }, setDropError)}
                 placeholder="Paste the whole file, including its first and last lines"
                 spellCheck={false}
                 autoCapitalize="off"
@@ -133,7 +141,9 @@ export function KeyPasteField({ answer, disabled, autoFocus = false }) {
             )}
           </label>
         ))}
-        <p className="settings-keys__muted">{answer.words.pasteNote}</p>
+        {dropError && <p className="settings-keys__muted" role="alert">{dropError}</p>}
+        {plainNote && <Alert color="warning" variant="soft" description={plainNote} />}
+        <p className="settings-keys__muted" id={`${id}-note`}>{answer.words.pasteNote}</p>
       </div>
     )
   }

@@ -99,26 +99,56 @@ export function partLabel(part) {
   return part.label || part.name
 }
 
-/** How a key is sent, as the card's Details and the key page show it. */
-export function sentAs(inject) {
+/**
+ * How a key is sent, as the card's Details show it after "Sent as". Parts are
+ * named by their labels when ``parts`` lists them.
+ */
+export function sentAs(inject, parts = []) {
+  const label = name => {
+    const part = (parts || []).find(item => item.name === name)
+    return part ? partLabel(part) : name
+  }
   if (!inject) return 'Authorization: Bearer …'
   if (inject.type === 'query') return `?${inject.name}=…`
-  if (inject.type === 'basic') return `Authorization: Basic (${inject.username} and ${inject.password})`
-  if (inject.type === 'aws_sigv4') return `signed for AWS ${inject.service} in ${inject.region} (Signature Version 4)`
+  if (inject.type === 'basic') return `Authorization: Basic (${label(inject.username)} and ${label(inject.password)})`
+  if (inject.type === 'aws_sigv4') return `an AWS signature (${inject.service}, region ${inject.region})`
   if (inject.type === 'jwt_bearer') {
     const exchange = inject.exchange?.kind
     if (exchange === 'google') return `a Google access token for ${inject.claims?.scope || 'its scope'}`
     if (exchange === 'github') return `a GitHub App token for installation ${inject.exchange.installation_id}`
-    return `a token signed ${inject.alg || 'RS256'} for ${inject.claims?.aud || inject.claims?.iss}`
+    const alg = inject.alg || 'RS256'
+    return inject.claims?.aud ? `a token signed ${alg} for ${inject.claims.aud}` : `a token signed ${alg}, issued by ${inject.claims?.iss}`
   }
   if (inject.type === 'slots') {
     return inject.slots.map(slot => {
-      if (slot.type === 'header') return `${slot.name}: ${slot.template}`
-      if (slot.type === 'query') return `?${slot.name}={${slot.part}}`
-      return `${slot.format === 'form' ? 'form' : 'JSON'} field ${slot.field}={${slot.part}}`
+      if (slot.type === 'header') return `${slot.name}: ${slot.template.replace(/\{([^}]+)\}/g, (_, name) => `{${label(name)}}`)}`
+      if (slot.type === 'query') return `?${slot.name}={${label(slot.part)}}`
+      return `${slot.format === 'form' ? 'form' : 'JSON'} field ${slot.field}={${label(slot.part)}}`
     }).join(' · ')
   }
   return `${inject.name}: ${inject.prefix || ''}…`
+}
+
+/**
+ * Everything a signed token says, for a card that would let an app or agent
+ * mint it: its claims (a ``sub`` acts as that user), key id and exchange.
+ * Null for any other recipe.
+ */
+export function tokenClaims(inject) {
+  if (inject?.type !== 'jwt_bearer') return null
+  const claims = Object.entries(inject.claims || {}).map(([name, value]) => `${name} ${value}`)
+  const exchange = inject.exchange?.kind === 'google' ? 'exchanged with Google'
+    : inject.exchange?.kind === 'github' ? `exchanged with GitHub for installation ${inject.exchange.installation_id}`
+      : 'sent as it is'
+  return [...claims, ...(inject.key_id ? [`key id ${inject.key_id}`] : []), exchange].join(' · ')
+}
+
+/** What the paste step says about parts that aren't secret. */
+export function plainPartsNote(parts) {
+  const plain = (parts || []).filter(part => !part.secret).map(partLabel)
+  if (!plain.length) return null
+  const names = plain.length === 1 ? plain[0] : `${plain.slice(0, -1).join(', ')} and ${plain[plain.length - 1]}`
+  return `${names} ${plain.length === 1 ? "isn't" : "aren't"} secret: shown as typed and not hidden from answers. Paste only what is meant to be seen there.`
 }
 
 /** Hosts in plain words: "a", "a and b", "a, b and c", "a, b and 2 more". */
@@ -338,7 +368,7 @@ export function requestWording(request, names) {
     says: `${who} says:`,
     denyNote: `Not now is a no: ${asked} can't ask for ${key} again until you let it in Settings › Keys.`,
     pasteTitle: newKeyParts(request)
-      ? (hosts ? `Paste your ${hosts} details` : 'Paste the key\'s details')
+      ? (hosts ? `Paste the parts of your ${hosts} key` : 'Paste the parts of the key')
       : (hosts ? `Paste your ${hosts} key` : 'Paste the key'),
     pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
   }

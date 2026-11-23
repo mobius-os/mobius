@@ -74,7 +74,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
@@ -88,11 +88,13 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 # (``install``). An older store is migrated at load with ``install`` None
 # ("unstamped"), which matches no app caller until the platform names the
 # installation (``Vault.adopt_installs``).
-# 4: a key holds named parts (``parts``) instead of one sealed value; an older
-# value becomes the secret part ``value``, sealed exactly as before. The file
-# it migrated from is kept beside the store (``keys.v<version>.json``) for an
-# older vault (the recovery fallback, a restore from the image) that can't
-# read version 4.
+# 4: a key holds named parts (``parts``) instead of one sealed value. In
+# memory every key has parts (an older value is the secret part ``value``,
+# sealed exactly as before). The store is still written as version 3 while
+# every key is that one value sent in a header or query parameter, so an
+# older vault (the recovery fallback, a restore from the image, a rollback)
+# keeps reading it; it is written as version 4 only once a key needs parts or
+# another recipe (``_store_payload``).
 STORE_VERSION = 4
 SOCKET_NAME = "vault.sock"
 NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
@@ -105,6 +107,11 @@ INSTALL_RE = re.compile(r"[0-9a-f]{32}")
 METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
 MIN_VALUE_LENGTH = 1
 MAX_VALUE_LENGTH = 8192
+# A site that echoes what it is sent could otherwise tell a caller which of
+# its guesses is a short secret (the guess that comes back redacted).
+MIN_SENT_SECRET = 8
+# Characters that reorder how a label reads on the owner's card.
+BIDI_CONTROLS = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 # A key's parts: the one most keys have is ``value``; others name themselves.
 # Eight matches the fields one sealed owner card can carry.
 VALUE_PART = "value"
@@ -122,6 +129,17 @@ AWS_NAME_RE = re.compile(r"[a-z0-9-]{1,32}")
 # What the vault sets on an AWS-signed request; a caller's copy never travels.
 AWS_SET_BY_VAULT = ("authorization", "x-amz-date", "x-amz-security-token", "x-amz-content-sha256")
 AWS_UNRESERVED = "-_.~"
+# A caller's own copy source would read from any bucket or key the access key
+# can, outside the paths the grant allows; refused rather than signed.
+AWS_REFUSED_HEADER_PREFIXES = ("x-amz-copy-source",)
+# S3 picks a bucket's or object's configuration by query parameter, which a
+# path rule can't tell apart: these change who may reach it or where it goes,
+# so a borrow can't sign them (an owner who needs one uses the key directly).
+S3_REFUSED_SUBRESOURCES = frozenset({
+  "acl", "policy", "policystatus", "cors", "website", "replication", "encryption", "ownershipcontrols",
+  "publicaccessblock", "lifecycle", "notification", "logging", "object-lock", "legal-hold", "retention",
+  "versioning", "accelerate", "requestpayment", "inventory", "analytics", "metrics", "intelligent-tiering",
+})
 JWT_ALGS = ("RS256", "ES256")
 JWT_CLAIMS = ("iss", "sub", "aud", "scope")
 JWT_MAX_CLAIM = 512
@@ -185,6 +203,10 @@ FORBIDDEN_SLOT_HEADERS = frozenset({
   "x-vault-caller", "accept-encoding",
   "user-agent", "referer", "origin", "content-type", "accept", "accept-language",
   "from", "via", "forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip",
+  # Headers the vault drops from callers because they redirect the method or
+  # path, or slice the answer past redaction.
+  "x-http-method-override", "x-http-method", "x-method-override",
+  "x-original-url", "x-rewrite-url", "x-override-url", "range", "if-range",
 })
 HOP_BY_HOP = frozenset({
   "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -374,7 +396,9 @@ def _validate_aws(raw: dict) -> dict:
 
 
 def _jwt_text(value, what: str) -> str:
-  text = str(value).strip()
+  if not isinstance(value, str):
+    raise VaultError(400, f"{what} is text.")
+  text = value.strip()
   if not text or len(text) > JWT_MAX_CLAIM or any(ch in text for ch in "\r\n\x00"):
     raise VaultError(400, f"{what} is one line of at most {JWT_MAX_CLAIM} characters.")
   return text
@@ -478,8 +502,8 @@ def _part_meta(item: dict, existing: dict | None) -> dict:
   name = _part_name(item.get("name"), "A part")
   label = item.get("label")
   label = (existing or {}).get("label", "") if label is None else str(label).strip()
-  if len(label) > MAX_PART_LABEL or any(ch in label for ch in "\r\n\x00"):
-    raise VaultError(400, f"A part's label is one line of at most {MAX_PART_LABEL} characters.")
+  if len(label) > MAX_PART_LABEL or any(ch in label for ch in "\r\n\x00") or BIDI_CONTROLS & set(label):
+    raise VaultError(400, f"A part's label is one line of at most {MAX_PART_LABEL} characters, in plain text.")
   secret = item.get("secret")
   if secret is None:
     secret = (existing or {}).get("secret", True)
@@ -1076,6 +1100,11 @@ class Loan:
     if self.inject["type"] == "basic":
       # The pair as it travels, should a site echo the header back whole.
       secrets_sent.append(_basic_credentials(self.inject, self.values))
+    if self.inject["type"] == "slots":
+      # A header built around a secret, should a site echo or re-encode it whole.
+      secrets_sent += [header for (_, header), slot in zip(recipe_headers(self.inject, self.values),
+                                                           [s for s in self.inject["slots"] if s["type"] == "header"])
+                       if set(TEMPLATE_PART_RE.findall(slot["template"])) & self.secret]
     if self.inject["type"] == "jwt_bearer":
       # A private key is never sent; the token made from it is.
       secrets_sent = [value for value in secrets_sent if value != self.values[self.inject["private_key"]]]
@@ -1093,6 +1122,8 @@ def recipe_headers(inject: dict, values: dict) -> list[tuple[str, str]]:
   if kind == "header":
     added = [(inject["name"], f"{inject.get('prefix', '')}{values[VALUE_PART]}")]
   elif kind == "basic":
+    if ":" in values[inject["username"]]:
+      raise VaultError(400, "A Basic username can't contain a colon.")
     added = [("Authorization", "Basic " + _basic_credentials(inject, values))]
   elif kind == "slots":
     added = [(slot["name"], TEMPLATE_PART_RE.sub(lambda m: values[m.group(1)], slot["template"]))
@@ -1129,7 +1160,9 @@ def _json_text(item) -> str:
   if isinstance(item, _JsonNumber):
     return str(item)
   if isinstance(item, str):
-    return json.dumps(item, ensure_ascii=False)
+    # Escaped as JSON allows, so a lone surrogate the caller sent stays
+    # exactly as it was instead of failing to encode.
+    return json.dumps(item)
   if item is True:
     return "true"
   if item is False:
@@ -1137,7 +1170,7 @@ def _json_text(item) -> str:
   if item is None:
     return "null"
   if isinstance(item, _JsonObject):
-    return "{" + ",".join(f"{json.dumps(k, ensure_ascii=False)}:{_json_text(v)}" for k, v in item) + "}"
+    return "{" + ",".join(f"{json.dumps(k)}:{_json_text(v)}" for k, v in item) + "}"
   return "[" + ",".join(_json_text(v) for v in item) + "]"
 
 
@@ -1186,6 +1219,8 @@ def recipe_body(
       )
     except (UnicodeDecodeError, ValueError):
       raise VaultError(400, "The request body is not valid JSON (UTF-8).")
+    except RecursionError:
+      raise VaultError(400, "The JSON body is nested too deeply.")
     if not isinstance(parsed, _JsonObject):
       raise VaultError(400, "This key goes in a JSON body whose top level is an object.")
     members = [k for k, _ in parsed]
@@ -1193,11 +1228,15 @@ def recipe_body(
       raise VaultError(400, "The JSON body names a member twice; send each once.")
     kept = _JsonObject((k, v) for k, v in parsed if k not in names)
     kept += fields
-    return _json_text(kept).encode("utf-8"), add_type
+    try:
+      return _json_text(kept).encode("utf-8"), add_type
+    except RecursionError:
+      raise VaultError(400, "The JSON body is nested too deeply.")
   try:
-    pairs = [] if empty else urllib.parse.parse_qsl(body.decode("ascii"), keep_blank_values=True, strict_parsing=True)
+    pairs = [] if empty else urllib.parse.parse_qsl(body.decode("ascii"), keep_blank_values=True,
+                                                    strict_parsing=True, errors="strict")
   except (UnicodeDecodeError, ValueError):
-    raise VaultError(400, "The request body is not a valid form; percent-encode it.")
+    raise VaultError(400, "The request body is not a valid form; percent-encode it as UTF-8.")
   pairs = [(k, v) for k, v in pairs if k not in names] + fields
   return urllib.parse.urlencode(pairs).encode("ascii"), add_type
 
@@ -1216,10 +1255,21 @@ def aws_canonical_target(raw_path: str, raw_query: str, service: str) -> tuple[s
   The query is sorted and encoded the same way, and sent exactly as signed
   so the site computes the same string.
   """
-  wire_path = "/".join(_aws_quote(urllib.parse.unquote(seg)) for seg in raw_path.split("/")) or "/"
+  try:
+    wire_path = "/".join(_aws_quote(urllib.parse.unquote(seg, errors="strict")) for seg in raw_path.split("/")) or "/"
+    caller_pairs = urllib.parse.parse_qsl(raw_query, keep_blank_values=True, errors="strict")
+  except UnicodeDecodeError:
+    raise VaultError(400, "Percent-encode the path and query as UTF-8 for a signed request.")
   signed_path = wire_path if service == "s3" else urllib.parse.quote(wire_path, safe="/" + AWS_UNRESERVED)
-  pairs = sorted((_aws_quote(k), _aws_quote(v))
-                 for k, v in urllib.parse.parse_qsl(raw_query, keep_blank_values=True))
+  for name, _ in caller_pairs:
+    lowered = name.lower()
+    if lowered.startswith("x-amz-"):
+      # The vault signs requests; it never makes a presigned URL, which would
+      # outlive the grant (X-Amz-Expires, X-Amz-Signature and their kin).
+      raise VaultError(400, f"A signed request can't carry {name} in its query: the vault signs it.")
+    if service == "s3" and lowered in S3_REFUSED_SUBRESOURCES:
+      raise VaultError(400, f"Changing a bucket's or object's {name} through a borrowed key is refused.")
+  pairs = sorted((_aws_quote(k), _aws_quote(v)) for k, v in caller_pairs)
   query = "&".join(f"{k}={v}" for k, v in pairs)
   return wire_path, signed_path, query, query
 
@@ -1277,7 +1327,7 @@ def jwt_signing_key(text: str):
     text = pem
   try:
     key = serialization.load_pem_private_key(text.encode(), password=None)
-  except (ValueError, TypeError):
+  except (ValueError, TypeError, UnsupportedAlgorithm):
     raise VaultError(400, "The private key isn't an unencrypted PEM key.")
   return key, email if isinstance(email, str) else None
 
@@ -1366,6 +1416,12 @@ def build_upstream_request(
 
 
 def _aws_signed(method, host, raw_path, raw_query, headers, body, inject, values, now):
+  for name, value in headers:
+    if name.lower().startswith(AWS_REFUSED_HEADER_PREFIXES):
+      raise VaultError(400, f"A signed request can't carry {name}: it reads outside the paths the key may reach.")
+    if _aws_signed_header(name) and not value.isascii():
+      # The signature covers its bytes as UTF-8 while HTTP carries Latin-1.
+      raise VaultError(400, f"The {name} header must be plain ASCII on a signed request.")
   wire_path, signed_path, wire_query, signed_query = aws_canonical_target(raw_path, raw_query, inject["service"])
   amz_date = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(time.time() if now is None else now))
   payload_hash = hashlib.sha256(body or b"").hexdigest()
@@ -1511,14 +1567,11 @@ class Vault:
         grant.setdefault("install", None)
       if record.get("origin"):
         record["origin"].setdefault("install", None)
-    if version == STORE_VERSION:
-      return records, False
-    # An older vault (the recovery fallback, a restore from the image) can't
-    # read version 4: keep the file this one migrated from, once.
-    backup = self.dir / f"keys.v{version}.json"
-    if not backup.exists():
-      _atomic_write(backup, raw)
-    return {name: _migrated_to_parts(record) for name, record in records.items()}, True
+    if version != STORE_VERSION:
+      records = {name: _migrated_to_parts(record) for name, record in records.items()}
+    # Version 3 is still what single-value stores are written as, so only an
+    # older one (installation ids to stamp) is rewritten at start.
+    return records, version < 3
 
   def _load_requests(self) -> dict:
     """Open requests. A damaged file is set aside rather than stopping the vault:
@@ -1553,8 +1606,7 @@ class Vault:
     return stats
 
   def _write_store(self, records: dict) -> None:
-    payload = {"version": STORE_VERSION, "keys": records}
-    _atomic_write(self.store_path, json.dumps(payload, indent=1, sort_keys=True).encode())
+    _atomic_write(self.store_path, json.dumps(_store_payload(records), indent=1, sort_keys=True).encode())
 
   def _write_requests(self, requests: dict) -> None:
     _atomic_write(self.requests_path, json.dumps({"requests": requests}, indent=1, sort_keys=True).encode())
@@ -1731,7 +1783,7 @@ class Vault:
         raise VaultError(409, f"{name} changed since it was loaded; review it again.")
       if existing is None and len(self._records) >= MAX_KEYS:
         raise VaultError(400, f"The vault holds at most {MAX_KEYS} keys.")
-      parts, new_values = self._parts_after(name, existing, body)
+      parts, new_values, short_secrets = self._parts_after(name, existing, body)
       if body.get("inject") is not None:
         inject = validate_inject(body["inject"])
       elif existing is not None:
@@ -1741,8 +1793,13 @@ class Vault:
       missing = recipe_fits(inject, [part["name"] for part in parts])
       if missing:
         raise VaultError(400, f"{name} is sent with {', '.join(missing)}, which it has no part for.")
+      _refuse_plain_credentials(name, inject, parts)
       if not _sends_a_secret(inject, parts):
         raise VaultError(400, f"{name} would be sent without any secret part; mark the secret one secret.")
+      if inject["type"] not in ("header", "query"):
+        short = [part for part in short_secrets if part in recipe_parts(inject)]
+        if short:
+          raise VaultError(400, f"Secret part {short[0]} is shorter than {MIN_SENT_SECRET} characters.")
       if body.get("grants") is not None:
         grants = validate_grants(body["grants"])
       else:
@@ -1773,8 +1830,10 @@ class Vault:
       self._audit_change(name, actor, "added" if existing is None else "updated")
     return {"name": name, "created": existing is None}
 
-  def _parts_after(self, name: str, existing: dict | None, body: dict) -> tuple[list[dict], bool]:
-    """The key's parts once ``body`` is applied, and whether it changed a value."""
+  def _parts_after(self, name: str, existing: dict | None, body: dict) -> tuple[list[dict], bool, list[str]]:
+    """The key's parts once ``body`` is applied, whether it changed a value,
+    and which new secret values are shorter than ``MIN_SENT_SECRET``. An item
+    without a value changes only an existing part's label or secrecy."""
     current = {part["name"]: part for part in (existing or {}).get("parts") or []}
     items = []
     if body.get("value") is not None:
@@ -1784,15 +1843,27 @@ class Vault:
       if not isinstance(raw, list) or len(raw) > MAX_PARTS:
         raise VaultError(400, f"A key has at most {MAX_PARTS} parts.")
       items += raw
-    named = []
+    named, relabelled, short_secrets = [], [], []
     for item in items:
       if not isinstance(item, dict):
         raise VaultError(400, "Each part names itself and gives its value.")
-      meta = _part_meta(item, current.get(str(item.get("name") or "").strip()))
-      if meta["name"] in named:
+      before = current.get(str(item.get("name") or "").strip())
+      meta = _part_meta(item, before)
+      if meta["name"] in named or meta["name"] in relabelled:
         raise VaultError(400, f"Part {meta['name']} is given twice.")
+      if item.get("value") is None:
+        # A label or secrecy change keeps the value: it isn't a new one.
+        if before is None:
+          raise VaultError(400, f"Part {meta['name']} needs a value.")
+        relabelled.append(meta["name"])
+        current[meta["name"]] = (self._seal_part(name, meta, self._open_part(name, before))
+                                 if meta["secret"] != before["secret"] else {**before, "label": meta["label"]})
+        continue
+      value = validate_value(item.get("value"))
       named.append(meta["name"])
-      current[meta["name"]] = self._seal_part(name, meta, validate_value(item.get("value")))
+      current[meta["name"]] = self._seal_part(name, meta, value)
+      if meta["secret"] and len(value) < MIN_SENT_SECRET:
+        short_secrets.append(meta["name"])
     removed = body.get("remove_parts") or []
     if not isinstance(removed, list) or not all(isinstance(part, str) for part in removed):
       raise VaultError(400, "Name the parts to remove.")
@@ -1807,7 +1878,7 @@ class Vault:
       raise VaultError(400, "A key keeps at least one secret part.")
     # The part ``value`` first, then the others in the order they were added.
     ordered = sorted(current.values(), key=lambda part: part["name"] != VALUE_PART)
-    return ordered, bool(named)
+    return ordered, bool(named), short_secrets
 
   def _owned_name(self, origin: dict) -> str | None:
     """The key the app in ``origin`` created for that secret and still holds."""
@@ -2037,6 +2108,8 @@ class Vault:
         missing = recipe_fits(inject, have)
         if missing and record is None:
           raise VaultError(400, f"The recipe sends {', '.join(missing)}; list every part it sends in parts.")
+        if specs is not None:
+          _refuse_plain_credentials(name, inject, specs)
         if record is None and specs is not None and not _sends_a_secret(inject, specs):
           raise VaultError(400, "The recipe sends no secret part; mark the secret one secret.")
       grant = asker_grant(record["grants"], asker) if record is not None else None
@@ -2047,6 +2120,14 @@ class Vault:
         # Its ticket goes with it, so a card still showing it answers nothing.
         del self._requests[request_id]
         existing = None
+      if existing is not None and existing["status"] == "pending" and (
+        (inject is not None and inject != existing.get("inject"))
+        or (specs is not None and specs != existing.get("parts"))
+      ):
+        # A waiting request answers every later ask; one proposing another
+        # recipe would otherwise be approved as the first one.
+        raise VaultError(409, f"A request for {name} is already waiting with another way of sending it; "
+                         "the owner answers that one first.")
       if grant is not None:
         status = "paused" if grant.get("paused") else "granted"
         missing = sites_outside(grant["sites"], sites)
@@ -2085,7 +2166,9 @@ class Vault:
         "key": name, "reason": reason, "sites": sites, "inject": inject,
         "status": "pending", "created_at": now, "asked_at": now, "ticket": secrets.token_hex(8),
       }
-      if specs is not None and record is None:
+      if specs is not None:
+        # Kept even for a key that exists now: deleted before the owner
+        # answers, it is created from these parts.
         self._requests[request_id]["parts"] = specs
       self._audit_change(name, caller, "requested")
     asked = {"sites": sites, "reason": reason, "created": True}
@@ -2510,6 +2593,24 @@ def sets_inject(record: dict | None, request: dict) -> bool:
           and not recipe_fits(request["inject"], [part["name"] for part in record["parts"]]))
 
 
+def _credential_parts(inject: dict) -> list[str]:
+  """The parts a recipe treats as the secret itself, never shown as text."""
+  kind = inject["type"]
+  if kind == "basic":
+    return [inject["password"]]
+  if kind == "aws_sigv4":
+    return [inject["secret_access_key"], *([inject["session_token"]] if inject.get("session_token") else [])]
+  if kind == "jwt_bearer":
+    return [inject["private_key"]]
+  return []
+
+
+def _refuse_plain_credentials(name: str, inject: dict, parts: list[dict]) -> None:
+  for part in parts:
+    if part["name"] in _credential_parts(inject) and not part["secret"]:
+      raise VaultError(400, f"Part {part['name']} of {name} is the secret itself, so it stays secret.")
+
+
 def _sends_a_secret(inject: dict, parts: list[dict]) -> bool:
   """Whether ``inject`` sends at least one secret part: what it sends is what
   the vault redacts, so a key sent with only plain parts would be no key."""
@@ -2547,13 +2648,39 @@ def _listed_part(part: dict) -> dict:
 
 
 def _migrated_to_parts(record: dict) -> dict:
-  """A record from before version 4: its one sealed value becomes the secret part ``value``."""
+  """A version 1 to 3 record: its one sealed value becomes the secret part
+  ``value``. A damaged record (no sealed value) still loads, and only its own
+  use fails ("can't be decrypted"), as before; one that already holds parts
+  passes through."""
+  if isinstance(record.get("parts"), list):
+    return record
   migrated = {k: v for k, v in record.items() if k not in ("nonce", "sealed", "multiline")}
   migrated["parts"] = [{
     "name": VALUE_PART, "label": "", "secret": True,
-    "nonce": record["nonce"], "sealed": record["sealed"], "multiline": bool(record.get("multiline")),
+    "nonce": record.get("nonce"), "sealed": record.get("sealed"), "multiline": bool(record.get("multiline")),
   }]
   return migrated
+
+
+def _single_value(record: dict) -> bool:
+  """Whether a key is what every key was before parts: one secret ``value``
+  sent in a header or a query parameter."""
+  parts = record.get("parts") or []
+  return (len(parts) == 1 and parts[0]["name"] == VALUE_PART and parts[0].get("secret")
+          and record["inject"]["type"] in ("header", "query"))
+
+
+def _store_payload(records: dict) -> dict:
+  """The store as written: version 3 (one sealed value per key) while every
+  key fits it, version 4 (parts) once any key needs more."""
+  if not all(_single_value(record) for record in records.values()):
+    return {"version": STORE_VERSION, "keys": records}
+  flat = {}
+  for name, record in records.items():
+    [part] = record["parts"]
+    flat[name] = {**{k: v for k, v in record.items() if k != "parts"},
+                  "nonce": part["nonce"], "sealed": part["sealed"], "multiline": bool(part.get("multiline"))}
+  return {"version": 3, "keys": flat}
 
 
 def asker_grant(grants: dict, asker: dict) -> dict | None:
@@ -2752,6 +2879,18 @@ class BorrowSlots:
         del self._held[caller]
 
 
+def _minted(loan: Loan, request: UpstreamRequest, bearer: str | None) -> list[str]:
+  """What the vault made for this use and must hide from the answer: a
+  minted token, or an AWS signature (an S3 error echoes it back), which is
+  valid for that exact request for a while."""
+  if bearer:
+    return [bearer]
+  if loan.inject["type"] != "aws_sigv4":
+    return []
+  authorization = next(value for name, value in request.headers if name.lower() == "authorization")
+  return [authorization, authorization.rsplit("Signature=", 1)[-1]]
+
+
 class TokenCache:
   """Tokens minted from private keys, in memory only, until shortly before
   they expire. Keyed by the key, its recipe and its private part, so any
@@ -2760,18 +2899,29 @@ class TokenCache:
   def __init__(self) -> None:
     self._lock = threading.Lock()
     self._tokens: dict[str, tuple[str, float]] = {}
+    self._minting: dict[str, threading.Lock] = {}
 
   def get(self, key: str, mint) -> str:
-    now = time.time()
+    """The cached token, or one minted now. Simultaneous borrows of one key
+    wait for a single mint rather than each exchanging a token."""
     with self._lock:
-      held = self._tokens.get(key)
-    if held is not None and held[1] - TOKEN_MARGIN_SECS > now:
-      return held[0]
-    token, expires = mint()
+      minting = self._minting.setdefault(key, threading.Lock())
+    with minting:
+      now = time.time()
+      with self._lock:
+        held = self._tokens.get(key)
+      if held is not None and held[1] - TOKEN_MARGIN_SECS > now:
+        return held[0]
+      token, expires = mint()
+      with self._lock:
+        self._tokens = {k: v for k, v in self._tokens.items() if v[1] > now}
+        self._tokens[key] = (token, expires)
+      return token
+
+  def drop(self, key: str) -> None:
+    """Forget a token the site refused (revoked upstream), so the next borrow mints afresh."""
     with self._lock:
-      self._tokens = {k: v for k, v in self._tokens.items() if v[1] > now}
-      self._tokens[key] = (token, expires)
-    return token
+      self._tokens.pop(key, None)
 
 
 def _token_answer(host: str, status: int, data: bytes, jwt: str) -> dict:
@@ -3001,7 +3151,7 @@ class VaultHandler(BaseHTTPRequestHandler):
           answer["ask"] = AGENT_ASK
         self._send_json(exc.status, answer, denied=True)
         return
-      self._relay(logged_name, caller_label, request, body, loan.echoes(*filter(None, [bearer])), started, deadline)
+      self._relay(logged_name, caller_label, request, body, loan.echoes(*_minted(loan, request, bearer)), started, deadline)
     finally:
       deadline.stop()
       if borrowing:
@@ -3013,6 +3163,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     inject = loan.inject
     private = loan.values[inject["private_key"]]
     key = hashlib.sha256(json.dumps([name, inject, private], sort_keys=True).encode()).hexdigest()
+    self._token_key = key
     return self.server.tokens.get(key, lambda: self._mint(inject, private, deadline))
 
   def _mint(self, inject: dict, private: str, deadline: BorrowDeadline) -> tuple[str, float]:
@@ -3071,6 +3222,8 @@ class VaultHandler(BaseHTTPRequestHandler):
     self._key_sent = False  # set once the request, key included, starts to leave
     try:
       connection, sock, response = self._open_upstream(request, body, deadline)
+      if response.status == 401 and getattr(self, "_token_key", None):
+        self.server.tokens.drop(self._token_key)
       inflater = Inflater(response.getheaders())
     except VaultError as exc:
       if connection is not None:
