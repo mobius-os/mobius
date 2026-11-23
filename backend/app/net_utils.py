@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException
+from starlette.requests import HTTPConnection
 
 # Redirect loops stay bounded; every hop must still pass validate_url_safe.
 MAX_REDIRECTS = 5
@@ -156,3 +157,32 @@ def validate_url_safe(url: str) -> tuple[str, str, str]:
   # brackets preserved) per RFC 7230 §5.4; the SNI/cert name is the bare DNS
   # host. userinfo was rejected above, so parsed.netloc is exactly host[:port].
   return pinned_url, parsed.netloc, host
+
+
+def rate_limit_client(request: HTTPConnection) -> str:
+  """The visitor a per-client rate limit counts, which may sit behind a proxy.
+
+  Behind a proxy (the bundled Caddy, a managed platform's edge) the TCP peer
+  of every public request is the proxy's internal address, so keying on it
+  made each per-client limit one bucket for the whole internet: any visitor
+  could fill it and lock everyone else out of sign-in.
+
+  A peer on an internal network is treated as a proxy, and the rightmost
+  X-Forwarded-For entry names the visitor: the one that proxy wrote, whether
+  it replaced the header (Caddy) or appended to one the client sent. A
+  publicly routable peer is the visitor itself and its headers are ignored, so
+  a client on the internet cannot pick its own bucket. Only ``request.client``
+  stays the raw peer, so loopback checks elsewhere never depend on this.
+  """
+  peer = request.client.host if request.client else "127.0.0.1"
+  try:
+    if ipaddress.ip_address(peer).is_global:
+      return peer
+  except ValueError:
+    return peer
+  forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
+  claimed = forwarded.rsplit(",", 1)[-1].strip()
+  try:
+    return str(ipaddress.ip_address(claimed))
+  except ValueError:
+    return peer

@@ -917,9 +917,8 @@ def test_public_data_limiter_buckets_per_site_not_per_url():
 
   slowapi's default key_style="url" folds the path into the bucket, which
   handed a caller a fresh 60/minute budget for every key it invented. The key
-  stays the token rather than the client address because public traffic
-  arrives through the proxy and the app refuses to trust X-Forwarded-For, so
-  a client-keyed limit would collapse into a single global bucket.
+  is the token rather than the client address because the budget is per site:
+  one site's traffic must never throttle another.
   """
   from app.routes import published as published_mod
 

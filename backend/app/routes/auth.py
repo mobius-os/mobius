@@ -28,7 +28,6 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -48,12 +47,13 @@ from app.deps import (
   require_chat_embed_operation,
   require_installation_owner_control,
 )
+from app.net_utils import rate_limit_client
 from app.timeutil import now_naive_utc
 from app.routes.shell_install_pass import router as shell_install_pass_router
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 router.include_router(shell_install_pass_router)
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 log = logging.getLogger("moebius.auth")
 
 # Global login attempt tracking keyed by username. IP-level defense

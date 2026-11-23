@@ -499,11 +499,13 @@ by setting `access` to `apps`, or additionally expose anonymous calls at
 `/api/app-services/{service_id}/{path}` by setting it to `public`. Anonymous
 requests are counted per public service, 60 a minute by default across all its
 visitors, and one visitor may use at most a quarter of that allowance (never
-less than 60). A visitor is the network client address; Möbius does not trust
-forwarded client addresses, so behind a hosting proxy every visitor arrives as
-the same caller and shares one visitor share. A public service whose product
-needs a faster cadence may declare `service.public_requests_per_minute`, from
-60 to 600, which the owner accepts with the rest of its capability contract;
+less than 60). A visitor is the client address the deployment's proxy reports
+(the rightmost `X-Forwarded-For` entry, read only from a peer on an internal
+network); a client reaching Möbius directly is its own network address. Two
+proxies in a row count every visitor of one outer proxy address together. A
+public service whose product needs a faster cadence may declare
+`service.public_requests_per_minute`, from 60 to 600, which the owner accepts
+with the rest of its capability contract;
 that reviewed number is the service's ceiling. Request polling suits
 turn-based or slow-changing state; it is not a real-time transport. `service.id`
 is the stable public contract and does not change when the app's display name,

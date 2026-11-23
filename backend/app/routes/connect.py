@@ -72,7 +72,6 @@ from fastapi import (
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from app import browser_access, connect_outbound, connect_runner, connect_output, models
 from app.config import get_settings
@@ -84,6 +83,7 @@ from app.deps import (
   reject_cross_site,
   require_nondelegated_owner_or_app_control,
 )
+from app.net_utils import rate_limit_client
 from app.storage_io import atomic_write
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ router = APIRouter(
   tags=["connect"],
   dependencies=[Depends(reject_cross_site)],
 )
-_pair_limiter = Limiter(key_func=get_remote_address)
+_pair_limiter = Limiter(key_func=rate_limit_client)
 
 # A pairing code has no time limit: the owner may send the command to someone
 # who runs it days later. It stays redeemable until it is used once, replaced

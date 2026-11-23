@@ -13,10 +13,10 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import app_services, fs_locks, models
+from app.net_utils import rate_limit_client
 from app.reviewer_automation import REPO as _REVIEWER_REPO
 from app.config import get_settings
 from app.database import get_db
@@ -31,7 +31,7 @@ from app.github_contribution_git import _gh
 from app.github_contributions import _recheck_submit_app, _validate_submit_app
 
 router = APIRouter(prefix="/api/github", tags=["github"])
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 
 
 class ReviewerGrantBody(BaseModel):

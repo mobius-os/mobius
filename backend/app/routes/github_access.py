@@ -18,7 +18,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import fs_locks, github_auth, models, source_status
@@ -46,9 +45,10 @@ from app.github_connection import (
   has_full_pr_access,
   has_private_repo_access,
 )
+from app.net_utils import rate_limit_client
 
 router = APIRouter(prefix="/api/github", tags=["github"])
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 log = logging.getLogger("moebius.github.access")
 
 # Response cap + timeout mirror routes/proxy.py: GitHub payloads the
