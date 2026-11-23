@@ -8,18 +8,23 @@ import logging
 import time
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
+from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import Text, cast, or_
+from sqlalchemy import Text, and_, cast, or_
 from sqlalchemy.orm import Session, load_only
 
 from app import chat_queue, chat_writer, contribution_review_runs as reviews, models, owner_grants, providers, transcript_rows, settled
 from app import contribution_review_list as list_view
+from app import contribution_review_lifecycle as review_lifecycle
+from app import contribution_review_queries as queries
+from app import contribution_review_settle as review_settle
 from app import contribution_review_presets as presets
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
 from app.contribution_review_public_actions import post_public_review
@@ -56,7 +61,7 @@ REVIEW_CAPABILITIES = {"post_review": True, "post_review_merge": True, "propose_
                        "push_approval": True, "comment_verdict": True, "agent_submits_verdict": True,
                        "mark_ready_now": True, "back_to_draft_now": True, "close_now": True,
                        "request_review_now": True, "request_rereview_now": True, "ask_approval_now": True,
-                       "pr_machine": True, "owner_confirm": True,
+                       "pr_machine": True, "owner_confirm": True, "post_findings_now": True,
                        # Following (the autopilot grant) can start on a sent PR, and can ask before each push.
                        "follow_after_send": True, "follow_ask_mode": True}
 PUBLISHING_MODES = {"review", "review_merge"}
@@ -143,6 +148,22 @@ class ReviewOutcome(PullIdentity):
   tests_passed: bool | None = None
   reviewed_base_sha: str | None = Field(default=None, pattern=r"^[0-9a-f]{40}$")
   independent_receipt_id: str | None = Field(default=None, max_length=64)
+  # False when no finding should hold the PR up: a verdict proposal is then a plain comment.
+  blocking: bool = Field(default=True, strict=True)
+  # The obstacle outside the reviewer's control that ended this review early. Never a verdict.
+  blocked: str | None = Field(default=None, min_length=1, max_length=2000)
+
+  @model_validator(mode="after")
+  def only_findings_can_be_non_blocking(self):
+    if not self.blocking and self.state != "needs_you":
+      raise ValueError("blocking:false describes findings (needs_you); an all_clear result has none.")
+    return self
+
+  @model_validator(mode="after")
+  def a_blocked_review_is_private(self):
+    if self.blocked and (self.state != "needs_you" or self.publish):
+      raise ValueError("blocked names why a review could not finish: send it as needs_you without publish.")
+    return self
 
 
 def _row(db, app_id, run_id, principal):
@@ -239,6 +260,8 @@ def _saved_options_input(row):
 
 
 def _snapshot(db, body, principal):
+  """The options and model one preview or new grant freezes, for this caller."""
+  _refuse_agent_enabled_auto_send(body.options, principal)
   choice = resolve_round_choice(db)
   requested = getattr(body, "agent", None)
   if requested:
@@ -269,8 +292,32 @@ def _snapshot(db, body, principal):
     raise HTTPException(422, str(exc)) from exc
 
 
+AGENT_ENABLED_AUTO_SEND = (
+  "Only the owner can let a review send its verdict by itself, by choosing \"Agent posts\" when starting it "
+  "in Contribute. Start this review without agent_submits_verdict: its verdict then waits for the owner's Send.")
+
+
+def _is_agent(principal) -> bool:
+  return principal.chat_id is not None or principal.run_id is not None
+
+
+def _refuse_agent_enabled_auto_send(options, principal) -> None:
+  """Sending a verdict unseen is the owner's own choice in the review window.
+
+  A chat approval is the agent's attestation, so it never grants this: the owner
+  would learn what was posted in their name only after it was public. An app
+  token an agent minted carries the same provenance (``via_agent_chat``) even
+  though it drops the agent's chat/run identity, so it is refused too; the
+  owner's own browser mints an app token with no such provenance and keeps its
+  legitimate access.
+  """
+  agent_backed = _is_agent(principal) or principal.via_agent_chat is not None
+  if options is not None and options.agent_submits_verdict is True and agent_backed:
+    raise HTTPException(403, AGENT_ENABLED_AUTO_SEND)
+
+
 def _chat_approval(db, body, principal):
-  is_agent = principal.chat_id is not None or principal.run_id is not None
+  is_agent = _is_agent(principal)
   if body.source_chat_id is not None and (not is_agent or body.source_chat_id != principal.chat_id):
     raise HTTPException(403, "A source chat may only name the current authenticated owning conversation.")
   if principal.delegation_id is not None:
@@ -542,24 +589,66 @@ async def start_reviews(app_id: int | None, body: StartReviews,
     return {"run": _run_view(db, row), "brief": reviews.brief(row)}
 
 
+LIST_PAGE = 100
+ITEM_POST_FINDINGS = "post_findings"  # per item: may its findings be posted (see contribution_review_post_findings.offer)
+
+
+def _cursor_after(cursor: str | None):
+  """The (created_at, id) a page continues after, from the opaque cursor the previous page returned."""
+  if cursor is None:
+    return None
+  moment, _, run_id = cursor.partition("|")
+  try:
+    return datetime.fromisoformat(moment), run_id
+  except ValueError:
+    raise HTTPException(400, "This cursor is not one this list returned.") from None
+
+
+def _unfinished_runs(db, scope, owner_id) -> list:
+  """The owner's runs that are not complete, however old: the list never hides one behind its page size."""
+  run = models.ContributionReviewRun
+  ids = queries.run_ids(db, queries.UNFINISHED, owner_id)
+  rows = scope.filter(run.id.in_(ids)).all() if ids else []
+  return [row for row in rows if reviews.view(row)["state"] != "complete"]
+
+
+def _finished_page(scope, skip_ids, limit, after):
+  """One page of the remaining runs, newest first, and the cursor of the next page (None at the end)."""
+  run = models.ContributionReviewRun
+  query = scope.filter(run.id.notin_(skip_ids)) if skip_ids else scope
+  if after is not None:
+    moment, run_id = after
+    query = query.filter(or_(run.created_at < moment, and_(run.created_at == moment, run.id < run_id)))
+  rows = query.order_by(run.created_at.desc(), run.id.desc()).limit(limit + 1).all()
+  page = rows[:limit]
+  return page, (f"{page[-1].created_at.isoformat()}|{page[-1].id}" if len(rows) > limit else None)
+
+
 @router.get(APP_PREFIX + "/{app_id}/review-runs")
 def list_reviews(app_id: int | None, db: Session = Depends(get_db),
                  principal: Principal = Depends(get_principal),
-                 view: Literal["full", "summary"] = "full"):
+                 view: Literal["full", "summary"] = "full", limit: int = LIST_PAGE, cursor: str | None = None):
   """The owner's review runs, newest first.
 
   `view=summary` is the cheap form for a client that polls: every run keeps what a row or badge
   needs and loses its documents (see `contribution_review_list`); a run's full detail is `GET .../review-runs/{run_id}`.
   An answer in that form says so with a top-level `"view": "summary"`; a Möbius older than the option
   ignores it and answers in full, without the marker.
+
+  The first page holds every run that is not complete, whatever its age, and the newest `limit` (at most 100)
+  of the others. `has_more` says whether older runs remain, and `next_cursor` (pass it back as `cursor`) pages
+  through them; the pages after the first hold only complete runs, so a run is listed once.
   """
   _authorize_context(db, app_id, principal)
-  rows = db.query(models.ContributionReviewRun).filter(
-    models.ContributionReviewRun.owner_id == principal.owner.id,
-    _read_context_filter(app_id),
-  ).order_by(models.ContributionReviewRun.created_at.desc()).limit(100).all()
+  run = models.ContributionReviewRun
+  scope = db.query(run).filter(run.owner_id == principal.owner.id, _read_context_filter(app_id))
+  after = _cursor_after(cursor)
+  unfinished = _unfinished_runs(db, scope, principal.owner.id)
+  page, next_cursor = _finished_page(scope, {row.id for row in unfinished}, max(1, min(limit, LIST_PAGE)), after)
+  rows = sorted([*([] if after else unfinished), *page], key=lambda row: (row.created_at, row.id), reverse=True)
   answer = {"runs": [_list_run_view(db, row, app_id, view) for row in rows],
-            "respond_chats": _respond_chats(db, app_id) if app_id is not None else []}
+            "respond_chats": _respond_chats(db, app_id) if app_id is not None and after is None else [],
+            "has_more": next_cursor is not None, "next_cursor": next_cursor}
   if view == "summary":
     answer["view"] = view
   return answer
@@ -567,20 +656,38 @@ def list_reviews(app_id: int | None, db: Session = Depends(get_db),
 
 def _list_run_view(db, row, app_id, view="full"):
   """A run as the list shows it: one the asking app owns whole (or as its summary), a core run it reads through always minimized."""
-  value = _run_view(db, row, context_app_id=app_id)
+  value = _run_view(db, row, context_app_id=app_id, settle=True)
   if app_id is None or row.app_id == app_id:
-    return list_view.summary_run(value) if view == "summary" else value
+    return _summary_with_lifecycle(value) if view == "summary" else value
   value["items"] = [list_view.navigation_item(item) for item in value["items"]]
   if "options" in value:
     value["options"] = list_view.navigation_options(value["options"])
   return value
 
 
+def _summary_with_lifecycle(value):
+  """The summary row, with each item's vector as a short list row reads it (the history stays in the run)
+  and whether its findings can be posted."""
+  light = list_view.summary_run(value)
+  for brief, item in zip(light["items"], value["items"]):
+    if item.get(review_lifecycle.KEY):
+      brief[review_lifecycle.KEY] = review_lifecycle.compact(item[review_lifecycle.KEY])
+    if item.get(ITEM_POST_FINDINGS):
+      brief[ITEM_POST_FINDINGS] = item[ITEM_POST_FINDINGS]
+  return light
+
+
+UNFINISHED_IS_NOT_A_RESULT = (
+  "This review publishes what it finds: send findings with publish:true. A private needs_you is only for an "
+  "obstacle outside your control, named in \"blocked\". An unfinished review is not a result: finish it first.")
+
+
 def _reported_outcome(previous, body, row, principal):
   """Build private review evidence once; callers add only transition facts."""
   return {**previous, "state": body.state, "summary": body.summary, "scope": body.scope,
     "tests": body.tests, "tests_passed": body.tests_passed,
-    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha,
+    "reviewed_base_sha": body.reviewed_base_sha, "head_sha": body.head_sha, "blocking": body.blocking,
+    "blocked": body.blocked,
     "review_chat_id": row.chat_id, "review_run_id": principal.run_id}
 
 
@@ -703,6 +810,8 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       raise HTTPException(422, "Record the complete review scope and test evidence before all clear.")
     if body.publish and not _posts_review(row):
       raise HTTPException(403, "This grant does not authorize a public review.")
+    if _posts_review(row) and body.state == "needs_you" and not body.publish and not body.blocked:
+      raise HTTPException(422, UNFINISHED_IS_NOT_A_RESULT)
     if row.mode == "review_merge" and _posts_review(row) and body.state == "all_clear" and not body.publish:
       raise HTTPException(422, "This grant posts its review before merging. Send the all-clear outcome with publish:true.")
     if row.mode == "review" and not attempted and not body.publish:
@@ -839,7 +948,7 @@ def get_review(app_id: int, run_id: str, db: Session = Depends(get_db),
   if row is None:
     raise HTTPException(404, "Review run not found.")
   foreign_core = app_id is not None and row.app_id is None
-  return {"run": _run_view(db, row, context_app_id=app_id),
+  return {"run": _run_view(db, row, context_app_id=app_id, settle=True),
           "brief": None if foreign_core else reviews.brief(row)}
 
 
@@ -851,20 +960,76 @@ def _read_context_filter(app_id):
              models.ContributionReviewRun.app_id.is_(None))
 
 
-def _run_view(db, row, *, context_app_id=None):
-  value = reviews.view(row)
-  if (row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY):
-    value["takeover_notice"] = row.outcomes_json[TAKEOVER_NOTICE_KEY]
-  chat = db.get(models.Chat, row.chat_id)
-  value["chat_created_by_app_id"] = chat.created_by_app_id if chat else None
-  stop_context = context_app_id if context_app_id is not None else row.app_id
-  value["can_stop"] = bool(chat and (stop_context is None or chat.created_by_app_id == stop_context))
-  value["stop_semantics"] = "revokes_future_actions; an already-admitted public action may finish"
-  frozen = row.options_json or {}
-  if value["state"] != "complete" and not _frozen_model_matches(frozen, chat):
-    value.update(state="needs_you", summary="The owning chat model choice no longer matches this frozen workflow.")
-  last = db.query(models.ChatRun).filter_by(chat_id=row.chat_id).order_by(
-    models.ChatRun.started_at.desc()).first()
+STALLED_SUMMARY = ("This review did not report back: its conversation ended, or an hour passed without a result. "
+                   "Start the review again, or stop it. A result it still reports counts.")
+
+
+def _last_run(db, row):
+  return db.query(models.ChatRun).filter_by(chat_id=row.chat_id).order_by(models.ChatRun.started_at.desc()).first()
+
+
+def _chat_standing(db, row, chat, last) -> tuple[bool, bool]:
+  """(ended, working): the run's conversation can no longer report, or something will still move it.
+
+  Ended: never started, stopped, failed, or quiet with no next move. Working: a live run, or a finished
+  turn with a next move (an armed Wait, a self-resuming helper, a parked continuation).
+
+  A turn that merely ended is only inferred to be over after the same short grace the first turn gets, so a
+  helper that is still registering is not mistaken for a dead review.
+  """
+  from app.timeutil import now_naive_utc
+  if chat is None:
+    return True, False
+  def quiet(moment) -> bool:
+    return moment is None or (now_naive_utc() - moment).total_seconds() > FIRST_TURN_GRACE_SECONDS
+  if last is None:
+    return quiet(row.created_at), False
+  if last.status in _HALTED_RUNS:
+    return True, False
+  if last.status in models.NONTERMINAL_RUN_STATUSES:
+    return False, True
+  if last.status != "completed":
+    return False, False
+  moves = _has_next_move(db, chat)
+  return quiet(last.ended_at) and not moves, moves
+
+
+def _chat_facts(db, row, chat, last) -> dict:
+  """What the run's conversation tells the review's machine: Stop pressed, a question open, the chat over or working."""
+  asking = bool(chat and chat.pending_question_id)
+  ended, working = (False, False) if asking else _chat_standing(db, row, chat, last)
+  return {"stopped": _review_stop_requested(row), "asking": asking, "ended": ended, "working": working}
+
+
+def sweep_review_lifecycles(db) -> int:
+  """The periodic tick for runs with no screen open (see `contribution_review_settle.sweep`)."""
+  def facts_of(row):
+    return _chat_facts(db, row, db.get(models.Chat, row.chat_id), _last_run(db, row))
+  return review_settle.sweep(db, facts_of)
+
+
+def _settled_vectors(db, row, chat, last, settle) -> dict[str, dict]:
+  """Each item's review vector, after writing what the clock and the chat moved when `settle`.
+
+  The write comes first, so the view built next already shows it.
+  """
+  at = review_settle.now()
+  facts = _chat_facts(db, row, chat, last) if review_settle.has_live(row, at) else {}
+  if settle:
+    review_settle.settle_safely(db, row, facts, at)
+  return review_settle.run_vectors(row, facts, at)
+
+
+def _decorate_items(row, value, vectors) -> None:
+  """Put each item's review vector and its Post-findings offer on the view."""
+  saved = row.outcomes_json or {}
+  for item in value["items"]:
+    item[review_lifecycle.KEY] = vectors[reviews.key(item)]
+    item[ITEM_POST_FINDINGS] = post_findings.offer(saved.get(reviews.key(item)) or {})
+
+
+def _conversation_overlay(db, value, chat, last) -> None:
+  """What the owning conversation says about a run that is not complete: a question, a stop, a stall, or running."""
   if value["state"] != "complete" and chat and chat.pending_question_id:
     # An open owner card is the conversation's real state, however its last
     # turn ended: it continues when the owner answers, so it is not stopped.
@@ -879,8 +1044,29 @@ def _run_view(db, row, *, context_app_id=None):
     value.update(state="needs_you", execution_state="interrupted", summary=(
       "Nothing is working on this review any more: its reviewer stopped before it reported, "
       "for example when Möbius restarted. Open the review conversation to continue it, or start the review again."))
+  elif value["state"] != "complete" and any(review_lifecycle.stalled(item[review_lifecycle.KEY]) for item in value["items"]):
+    # Stalled by the clock or a dead chat: the old readers know "interrupted", so say it that way.
+    value.update(state="needs_you", execution_state="interrupted", summary=STALLED_SUMMARY)
   elif last:
     value["execution_state"] = last.status
+
+
+def _run_view(db, row, *, context_app_id=None, settle=False):
+  chat = db.get(models.Chat, row.chat_id)
+  last = _last_run(db, row)
+  vectors = _settled_vectors(db, row, chat, last, settle)
+  value = reviews.view(row)
+  _decorate_items(row, value, vectors)
+  if (row.outcomes_json or {}).get(TAKEOVER_NOTICE_KEY):
+    value["takeover_notice"] = row.outcomes_json[TAKEOVER_NOTICE_KEY]
+  value["chat_created_by_app_id"] = chat.created_by_app_id if chat else None
+  stop_context = context_app_id if context_app_id is not None else row.app_id
+  value["can_stop"] = bool(chat and (stop_context is None or chat.created_by_app_id == stop_context))
+  value["stop_semantics"] = "revokes_future_actions; an already-admitted public action may finish"
+  frozen = row.options_json or {}
+  if value["state"] != "complete" and not _frozen_model_matches(frozen, chat):
+    value.update(state="needs_you", summary="The owning chat model choice no longer matches this frozen workflow.")
+  _conversation_overlay(db, value, chat, last)
   if value["state"] != "complete" and _review_stop_requested(row):
     value.update(state="needs_you", execution_state="stopped",
                  summary="This review was stopped. No new evidence or public action is admitted.")
@@ -1075,8 +1261,9 @@ async def core_start_reviews(body: StartReviews, db: Session = Depends(get_db), 
 
 
 @router.get("/api/github/review-runs")
-def core_list_reviews(db: Session = Depends(get_db), principal: Principal = Depends(get_principal)):
-  return list_reviews(None, db, principal)
+def core_list_reviews(db: Session = Depends(get_db), principal: Principal = Depends(get_principal),
+                      limit: int = LIST_PAGE, cursor: str | None = None):
+  return list_reviews(None, db, principal, limit=limit, cursor=cursor)
 
 
 @router.get("/api/github/review-runs/{run_id}")
@@ -1252,6 +1439,50 @@ async def decide_verdict(app_id: int | None, run_id: str, body: VerdictDecision,
 async def core_decide_verdict(run_id: str, body: VerdictDecision, db: Session = Depends(get_db),
                               principal: Principal = Depends(get_principal)):
   return await decide_verdict(None, run_id, body, db, principal)
+
+
+class PostFindings(PullIdentity):
+  # A public tap: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+  preview_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _saved_item(row, body):
+  """The run's pinned target and saved item for the pull request a request names, at its exact version."""
+  item_key = reviews.key(body.model_dump())
+  original = next((t for t in row.targets_json if reviews.key(t) == item_key), None)
+  target = reviews.effective_target(row, original) if original else None
+  if target is None or target["head_sha"] != body.head_sha:
+    raise HTTPException(409, "This review is of another version. Nothing was posted.")
+  return item_key, target, (row.outcomes_json or {}).get(item_key) or {}
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post-preview", dependencies=[Depends(reject_cross_site)])
+def preview_posted_findings(app_id: int, run_id: str, body: PullIdentity, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """Read-only: the exact words Post to GitHub would send for this private review, and their hash."""
+  _item_key, target, item = _saved_item(_row(db, app_id, run_id, principal), body)
+  return post_findings.preview(item, target)
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/post",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def post_findings_now(app_id: int, run_id: str, body: PostFindings, db: Session = Depends(get_db),
+                            principal: Principal = Depends(get_principal)):
+  """The owner's own tap: post a finished private review's previewed words, once, as a plain comment review.
+
+  200 {state: posted, url, review_id}; 409 with a plain reason when nothing was posted;
+  502 post_unconfirmed when GitHub may have taken it. See contribution_review_post_findings.
+  """
+  _require_owner_hands(principal, "Only you can post a review from here. An agent cannot press Post.")
+  owner_grants.consume_owner_grant(db, principal, app_id, "post_findings", body, run_id=run_id)
+  row = _row(db, app_id, run_id, principal)
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    _owner_decision_authority(db, row)
+    item_key, target, _item = _saved_item(row, body)
+    cwd = Path(get_settings().data_dir) / "platform"
+    return await post_findings.post(db, row, item_key, target, body.preview_sha256, principal, cwd, gh=_gh,
+                                    authorize=lambda: _owner_decision_authority(db, row))
 
 
 class DirectMerge(PullIdentity):
@@ -1462,7 +1693,7 @@ async def observe_review(app_id: int | None, run_id: str, db: Session = Depends(
         # A failed read proves no new fact; preserve evidence and attempt fence.
         continue
       reviews.settle_merge_observation(db, row, reviews.key(original), previous, fact)
-    return {"run": _run_view(db, row)}
+    return {"run": _run_view(db, row, settle=True)}
 
 
 @router.post("/api/github/review-runs/{run_id}/observe", dependencies=[Depends(reject_cross_site)])

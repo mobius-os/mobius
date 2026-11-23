@@ -1,5 +1,5 @@
 /* Generic app block chrome. Apps own any detailed presentation in their view. */
-.md-app-block { width:min(100%, 640px); border:1px solid var(--border-light, var(--border)); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
+.md-app-block { width:100%; border:1px solid var(--border-light, var(--border)); border-radius:14px; margin:16px 0; overflow:hidden; background:var(--surface, var(--bg)); font-size:14px; line-height:1.4; }
 .md-blocks > .md-app-block { margin:4px 0 8px; }
 /* Assistant replies shrink to their prose (.chat__msg--assistant aligns
    flex-start). A reply with a block takes the column's width instead, so the
@@ -83,6 +83,13 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
    between their lines is the 26px their boxes reach beyond the line. */
 .md-app-block__item-state .md-app-block__links { row-gap:26px; }
 .md-app-block > footer { display:flex; flex-wrap:wrap; align-items:center; justify-content:flex-end; gap:8px 12px; padding:8px 16px 16px; }
+/* Compact inline actions share one permanent 44px lane: empty while the
+   header reports work, confirmation in place, then the result links. */
+.md-app-block--action-lane > footer { box-sizing:border-box; min-height:68px; flex-wrap:nowrap; }
+.md-app-block__results { display:flex; align-items:center; justify-content:safe flex-end; gap:12px; min-width:0; overflow-x:auto; }
+.md-app-block__results > .md-app-block__links { flex-shrink:0; flex-wrap:nowrap; }
+.md-app-block__results .md-app-block__link { white-space:nowrap; }
+.md-app-block--action-lane > footer > .md-app-block__session { flex:0 0 auto; }
 .md-app-block__toggle { display:inline-flex; align-items:center; gap:8px; margin-right:auto; border:0; background:transparent; color:var(--text); font:inherit; font-size:14px; min-height:44px; padding:0 8px; border-radius:8px; cursor:pointer; }
 .md-app-block__toggle:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__toggle:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
@@ -180,6 +187,8 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__title-mark.is-danger { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger-text, color-mix(in srgb, var(--danger) 65%, var(--text))); }
 .md-app-block__title-mark-alert { font-size:13px; font-weight:700; line-height:1; }
 .md-app-block__title-mark .md-app-block__spinner { width:14px; height:14px; }
+.md-app-block__title-mark.is-busy { background:transparent; }
+.md-app-block__title-mark.is-busy .md-app-block__spinner { box-sizing:border-box; border-width:2px; transform-origin:center; }
 /* A folded block is one muted line, not a placeholder box: no rows, no controls. */
 .md-app-block--folded { border:0; background:transparent; }
 .md-app-block--folded > header { flex-wrap:wrap; padding:0 4px 0 8px; }
@@ -189,3 +198,20 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__jump:hover { background:color-mix(in srgb, var(--text) 6%, transparent); }
 .md-app-block__jump:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .md-app-block--folded .md-app-block__jump { margin-left:auto; }
+
+/* Opt-in status belongs beside the action, not in a second header lane.
+   Keep controls at their natural size; wrap the footer on narrow cards. */
+.md-app-block--footer-status:not(.md-app-block--folded) { padding-top:12px; }
+.md-app-block--footer-status > footer { flex-wrap:wrap; }
+/* The host-drawn app name is its own quiet line above the app's status, so
+   it is never truncated away beside the controls. */
+.md-app-block__footer-status { display:flex; flex:1 1 80px; flex-direction:column; align-items:flex-start; gap:2px; min-width:0; margin-right:auto; }
+.md-app-block__footer-app { max-width:100%; overflow-wrap:anywhere; color:var(--muted); font-size:12px; line-height:1.3; }
+.md-app-block__footer-line { display:flex; align-items:center; gap:6px; max-width:100%; min-width:0; }
+.md-app-block__footer-status strong { min-width:0; font-size:13px; font-weight:500; overflow-wrap:anywhere; }
+.md-app-block--footer-status > footer > .md-app-block__session,
+.md-app-block--footer-status > footer .md-app-block__session-row,
+.md-app-block--footer-status > footer .md-app-block__controls { flex:0 1 auto; }
+.md-app-block--footer-status.md-app-block--folded > footer { padding:0 4px 0 8px; }
+.md-app-block--folded .md-app-block__footer-status { color:var(--muted); }
+.md-app-block--footer-status a.md-app-block__link { color:var(--text); }

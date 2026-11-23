@@ -168,6 +168,56 @@ test('Enter sends exact Markdown, Shift+Enter inserts a line, sent text cannot r
   expect(await text(page)).toBe('')
 })
 
+test.describe('Android Chrome', () => {
+  test.use({ userAgent: 'Mozilla/5.0 (Linux; Android 16; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Mobile Safari/537.36' })
+
+  test('typing after a send or history recall reaches the box through EditContext', async ({ page }) => {
+    const errors = []
+    page.on('pageerror', error => errors.push(error.message))
+    await open(page, { touch:true })
+    const keyboardText = () => page.evaluate(() => document.querySelector('.cm-content').editContext?.text ?? null)
+    await page.keyboard.type('first message')
+    await expect(page.getByRole('button', { name:'Send' })).toBeVisible()
+    expect(await keyboardText()).toBe('first message')
+    await page.evaluate(() => window.composerFixture.replace(''))
+    await expect.poll(() => text(page)).toBe('')
+    await page.keyboard.type('next')
+    await expect.poll(() => text(page)).toBe('next')
+    expect(await keyboardText()).toBe('next')
+    await page.evaluate(() => window.composerFixture.replace('older **message**'))
+    await expect.poll(() => text(page)).toBe('older **message**')
+    await page.keyboard.type('!')
+    await expect.poll(() => text(page)).toBe('older **message**!')
+    expect(await keyboardText()).toBe('older **message**!')
+    await page.keyboard.press('Control+z')
+    await page.keyboard.press('Control+z')
+    expect(await text(page)).toBe('older **message**')
+    expect(errors).toEqual([])
+  })
+
+  test('a word still being composed when the box is cleared does not corrupt the next word', async ({ page }) => {
+    const errors = []
+    page.on('pageerror', error => errors.push(error.message))
+    await open(page, { touch:true })
+    const ime = await page.context().newCDPSession(page)
+    const compose = async word => {
+      for (let i = 1; i <= word.length; i++) await ime.send('Input.imeSetComposition', { text: word.slice(0, i), selectionStart: i, selectionEnd: i })
+    }
+    await compose('hello')
+    await ime.send('Input.insertText', { text: 'hello ' })
+    await compose('world')
+    await expect(page.getByRole('button', { name:'Send' })).toBeVisible()
+    await expect.poll(() => text(page)).toBe('hello world')
+    await page.evaluate(() => window.composerFixture.replace(''))
+    await expect.poll(() => text(page)).toBe('')
+    await compose('next')
+    await ime.send('Input.insertText', { text: 'next' })
+    await expect.poll(() => text(page)).toBe('next')
+    expect(await page.evaluate(() => document.querySelector('.cm-content').editContext.text)).toBe('next')
+    expect(errors).toEqual([])
+  })
+})
+
 test('composition confirmation cannot send a desktop draft', async ({ page }) => {
   const editor = await open(page)
   await page.keyboard.insertText('draft')

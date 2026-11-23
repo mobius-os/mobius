@@ -403,28 +403,18 @@
 .chat__msg:focus { outline: none; }
 
 .chat__msg--user { align-items: flex-end; }
-/* A mid-turn message waiting for the agent's next step boundary. The caption
-   holds at zero height and opacity briefly: a fast cut replaces this row with
-   an ordinary one, and must neither flash the caption nor grow and shrink the
-   row at the pinned bottom. The global reduced-motion rule shortens the fade
-   but keeps the delay. */
-.chat__steer-pending-note {
-  overflow: hidden;
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--muted);
-  animation: chat-steer-note-in 0.2s ease-out 0.8s both;
-}
-@keyframes chat-steer-note-in {
-  from { max-height: 0; margin-top: 0; opacity: 0; }
-  to { max-height: 32px; margin-top: 4px; opacity: 1; }
-}
 .chat__msg--marker { align-items: stretch; }
 .chat__msg--assistant {
   --activity-block-gap: 8px;
   --activity-row-gap: 4px;
   align-items: flex-start;
 }
+
+/* The row of an owner-input card (question, secure input). Replies shrink
+   each piece to its content, and a card sized by its content is as narrow as
+   its shortest question and changes width once an answer is typed. The row
+   takes the reply column instead, as a reply with an app block does. */
+.chat__owner-card { align-self: stretch; min-width: 0; }
 
 /* Event-only owner for Markdown-aware native selection copy. `contents` keeps
    every prose/tool child in the message row's existing flex and gap geometry. */
@@ -479,9 +469,10 @@
   pointer-events: none;
   transition: opacity 0.15s ease, visibility 0s linear 0.15s;
 }
-/* The chat's one reply footer, on its last reply, is its own line under the
-   reply, not an overlay in the conversation gap: it keeps its space while
-   the agent works, so settling never moves the transcript, and it always
+/* Each complete answer's footer is its own line under its last reply, not
+   an overlay in the conversation gap: it keeps its space while the agent
+   works, so settling fills that line instead of adding one (collapsed
+   References fit it too; only a list left open adds its body), and it always
    sits the same distance below the reply's last line (its fixed height comes
    from .chat__msg-meta). Time and Copy stay together, inset to match the
    reply's prose. */
@@ -492,6 +483,50 @@
   margin: 6px 0 0;
   padding: 0 8px;
   gap: 0;
+}
+/* References share the action line; only their expanded body takes a new
+   line. Its open disclosure, not a second timer, owns the visibility hold. */
+.chat__msg-meta--start:has(> .chat__sources) {
+  display: grid;
+  box-sizing: border-box;
+  width: 100%;
+  grid-template-columns: minmax(0, max-content) repeat(2, max-content) minmax(max-content, 1fr);
+  /* The action line stays 28px whether References are open or not; an open
+     list only adds its own row below. */
+  grid-template-rows: 28px auto;
+  height: auto;
+  min-height: 28px;
+}
+.chat__msg-meta--start:has(> .chat__sources) > .chat__ts {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chat__msg-meta--start > .chat__sources { display: contents; }
+/* In the footer the toggle fits the reserved 28px line like Copy and Branch
+   (24px, centred), so a settling answer that gains its References fills the
+   line instead of growing it. Touch keeps a 44px target
+   through ::after (below), not through the toggle's own height. */
+.chat__msg-meta--start .chat__sources-toggle {
+  position: relative;
+  min-height: 0;
+  height: 24px;
+  padding: 0 6px;
+  margin-left: 6px;
+  justify-self: start;
+}
+/* Expanded link titles must not contribute to the action row's track sizing;
+   the body's inline-size container (below) keeps them out of it. */
+.chat__msg-meta--start .chat__sources-body { grid-column: 1 / -1; }
+/* While its answer continues, References hold their place, inert: closed
+   they are unseen like the other controls; an open list stays visible, so it
+   neither leaves a list-sized gap nor collapses. */
+.chat__sources--held:not(.chat__sources--open) { visibility: hidden; }
+.chat__msg-meta--start:has(> .chat__sources--open) {
+  opacity: 1;
+  visibility: inherit;
+  pointer-events: auto;
+  transition-delay: 0s;
 }
 /* The footer's actions are equal 24px square buttons, icon centred, side by
    side; the time sits the same distance from Copy's icon as Copy's icon from
@@ -934,7 +969,7 @@
   animation: cursorPulse 1.5s ease-in-out infinite;
 }
 
-.progressive-markdown[data-is-streaming="true"] {
+.md-blocks[data-is-streaming="true"] {
   position: relative;
 }
 
@@ -1810,6 +1845,8 @@
 .chat__sources-body {
   min-width: 0;
   padding-top: 4px;
+  /* The reference list sizes to the pane it is in, not the screen. */
+  container: chat-sources / inline-size;
 }
 
 .chat__sources-status {
@@ -1844,13 +1881,22 @@
   grid-column: 1 / -1;
 }
 
-@media (max-width: 340px) {
-  .chat__sources-list { grid-template-columns: minmax(0, 1fr); }
+/* In a narrow pane, reference links fit their labels instead of filling a
+   grid cell. 560px of list is what a 600px-wide phone pane leaves. */
+@container chat-sources (max-width: 560px) {
+  .chat__sources-list { display: flex; flex-wrap: wrap; }
+  .chat__source-item--web { width: auto; max-width: min(100%, 220px); }
+  .chat__source-item--web .chat__source-chip { width: auto; max-width: 100%; }
 }
 
 @media (pointer: coarse) {
   .chat__sources-toggle,
   .chat__source-chip { min-height: 44px; }
+  .chat__msg-meta--start .chat__sources-toggle::after {
+    content: '';
+    position: absolute;
+    inset: -10px 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2303,11 +2349,29 @@
    from the old `.chat__compaction*` selectors (compaction is the first
    marker, so its look is the default). */
 .chat__marker {
+  width: 100%;
+  min-width: 0;
+  align-self: stretch;
   border-radius: 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border-light)); /* CONTRACT: accent-tinted hairline framing the marker card */
   background: color-mix(in srgb, var(--accent) 4%, transparent); /* CONTRACT: faint accent tint — sits on the opaque message-list fill beneath, not a standalone surface */
   overflow: hidden;
 }
+
+/* A marker that follows earlier content in an answer takes the same separation
+   as Goal history. Markers opening an answer, standalone rows and compaction
+   cards (nested in .chat__tools) keep their existing spacing; the answer cause
+   already owns the gap below it. */
+.chat__markdown-copy-surface > :not(.chat__answer-cause) + .chat__marker { margin-top: 10px; }
+.chat__recovery-events { list-style: none; margin: 8px 0 0; padding: 0; }
+.chat__recovery-events li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  padding: 4px 0;
+}
+.chat__recovery-events time { color: var(--muted); font-size: 12px; }
 
 .chat__marker-header {
   display: flex;
@@ -3228,29 +3292,6 @@
      the keyboard or scroll the chat behind it. */
   touch-action: pan-y;
   overscroll-behavior: contain;
-}
-
-/* Opts into a scrollbar unconditionally, not behind .chat__tool-diff-scroll's
-   hover/pointer gate: the model list overflows on touch clients too.
-   Keep the gutter stable, but reveal its thumb only during scrolling.
-   Opening the Brain must not flash a scrollbar before any movement. */
-.composer-popover {
-  --shell-scrollbar-width: thin;
-  --shell-scrollbar-display: block;
-  --composer-scrollbar-thumb: transparent;
-  scrollbar-color: var(--composer-scrollbar-thumb) transparent;
-}
-
-.composer-popover[data-scrolling] {
-  --composer-scrollbar-thumb: color-mix(in srgb, var(--muted) 32%, transparent);
-}
-
-.composer-popover::-webkit-scrollbar { width: 10px; }
-.composer-popover::-webkit-scrollbar-thumb {
-  border: 3px solid transparent;
-  border-radius: 999px;
-  background: var(--composer-scrollbar-thumb);
-  background-clip: padding-box;
 }
 
 [data-theme="light"] .composer-popover {

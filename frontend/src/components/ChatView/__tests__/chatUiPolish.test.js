@@ -178,7 +178,7 @@ test('activity surfaces use their intended width and compact status type', () =>
 
 test('message references use a bounded responsive two-column grid', () => {
   const css = stripComments(chatCss)
-  const sourcesRule = css.match(/\.chat__sources\s*\{[^}]*\}/)?.[0] || ''
+  const sourcesRule = css.match(/(?:^|\})\s*(\.chat__sources\s*\{[^}]*\})/)?.[1] || ''
   const listRule = css.match(/\.chat__sources-list\s*\{[^}]*\}/)?.[0] || ''
   const itemRule = css.match(/\.chat__source-item\s*\{[^}]*\}/)?.[0] || ''
   const nonWebItemRule = css.match(/\.chat__source-item:not\(\.chat__source-item--web\)\s*\{[^}]*\}/)?.[0] || ''
@@ -213,8 +213,21 @@ test('message references use a bounded responsive two-column grid', () => {
   assert.match(chipRule, /width:\s*100%/,
     'each source card should fill its grid column')
   assert.match(css,
-    /@media\s*\(max-width:\s*340px\)\s*\{\s*\.chat__sources-list\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/s,
-    'narrow panes should fall back to one reference column')
+    /@container\s+chat-sources\s*\(max-width:\s*560px\)\s*\{\s*\.chat__sources-list\s*\{\s*display:\s*flex;\s*flex-wrap:\s*wrap/s,
+    'narrow panes should wrap compact reference pills instead of using grid columns')
+  assert.match(css.match(/(?:^|\})\s*(\.chat__sources-body\s*\{[^}]*\})/)?.[1] || '', /container:\s*chat-sources\s*\/\s*inline-size/,
+    'the pill layout follows the references body width, not the screen')
+  assert.match(css,
+    /\.chat__source-item--web\s*\{\s*width:\s*auto;\s*max-width:\s*min\(100%,\s*220px\)/,
+    'long reference labels should cap their pill width on phones')
+})
+
+test('held References: closed ones are unseen, an open list stays shown', () => {
+  const css = stripComments(chatCss)
+  assert.match(css, /\.chat__sources--held:not\(\.chat__sources--open\)\s*\{\s*visibility:\s*hidden;\s*\}/,
+    'only a closed held disclosure is hidden, like the other working-footer controls')
+  assert.doesNotMatch(css, /\.chat__sources--held\s*\{[^}]*visibility/,
+    'an open held list is never hidden, so it leaves no list-sized gap')
 })
 
 test('transitions into Stop are sequential while Send to Steer stays immediate', () => {

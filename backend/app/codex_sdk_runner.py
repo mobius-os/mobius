@@ -81,9 +81,6 @@ from app.codex_events import (
   _agent_message_phase,
   _codex_terminal_error,
   _codex_size_failure,
-  # Compatibility import for existing internal callers; implementation lives
-  # beside the Codex event/observability code it supports.
-  _skill_names_in_command,
   _observe_skill_reads,
   _file_change_patch_summary,
   _file_change_edit_preview,
@@ -829,8 +826,10 @@ class ActiveCodexTurn:
     run_marker: str | None = None,
     shared_host: bool = False,
     goal_brief_refresh: Any | None = None,
+    model: str | None = None,
   ):
     self.chat_id = chat_id
+    self.model = model
     self._goal_brief_refresh = goal_brief_refresh
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
@@ -1294,7 +1293,6 @@ def _sdk_imports() -> dict[str, Any]:
     AccountRateLimitsUpdatedNotification,
     ReasoningSummaryTextDeltaNotification,
     ReasoningTextDeltaNotification,
-    SubAgentActivityKind,
     SubAgentActivityThreadItem,
     ThreadStartedNotification,
     ThreadStatusChangedNotification,
@@ -1305,14 +1303,11 @@ def _sdk_imports() -> dict[str, Any]:
     TurnStatus,
     WebSearchThreadItem,
   )
-  # The exact rust-v0.153.3 SDK pin includes the complete collab, sub-agent,
-  # status, and rate-limit surface above. Import it as one contract: accepting
+  # The pinned SDK includes the complete collab, sub-agent, status, and
+  # rate-limit surface above. Import it as one contract: accepting
   # an older partial SDK here would only defer an image mismatch into missing
   # lifecycle events at runtime. test_codex_sdk_contract locks the symbols and
   # fields that this runner consumes.
-  _enable_completed_subagent_activity(
-    activity_kind_type=SubAgentActivityKind,
-  )
 
   return {
     "CollabAgentToolCallThreadItem": CollabAgentToolCallThreadItem,
@@ -1370,39 +1365,6 @@ def _sdk_imports() -> dict[str, Any]:
     "TurnStatus": TurnStatus,
     "WebSearchThreadItem": WebSearchThreadItem,
   }
-
-
-def _enable_completed_subagent_activity(*, activity_kind_type: Any) -> None:
-  """Accept the completion marker emitted by the matching Codex app-server.
-
-  Codex 0.153.3 persists ``subAgentActivity(kind=completed)`` but the Python
-  models generated from that same tag omit ``completed`` from the enum. That
-  makes ``thread/resume`` fail while parsing otherwise valid history. Keep the
-  compatibility seam at the provider boundary and limited to this known wire
-  value; arbitrary future values must still fail loudly. Once the generated
-  enum includes ``completed`` natively this becomes a no-op.
-  """
-  if activity_kind_type is None:
-    return
-  try:
-    activity_kind_type("completed")
-    return
-  except ValueError:
-    pass
-
-  previous_missing = getattr(activity_kind_type, "_missing_", None)
-
-  def _missing(cls: Any, value: Any) -> Any | None:
-    if value == "completed":
-      member = object.__new__(cls)
-      member._name_ = "completed"
-      member._value_ = value
-      return member
-    if previous_missing is not None:
-      return previous_missing(value)
-    return None
-
-  activity_kind_type._missing_ = classmethod(_missing)
 
 
 # Owner-facing wording for an unexpected session death. The exception's
@@ -1748,6 +1710,7 @@ async def _run_codex_sdk_turn(
   coordination_enabled: bool = True,
   helper_host_key=None,
   goal_brief_refresh=None,
+  app_room=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
 
@@ -1848,11 +1811,15 @@ async def _run_codex_sdk_turn(
         base_instructions = skill.read_text(encoding="utf-8")
       except OSError:
         base_instructions = None
-  deliverable_instruction = generated_files.delivery_instruction(generated_dir)
-  base_instructions = (
-    f"{base_instructions.rstrip()}\n\n{deliverable_instruction}\n"
-    if base_instructions else deliverable_instruction + "\n"
-  )
+  if app_room is not None:
+    # A confined app agent's room cannot reach the chat's deliverables folder.
+    base_instructions = f"{(base_instructions or '').rstrip()}\n"
+  else:
+    deliverable_instruction = generated_files.delivery_instruction(generated_dir)
+    base_instructions = (
+      f"{base_instructions.rstrip()}\n\n{deliverable_instruction}\n"
+      if base_instructions else deliverable_instruction + "\n"
+    )
 
   env = dict(base_env)
   env["MOBIUS_COORDINATION_ENABLED"] = (
@@ -1883,26 +1850,42 @@ async def _run_codex_sdk_turn(
   restricted = delegated
   from app.app_tools import live_app_tools
   from app.platform_tools import codex_turn_mcp_config
-  connector_thread_config = codex_turn_mcp_config(
-    connector_plan,
-    control_enabled=True,
-    top_level=not delegated,
-    coordination_enabled=coordination_enabled,
-    app_tool_names=tuple(
-      tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
-    ),
+  # A turn may bring its own provider settings (a Möbius models snapshot).
+  provider_overrides = (
+    provider_config_overrides if provider_config_overrides is not None
+    else get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
   )
   config_overrides = _codex_config_overrides()
-  config_overrides.extend(
-    provider_config_overrides if provider_config_overrides is not None else
-    get_provider(provider_id, data_dir=runtime_data_dir).codex_config_overrides()
-  )
-  config_overrides.extend(_codex_platform_hook_overrides())
-  # Keep the app-server in its own process group for turn-end cleanup.
-  launch_args = _codex_app_server_launch_args(
-    codex_bin,
-    config_overrides,
-  )
+  if app_room is not None:
+    # A confined app agent: only its declared control tools, no platform
+    # hooks, and the model reached through the gateway (agent_roles.Room).
+    connector_thread_config = codex_turn_mcp_config(
+      None, control_enabled=app_room.offers_tools,
+      app_agent_tools=app_room.control_tools, app_tool_names=app_room.app_tools,
+    )
+    config_overrides.extend(app_room.codex_overrides(provider_overrides))
+    if app_room.asks_owner:
+      config_overrides.append(_codex_owner_card_hook_override())
+    if codex_bin is None:
+      raise RuntimeError("Codex is not installed, so this app's agent cannot start.")
+    launch_args = app_room.codex_launch_args(codex_bin, config_overrides)
+  else:
+    connector_thread_config = codex_turn_mcp_config(
+      connector_plan,
+      control_enabled=True,
+      top_level=not delegated,
+      coordination_enabled=coordination_enabled,
+      app_tool_names=tuple(
+        tool.exposed_name for tool in (live_app_tools(db) if db is not None else ())
+      ),
+    )
+    config_overrides.extend(provider_overrides)
+    config_overrides.extend(_codex_platform_hook_overrides())
+    # Keep the app-server in its own process group for turn-end cleanup.
+    launch_args = _codex_app_server_launch_args(
+      codex_bin,
+      config_overrides,
+    )
   config_kwargs: dict[str, Any] = dict(
     codex_bin=codex_bin,
     cwd=cwd,
@@ -1952,6 +1935,9 @@ async def _run_codex_sdk_turn(
   first_token_usage: Any | None = None
   final_token_usage: Any | None = None
   call_token_usages: list[Any] = []
+  # Set only from this turn's own model output (see RunnerResult). The turn
+  # stream is routed to this turn, so a resumed thread's history is not it.
+  provider_responded = False
   process_group_id: int | None = None
   task_host_open = False
   task_host_tool_use_id: str | None = None
@@ -2013,7 +1999,10 @@ async def _run_codex_sdk_turn(
     )
 
   def with_usage(result: RunnerResult) -> RunnerResult:
-    """Attaches whatever the turn spent before it ended, however it ended."""
+    """Attaches what the turn spent, and whether the provider answered it,
+    however it ended."""
+    if provider_responded:
+      result["provider_responded"] = True
     if final_token_usage is not None:
       result["usage"] = _model_dump(final_token_usage)
       metrics = normalize_codex_usage(
@@ -2073,9 +2062,14 @@ async def _run_codex_sdk_turn(
       # keyed without per-turn facts); this thread trusts only the ones it
       # uses. Every turn needs its recorded-result end hook; a lazy Goal
       # refresher also covers coordinator promotion after provider entry.
-      required_hooks = [_codex_owner_card_hook_override()]
+      # A room has no Goals; it ends a turn on a card only when it may ask.
+      required_hooks = (
+        [_codex_owner_card_hook_override()]
+        if app_room is None or app_room.asks_owner else []
+      )
       brief_hooks = (
-        [_codex_goal_brief_hook_override()] if goal_brief_refresh is not None else []
+        [_codex_goal_brief_hook_override()]
+        if goal_brief_refresh is not None and app_room is None else []
       )
       if required_hooks or brief_hooks:
         connector_thread_config = await _codex_platform_hook_thread_config(
@@ -2288,6 +2282,7 @@ async def _run_codex_sdk_turn(
         run_marker=base_env.get(RUN_MARKER_ENV),
         shared_host=helper_host is not None,
         goal_brief_refresh=goal_brief_refresh,
+        model=model,
       )
       registry.register(active_turn)
       record_memory_checkpoint_once(
@@ -2367,6 +2362,7 @@ async def _run_codex_sdk_turn(
           if item_id and item_id in abandoned_agent_message_item_ids:
             continue
           if payload.delta:
+            provider_responded = True
             event = {"type": "text", "content": payload.delta}
             if item_id:
               event["text_item_id"] = item_id
@@ -2389,6 +2385,7 @@ async def _run_codex_sdk_turn(
           ),
         ):
           if payload.delta:
+            provider_responded = True
             bc.publish(_thinking_event(
               payload.delta,
               _codex_thinking_segment_id(payload),
@@ -2413,6 +2410,7 @@ async def _run_codex_sdk_turn(
         if isinstance(payload, sdk["ItemStartedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
           if isinstance(item, sdk["AgentMessageThreadItem"]):
+            provider_responded = True
             item_id = str(getattr(item, "id", None) or "")
             event = {"type": "text_boundary"}
             if (
@@ -2436,10 +2434,15 @@ async def _run_codex_sdk_turn(
             # this turn. Codex may announce ThreadStarted before or after its
             # collab item, so opening it here is a fallback while the lifecycle
             # path below can also open it on demand.
+            provider_responded = True
             ensure_task_host()
           else:
             event = _tool_start_event(item, sdk)
             if event is not None:
+              # Every tool item classified here is a call the model requested
+              # (an owner card's request_question included); user messages,
+              # hook prompts and compaction markers are not.
+              provider_responded = True
               _stamp_tool_use_id(event, item)
               bc.publish(event)
           _observe_skill_reads(item, sdk, bc=bc, chat_id=chat_id)
@@ -2898,6 +2901,7 @@ async def run_codex_sdk_turn(
   coordination_enabled: bool = True,
   helper_host_key=None,
   goal_brief_refresh=None,
+  app_room=None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
 
@@ -2955,6 +2959,7 @@ async def run_codex_sdk_turn(
         coordination_enabled=coordination_enabled,
         helper_host_key=helper_host_key,
         goal_brief_refresh=goal_brief_refresh,
+        app_room=app_room,
       )
   finally:
     ownership.release()

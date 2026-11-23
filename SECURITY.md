@@ -15,8 +15,9 @@ being external attackers reaching the public HTTPS endpoint.
   their owner through managed sign-in instead.
 - **PKCE OAuth:** Server-side token exchange for CLI provider auth.
   No client-side token exposure.
-- **Encryption at rest:** API keys stored with Fernet (AES-128 + HMAC),
-  derived from SECRET_KEY.
+- **Encryption at rest:** keys in Settings › Keys are sealed with AES-GCM
+  under the key vault's own master key (`.vault/master.key`), never under
+  SECRET_KEY; connector credentials use Fernet keys derived from SECRET_KEY.
 - **TLS and response headers:** Caddy auto-provisions HTTPS certificates, while
   the backend owns standard response headers and scoped document CSPs so direct
   Railway and self-hosted proxy paths cannot drift. The primary Caddy host
@@ -122,6 +123,79 @@ prompt- and review-based. This is appropriate because:
 Full agent root is the default normal-instance capability. The root-owned baked
 entrypoint creates an unrestricted sudo rule unless an operator sets
 `MOBIUS_AGENT_SUDO=0`; changing that boundary requires recreating the container.
+
+### Keys: the agent may read them, apps only borrow them
+
+Keys live encrypted in the key vault (`/data/.vault/`), managed in
+**Settings › Keys**. The owner and the owner's top-level agents may read a key
+unless its Agents switch is off, and only the owner's own input turns that
+switch back on; delegated helpers may borrow a key but never read its value.
+Every read and change is logged without its value, under the caller it was
+made for, and an agent replacing a value or changing how a key is sent
+through the server notifies the owner. Only the owner's own input can let an
+app or the agents use a key on more sites (an agent asks on a card, as an app
+does), or switch a paused app back on; each app's sites belong to
+its own grant, so approving one app never widens another. Apps never receive a value: an app
+asks once for a key by name, the owner approves it, and the app then sends
+requests through `/api/keys/use/…`, where the server identifies the app (its
+id and its installation) from its own platform-issued token and the vault adds
+the key on the way out
+(default-deny sites, methods and paths, with method- and path-override
+headers dropped and paths a site could decode differently refused;
+public-address pinning; no redirects; echoed values redacted in their common
+encodings, also when streamed, with a fixed hold-back so timing never hints at
+the key; only an allowlist of the site's answer headers, sandboxed). The vault
+listens only on a mode-0600 socket and applies a change only once it is
+safely on disk. Approving requests and changing grants is refused to apps,
+shared-browser guests (including app tokens a guest's session minted, which
+cannot borrow or ask either) and delegated helpers; approving a request is
+refused to agents as well. These rules, the owner's notifications and the
+caller a change is logged under are enforced by the server's HTTP routes,
+which attest each caller from its token. The vault trusts any local process
+that can open its socket, and such a process can act as any caller: owner
+tools such as `store-key.py` (which replaces an existing key only when given
+`--replace`, and notifies no one), and anything running with the server
+user's rights or sudo, which agents have. A planned peer check
+(KEY_VAULT_DESIGN.md, *Future work*) keeps sandboxed app code off the socket;
+agents stay trusted.
+A key an app saves for itself gets a name scoped to that app, so it can never
+answer another app's request for a plain name, and a request card names the
+app that saved an existing key. Such a key obeys its grant's sites too,
+including when the platform sends it to the app's model provider (a new
+provider key starts on the paths that provider's protocol calls). It stops
+being the app's, and the app loses its grant, once the owner or an agent
+stores a new value in it.
+App ids are reused after a purge, so every grant, request and saved key's
+origin names the app's installation as well as its id: an id that never
+changes through trash, recovery, a data wipe or an update, and is never
+reused. A grant is used only by the installation it was given to. A purge
+still removes that app's grants and, like a data wipe, erases the keys it
+saved for itself; a restore keeps the grants whose installation the restored
+database holds and withdraws the rest, keeping every value. Backups carry the vault only in the secrets archive (skipped when no
+backup recipient is configured): encrypted by default, but a
+`--plaintext-secrets` backup holds every key in readable form. Agents are guided to borrow keys through the vault rather than read them,
+so values stay out of chat logs.
+
+Known limitation: app *browser* code cannot reach a value, but an app's
+server-side service and scheduled jobs still run as the same OS user as the
+server, which has root by default, so determined server-side app code could
+read the vault folder. A kernel sandbox for that code is future work
+(KEY_VAULT_DESIGN.md). Treat any key as readable by your agent, and by
+installed apps' server code until then.
+
+Two further limits follow from how upstream identifies callers. The service
+token in `/data/service-token.txt` is a plain owner token, so anything that
+can read that file (agents and app server code, as above) counts as the
+owner's own input and could approve a request. And an agent run an app starts
+at Admin, or for an app that declares no agent access, is an ordinary agent:
+the app can ask that agent to read or borrow a key the Agents switch allows.
+Tools, Read and Edit agents run in a room whose only door accepts their own
+agent key, so they reach no key the app was not granted (`agent` in the
+manifest; CAPABILITIES.md "App agent access").
+
+Every process can read every other process's command line, agent rooms
+included, so never pass a token, key or password as a program argument; send
+it through a pipe or a file instead, as `mapi` does.
 
 ## Opaque embedded-chat contract
 

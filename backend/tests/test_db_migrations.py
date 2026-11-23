@@ -77,6 +77,20 @@ def _migration_versions_before(target: str) -> list[str]:
   return versions[:versions.index(target)]
 
 
+def _insert_bare_chat(eng, chat_id, **values):
+  """A chats row as an earlier release writes it: the current ORM would also
+  insert (and return) columns that release's table does not have yet."""
+  row = {"id": chat_id, **values}
+  with eng.begin() as conn:
+    for _cid, name, kind, notnull, default, pk in conn.execute(text("PRAGMA table_info(chats)")):
+      if notnull and default is None and not pk and name not in row:
+        row[name] = 0 if kind.upper() in ("BOOLEAN", "INTEGER") else (
+          "[]" if kind.upper() == "JSON" else "")
+    conn.execute(text(
+      f"INSERT INTO chats ({', '.join(row)}) VALUES ({', '.join(':' + n for n in row)})"
+    ), row)
+
+
 def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   """The real boot order must close every ORM gap on an existing install.
 
@@ -145,9 +159,7 @@ def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatc
   monkeypatch.setenv("DATA_DIR", str(tmp_path))
   assert "## Summary\nshort" in note.read_text(encoding="utf-8")
   assert not (tmp_path / "backups" / "chat-notes-before-0083").exists()
-  with Session(eng) as db:
-    db.add(create_chat(id="kept", title="Kept", messages=[{"role": "user", "content": "old"}]))
-    db.commit()
+  _insert_bare_chat(eng, "kept", title="Kept")
   with eng.begin() as conn:  # The previous release writes only the legacy value.
     conn.execute(text("UPDATE chats SET messages = :m WHERE id = 'kept'"),
                  {"m": json.dumps([{"role": "user", "content": "previous"}])})
@@ -1891,8 +1903,106 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0104_claude_session_costs",
     "0105_autopilot_push_mode",
     "0106_browser_grant_full_access",
+    "0107_app_install_id",
+    "0108_chat_pending_revision",
   ]
   assert second == first
+
+
+def _insert_bare_apps(eng, ids):
+  """App rows as a release without ``install_id`` writes them: every column it
+  requires filled, the installation left to the migration."""
+  with eng.begin() as conn:
+    columns = conn.execute(text("PRAGMA table_info(apps)")).all()
+    for app_id in ids:
+      row = {"id": app_id, "slug": f"app-{app_id}", "source_dir": f"/data/apps/app-{app_id}", "name": f"App {app_id}"}
+      for _cid, name, kind, notnull, default, pk in columns:
+        if notnull and default is None and not pk and name not in row:
+          row[name] = 0 if kind.upper() in ("BOOLEAN", "INTEGER") else ""
+      names = ", ".join(row)
+      conn.execute(text(f"INSERT INTO apps ({names}) VALUES ({', '.join(':' + n for n in row)})"), row)
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_app_install_ids_are_backfilled_distinct_and_never_change(tmp_path, monkeypatch, start):
+  """Every app row gets its own installation id, once: a retry fills only
+  rows still without one, and a row created afterwards gets its own."""
+  db_path = tmp_path / "install-id.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  previous = len(_migration_versions_before("0107_app_install_id"))
+  if start == "schema_0013":
+    models.Base.metadata.create_all(bind=eng)
+    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:previous])
+    run_migrations(eng)  # The previous release's ledger, then its apps.
+    monkeypatch.undo()
+    assert "install_id" not in {c["name"] for c in inspect(eng).get_columns("apps")}
+    _insert_bare_apps(eng, [1, 2, 3])
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  if start == "fresh":
+    with eng.begin() as conn:
+      conn.execute(text("UPDATE apps SET install_id = NULL"))
+    _insert_bare_apps(eng, [1, 2, 3])
+    migrations._add_app_install_ids(eng)
+
+  assert "0107_app_install_id" in {row["version"] for row in schema_migration_history(eng)}
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.connect() as conn:
+    first = dict(conn.execute(text("SELECT id, install_id FROM apps")).all())
+  assert sorted(first) == [1, 2, 3] and len(set(first.values())) == 3
+  assert all(isinstance(value, str) and len(value) == 32 for value in first.values())
+  migrations._add_app_install_ids(eng)  # A crash retry changes nothing.
+  with Session(eng) as db:
+    later = models.App(name="Later", slug="later", source_dir="/data/apps/later")
+    db.add(later)
+    db.commit()
+    later_install = later.install_id
+  with eng.connect() as conn:
+    after = dict(conn.execute(text("SELECT id, install_id FROM apps")).all())
+  assert {app_id: after[app_id] for app_id in first} == first
+  assert later_install and later_install not in first.values()
+  with pytest.raises(IntegrityError):
+    with eng.begin() as conn:
+      conn.execute(text("UPDATE apps SET install_id = :taken WHERE id = 2"), {"taken": first[1]})
+  eng.dispose()
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_chat_pending_revision_starts_at_zero_after_fresh_and_frozen_upgrade(
+  tmp_path, monkeypatch, start,
+):
+  """Every chat, one written before the column existed included, starts its
+  queue revision at 0; a crash retry of the migration changes nothing."""
+  db_path = tmp_path / "pending-revision.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  if start == "schema_0013":
+    previous = len(_migration_versions_before("0108_chat_pending_revision"))
+    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:previous])
+    run_migrations(eng)  # The previous release's ledger.
+    monkeypatch.undo()
+    assert "pending_revision" not in {c["name"] for c in inspect(eng).get_columns("chats")}
+    _insert_bare_chat(eng, "earlier", title="Earlier", pending_messages='[{"cid": "q"}]')
+  run_migrations(eng)
+  migrations._add_chat_pending_revision(eng)  # Idempotent on a crash retry.
+
+  assert "0108_chat_pending_revision" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  with Session(eng) as db:
+    db.add(create_chat(id="later", title="Later"))
+    db.commit()
+    revisions = {chat.id: chat.pending_revision for chat in db.query(models.Chat)}
+  assert set(revisions.values()) == {0}
+  assert ("earlier" in revisions) is (start == "schema_0013")
+  eng.dispose()
 
 
 @pytest.mark.parametrize("start", ["fresh", "schema_0013"])

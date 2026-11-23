@@ -1106,14 +1106,9 @@ def _new_chat(
   project_id: str | None = None,
 ) -> models.Chat:
   # Provider follows the last-selected model (the single source of truth),
-  # matching owner chat creation.
-  provider = providers.owner_default_provider(
+  # from the same single settings read as owner chat creation.
+  provider, agent_settings = providers.snapshot_owner_chat_choice(
     get_settings().data_dir, owner.provider if owner else None,
-  )
-  agent_settings = providers.snapshot_chat_agent_settings(
-    get_settings().data_dir,
-    provider,
-    fallback_model=providers.DEFAULT_MODELS.get(provider),
   )
   return chat_writer.create_chat(
     id=chat_id,
@@ -2212,9 +2207,15 @@ async def delete_project(
       "chatIds": chat_ids,
     })
     publish_recovery_notification(recovery_notification_id)
-    return Response(status_code=204, headers={
-      "X-Recovery-Notification-Id": recovery_notification_id,
-    })
+  # Their agents' waiting key requests could only be answered on their cards.
+  # Withdrawn together after the lifecycle gate, so a vault that hangs delays
+  # this response by one vault timeout, never one per chat, and never holds
+  # the gate; only requests made up to the deletion go (``forget_chat``).
+  from app import key_vault
+  await key_vault.forget_chats(chat_ids, deleted_at)
+  return Response(status_code=204, headers={
+    "X-Recovery-Notification-Id": recovery_notification_id,
+  })
 
 
 @router.post("/{project_id}/recover", dependencies=[Depends(reject_cross_site)])

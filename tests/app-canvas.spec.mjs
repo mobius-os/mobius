@@ -1049,7 +1049,11 @@ test.describe('AppCanvas: iframe-mount contract', () => {
       { type: 'moebius:open-app', appId: 'no-such-app' }, window.location.origin,
     ))
     await expect.poll(() => appsFetches).toBeGreaterThan(beforeRefetch)
-    await expect(page.getByText('ClearedToy')).toBeVisible({ timeout: 8000 })
+    // The shell has adopted the refetched row (name and cleared chat) once the
+    // sidebar's app icon carries the new name. Its name is the icon's
+    // accessible label, not visible text.
+    await expect(page.locator(`.drawer__apps-card-tile[data-drag-key="app:${appId}"]`))
+      .toHaveAttribute('aria-label', /^ClearedToy\b/, { timeout: 8000 })
     expect(framesFetched).toBe(initialFramesFetched)
 
     // The still-mounted document retains the former chat_id embedded when it

@@ -82,12 +82,13 @@ from claude_agent_sdk.types import (
   UserMessage,
 )
 
-from app import activity, generated_files, settled, tracing
+from app import activity, answer_check, generated_files, settled, tracing
 from app.memory_observability import cgroup_oom_kill_count, process_was_oom_killed
 from app.claude_events import (
   NativeContinuationTracker,
   _clip_task_text,
   dispatch_sdk_message,
+  is_provider_response,
   is_root_conversation_message,
 )
 from app.claude_sdk_contract import transport_process_pid
@@ -96,6 +97,7 @@ from app.platform_tools import (
   APPROVAL_TOOL_NAME,
   ASK_PARENT_TOOL_NAME,
   CONTROL_SERVER_NAME,
+  KEY_TOOL_NAME,
   QUESTION_TOOL_NAME,
   RESTART_TOOL_NAME,
   SECRET_TOOL_NAME,
@@ -108,6 +110,7 @@ from app.process_groups import (
 )
 from app.runner_registry import RunnerKind, registry
 from app.runtime_types import RunnerResult, prompt_not_sent_result
+from app.viewed_images import chat_media_dir
 
 log = logging.getLogger(__name__)
 
@@ -264,8 +267,34 @@ _CLAUDE_TURN_END_TOOLS = (
   f"mcp__{CONTROL_SERVER_NAME}__{QUESTION_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
+  f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}",
   "Bash",
 )
+# Owner cards whose save hands the turn to the owner; the visible-answer check
+# runs just before one is saved (see `answer_check.reason`). Not every call
+# ends the turn: a key request often answers at once without a card, and the
+# turn goes on (see `_ANSWER_CHECK_KEY_TOOL`). Membership also keeps these
+# calls out of the after-step note.
+_ANSWER_CHECK_CARD_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (
+    APPROVAL_TOOL_NAME, KEY_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME,
+  )
+)
+# The cards whose save needs the turn's closing `message`. A key request may
+# carry one, but often answers at once without saving a card and drops it; a
+# secret card has none.
+_ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME)
+)
+# A hold before a key request is forgotten once the request returns: if it
+# answered at once, the turn goes on, and its end-of-turn check must still see
+# what the hold covered.
+_ANSWER_CHECK_KEY_TOOL = f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}"
+# The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
+# of exact tool names, so only these calls pay the PreToolUse round trip.
+_ANSWER_CHECK_CARD_MATCHER = "|".join(sorted(_ANSWER_CHECK_CARD_TOOLS))
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -532,9 +561,10 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None, run_generation: int | None = None,
+    *, sink=None, run_generation: int | None = None, model: str | None = None,
   ):
     self.chat_id = chat_id
+    self.model = model
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._sink = sink
@@ -1137,60 +1167,6 @@ def _precompact_log_trigger(hook_input: object) -> str | None:
   return None
 
 
-# The owner reads only a turn's text blocks; thinking is folded away. A turn
-# that ends with a short visible reply after long reasoning is the shape in
-# which the agent composed its answer in thinking and closed with a line such
-# as "Nothing has been changed." — the owner then sees no answer at all. The
-# shape is rare (under 1% of stored replies on one instance), so the check
-# below rarely costs an extra model call, and the agent itself judges whether
-# its reply is complete.
-_ANSWER_CHECK_VISIBLE_MAX_CHARS = 400
-_ANSWER_CHECK_THINKING_MIN_CHARS = 600
-_ANSWER_CHECK_REASON = (
-  "Möbius end-of-turn check. The owner sees only your visible reply; your "
-  "thinking is hidden from them. This turn's reasoning is long but its "
-  "visible reply is short, so your answer may exist only in your thinking. "
-  "Re-read the owner's latest message. If your visible reply does not "
-  "already answer it or report the result, write that answer now as visible "
-  "text, without mentioning this check. If it already does, end your turn "
-  "without writing anything more."
-)
-
-
-def _answer_may_be_only_in_thinking(
-  blocks: object, last_assistant_message: object = None,
-) -> bool:
-  """Whether this reply's reasoning dwarfs what the owner can actually read.
-
-  ``blocks`` is the sink's current assistant segment. The Stop hook can run
-  before the stream reader has dispatched the final text, so the CLI's own
-  ``last_assistant_message`` is counted when the blocks do not contain it yet.
-  """
-  if not isinstance(blocks, list):
-    return False
-  visible = "".join(
-    block["content"] for block in blocks
-    if isinstance(block, dict) and block.get("type") == "text"
-    and isinstance(block.get("content"), str)
-  )
-  visible_chars = len(visible.strip())
-  if isinstance(last_assistant_message, str):
-    tail = last_assistant_message.strip()
-    if tail and tail not in visible:
-      visible_chars += len(tail)
-  if visible_chars >= _ANSWER_CHECK_VISIBLE_MAX_CHARS:
-    return False
-  longest_thinking = max(
-    (
-      len(block["content"].strip()) for block in blocks
-      if isinstance(block, dict) and block.get("type") == "thinking"
-      and isinstance(block.get("content"), str)
-    ),
-    default=0,
-  )
-  return longest_thinking >= _ANSWER_CHECK_THINKING_MIN_CHARS
-
-
 async def run_claude_sdk_turn(
   *,
   user_message: str,
@@ -1209,6 +1185,7 @@ async def run_claude_sdk_turn(
   goal_brief_refresh=None,
   fork_from: dict | None = None,
   run_generation: int | None = None,
+  app_room=None,
 ) -> RunnerResult:
   """Runs one Claude SDK turn and translates SDK messages to Möbius events.
 
@@ -1235,12 +1212,15 @@ async def run_claude_sdk_turn(
       load, regardless of this flag.
     connector_plan: Detached owner-managed MCP configuration built before the
       request session was released. It is plain data and never queries SQLite.
+    app_room: The ``agent_roles.Room`` a confined app agent runs in, or None.
 
   Returns:
     A dict containing the resulting session ID, final cost, and error.
   """
   current_session_id = session_id
   cost_usd: float | None = None
+  # Whether any frame of this attempt was remote model output (RunnerResult).
+  provider_responded = False
   # The handle for the client currently streaming this turn. Declared in the
   # turn scope because the hooks below are built before `_run_once` constructs
   # it, and the card-end hook must reach the live handle to own the turn's end.
@@ -1446,35 +1426,163 @@ async def run_claude_sdk_turn(
     raise ValueError(
       f"Selected model {_model!r} does not belong to provider {provider_id!r}."
     )
-  # Fires when the root agent is about to end its turn. At most once per turn,
-  # when the visible reply is short beside long reasoning, it returns the turn
-  # to the agent with `_ANSWER_CHECK_REASON` so an answer composed only in
-  # thinking gets written where the owner can read it. A Stop or a saved owner
-  # card owns the turn's end, so neither is ever reopened here.
-  answer_check_sent = False
+  # The visible-answer check (see `answer_check.reason`) runs at each
+  # hand-back: just before the root agent saves an owner card, and when it
+  # ends its turn. Before a card it declines that one tool call, so the agent
+  # can add what is missing and call the card again; at the end it returns
+  # the turn. After it speaks, it considers only blocks that arrived since (plus
+  # all visible text), so an unchanged retry or continuation passes and a
+  # second miss is caught, before a card or at the end, up to
+  # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
+  # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
+  # fresh block list, which the identity check below treats as new. A Stop or
+  # a saved owner card owns the turn's end, so neither is reopened.
+  answer_check_reminders = 0
+  # (block list, blocks covered by the last reminder, thinking covered by any
+  # check that spoke). The after-step note shares the thinking pointer, so one
+  # swallowed draft is pointed out once, after a step or at the end.
+  answer_check_reviewed: tuple[object, int, int] = (None, 0, 0)
+  # What a hold before a key request replaced (its block list, the blocks
+  # reviewed in it before, and the reminder count), restored when it returns.
+  answer_check_before_key_hold: tuple[object, int, int] | None = None
+  answer_check_media_dir = os.path.normpath(
+    str(chat_media_dir(get_settings().data_dir, chat_id))
+  )
+
+  def _answer_check_pointers(blocks: object) -> tuple[int, int]:
+    reviewed_list, reviewed_through, thinking_through = answer_check_reviewed
+    return (reviewed_through, thinking_through) if blocks is reviewed_list else (0, 0)
+
+  def _answer_check_evidence() -> object:
+    """This segment's blocks as a check should see them after earlier ones spoke."""
+    blocks = getattr(bc, "assistant_blocks", None)
+    return answer_check.unreviewed_evidence(blocks, *_answer_check_pointers(blocks))
+
+  def _answer_check_spoke(*, reminder: bool) -> None:
+    nonlocal answer_check_reviewed
+    blocks = getattr(bc, "assistant_blocks", None)
+    end = len(blocks) if isinstance(blocks, list) else 0
+    reviewed_through = end if reminder else _answer_check_pointers(blocks)[0]
+    answer_check_reviewed = (blocks, reviewed_through, end)
+
+  def _answer_check_forget_key_hold() -> None:
+    """Undo a key request's hold so later checks see what it covered."""
+    nonlocal answer_check_reviewed, answer_check_reminders, answer_check_before_key_hold
+    if answer_check_before_key_hold is None:
+      return
+    held_blocks, held_through, held_reminders = answer_check_before_key_hold
+    answer_check_before_key_hold = None
+    blocks, _, thinking_through = answer_check_reviewed
+    if blocks is held_blocks:
+      # The thinking pointer stays: a draft already pointed out is not raised again.
+      answer_check_reviewed = (blocks, held_through, thinking_through)
+    answer_check_reminders = held_reminders
+
+  def _answer_check_since_last_reminder(
+    *, before_card: bool, last_assistant_message: object = None,
+    message_required: bool = False, key_request: bool = False,
+  ) -> str | None:
+    nonlocal answer_check_reminders, answer_check_before_key_hold
+    if (
+      answer_check_reminders >= answer_check.MAX_REMINDERS
+      or active_client is None
+      or not active_client.accepts_native_prompt
+    ):
+      return None
+    reason = answer_check.reason(
+      _answer_check_evidence(),
+      chat_id=chat_id,
+      media_dir=answer_check_media_dir,
+      before_card=before_card,
+      reminded=answer_check_reminders > 0,
+      last_assistant_message=last_assistant_message,
+      message_required=message_required,
+      key_request=key_request,
+    )
+    if reason is None:
+      return None
+    if key_request and answer_check_before_key_hold is None:
+      blocks = getattr(bc, "assistant_blocks", None)
+      answer_check_before_key_hold = (
+        blocks, _answer_check_pointers(blocks)[0], answer_check_reminders,
+      )
+    answer_check_reminders += 1
+    _answer_check_spoke(reminder=True)
+    log.info(
+      "Claude visible-answer check spoke chat_id=%s before_card=%s reminder=%d",
+      chat_id, before_card, answer_check_reminders,
+    )
+    return reason
 
   async def visible_answer_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
-    nonlocal answer_check_sent
     del tool_use_id, context
+    reason = _answer_check_since_last_reminder(
+      before_card=False,
+      last_assistant_message=hook_input.get("last_assistant_message"),
+    )
+    if reason is None:
+      return {"continue_": True}
+    return {"decision": "block", "reason": reason}
+
+  async def visible_answer_before_card_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    # Registered for _ANSWER_CHECK_CARD_MATCHER only. A delegated child's card
+    # goes to its parent agent, not the owner.
+    if hook_input.get("agent_id"):
+      return {"continue_": True}
+    # A successful save publishes this closing message with its card. Count
+    # it as pending visible text, without publishing it before the save.
+    tool_input = hook_input.get("tool_input")
+    message = tool_input.get("message") if isinstance(tool_input, dict) else None
+    tool_name = hook_input.get("tool_name")
+    reason = _answer_check_since_last_reminder(
+      before_card=True, last_assistant_message=message,
+      message_required=tool_name in _ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS,
+      key_request=tool_name == _ANSWER_CHECK_KEY_TOOL,
+    )
+    if reason is None:
+      return {"continue_": True}
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PreToolUse",
+      "permissionDecision": "deny",
+      "permissionDecisionReason": reason,
+    }}
+
+  # After each work step, words the model wrote as thinking just before it
+  # get a note that rides on the step's result instead of blocking it.
+  async def visible_answer_after_step_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    if hook_input.get("tool_name") == _ANSWER_CHECK_KEY_TOOL and not hook_input.get("agent_id"):
+      # The request returned. A saved card has ended the turn, so nothing
+      # reads this; an answer given at once lets the turn go on.
+      _answer_check_forget_key_hold()
     if (
-      answer_check_sent
-      or hook_input.get("stop_hook_active")
+      hook_input.get("agent_id")
+      or hook_input.get("tool_name") in _ANSWER_CHECK_CARD_TOOLS
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
       return {"continue_": True}
-    if not _answer_may_be_only_in_thinking(
-      getattr(bc, "assistant_blocks", None),
-      hook_input.get("last_assistant_message"),
-    ):
+    note = answer_check.after_step_reason(_answer_check_evidence())
+    if note is None:
       return {"continue_": True}
-    answer_check_sent = True
-    log.info("Claude visible-answer check returned the turn chat_id=%s", chat_id)
-    return {"decision": "block", "reason": _ANSWER_CHECK_REASON}
+    _answer_check_spoke(reminder=False)
+    log.info("Claude visible-answer check spoke after a step chat_id=%s", chat_id)
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "PostToolUse", "additionalContext": note,
+    }}
 
   async def queued_prompt_hook(hook_input, tool_use_id, context):
     """A queued prompt cannot start new work after Stop or a saved card."""
@@ -1484,7 +1592,7 @@ async def run_claude_sdk_turn(
     return {"continue_": True}
 
   async def _run_once() -> RunnerResult:
-    nonlocal current_session_id, cost_usd, active_client
+    nonlocal current_session_id, cost_usd, active_client, provider_responded
     # Most recent provider rate-limit reset time seen this attempt (from any
     # RateLimitEvent). Threaded into the terminal result so a 429/limit kill
     # can park until the STRUCTURED reset time rather than parsing the error
@@ -1515,8 +1623,10 @@ async def run_claude_sdk_turn(
         stderr_tail.append(line.rstrip("\n")[:500])
 
     options_kwargs = {
+      # A room cannot reach the chat's deliverables folder.
       "system_prompt": (
-        _system_prompt_with_register(skill_text).rstrip()
+        _system_prompt_with_register(skill_text).rstrip() + "\n" if app_room is not None
+        else _system_prompt_with_register(skill_text).rstrip()
         + "\n\n" + generated_files.delivery_instruction(generated_dir) + "\n"
       ),
       "resume": session_id if session_id is not None else None,
@@ -1561,10 +1671,17 @@ async def run_claude_sdk_turn(
         "UserPromptSubmit": [HookMatcher(
           matcher=None, hooks=[queued_prompt_hook], on_failure="block",
         )],
+        "PreToolUse": [
+          HookMatcher(
+            matcher=_ANSWER_CHECK_CARD_MATCHER,
+            hooks=[visible_answer_before_card_hook],
+          ),
+        ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
           HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
           HookMatcher(matcher=None, hooks=[turn_end_hook]),
+          HookMatcher(matcher=None, hooks=[visible_answer_after_step_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
@@ -1582,7 +1699,15 @@ async def run_claude_sdk_turn(
         "permission_mode": "acceptEdits",
         })
       options_kwargs.update(restricted_options)
-    if skills_enabled:
+    if app_room is not None:
+      # The room limits a confined agent, and Möbius serves its web: Claude's
+      # own page fetch runs inside the room, which has no internet.
+      options_kwargs["setting_sources"] = None
+      options_kwargs["cli_path"] = app_room.claude_launcher(_CLAUDE_CLI)
+      options_kwargs["disallowed_tools"] += [
+        "WebFetch", *(() if app_room.web else ("WebSearch",)),
+      ]
+    elif skills_enabled:
       options_kwargs["skills"] = "all"
     if _model:
       options_kwargs["model"] = _model
@@ -1625,16 +1750,24 @@ async def run_claude_sdk_turn(
         claude_control_servers,
         expected_control_tool_names,
       )
-      connector_config_handle = startup_file_stack.enter_context(
-        claude_mcp_config_handle(
-          connector_plan,
-          extra_servers=claude_control_servers(
-            enabled=control_server_enabled,
-          ),
+      if app_room is not None:
+        # A room cannot open this server's file descriptors, and its control
+        # tools carry no credential, so their configuration travels inline.
+        control_server_enabled = app_room.offers_tools
+        options_kwargs["mcp_servers"] = claude_control_servers(
+          enabled=control_server_enabled,
         )
-      )
-      if connector_config_handle:
-        options_kwargs["mcp_servers"] = connector_config_handle.path
+      else:
+        connector_config_handle = startup_file_stack.enter_context(
+          claude_mcp_config_handle(
+            connector_plan,
+            extra_servers=claude_control_servers(
+              enabled=control_server_enabled,
+            ),
+          )
+        )
+        if connector_config_handle:
+          options_kwargs["mcp_servers"] = connector_config_handle.path
     except Exception:
       startup_file_stack.close()
       startup_file_stack = ExitStack()
@@ -1644,12 +1777,15 @@ async def run_claude_sdk_turn(
         exc_info=True,
       )
     try:
-      options_kwargs["system_prompt"] = {
-        "type": "file",
-        "path": startup_file_stack.enter_context(
-          _system_prompt_file(options_kwargs["system_prompt"])
-        ),
-      }
+      if app_room is None:
+        # A room agent gets its prompt as text: the room cannot open this
+        # server's file descriptors, and it carries no credential.
+        options_kwargs["system_prompt"] = {
+          "type": "file",
+          "path": startup_file_stack.enter_context(
+            _system_prompt_file(options_kwargs["system_prompt"])
+          ),
+        }
       options = ClaudeAgentOptions(**options_kwargs)
       client = ClaudeSDKClient(options)
     except Exception:
@@ -1659,6 +1795,7 @@ async def run_claude_sdk_turn(
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
       run_generation=run_generation,
+      model=_model,
     )
     if not registry.register(active_client, run_generation=run_generation):
       startup_file_stack.close()
@@ -1678,18 +1815,22 @@ async def run_claude_sdk_turn(
             await asyncio.wait_for(client.connect(), timeout=30.0)
           active_client.mark_connected()
           with tracing.span("claude.control_mcp_ready"):
+            # A room waits only for its control tools; other apps' tools
+            # come and go with those apps.
+            control_configured = control_server_enabled and (
+              connector_config_handle is not None
+              if app_room is None else bool(app_room.control_tools)
+            )
             control_ready_error = await _await_control_mcp_ready(
               client,
-              enabled=(
-                control_server_enabled and connector_config_handle is not None
-              ),
+              enabled=control_configured,
               expected_tool_names=(
-                expected_control_tool_names(
+                None if not control_configured
+                else app_room.control_tools if app_room is not None
+                else expected_control_tool_names(
                   top_level=run_policy is None,
                   coordination_enabled=coordination_enabled,
                 )
-                if control_server_enabled and connector_config_handle is not None
-                else None
               ),
             )
           if control_ready_error:
@@ -1753,6 +1894,8 @@ async def run_claude_sdk_turn(
           if first_output_span is not None and isinstance(sdk_msg, (StreamEvent, AssistantMessage)):
             tracing.end_span(first_output_span)
             first_output_span = None
+          if is_provider_response(sdk_msg):
+            provider_responded = True
           # Persist the session id ONLY from ROOT conversation messages.
           # SystemMessage and its subclasses — notably HookEventMessage,
           # which the codex plugin's SessionStart hook emits on every
@@ -1979,6 +2122,8 @@ async def run_claude_sdk_turn(
               teardown.finish()
 
   result = await _run_once()
+  if provider_responded:
+    result["provider_responded"] = True
   # CLI 2.1.277+ restores the earlier session's cost on resume, and the source
   # session's on a fork. The durable metrics owner has the prior snapshot and
   # derives the additive turn cost from how this session started.

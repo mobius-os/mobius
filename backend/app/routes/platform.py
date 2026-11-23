@@ -6,7 +6,8 @@ line), ``POST /check`` (owner-triggered ``git fetch`` + fresh status, the
 on-demand refresh for the "Check for updates" button), ``GET /update-preview``
 (an immutable exact-target plan), ``POST /apply`` (apply that reviewed target
 and merge it with local edits, or record a conflict),
-``GET /update-progress`` (the active Apply phase),
+``GET /update-progress`` (the active Apply or overlay-finish phase),
+``POST /overlay-finish`` (the backend-owned finish of a staged resolution),
 ``POST /conflict-resolver-chat`` (owner-clicked resolver chat), and
 ``POST /restart`` (owner-confirmed self-restart through the same drained,
 supervisor-handled path as the normal Settings restart). Read failures are
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,7 +29,11 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
-from app import auth, deployment_control, models, platform_activation, platform_update
+from app import (
+  auth, deployment_control, launcher_side, models, platform_activation,
+  platform_update,
+)
+from app.config import get_settings
 from app.update_chat import UpdateAgentChoice
 from app.database import SessionLocal, get_db
 from app.deps import (
@@ -400,6 +406,50 @@ async def keep_settling_platform_update(
     ) from exc
 
 
+class PlatformOverlayFinishIn(BaseModel):
+  """The release whose parked resolution the caller has staged."""
+
+  target_sha: str = Field(pattern=r"^[0-9a-f]{40,64}$")
+  # Run a failed finish of this exact answer again. Without it, repeating a
+  # request returns the recorded operation instead of running it twice.
+  retry_operation_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post(
+  "/overlay-finish",
+  dependencies=[Depends(reject_cross_site)],
+  status_code=202,
+)
+async def finish_platform_overlay_update(
+  request: PlatformOverlayFinishIn,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> PlatformUpdateProgress:
+  """Start or join the backend-owned finish of a staged parked resolution.
+
+  Answers once the operation is admitted; its phases and outcome follow in
+  ``GET /update-progress`` under the returned ``plan_id``. A refused request
+  (stale or unstaged answer, another update running) changes nothing.
+  """
+  try:
+    return await platform_update.finish_platform_overlay_update(
+      target_sha=request.target_sha,
+      retry_operation_id=request.retry_operation_id,
+    )
+  except PlatformUpdateError as exc:
+    code = str(exc)
+    detail = (
+      {"code": code, "message": (
+        "Another platform update task is running. Nothing changed: repeat "
+        "this same request shortly, and it joins this finish if it is the "
+        "one running."
+      )} if code == "platform_update_in_progress"
+      else _plan_error_detail(exc) if code in _PLAN_ERROR_MESSAGES
+      # The resolver acts on the precise refusal: which file, which stage.
+      else {"code": "overlay_finish_refused", "message": code}
+    )
+    raise HTTPException(status_code=409, detail=detail) from exc
+
+
 class ConflictResolverChatIn(BaseModel):
   # Resume a stalled resolver: start its bound chat again, or open a new one.
   resume: bool = False
@@ -436,6 +486,10 @@ def restart_platform(
   """Owner-confirmed restart to finish an update. Sends the response, then
   drains and asks the container supervisor to rerun the boot in place, so it
   starts with the new code (force-exit fallback)."""
+  return _restarting_response()
+
+
+def _restarting_response() -> JSONResponse:
   try:
     validate_restart_source()
   except RestartSourceInvalid as exc:
@@ -447,3 +501,42 @@ def restart_platform(
     {"status": "restarting"},
     background=BackgroundTask(restart_this_worker),
   )
+
+
+class LauncherSideOut(BaseModel):
+  available: bool
+  side: Literal["production", "staging"]
+
+
+class LauncherSideChoice(BaseModel):
+  side: Literal["production", "staging"]
+
+
+@router.get("/launcher-side", response_model=LauncherSideOut)
+def launcher_side_status(
+  _: models.Owner = Depends(get_current_owner),
+) -> LauncherSideOut:
+  """Whether this instance has a staging launcher, and the side it runs on."""
+  side = launcher_side.boot_side()
+  return LauncherSideOut(available=side.available, side=side.side)
+
+
+@router.post("/launcher-side", dependencies=[Depends(reject_cross_site)])
+def choose_launcher_side(
+  choice: LauncherSideChoice,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+) -> JSONResponse:
+  """Record the side for the next boot and restart into it.
+
+  The launcher address is read once at start, so the choice takes a restart.
+  It picks the account service this instance trusts, which is the owner's
+  decision alone: Full access may restart, but not choose this.
+  """
+  # Production stays choosable, so a choice left from removed staging
+  # variables can always be cleared.
+  if choice.side == launcher_side.STAGING and not launcher_side.boot_side().available:
+    raise HTTPException(status_code=409, detail="No staging launcher is configured.")
+  # Refuse first: a recorded choice with no restart would surprise a later one.
+  response = _restarting_response()
+  launcher_side.choose_side(choice.side, Path(get_settings().data_dir))
+  return response

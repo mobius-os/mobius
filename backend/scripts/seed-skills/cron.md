@@ -63,8 +63,9 @@ To list / remove: `crontab -u mobius -l` and edit the matching `init-cron.sh` (o
 API_BASE_URL=http://localhost:8000
 APP_ID="$1"
 
+# The token goes through a pipe, never curl's argv (printf is a builtin).
 curl -fsS \
-  -H "Authorization: Bearer $APP_TOKEN" \
+  -H @<(printf 'Authorization: Bearer %s\n' "$APP_TOKEN") \
   "$API_BASE_URL/api/apps/$APP_ID/job-context"
 ```
 
@@ -72,7 +73,7 @@ curl -fsS \
 
 ## Key details
 
-- **Credentials:** installable jobs use `$APP_TOKEN`. Never read `/data/service-token.txt` from an app job. App jobs have no agent environment, so they use plain `curl -H "Authorization: Bearer $APP_TOKEN" ...` — `mapi` is for agent-context calls only.
+- **Credentials:** installable jobs use `$APP_TOKEN`. Never read `/data/service-token.txt` from an app job. App jobs have no agent environment, so they use plain `curl` with the header passed through a pipe, as above — `mapi` is for agent-context calls only. Never put a token or key in a command's arguments: every process on the server can read every other process's command line.
 - **Owner-facing links:** `GET /api/apps/{app_id}/job-context` returns non-secret
   `public_origin`, the configured frontend origin without a trailing slash.
   Use it for links back to Möbius, not the job's internal `$API_BASE_URL` or

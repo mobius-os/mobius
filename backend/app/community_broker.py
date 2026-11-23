@@ -13,18 +13,35 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlencode
 
 import httpx
 
+from app.launcher_side import boot_side
 from app.runtime_identity import broker_async_transport, broker_socket_path
 
 
 COMMUNITY_PREFIX = "/v1/community"
-COMMUNITY_BASE_URL = os.environ.get(
-  "MOBIUS_COMMUNITY_REGISTRY_URL", "https://www.mobius.you",
-).rstrip("/")
+
+
+def community_base_url(environ: Mapping[str, str]) -> str:
+  """Return where public Store reads go.
+
+  They follow the launcher this instance links with, like the linked reads
+  the identity broker makes, so one instance shows one Store.
+  """
+  configured = (
+    environ.get("MOBIUS_COMMUNITY_REGISTRY_URL")
+    or environ.get("MOBIUS_IDENTITY_ISSUER")
+    or "https://www.mobius.you"
+  )
+  return configured.strip().rstrip("/")
+
+
+# The Store follows the launcher this boot settled on, whatever imports first.
+boot_side()
+COMMUNITY_BASE_URL = community_base_url(os.environ)
 MAX_RESPONSE_BYTES = 10_000_000
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$")
 # Discovery and Spotlight are public Store data: owners should not need to

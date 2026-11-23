@@ -66,7 +66,6 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
 import { apiFetch } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
@@ -92,9 +91,10 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
-import { orderPickerModels, withRecentModel } from '../../lib/modelPickerOrder.js'
+import { orderPickerModels } from '../../lib/modelPickerOrder.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
 import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
+import ModelPickerRow, { providerSetupLink } from './ModelPickerRow.jsx'
 import './ChatSettingsPanel.css'
 
 /** Resolves the displayed model list for `providerId` from the live
@@ -102,7 +102,7 @@ import './ChatSettingsPanel.css'
  *
  *  Rules (matches the codex-review spec):
  *    - Preserve registry order among models with no owner recency. The
- *      flattened picker moves confirmed recent choices ahead of them.
+ *      flattened picker moves recently used models ahead of them.
  *    - Hide entries whose ID appears in `hiddenIds`, UNLESS that ID
  *      is the chat's currently-selected model (`selectedId`). The
  *      currently-selected model is always visible so the user can
@@ -136,6 +136,10 @@ export default function ChatSettingsPanel({
   autoResumeError = '',
   onAutoResumeChange,
   onChange,
+  // Provider logo links (absent where the host cannot navigate, as in an
+  // embedded chat): a built-in's Settings page, or an app provider's app.
+  onOpenProviderSettings,
+  onOpenProviderApp,
   // Shared promise tail for picker writes, handoffs, and message sends.
   settingsSaveTailRef,
   // Per-chat external state survives the popover and ChatView itself. This is
@@ -145,7 +149,6 @@ export default function ChatSettingsPanel({
   providerUsage = null,
 }) {
   const [saving, setSaving] = useState(false)
-  const queryClient = useQueryClient()
   const [localError, setLocalError] = useState('')
   const pendingSwitchPreviousRef = useRef(null)
   // Synchronous guard for the paid atomic handoff. Routine picker writes use
@@ -257,11 +260,6 @@ export default function ChatSettingsPanel({
           provider: data.provider,
           effective: data.effective,
         })
-        if (body.agent_settings_json?.model) {
-          queryClient.setQueryData(modelQueries.prefs.key, previous => (
-            withRecentModel(previous, body.agent_settings_json.model)
-          ))
-        }
         return ''
       } catch {
         return 'Network error.'
@@ -274,7 +272,7 @@ export default function ChatSettingsPanel({
       setSaving(false)
     })
     return operation
-  }, [chatId, onChange, queryClient, settingsSaveTailRef])
+  }, [chatId, onChange, settingsSaveTailRef])
 
   const switchProviderWithHandoff = useCallback(async ({
     provider: nextProvider,
@@ -335,9 +333,6 @@ export default function ChatSettingsPanel({
         return false
       }
       completeProviderSwitch(chatId, request, data)
-      queryClient.setQueryData(modelQueries.prefs.key, previous => (
-        withRecentModel(previous, model)
-      ))
       return true
     } catch {
       failProviderSwitch(
@@ -347,7 +342,7 @@ export default function ChatSettingsPanel({
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, queryClient, settingsSaveTailRef])
+  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, settingsSaveTailRef])
 
   const handleEffortChange = useCallback((value) => {
     // Remember this effort under the active provider so a later
@@ -451,6 +446,8 @@ export default function ChatSettingsPanel({
     setDraftEffort(nextEffort)
     setDraftEffortByProvider(nextEffortByProvider)
     await patchChat({
+      // Keep discovery's provider even when the server catalog is cold.
+      provider: providerValue,
       agent_settings_json: modelSelectionSettings(value, nextEffort, nextEffortByProvider),
     })
   }, [
@@ -657,36 +654,27 @@ export default function ChatSettingsPanel({
         const isSelected = selectedCatalogModel(registry, pid, selectedModel) === m.id && selectedProvider === pid
         return (
             <div key={`${pid}-${m.id}`}>
-              <button
-                type="button"
-                className={`csp-row${isSelected ? ' csp-row--selected' : ''}`}
-                onClick={() => {
-                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
-                }}
+              <ModelPickerRow
+                Logo={info.Logo}
+                modelLabel={m.label}
+                subtitle={!providerConfigured
+                  ? `${info.label} · Not connected`
+                  : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
+                    ? `${info.label} · No credit`
+                    : info.label}
+                setup={providerSetupLink(pid, info.label, { onOpenProviderSettings, onOpenProviderApp })}
+                selected={isSelected}
                 disabled={switchBusy || appCrossProvider || !providerConfigured}
-                aria-pressed={isSelected}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
                   : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
-              >
-                <span className="csp-row__icon"><info.Logo /></span>
-                <span className="csp-row__main">
-                  <span className="csp-row__title">
-                    <span>{m.label}</span>
-                  </span>
-                  <span className="csp-row__sub">
-                    {!providerConfigured
-                      ? `${info.label} · Not connected`
-                      : pid === 'mobius' && mobiusOutOfCredit(providerStatusQuery.data?.mobius)
-                        ? `${info.label} · No credit`
-                        : info.label}
-                  </span>
-                </span>
-                <span className="csp-row__dot" />
-              </button>
+                onSelect={() => {
+                  if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
+                }}
+              />
               {isSelected && !isPendingRow && (
-                // Indent aligns the stepper under the row title (icon 30 +
-                // gap 12 + row pad 10 = 52).
+                // Indent aligns the stepper under the model title: logo
+                // padding 10 + icon 30 + model button padding 12 = 52.
                 <div className="csp-effort-indent">
                   <EffortStepper
                     efforts={rowEfforts}

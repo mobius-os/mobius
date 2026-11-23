@@ -51,6 +51,29 @@ const answerOptions = {
   answers: { 'Anything else?': 'No' }, selected_options: { help: ['0'] },
 }
 
+test('a started owner turn refreshes model order, not an uncut steer or duplicate', async () => {
+  let refreshes = 0
+  await setup({ onOwnerSendAccepted: () => { refreshes++ } })
+  globalThis.fetch = async () => Response.json({ status: 'steered' }, { status: 202 })
+  await hook.result.current.sendMessage('new message')
+  await hook.result.current.sendMessage('fast-forward', undefined, { forceSteer: true, consumePendingCids: ['queued-cid'] })
+  assert.equal(refreshes, 0, 'provider delivery and the cut are still pending')
+  globalThis.fetch = async () => Response.json({ status: 'started' }, { status: 202 })
+  await hook.result.current.sendMessage('first turn')
+  assert.equal(refreshes, 1)
+  await hook.result.current.sendMessage('control', undefined, { hidden: true })
+  assert.equal(refreshes, 1)
+  globalThis.fetch = async () => Response.json({ status: 'duplicate' }, { status: 200 })
+  await hook.result.current.sendMessage('retry')
+  assert.equal(refreshes, 1)
+  globalThis.fetch = async () => Response.json({ status: 'queued' }, { status: 202 })
+  await hook.result.current.sendMessage('just queued')
+  assert.equal(refreshes, 1)
+  globalThis.fetch = async () => Response.json({ status: 'queued', started: true }, { status: 202 })
+  await hook.result.current.sendMessage('wake older queue')
+  assert.equal(refreshes, 2)
+})
+
 for (const running of [false, true]) {
   test(`quiet answer with running=${running} keeps current content without a stream request`, async () => {
     await setup()

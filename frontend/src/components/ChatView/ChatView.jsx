@@ -33,6 +33,7 @@ import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.j
 import {
   chatMessagesQueryKey,
   chatQueries,
+  modelQueries,
   settingsQueries,
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -82,6 +83,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { sendRecoveryResume } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
 import useComposerDraftState from './hooks/useComposerDraftState.js'
@@ -107,6 +109,7 @@ import useFootReveal from './hooks/useFootReveal.js'
 import GoalPlanDetails from './GoalPlanDetails.jsx'
 import GoalDraftChip from './GoalDraftChip.jsx'
 import WaitingChip from './WaitingChip.jsx'
+import { HelperPreviewProvider } from './helperPreviewSlot.jsx'
 import { currentChatAnnouncement, currentProgressGoal, goalAwaitsChanges, goalContinuationHandoff } from './chatHandoffPresentation.js'
 import AssistantReply from './AssistantReply.jsx'
 import ArchivedChatNotice from './ArchivedChatNotice.jsx'
@@ -176,7 +179,6 @@ import {
 } from '../../lib/searchTermHighlight.js'
 import { composerHistoryFromMessages } from './composerHistory.js'
 import { createQueuedEditOrder } from './queuedEditOrder.js'
-import { steerPendingHint } from './queuedHint.js'
 import { createFileDragHandlers } from './dragUpload.js'
 import {
   isAmbiguousSendFailure,
@@ -202,7 +204,7 @@ import {
 } from './activeAssistantSelection.js'
 import { assistantReplyGroups } from './assistantReplies.js'
 import { stretchClipboard } from './messageCopy.js'
-import { agentStretches, footerCopyParts, replyFooter } from './replyFooter.js'
+import { footerCopyParts, footerHasCopy, replyFooters } from './replyFooter.js'
 import { useStretchPrefix } from './hooks/useStretchPrefix.js'
 import { olderHistoryBatches } from './olderHistoryBatches.js'
 import {
@@ -238,6 +240,7 @@ import {
   stopConfirmedIdle,
   stopRequestSucceeded,
   supersedeResumedPauseBlocks,
+  combineRecoveryHistory,
   serverSnapshotBehindLocal,
   shouldFreezeStreamingReturn,
   startedMessagesFromResponse,
@@ -286,7 +289,7 @@ import {
   normalizeGoalPresentation,
   progressRailViewModel,
 } from './goalProgress.js'
-import { AppBlockChatContext, createAppBlockChat } from './markdown/appBlockChat.js'
+import { AppBlockChatContext, createAppBlockChat, useWaitingBlock } from './markdown/appBlockChat.js'
 import './ChatView.css'
 
 // Inspectors and side panels that open only on request stay off the startup
@@ -419,6 +422,7 @@ export default function ChatView({
   builtAppsReady = false,
   onOpenApp,
   onInternalNav,
+  onOpenProviderSettings,
   onMessageStart,
   onOwnerActivity,
   // True while this chat is filed under Archived; the notice offers Restore.
@@ -891,6 +895,7 @@ export default function ChatView({
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [], {
     chatId, principalKey: outboxPrincipalKey(getToken()),
+    initialRevision: cached?.pending_revision,
   })
   const { acknowledgeLocalAnswers, localAnswerIntents } = pendingQueue
   useEffect(() => {
@@ -1545,6 +1550,7 @@ export default function ChatView({
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: data.pending_messages || [],
+        pending_revision: data.pending_revision,
         pending_question_id: data.pending_question_id || null,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: data.active_assistant_message_id || null,
@@ -1560,7 +1566,9 @@ export default function ChatView({
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
       if (!preserveLocalTurn) {
-        pendingQueue.hydrateFromTranscript(data.pending_messages || [], data.messages || [])
+        pendingQueue.hydrateFromTranscript(
+          data.pending_messages || [], data.messages || [], data.pending_revision,
+        )
       }
       const runtime = {
         running: !!data.running,
@@ -1748,6 +1756,7 @@ export default function ChatView({
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: serverPending,
+        pending_revision: data.pending_revision,
         pending_question_id: pendingQuestionId,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: runtime.activeAssistantMessageId,
@@ -1759,7 +1768,7 @@ export default function ChatView({
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
       // own it during a turn; hydrate only when the stream is dead.
       if (!localAuthoritative) {
-        pendingQueue.hydrate(serverPending)
+        pendingQueue.hydrate(serverPending, { revision: data.pending_revision })
       }
       // A question closes SSE replay by design: nothing can arrive before the
       // owner answers. If this view missed that event, read the compact detail
@@ -1876,6 +1885,7 @@ export default function ChatView({
     patchQuestionAnswers,
     lastReadAtRef: streamLastReadAtRef,
   } = useStreamConnection(chatId, {
+    onOwnerSendAccepted: () => { void modelQueries.prefs.invalidate(queryClient) },
     onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
@@ -1975,6 +1985,10 @@ export default function ChatView({
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      // Queue promotion, not enqueue, is when an owner row's actual model is
+      // known and the backend updates recency. A non-owner head just causes a
+      // harmless fresh read.
+      void modelQueries.prefs.invalidate(queryClient)
       setActiveAssistantMessageId(null)
       // A queued message is being promoted into its OWN run — the rail's
       // run-start boundary for queue drains. useStreamConnection fires this
@@ -1987,9 +2001,10 @@ export default function ChatView({
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
         : null
+      const promotedAt = { revision: message?._pending_revision }
       const localPromoted = Array.isArray(consumedCids)
-        ? pendingQueue.promoteManyByCid(consumedCids)
-        : pendingQueue.promoteAll()
+        ? pendingQueue.promoteManyByCid(consumedCids, promotedAt)
+        : pendingQueue.promoteAll(undefined, promotedAt)
       const continuationRows = serverRows?.length ? serverRows : localPromoted
       // The pin intent was stamped at submit under the queued row's cid; the
       // backend echoes those cids back as _consumed_cids (or the promoted row
@@ -2015,6 +2030,7 @@ export default function ChatView({
       assistantMessageId,
       nextAssistantMessageId,
       sealedItems,
+      pendingRevision,
     }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
       // including when Stop is pressed with a queued message): the backend has
@@ -2096,10 +2112,7 @@ export default function ChatView({
       // The rows have now genuinely left `chat.pending_messages`, so retire the
       // tray entries the deferred-cut window kept durably queued but hidden.
       // The cut is the one place that owns the hand-off for both providers.
-      for (const msg of steeredMessages) {
-        const cid = cidOf(msg)
-        if (cid != null) pendingQueue.cancelByCid(cid)
-      }
+      pendingQueue.completeByCid(steeredMessages.map(cidOf), { revision: pendingRevision })
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
       // This event is the backend's authoritative transcript commit. Refresh
       // the shell's chat list here so a deferred steer advances drawer recency
@@ -2157,13 +2170,16 @@ export default function ChatView({
   }, [chatId, committedSteerKeyboardDismiss, inputValueRef])
   // The composer clears before this boundary, so a slow picker save delays
   // transport without swallowing text entered after Send.
-  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+  const settingsSaved = useCallback(async () => {
     await settingsSaveTailRef.current
     if (chatIdStaleRef.current) {
       throw new Error('This chat is no longer open.')
     }
+  }, [])
+  const sendAfterSettingsSaved = useCallback(async (text, attachments, options) => {
+    await settingsSaved()
     return streamSend(text, attachments, options)
-  }, [streamSend])
+  }, [settingsSaved, streamSend])
 
   useEffect(() => {
     if (retiredAssistantItemsRef.current !== streamItems) {
@@ -2666,7 +2682,9 @@ export default function ChatView({
       // Activation can follow an offline/restart replay whose delivery receipt
       // was missed while this pane was hidden. The validated detail/cache
       // transcript, not just an empty runtime queue, owns that cid's handoff.
-      pendingQueue.hydrateFromTranscript(runtime.pending_messages || [], authoritativeMessages)
+      pendingQueue.hydrateFromTranscript(
+        runtime.pending_messages || [], authoritativeMessages, runtime.pending_revision,
+      )
       retireUnownedRuntimeStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2798,6 +2816,7 @@ export default function ChatView({
             runtime.active_assistant_message_id || null,
           goal: runtimeGoal,
           pending_messages: runtime.pending_messages || [],
+          pending_revision: runtime.pending_revision,
           pending_question_id: runtime.pending_question_id || null,
           waits: runtime.waits || [],
           background_helpers: normalizeBackgroundHelpers(
@@ -3226,7 +3245,9 @@ export default function ChatView({
   // turn from mount, so its first promote appends a fresh assistant.
   function adoptStartedQueueTurn(result, fallbackRow = null) {
     const consumed = result.message?._consumed_cids
-    if (Array.isArray(consumed)) pendingQueue.promoteManyByCid(consumed)
+    if (Array.isArray(consumed)) {
+      pendingQueue.promoteManyByCid(consumed, { revision: result.message._pending_revision })
+    }
     const rows = startedMessagesFromResponse(result) || (fallbackRow ? [fallbackRow] : null)
     if (rows) commitMessages(prev => appendMessageBatch(prev, rows))
     onMessageStartRef.current?.()
@@ -3489,6 +3510,7 @@ export default function ChatView({
             ts: ackTs ?? queuedMsg.ts,
             position: result.position,
             serverMsg: canonicalPending,
+            revision: result.pending_revision,
           })
           if (!canonicalPending) {
             // Older backends acknowledge only {ts, position}. Hydrate
@@ -3521,19 +3543,11 @@ export default function ChatView({
           } else if (result.cut_deferred) {
             // The transcript split waits for provider acknowledgement, so the
             // row is STILL queued server-side and its tray entry stays.
-            // Resolve THIS send's own row and nothing else: confirm it by cid
-            // against the server's echoed entry (which carries the durable ts
-            // fast-forward needs).
-            //
-            // Not `hydrate(result.pending_messages)`: that list is a snapshot
-            // taken at steer time, and a wholesale reconcile against it is
-            // wrong in both directions. It would DROP a row queued and
-            // confirmed while this 202 was in flight (absent from the snapshot,
-            // no longer in-flight), and it would RESURRECT this row if the
-            // runner's cut landed first (the cut retires the tray entry, then
-            // the snapshot puts it back while it is already inline). Confirming
-            // one cid is a no-op once the cut has retired it, so the two can
-            // land in either order.
+            // Resolve THIS send's own row: confirm it by cid against the
+            // server's echoed entry (which carries the durable ts fast-forward
+            // needs), at the echoed list's revision so an older list cannot
+            // drop it. Confirming one cid is a no-op once the cut has retired
+            // it, so the response and the cut can land in either order.
             const serverRow = Array.isArray(result.pending_messages)
               ? result.pending_messages.find(m => cidOf(m) === queuedMsg.cid)
               : null
@@ -3541,6 +3555,7 @@ export default function ChatView({
               ts: serverRow?.ts ?? queuedMsg.ts,
               position: serverRow?.position,
               serverMsg: serverRow,
+              revision: result.pending_revision,
             })
             // Its cid-keyed intent remains beside the durable queued row until
             // the cut consumes both, regardless of response/event order.
@@ -3772,7 +3787,9 @@ export default function ChatView({
         }
         if (result.started) {
           if (Array.isArray(result.message?._consumed_cids)) {
-            pendingQueue.promoteManyByCid(result.message._consumed_cids)
+            pendingQueue.promoteManyByCid(result.message._consumed_cids, {
+              revision: result.message._pending_revision,
+            })
           }
           // The pin already landed at submit for this same cid.
           const startedMessages = startedMessagesFromResponse(result)
@@ -4412,15 +4429,19 @@ export default function ChatView({
     !activationSettledRef.current
     || isProviderSwitchBlocking(chatId) || sendingRef.current || serverRunningRef.current
   ), [chatId])
+  const helperDelegationId = chatInfo?.helper_delegation_id || null
+  const helperParentChatId = chatInfo?.helper_parent_chat_id || null
   const sendResume = useCallback(async (text, attachments, options) => {
     const request = { chatId: String(chatId) }
     resumeRequestRef.current = request
     try {
-      return await sendAfterSettingsSaved(text, attachments, options)
+      return await sendRecoveryResume({
+        helperDelegationId, settingsSaved, request: apiFetch, send: sendAfterSettingsSaved,
+      }, text, attachments, options)
     } finally {
       if (resumeRequestRef.current === request) resumeRequestRef.current = null
     }
-  }, [chatId, sendAfterSettingsSaved])
+  }, [chatId, helperDelegationId, sendAfterSettingsSaved, settingsSaved])
   const { resume: handleResume, state: resumeState } = useResume({
     chatId,
     runId: recoveryRunId,
@@ -4508,7 +4529,8 @@ export default function ChatView({
         method: 'DELETE',
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
-      await jsonOrThrow(res, 'Queued-message cancellation failed')
+      const data = await jsonOrThrow(res, 'Queued-message cancellation failed')
+      pendingQueue.cancelByCid(cid, { revision: data.pending_revision })
     } catch {
       // A failed response is ambiguous: the DELETE may still have committed.
       // Read server truth, but restore only this operation's row so an older
@@ -4572,8 +4594,12 @@ export default function ChatView({
       )
       const data = await jsonOrThrow(res, 'Queued-message edit failed')
       if (data.updated && Array.isArray(data.pending_messages)) {
-        // Reconcile the edited text from server truth.
-        pendingQueue.hydrate(data.pending_messages)
+        // This edit confirms only its own row, not the pre-cut snapshot of
+        // siblings. A concurrent steer must not be undone by that old list.
+        const serverMsg = data.pending_messages.find(row => cidOf(row) === cid)
+        if (serverMsg) {
+          pendingQueue.confirmQueued(cid, { serverMsg, revision: data.pending_revision })
+        }
         return 'saved'
       }
       // updated:false — a racing promotion or cancel already pulled this row
@@ -4606,7 +4632,7 @@ export default function ChatView({
       forgetAllSendIntents()
 
       let stoppedCleanly = false
-      // The server's queue as of the latest runtime read after a Stop request.
+      // The latest runtime read after a Stop request that carried the queue.
       let serverQueue = null
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
@@ -4633,7 +4659,10 @@ export default function ChatView({
           const res = await apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: 5000 })
           if (!res.ok) return { failed: true, running: null }
           const data = await res.json()
-          return { failed: false, running: data?.running, pending: data?.pending_messages }
+          return {
+            failed: false, running: data?.running,
+            pending: data?.pending_messages, revision: data?.pending_revision,
+          }
         } catch {
           return { failed: true, running: null }
         }
@@ -4651,7 +4680,7 @@ export default function ChatView({
           break
         }
         const confirmation = await confirmStopIdle()
-        if (Array.isArray(confirmation.pending)) serverQueue = confirmation.pending
+        if (Array.isArray(confirmation.pending)) serverQueue = confirmation
         stoppedCleanly = stopConfirmedIdle({
           stopSucceeded: requestSucceeded,
           confirmRunning: confirmation.running,
@@ -4672,8 +4701,10 @@ export default function ChatView({
       // interrupt failed. Show its queue either way: an idle one lets the
       // composer offer to send the held rows, and a turn still running must
       // not keep promising rows that no longer send after it.
-      if (!serverQueue) serverQueue = (await confirmStopIdle()).pending
-      if (Array.isArray(serverQueue)) pendingQueue.hydrate(serverQueue)
+      if (!serverQueue) serverQueue = await confirmStopIdle()
+      if (Array.isArray(serverQueue.pending)) {
+        pendingQueue.hydrate(serverQueue.pending, { revision: serverQueue.revision })
+      }
       // The SDK interrupt timed out (handle.stop()'s 2s bound — see
       // claude_sdk_runner.stop): the runner is still alive and the backend
       // left the registry entry + broadcast intact for the runner's own
@@ -4847,7 +4878,7 @@ export default function ChatView({
           // them at the authoritative cut.
         } else if (Array.isArray(result.pending_messages)) {
           // Compatibility with an older immediate-cut backend.
-          pendingQueue.hydrate(result.pending_messages)
+          pendingQueue.hydrate(result.pending_messages, { revision: result.pending_revision })
         } else {
           // A backend that echoes no queue at all: remove exactly the steered
           // cids.
@@ -5647,6 +5678,15 @@ export default function ChatView({
     scrollRef, hasPendingResume, resumeCardEl,
   )
   const questionNudgeShown = hasPendingQuestion && pendingCardOffscreen
+  // An app block the owner still has to act on (a prepared change waiting to
+  // be sent, say) gets the same cue once it has scrolled away. A running turn
+  // or an open question comes first: the block is not the next step then.
+  const waitingBlock = useWaitingBlock(appBlockChat)
+  const blockNudgeArmed = Boolean(waitingBlock) && !turnActive && !hasPendingQuestion
+  const waitingBlockOffscreen = useOffscreenNudge(
+    scrollRef, blockNudgeArmed, waitingBlock?.node ?? null,
+  )
+  const blockNudgeShown = blockNudgeArmed && waitingBlockOffscreen
   useChatQuestionReveal({
     activation: questionActivation, hidden, displayReady, rootRef: scrollRef,
     pendingElement: hasPendingQuestion ? pendingQuestionEl : null,
@@ -5692,6 +5732,7 @@ export default function ChatView({
     }
   }, [hasUnloadedNewer, followLatest, chatId, queryClient, applyMessagesToView])
   const offscreenControlsVisible = questionNudgeShown
+    || blockNudgeShown
     || resumeNudgeShown
     || jumpToLatestVisible
 
@@ -5907,12 +5948,19 @@ export default function ChatView({
     () => projectActiveSteerPrefix(settledMessages, activeSteerPrefix),
     [settledMessages, activeSteerPrefix],
   )
-  const peerTimeline = usePeerTimeline(
+  const projectedTimeline = usePeerTimeline(
     chatId,
     displayedMessages,
     !hidden && transcriptPaintable,
     streamItems,
   )
+  // Settled pause history joins its resume notice only where the projected
+  // timeline draws nothing between them.
+  const peerTimeline = useMemo(() => {
+    const combined = combineRecoveryHistory(projectedTimeline.messages, projectedTimeline)
+    return combined === projectedTimeline.messages
+      ? projectedTimeline : { ...projectedTimeline, messages: combined }
+  }, [projectedTimeline])
   const committedReplyGroupsRef = useRef(null)
   const replyGroups = useMemo(() => assistantReplyGroups(
     showActiveAssistantSurface && activeMirrorMsgIdx < 0
@@ -5944,59 +5992,69 @@ export default function ChatView({
     }
   }
 
-  const stretches = useMemo(
-    () => agentStretches(peerTimeline.messages, replyGroups),
-    [peerTimeline.messages, replyGroups],
-  )
-  // Each stretch's earlier replies' rows, for the References its last reply
-  // lists; replies inside a stretch list none.
-  const stretchSourceRows = useMemo(() => new Map([...stretches].map(([end, groups]) => [
-    end, groups.slice(0, -1).flatMap(group => group.rows.map(row => row.message)),
-  ])), [stretches])
   // Answering a card starts the turn the moment it is submitted, before the
-  // server acknowledges it; a failed answer clears this and the footer returns.
-  const turnStarting = turnActive || questionFollowHandoff != null
-  // The settled footer reply's end (see replyFooter). It is state set from a
+  // server acknowledges it; a failed answer ends it and the controls return
+  // in the line the answer kept.
+  const questionPending = questionFollowHandoff != null
+  const turnStarting = turnActive || questionPending
+  // The settled footer reply's end (see replyFooters). It is state set from a
   // committed render's layout effect, so a discarded render cannot name a
   // reply, and it updates before paint. Kept with its chat, so switching
   // chats never carries one chat's settled reply into another.
   const [settledFooter, setSettledFooter] = useState({ chatId: null, end: null })
   const settledEnd = settledFooter.chatId === chatId ? settledFooter.end : null
-  // One footer for the whole chat, on the reply at its very end. Once the
-  // owner speaks or answers a card there is none until the next reply starts,
-  // so that reply's Thinking takes the footer's place instead of appearing
-  // below it.
+  // One footer per complete answer. Only the current answer follows the live
+  // surface: it keeps its line, without controls, while the same answer
+  // continues (a question answered inside its row), and leaves it to the new
+  // reply when another turn starts. An answer a still-running run wrote
+  // (before a visible steer) stays working until that run settles.
   const footerLiveIndex = showActiveAssistantSurface
     ? (activeMirrorMsgIdx >= 0 ? activeMirrorMsgIdx : messages.length) : -1
-  const footer = useMemo(() => replyFooter({
-    messages: peerTimeline.messages, replyGroups, stretches, liveIndex: footerLiveIndex,
-    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd,
-  }), [peerTimeline.messages, replyGroups, stretches, footerLiveIndex,
-    lastVisibleMessageIndex, offset, turnStarting, settledEnd])
-  const footerGroup = footer?.group ?? null
-  const footerEnd = footer?.end ?? null
+  const runningRoot = turnActive
+    ? assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId })
+    : null
+  const footers = useMemo(() => replyFooters({
+    messages: peerTimeline.messages, replyGroups, liveIndex: footerLiveIndex,
+    lastVisibleIndex: lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot,
+    questionPending,
+  }), [peerTimeline.messages, replyGroups, footerLiveIndex,
+    lastVisibleMessageIndex, offset, turnStarting, settledEnd, runningRoot, questionPending])
+  const footerEnd = footers.current?.end ?? null
   useLayoutEffect(() => {
     if (!turnStarting) {
       setSettledFooter(prev => (prev.chatId === chatId && prev.end === footerEnd
         ? prev : { chatId, end: footerEnd }))
     }
   }, [chatId, turnStarting, footerEnd])
-  // A stretch that began before the loaded page reads its start only when
-  // the footer is about to be used.
+  // At most the first loaded answer can begin before the history page. Its
+  // start is read lazily (abortable, retryable), whether it is historical or
+  // the current answer.
+  const truncatedFooter = [...footers.byGroup.values()].some(item => item.truncated)
   const [stretchStartRows, requestStretchStart] = useStretchPrefix(
-    chatId, footer?.truncated ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
+    chatId, truncatedFooter ? offset : 0, { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
   )
-  const footerParts = useMemo(() => footerCopyParts(footer, {
-    startRows: stretchStartRows, messages: peerTimeline.messages, offset,
-    slots: peerTimeline.slots, positions: peerTimeline.positions, displayKeys: assistantDisplayKeys,
-    liveQuestionId: answerableQuestionId,
-  }), [footer, stretchStartRows, peerTimeline.messages, peerTimeline.slots,
-    peerTimeline.positions, offset, assistantDisplayKeys, answerableQuestionId])
-  // Copy shows exactly when the stretch's parts are known and say something;
-  // pressing it builds the clipboard from those same parts.
-  const footerCopy = useMemo(() => (footerParts?.length
-    ? button => stretchClipboard(footerParts, button.closest('.chat__list'))
-    : undefined), [footerParts])
+  // Copy shows when an answer settled with prose to copy (footerHasCopy) and
+  // builds its text only when pressed, from the transcript as it is then.
+  // The handler is stable and each answer's References rows keep their
+  // identity, so the footer gives an unchanged settled answer no new props on
+  // a streamed frame.
+  const copyReadRef = useRef(null)
+  useLayoutEffect(() => {
+    copyReadRef.current = {
+      footers,
+      context: {
+        startRows: stretchStartRows, messages: peerTimeline.messages, offset,
+        slots: peerTimeline.slots, positions: peerTimeline.positions,
+        displayKeys: assistantDisplayKeys, liveQuestionId: answerableQuestionId,
+      },
+    }
+  })
+  const copyAnswer = useCallback((button, answerKey) => {
+    const { footers: current, context } = copyReadRef.current
+    const footer = [...current.byGroup.values()].find(item => item.group.rows[0].key === answerKey)
+    const parts = footerCopyParts(footer, context)
+    return parts?.length ? stretchClipboard(parts, button.closest('.chat__list')) : null
+  }, [])
 
   const fileDragHandlers = createFileDragHandlers({
     getDepth: () => fileDragDepthRef.current,
@@ -6018,9 +6076,10 @@ export default function ChatView({
       : -1
     const active = activeIndex >= 0
     const replyRoot = assistantReplyRoot(group.rows[0].message)
-    const continuingRun = !!(turnActive && replyRoot && replyRoot
-      === assistantReplyRoot({ role: 'assistant', id: activeAssistantMessageId || streamAssistantMessageId }))
+    // The running run is still writing this reply (see runningRoot).
+    const continuingRun = !!runningRoot && replyRoot === runningRoot
     const tail = group.rows.at(-1)
+    const groupFooter = footers.byGroup.get(group)
     const last = active || group.lastVisibleIndex === lastVisibleMessageIndex
     return <AssistantReply
       key={group.rows[0].key}
@@ -6039,6 +6098,8 @@ export default function ChatView({
       onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       canContinueAnyway={canStartFreshSession}
+      helperChat={!!helperDelegationId}
+      helperParentChatId={helperParentChatId}
       resumeState={resumeState}
       onInternalNav={internalNav}
       autoResumeEnabled={last && autoResumeEnabled}
@@ -6056,16 +6117,20 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
-      // The footer clears the moment a new turn starts (an answered card
-      // included) and fills again where the agent next stops.
-      footer={group === footerGroup ? footer.state : null}
-      copy={group === footerGroup ? footerCopy : undefined}
-      metaVisible={group === footerGroup && visibleMessageMetaKey === group.rows[0].key}
-      onRevealMeta={group === footerGroup ? showMessageMeta : undefined}
-      onFooterIntent={group === footerGroup && footer.truncated ? requestStretchStart : undefined}
-      // References of the latest stretch leave with its footer while the
-      // agent works, and return, whole, where it next stops.
-      stretchSourceRows={group === footerGroup && turnStarting ? null : stretchSourceRows.get(group) || null}
+      // Each complete answer keeps its own footer; only one the running turn
+      // is still writing, or briefly the one it is leaving, has no controls.
+      footer={groupFooter?.state ?? null}
+      copy={footerHasCopy(groupFooter, {
+        startRows: stretchStartRows, messages: peerTimeline.messages, liveQuestionId: answerableQuestionId,
+      })
+        ? copyAnswer : undefined}
+      metaVisible={!!groupFooter && visibleMessageMetaKey === group.rows[0].key}
+      onRevealMeta={groupFooter ? showMessageMeta : undefined}
+      onFooterIntent={groupFooter?.truncated ? requestStretchStart : undefined}
+      // References sit in the answer footer. While the answer continues they
+      // keep their place, held and unusable, so submitting an answer cannot
+      // move the transcript; they are usable again once it settles.
+      stretchSourceRows={groupFooter?.sourceRows ?? null}
       // A chat an app owns stays with that app: no Branch.
       onBranch={onBranchChat && chatInfo?.created_by_app_id == null ? branchFromReply : undefined}
       suppressedQuestionKeys={showActiveAssistantSurface ? streamItemQuestionKeys : null}
@@ -6087,7 +6152,7 @@ export default function ChatView({
     ? renderAssistantReply(appendedReply) : null
 
 
-  return (
+  const pane = (
     <div
       ref={chatRef}
       className={`chat${showEmpty || showLoadError ? ' chat--empty' : ''}`}
@@ -6382,7 +6447,6 @@ export default function ChatView({
                   chatId={chatId}
                   messageKey={dataKey}
                 />
-                <span className="chat__steer-pending-note">{steerPendingHint()}</span>
                 <MessageMetaRow
                   timestamp={reservedSteerMessage.ts || null}
                   copy={copyText ? () => ({ plainText: copyText }) : null}
@@ -6431,6 +6495,18 @@ export default function ChatView({
                       )}
                     >
                       Möbius asked you something — tap to answer
+                    </button>
+                  )}
+                  {blockNudgeShown && (
+                    <button
+                      type="button"
+                      className="chat__question-nudge"
+                      {...composerAdjacentActionProps(
+                        () => revealPendingQuestion(waitingBlock.node),
+                        { activateOnTouchEnd: true },
+                      )}
+                    >
+                      {waitingBlock.appName} is waiting for you — tap to view
                     </button>
                   )}
                   {resumeNudgeShown && (
@@ -6642,6 +6718,7 @@ export default function ChatView({
                   embedded ? undefined : handleAutoResumeSettingsChange
                 }
                 onChangeChatInfo={mergeChatInfo}
+                onOpenProviderSettings={onOpenProviderSettings}
                 providerSwitchState={providerSwitchState}
                 settingsSaveTailRef={settingsSaveTailRef}
                 composerInputRef={inputRef}
@@ -6666,4 +6743,6 @@ export default function ChatView({
       </div>
     </div>
   )
+  // One helper preview per pane: opening another helper replaces the open one.
+  return <HelperPreviewProvider>{pane}</HelperPreviewProvider>
 }

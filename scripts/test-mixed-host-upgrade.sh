@@ -132,11 +132,13 @@ DOMAIN=localhost
 export COMPOSE_PROJECT_NAME=mobius
 
 fail() {
-  echo "mixed upgrade: $*" >&2
+  # Diagnostics first, the reason last: it then ends the step's log, where
+  # readers and scripts/ci-failures.sh look, instead of scrolling out of view.
   journalctl --no-pager -u mobius-rebuild.service -n 60 >&2 || true
   cat "$STATUS" >&2 2>/dev/null || true
   local cid
   if cid=$(app_container 2>/dev/null); then docker logs "$cid" --tail 60 >&2 2>&1 || true; fi
+  echo "mixed upgrade: $*" >&2
   exit 1
 }
 

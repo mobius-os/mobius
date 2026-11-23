@@ -116,6 +116,8 @@
     "0103_shared_peer_note_bodies": "f713001c5f0a692bb03b4846d3ad2dfae901f2664d28360cef7c8227521f410e",
     "0104_claude_session_costs": "f53ee15b9dea71ab2f84383e3c21ed04888dadf6d6b270a5cd0bf519f32f5481",
     "0105_autopilot_push_mode": "b1f4c31a706f15b2a66cc79101431f1fd24ae77abd92cbeea982ba1d4e2dbe7a",
-    "0106_browser_grant_full_access": "e0a56bf140c5e08bc1f977f471b087835ae377d4a7c35f59ac3cb3c805f03533"
+    "0106_browser_grant_full_access": "e0a56bf140c5e08bc1f977f471b087835ae377d4a7c35f59ac3cb3c805f03533",
+    "0107_app_install_id": "e8e734ce545aa3d36730c324ea656cb2ae2aea9b11eb25975fc9950d32c6b034",
+    "0108_chat_pending_revision": "3b00f74a78f05521779ac6585866ba8d8b357cf67f62b98065dc261ea93bc0b7"
   }
 }

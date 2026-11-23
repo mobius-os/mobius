@@ -349,6 +349,8 @@ for (const isStreaming of [true, false]) {
       replyGroup: group, activeRowIndex: isStreaming ? 1 : -1,
       activeMirrorMsg: tail, activitySourceBlocks: tail.blocks,
       useDbActivePayload: true, isStreaming, chatId: 'reply-fixture',
+      // As ChatView passes an answer end: References sit in its footer.
+      footer: isStreaming ? 'working' : 'settled', stretchSourceRows: isStreaming ? null : [],
     }, { tools: new Map(), positions: new Map() })
     assert.ok(html.includes(answer), 'the suffix belongs to the original paragraph')
     assert.equal((html.match(/<p\b[^>]*>/g) || []).length, 1)
@@ -373,7 +375,8 @@ test('one reply owns its final References, including a folded source row', () =>
   _resetDisclosureStateForTests()
   persistDisclosureOpen('reply-fixture', `${tail.id}:references`, true)
   const html = render(Active, { replyGroup: group, activeRowIndex: -1,
-    activeMirrorMsg: folded, useDbActivePayload: true, chatId: 'reply-fixture' },
+    activeMirrorMsg: folded, useDbActivePayload: true, chatId: 'reply-fixture',
+    footer: 'settled', stretchSourceRows: [] },
   { tools: new Map(), positions: new Map() })
   assert.equal((html.match(/class="chat__reply"/g) || []).length, 1)
   assert.equal((html.match(/class="chat__sources(?: |")/g) || []).length, 1)
@@ -465,4 +468,37 @@ test('reasoning that a routine save joined keeps its reasoning line', () => {
   assert.equal(html.split('class="chat__tools"').length, 2)
   assert.match(html, /data-activity-kind="reasoning"/)
   assert.match(html, /Thought for 3 seconds/)
+})
+
+test('folded app pages leave one command disclosure between real prose boundaries', () => {
+  const command = id => ({ type: 'tool', tool: 'Bash', tool_use_id: id, status: 'done' })
+  const page = id => ({
+    type: 'tool', tool: 'mobius_control:memory_read', tool_use_id: id, status: 'done',
+    app_activity: { app_slug: 'memory', app_name: 'Memory', operation_key: 'lookup:read',
+      status: 'succeeded', label: 'Read notes', resources: [] },
+  })
+  const compact = (id, start) => ({
+    type: 'activity', activity_id: id, message_index: 0, start, end: start + 2,
+    tool_count: 1, entries: [{ idx: start, item: command(id) }],
+  })
+  for (const isStreaming of [false, true]) {
+    const msg = { id: 'paged-work', role: 'assistant', blocks: [
+      page('first'),
+      { type: 'text', content: 'Starting checks' },
+      compact('one', 2), page('second'),
+      compact('two', 5), page('third'), command('three'),
+      { type: 'text', content: 'Checks complete' },
+      compact('four', 9),
+    ] }
+    const html = render(Message, { msg, chatId: 'chat', messageKey: msg.id, isStreaming },
+      { tools: new Map(), positions: new Map() })
+    const start = html.indexOf('Starting checks')
+    const end = html.indexOf('Checks complete')
+    assert.ok(start >= 0 && end > start)
+    const work = html.slice(start, end)
+    assert.equal((work.match(/class="chat__activity chat__activity--done/g) || []).length, 1)
+    assert.match(work, /Ran commands/)
+    assert.equal((html.match(/chat__app-activity-tool /g) || []).length, 1)
+    assert.match(html.slice(end), /Ran a command/)
+  }
 })

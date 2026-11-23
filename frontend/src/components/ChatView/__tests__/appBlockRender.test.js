@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
 import AppBlock from '../markdown/AppBlock.jsx'
 import { AppBlockView } from '../markdown/AppBlockParts.jsx'
-import { AskControl, PassiveBlockView, SessionControls, blockAsk, passiveBlockMode } from '../markdown/PassiveAppBlock.jsx'
+import { AskControl, PassiveBlockView, SessionControls, blockAsk, blockAwaitsOwner, passiveBlockMode, sessionLocked } from '../markdown/PassiveAppBlock.jsx'
 import { sessionState } from '../markdown/appBlockSession.js'
 import { appBlockFromToken } from '../markdown/appBlock.js'
 import { appQueries } from '../../../hooks/queries.js'
@@ -264,6 +264,10 @@ test('several confirming actions are ambiguous: no Confirm is enabled and no lis
 
 test('a static view the reader opened stays until the reader closes it, even when a slot frees', () => {
   const base = { supported: true, near: true, retained: false }
+  assert.equal(passiveBlockMode({ ...base, granted: false, staticOpen: false, hasPresentation: true }), 'passive',
+    'last idle display survives slot acquisition without owning a frame')
+  assert.equal(passiveBlockMode({ ...base, admitted: false, granted: false, hasPresentation: true }), 'static')
+  assert.equal(passiveBlockMode({ ...base, supported: false, granted: false, hasPresentation: true }), 'static')
   assert.equal(passiveBlockMode({ ...base, granted: false, staticOpen: false }), 'static')
   assert.equal(passiveBlockMode({ ...base, granted: true, staticOpen: true }), 'static', 'a freed slot keeps the open view')
   assert.equal(passiveBlockMode({ ...base, granted: true, staticOpen: false }), 'passive', 'closing it may go passive again')
@@ -295,7 +299,7 @@ test('a held session tells the reader to check the result and offers no control'
   const session = { state, awaitingAck: false }
   assert.equal(sessionLocked(session, false), true)
   assert.equal(sessionLocked({ state: null, awaitingAck: false }, false), true, 'locked even with no busy action')
-  assert.equal(sessionLocked({ state: null, awaitingAck: false }, true), false)
+  assert.equal(sessionLocked({ state: null, awaitingAck: false }, true), true)
   const html = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
     locked: sessionLocked(session, false), confirmArmed: false, notice: ADMISSION_WITHDRAWN('Example'), onEvent() {} }))
   assert.match(html, /Example can no longer run in this chat\. Open Example to check the result of the last action/)
@@ -474,7 +478,7 @@ test('app rows replace the saved rows, facts and item controls, with no conversa
 
 test('a live title carries a state mark: spinner, check or exclamation mark, none when neutral', () => {
   assert.match(appRowsView({ title: 'Sending 2', titleBusy: true, rows: [] }),
-    /<header><span class="md-app-block__title-mark is-neutral" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
+    /<header><span class="md-app-block__title-mark is-neutral is-busy" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
   assert.match(appRowsView({ title: '2 pull requests opened', titleTone: 'success', rows: [] }),
     /<span class="md-app-block__title-mark is-success" aria-hidden="true"><svg/)
   assert.match(appRowsView({ title: '1 needs a fix', titleTone: 'attention', rows: [] }),
@@ -492,6 +496,42 @@ test('no rows and no visible action fold the block to one line, with a jump only
   assert.match(appRowsView(fields), /md-app-block__open/, 'the newest folded block keeps its open link')
   assert.doesNotMatch(appRowsView({ ...fields, actions: [{ key: 'send-batch:sel-1', label: 'Send all' }] }), /md-app-block--folded/,
     'a visible action keeps the block open')
+})
+
+test('compact inline blocks keep their action lane while work runs and put results where controls were', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' },
+    items: [{ title: 'Exact change', intent: 'open:one' }] }) })
+  const show = fields => {
+    const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+      rows: [{ title: 'Exact change', meta: 'owner/repo' }], ...fields }, 's', new Set(['send:one']), new Set(), 'example')
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+      locked: false, confirmArmed: true, onEvent() {} }))
+  }
+  const states = [
+    { actions: [{ key: 'send:one', label: 'Send' }] },
+    { title: 'Checking', titleBusy: true, actions: [{ key: 'send:one', hidden: true }] },
+    { actions: [{ key: 'send:one', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] },
+    { title: 'Sending', titleBusy: true, actions: [{ key: 'send:one', hidden: true, busy: true }] },
+  ]
+  for (const fields of states) {
+    const html = show(fields)
+    assert.match(html, /md-app-block--action-lane/)
+    assert.match(html, /<footer>/, 'hidden controls leave the lane in place')
+  }
+  const complete = show({ actions: [{ key: 'send:one', hidden: true }], rows: [
+    { title: 'Exact change', meta: 'owner/repo', links: [{ label: '#42', url: 'https://example.com/pull/42' }] },
+    { title: 'Another change', meta: 'owner/other', links: [{ label: '#43', url: 'https://example.com/pull/43' }] },
+  ] })
+  const [rows, footer] = complete.split('<footer>')
+  assert.doesNotMatch(rows, /href="https:\/\/example.com\/pull/)
+  assert.match(footer, /md-app-block__results/)
+  assert.match(footer, /aria-label="#42, Exact change, opens in a new tab"/)
+  assert.match(footer, /aria-label="#43, Another change, opens in a new tab"/)
+  assert.doesNotMatch(footer, /<button/, 'settled results cannot send again')
+  const folded = show({ rows: [], actions: [{ key: 'send:one', hidden: true }] })
+  assert.doesNotMatch(folded, /md-app-block--action-lane|<button/, 'a superseded, folded card has no empty lane')
+  assert.match(folded, /md-app-block--folded/)
 })
 
 test('jumping to the newest block moves focus there, without animation for reduced motion', async () => {
@@ -541,6 +581,56 @@ test('after a tap the ask waits, and says why only to assistive technology', () 
   assert.match(askView('already'), /is-settled" disabled=""[^>]*>.*Requested in chat<\/button><span[^>]*>This chat already has this request\.<\/span><span class="md-app-block__sr-only" role="status">This chat already has this request\./)
   const locked = renderToStaticMarkup(createElement(AskControl, { status: 'ready', locked: true, onAsk() {} }))
   assert.match(locked, /is-ask" disabled="">/, 'an owner event awaiting acknowledgement locks it too')
+})
+
+test('a block awaits the owner only while it draws a control to press, on the newest block of the last message', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send', intent: 'send:all' } }) })
+  const press = { key: 'send:all', hidden: false, disabled: false, busy: false, open: false }
+  const state = { actions: [press], recoveryPending: false, rows: null }
+  const context = { chatId: 'chat-1', latest: true, tail: true }
+  const awaits = input => blockAwaitsOwner({ block, state, admitted: true, context, ask: null, locked: false, ...input })
+  assert.equal(awaits({}), true)
+  for (const input of [
+    { state: null },
+    { admitted: false },
+    { context: null },
+    { context: { ...context, latest: false } },
+    { context: { ...context, tail: false } },
+    { ask: fixAsk },
+    { locked: true },
+    { state: { ...state, recoveryPending: true } },
+    { state: { ...state, actions: [] } },
+    ...['hidden', 'disabled', 'busy', 'open'].map(flag => ({ state: { ...state, actions: [{ ...press, [flag]: true }] } })),
+  ]) assert.equal(awaits(input), false, JSON.stringify(input))
+})
+
+test('the waiting cue follows the controls the block draws: an item action the app\'s rows replace is none, and a locked session offers none', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    items: [{ title: 'First change', intent: 'open:a', action: { label: 'Contribute', intent: 'send:a' } }] }) })
+  const keys = new Set(['send:a'])
+  const context = { chatId: 'chat-1', latest: true, tail: true }
+  const report = extra => sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [{ key: 'send:a', label: 'Contribute' }], ...extra }, 's', keys)
+  const drawn = state => renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state, locked: false, confirmArmed: false, onEvent() {} }))
+  const awaits = (state, locked = false) => blockAwaitsOwner({ block, state, admitted: true, context, ask: null, locked })
+  // The app's own rows (here none) replace the saved item, and its control with it.
+  const replaced = report({ rows: [] })
+  assert.doesNotMatch(drawn(replaced), /<button/, 'the item control is not drawn')
+  assert.equal(awaits(replaced), false)
+  // Without rows the item's control is drawn and pressable.
+  const plain = report({})
+  assert.match(drawn(plain), /<button type="button" class="md-app-block__action"[^>]*>Contribute<\/button>/)
+  assert.equal(awaits(plain), true)
+  // One action busy locks every button (sessionLocked), including the idle sibling.
+  const two = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base, interaction: 'inline',
+    action: { label: 'Send all', intent: 'send:all' }, items: [{ title: 'First change', intent: 'open:a', action: { label: 'Contribute', intent: 'send:a' } }] }) })
+  const busy = sessionState({ type: 'moebius:app-block-state', sessionId: 's', actions: [
+    { key: 'send:all', label: 'Send all', busy: true }, { key: 'send:a', label: 'Contribute' }] }, 's', new Set(['send:all', 'send:a']))
+  const locked = sessionLocked({ state: busy, awaitingAck: false, authoritative: true }, true)
+  assert.equal(locked, true)
+  const html = renderToStaticMarkup(createElement(PassiveBlockView, { block: two, app: admitted[0], state: busy, locked, confirmArmed: false, onEvent() {} }))
+  assert.equal((html.match(/<button/g) || []).length, (html.match(/<button[^>]*disabled=""/g) || []).length, 'every drawn button is disabled')
+  assert.equal(blockAwaitsOwner({ block: two, state: busy, admitted: true, context, ask: null, locked }), false)
 })
 
 test('an ask is drawn only for an admitted app on the attested chat\'s newest block, outside recovery', () => {
@@ -604,3 +694,83 @@ test('a linked change-size fact keeps its source link around the coloured counts
   assert.match(unsafe, /<dd><span class="md-app-block__lines">/)
 })
 
+test('footer status removes the redundant header without dropping details or lifecycle controls', () => {
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    title: '1 contribution', interaction: 'inline', expand: false, status_placement: 'footer',
+    action: { label: 'Send', intent: 'send:one' }, items: [{ title: 'Exact change', intent: 'open:one' }] }) })
+  const show = fields => {
+    const state = fields && sessionState({ type: 'moebius:app-block-state', sessionId: 's',
+      title: '1 contribution', rows: [{ title: 'Exact change', meta: 'owner/repo', intent: 'open:one' }],
+      actions: [{ key: 'send:one', label: 'Send' }], ...fields }, 's', new Set(['send:one']), new Set(), 'example')
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+      locked: false, confirmArmed: true, onEvent() {}, onJump() {} }))
+  }
+  for (const fields of [null, {}, { title: 'Sending 1', titleBusy: true,
+    actions: [{ key: 'send:one', hidden: true, busy: true }] },
+  { title: 'Confirm 1', actions: [{ key: 'send:one', confirming: true,
+    confirmation: [{ title: 'Exact change', facts: [{ label: 'Project', value: 'owner/repo' }] }] }] }]) {
+    const html = show(fields)
+    assert.doesNotMatch(html, /<header>|md-app-block__open/)
+    assert.match(html, /Exact change/)
+    assert.match(html, /<footer><div class="md-app-block__footer-status">/)
+  }
+  assert.match(show({}), /intent=open%3Aone/, 'row details still open the app')
+  const confirmation = show({ actions: [{ key: 'send:one', confirming: true,
+    confirmation: [{ title: 'Exact change', facts: [] }] }] })
+  assert.match(confirmation, />Not now<\/button>/)
+  assert.match(confirmation, />Confirm<\/button>/)
+  const published = show({ title: '1 pull request', titleTone: 'success',
+    actions: [{ key: 'send:one', hidden: true }],
+    rows: [{ title: 'Exact change', links: [{ label: '#42', url: 'https://example.com/pull/42' }] }] })
+  assert.match(published, /<footer>[^]*<strong>1 pull request<\/strong>[^]*md-app-block__results/)
+  assert.match(published, /aria-label="#42, Exact change, opens in a new tab"/)
+  assert.doesNotMatch(published, /<button/)
+  const folded = show({ title: 'Continued below', rows: [], actions: [{ key: 'send:one', hidden: true }] })
+  assert.match(folded, /md-app-block--folded/)
+  assert.match(folded, /Jump to latest/)
+  assert.doesNotMatch(folded, /<header>|md-app-block__open|md-app-block__items/)
+})
+
+test('only the block opts in to the compact lane; other inline cards keep their header, caption and row links', () => {
+  const html = appRowsView({ title: '1 pull request', actions: [{ key: 'send-batch:sel-1', hidden: true }],
+    rows: [{ title: 'Exact change', links: [{ label: '#42', url: 'https://example.com/pull/42' }] }] })
+  assert.match(html, /<header>/)
+  assert.doesNotMatch(html, /md-app-block--action-lane|md-app-block--footer-status|md-app-block__results/)
+  const saved = appRowsView({})
+  assert.match(saved, /<p class="md-app-block__source">From this conversation<\/p>/)
+})
+
+test('status_placement applies only to an inline session block with an action and no inline view', () => {
+  const compact = { ...base, interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' } }
+  const show = value => {
+    const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify(value) })
+    return renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state: null,
+      locked: false, confirmArmed: false, onEvent() {} }))
+  }
+  assert.match(show(compact), /md-app-block--footer-status/)
+  for (const value of [{ ...compact, action: undefined }, { ...compact, expand: true }, { ...compact, interaction: undefined }]) {
+    const html = show(value)
+    assert.doesNotMatch(html, /md-app-block--footer-status|md-app-block--action-lane/, JSON.stringify(value))
+    assert.match(html, /<header>[^]*<span class="md-app-block__sr-only">Open in <\/span>Example/)
+  }
+  assert.match(render({ ...compact, inline: false }), /<header>[^]*Open in <\/span>Example/, 'a link-only block keeps its header')
+})
+
+test('an app report cannot hide the host-drawn app name, not even beside Confirm', () => {
+  const confirming = { statusPlacement: 'footer', title: 'Approve now',
+    actions: [{ key: 'send-batch:sel-1', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] }
+  const ordinary = appRowsView(confirming)
+  assert.match(ordinary, /<header>[^]*<span class="md-app-block__sr-only">Open in <\/span>Example/,
+    'a live report cannot switch the placement')
+  assert.match(ordinary, />Confirm<\/button>/)
+  const block = appBlockFromToken({ type: 'code', lang: 'mobius-app', text: JSON.stringify({ ...base,
+    interaction: 'inline', expand: false, status_placement: 'footer', action: { label: 'Send', intent: 'send:one' } }) })
+  const state = sessionState({ type: 'moebius:app-block-state', sessionId: 's', ...confirming,
+    actions: [{ key: 'send:one', confirming: true, confirmation: [{ title: 'Exact change', facts: [] }] }] },
+  's', new Set(['send:one']), new Set(), 'example')
+  const compact = renderToStaticMarkup(createElement(PassiveBlockView, { block, app: admitted[0], state,
+    locked: false, confirmArmed: true, onEvent() {} }))
+  const footer = compact.split('<footer>')[1]
+  assert.match(footer, /^<div class="md-app-block__footer-status"><span class="md-app-block__footer-app">Example<\/span>/)
+  assert.match(footer, /<strong>Approve now<\/strong>[^]*>Confirm<\/button>/, 'the app name sits in the same footer as Confirm')
+})

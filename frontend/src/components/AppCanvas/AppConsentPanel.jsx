@@ -8,6 +8,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { api } from '../../api/client.js'
 import { appQueries } from '../../hooks/queries.js'
 import AppIcon from '../AppIcon.jsx'
+import AppConsentAgents from './AppConsentAgents.jsx'
 import './AppConsentPanel.css'
 
 export default function AppConsentPanel({ appId, appName, request }) {
@@ -19,6 +20,9 @@ export default function AppConsentPanel({ appId, appName, request }) {
   const [declined, setDeclined] = useState(false)
   const name = request?.app_name || appName || 'This app'
   const rows = request?.rows || []
+  // Agent access is one block; the app's other permissions stay rows.
+  const agentRow = rows.find(row => row.group === 'agent')
+  const otherRows = rows.filter(row => row.group !== 'agent')
   const isUpdate = Boolean(request?.is_update)
   const icon = <AppIcon className="app-consent__icon" item={app || { slug: appId }} label={name} size={null} />
 
@@ -66,8 +70,9 @@ export default function AppConsentPanel({ appId, appName, request }) {
     {request?.app_description && !isUpdate && <p className="app-consent__detail">{request.app_description}</p>}
     <div className="app-consent__section">
       <p className="app-consent__label">{isUpdate ? 'Newly requested' : 'Access requested'}</p>
-      <ul className="app-consent__list" tabIndex={0} aria-label={`Access ${name} requests`}>
-        {rows.map(row => <li className="app-consent__row" key={row.id}>
+      {agentRow && <AppConsentAgents row={agentRow} />}
+      {otherRows.length > 0 && <ul className="app-consent__list" tabIndex={0} aria-label={`Access ${name} requests`}>
+        {otherRows.map(row => <li className="app-consent__row" key={row.id}>
           <div>
             <strong>{row.title}{row.level ? ` (${row.level})` : ''}</strong>
             <span>{row.text}</span>
@@ -75,7 +80,7 @@ export default function AppConsentPanel({ appId, appName, request }) {
           </div>
           {row.critical && <span className="app-consent__dot" role="img" aria-label="Critical: can change your Möbius" title="Critical: can change your Möbius" />}
         </li>)}
-      </ul>
+      </ul>}
     </div>
     <p className="app-consent__meta">{request?.baseline}</p>
     {error && <p className="app-consent__error" role="alert">{error}</p>}

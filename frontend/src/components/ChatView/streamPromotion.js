@@ -53,6 +53,7 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.question_id ? { question_id: item.question_id } : {}),
       ...(item.answers ? { answers: item.answers } : {}),
       ...(item.platform_action ? { platform_action: item.platform_action } : {}),
+      ...(item.key_request ? { key_request: item.key_request } : {}),
       ...(item.message ? { message: item.message } : {}),
     }
   }

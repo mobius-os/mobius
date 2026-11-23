@@ -37,7 +37,7 @@ import { makeAppChatController } from '../../lib/appChatControl.js'
 import { handleAppProjectsRequest } from '../../lib/appProjectControl.js'
 import { subscribeShellLaunchTargets } from '../../lib/shellLaunchTargets.js'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
-import { requestedSettingsSection, settingsSectionOrNull } from '../../lib/settingsSections.js'
+import { requestedSettingsSection, settingsFocusRequest, settingsSectionOrNull } from '../../lib/settingsSections.js'
 import { recordClientError } from '../../lib/errorLog.js'
 import { setChatCompacting } from '../ChatView/chatCompactionStore.js'
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
@@ -237,6 +237,8 @@ import { createMediaSessionOwner } from './mediaSessionOwner.js'
 import { HistoryDismissProvider } from '../../hooks/useHistoryDismiss.jsx'
 import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
+import { KEYS_QUERY, useKeys } from '../SettingsView/keysQueries.js'
+import { appsWaitingForKeys } from '../../lib/keyRequestPlaces.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -2490,6 +2492,10 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       return next
     })
   }, [])
+  // Apps whose key request waits for the owner: the app list marks them as
+  // needing the owner, and the request is asked when they open the app.
+  const keysForApps = useKeys({ enabled: !isSharedBrowserAccess })
+  const keyWaitingAppIds = useMemo(() => appsWaitingForKeys(keysForApps.data), [keysForApps.data])
   const ownerInputChatIds = useMemo(() => {
     const next = new Set()
     for (const chat of chats) {
@@ -2958,12 +2964,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
 
   // The one way the shell opens Settings for someone else (a mini-app, the
   // agent's open_item, a notification tap, a chat link): navigate there and
-  // focus a known section. Navigation only; every action inside Settings stays
-  // the owner's.
-  const openSettingsSection = useCallback((section) => {
-    setSettingsFocusTarget(section ? { section, nonce: Date.now() } : null)
+  // focus a known section, or open a whole page such as one provider's.
+  // Navigation only; every action inside Settings stays the owner's.
+  const openSettingsSection = useCallback((section, { page = null } = {}) => {
+    setSettingsFocusTarget(settingsFocusRequest(section, { page }))
     if (activeViewRef.current !== 'settings') navToRef.current('settings')
   }, [activeViewRef])
+  // The chat picker only offers built-in providers here (providerSetupTarget).
+  const openProviderSettings = useCallback((providerId) => {
+    openSettingsSection(null, { page: providerId })
+  }, [openSettingsSection])
 
   const { openAppWithIntent, handleChatInternalNav } = useAppIntentNavigation({
     appsRef,
@@ -3674,6 +3684,12 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
       // Keeping this behind the notification-center interface prevents the
       // shell event switch from learning preview implementation details.
       onNotificationCreated()
+    } else if (ev.type === 'key_requests_changed') {
+      // A new key request never notifies; this content-free nudge makes the
+      // dialog over a visible app, the chat cards and the app list's dots
+      // re-read the vault's requests. Exact: an open key page's activity
+      // (under the same prefix) has nothing new from it.
+      void queryClient.invalidateQueries({ queryKey: KEYS_QUERY, exact: true })
     }
   }, [
     applyChatRenameEvent,
@@ -5138,6 +5154,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
         onNowPlayingControl={handleNowPlayingControl}
         streamingChatIds={streamingChatIds}
         ownerInputChatIds={ownerInputChatIds}
+        keyWaitingAppIds={keyWaitingAppIds}
         failedChatIds={failureChatIds}
         attentionChatIds={attentionChatIds}
         newAppIds={appAttentionSet}
@@ -5310,6 +5327,8 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // Reaching for the drawer holds whatever a leave would hold, so a
                 // heavy game cannot starve the drawer and its sound stops first.
                 covered={modalDrawerOpen || drawerOpening}
+                // An app's key request waits over the app while the owner looks at it.
+                keyRequests={!isSharedBrowserAccess}
                 version={versionForApp(id)}
                 storageGeneration={app?.storage_generation}
                 appName={app?.name}
@@ -5475,6 +5494,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 loadTheme={loadTheme}
                 openAppWithIntent={openAppWithIntent}
                 onInternalNav={handleChatInternalNav}
+                onOpenProviderSettings={openProviderSettings}
                 onChatMissing={handlePaneChatMissing}
                 onFirstMessage={handlePaneChatFirstMessage}
                 archived={archivedChatIds.has(String(chatId))}

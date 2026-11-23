@@ -204,6 +204,9 @@ export function chatDetailCacheValue(data = {}) {
     pending_messages: Array.isArray(data.pending_messages)
       ? data.pending_messages
       : [],
+    pending_revision: Number.isSafeInteger(data.pending_revision)
+      ? data.pending_revision
+      : 0,
     pending_question_id: data.pending_question_id || null,
     waits: Array.isArray(data.waits) ? data.waits : [],
     background_helpers: data.background_helpers
@@ -225,6 +228,8 @@ export function chatDetailCacheValue(data = {}) {
       // {chat_id, title, through_count, available} for a branch: where its
       // copied history ends and which chat it came from (BranchOrigin).
       branch_origin: data.branch_origin || null,
+      helper_delegation_id: data.helper_delegation_id || null,
+      helper_parent_chat_id: data.helper_parent_chat_id || null,
     },
   }
 }

@@ -50,6 +50,13 @@ import { cidOf } from '../messageIdentity.js'
  * CID — the server row carries the same cid the client minted, so
  * hydrate reconciles directly with no content-heuristic guessing.
  *
+ * Ordering contract: the server advances `pending_revision` with every queue
+ * write and sends it with every queue list and acknowledgement. The hook keeps
+ * the newest revision it has seen, from a list or from a write it applied
+ * (a confirmed queue write, a cancel, a steer cut, a promotion), and
+ * hydrate() ignores a whole list read at an older revision: that list
+ * predates a write this view already shows.
+ *
  * The `setPendingMessages` setter is intentionally NOT exposed — the
  * named operations cover every call site and forcing them through the
  * API is the encapsulation.
@@ -63,14 +70,15 @@ import { cidOf } from '../messageIdentity.js'
  *   reserveForSteer: (cidList: string[]) => void,
  *   releaseSteerReservation: (cidList: string[]) => void,
  *   add: (msg: PendingMsg, opts?: {inFlight?: boolean}) => void,
- *   confirmQueued: (cid: string, patch?: {ts?: number, position?: number, serverMsg?: object}) => void,
+ *   confirmQueued: (cid: string, patch?: {ts?: number, position?: number, serverMsg?: object, revision?: number}) => void,
  *   promoteByCid: (cid: string) => PendingMsg | null,
- *   promoteAll: (cid?: string) => PendingMsg | null,
- *   promoteManyByCid: (cidList: string[]) => PendingMsg | null,
- *   cancelByCid: (cid: string) => void,
+ *   promoteAll: (cid?: string, opts?: {revision?: number}) => PendingMsg | null,
+ *   promoteManyByCid: (cidList: string[], opts?: {revision?: number}) => PendingMsg | null,
+ *   cancelByCid: (cid: string, opts?: {revision?: number}) => void,
+ *   completeByCid: (cidList: string[], opts?: {revision?: number}) => void,
  *   restoreByCid: (msg: PendingMsg, index: number) => void,
- *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts?: {preserveMissing?: boolean, completedCids?: string[]}) => void,
- *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[]) => void,
+ *   hydrate: (serverList: Array<{ts: number, content: string, cid?: string, role?: string, attachments?: Array, position?: number}>, opts: {revision: number, preserveMissing?: boolean, completedCids?: string[]}) => void,
+ *   hydrateFromTranscript: (serverList: object[], authoritativeMessages: object[], revision: number) => void,
  *   releaseHolds: () => void,
  *   markInFlight: (cid: string) => void,
  *   clearInFlight: (cid: string) => void,
@@ -127,10 +135,14 @@ function _combinePromoted(promotedGroup) {
   return promoted
 }
 
-export default function usePendingQueue(initialServerList = [], { chatId, principalKey } = {}) {
+export default function usePendingQueue(initialServerList = [], {
+  chatId, principalKey, initialRevision = 0,
+} = {}) {
   const initialPending = _fromServerList(initialServerList)
   const [pendingMessages, setPendingMessages] = useState(initialPending)
   const pendingMessagesRef = useRef(initialPending)
+  // The newest server queue revision this view has seen (ordering contract).
+  const revisionRef = useRef(initialRevision)
   // Rows accepted for an explicit steer stay durably pending until the
   // provider publishes the transcript cut. They are no longer actionable
   // queue items during that window, though, so keep their presentation state
@@ -167,9 +179,17 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // a successful fetch alone. One disposition map also fences local removal;
   // cancellation must never masquerade as proof of server acceptance.
   const acknowledgeServerIntent = useCallback(cid => {
-    intentDispositionsRef.current.set(cid, 'accepted')
+    if (intentDispositionsRef.current.get(cid) !== 'completed') {
+      intentDispositionsRef.current.set(cid, 'accepted')
+    }
     if (pendingMessagesRef.current.some(row => cidOf(row) === cid && row.recoveryAvailable)) {
       void retireIntent(cid, { ...scopeRef.current, outcome: 'delivered' })
+    }
+  }, [])
+
+  const observeRevision = useCallback((revision) => {
+    if (Number.isSafeInteger(revision) && revision > revisionRef.current) {
+      revisionRef.current = revision
     }
   }, [])
 
@@ -238,6 +258,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // the row (the server cleared the queue) cannot resurrect a phantom.
   const add = useCallback((msg, { inFlight = false } = {}) => {
     const cid = cidOf(msg)
+    if (intentDispositionsRef.current.get(cid) === 'completed') return
     if (inFlight && cid != null) inFlightCidsRef.current.add(cid)
     apply(prev => {
       const existing = prev.find(m => cidOf(m) === cid)
@@ -262,7 +283,8 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // DISPLAY fields (ts, position, canonical serverMsg content) on the row
   // matched BY CID; identity never changes, so there is no swap, no twin-
   // collapse, no reissued-ts guard. Clear the in-flight mark.
-  const confirmQueued = useCallback((cid, { ts, position, serverMsg } = {}) => {
+  const confirmQueued = useCallback((cid, { ts, position, serverMsg, revision } = {}) => {
+    observeRevision(revision)
     inFlightCidsRef.current.delete(cid)
     localMessageCidsRef.current.delete(cid)
     if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
@@ -282,7 +304,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       if (position !== undefined) next.position = position
       return next
     }))
-  }, [acknowledgeServerIntent, apply])
+  }, [acknowledgeServerIntent, apply, observeRevision])
 
   const promoteByCid = useCallback((cid) => {
     const current = pendingMessagesRef.current
@@ -304,7 +326,8 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     return promoted
   }, [acknowledgeServerIntent, releaseSteerReservation])
 
-  const promoteAll = useCallback((cid) => {
+  const promoteAll = useCallback((cid, { revision } = {}) => {
+    observeRevision(revision)
     const current = pendingMessagesRef.current
     if (current.length === 0) return null
     const idx = cid != null ? current.findIndex(m => cidOf(m) === cid) : 0
@@ -324,9 +347,10 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     setPendingMessages(kept)
     releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [acknowledgeServerIntent, releaseSteerReservation])
+  }, [acknowledgeServerIntent, observeRevision, releaseSteerReservation])
 
-  const promoteManyByCid = useCallback((cidList) => {
+  const promoteManyByCid = useCallback((cidList, { revision } = {}) => {
+    observeRevision(revision)
     const wanted = new Set((cidList || []).filter(c => c != null))
     if (wanted.size === 0) return null
     const current = pendingMessagesRef.current
@@ -350,7 +374,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     setPendingMessages(kept)
     releaseSteerReservation(promotedGroup.map(m => cidOf(m)))
     return promoted
-  }, [acknowledgeServerIntent, releaseSteerReservation])
+  }, [acknowledgeServerIntent, observeRevision, releaseSteerReservation])
 
   // The owner's empty Send released every hold on the server.
   const releaseHolds = useCallback(() => {
@@ -359,16 +383,39 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       : prev))
   }, [apply])
 
-  const cancelByCid = useCallback((cid) => {
+  // Called once optimistically and again, with the revision, when the server
+  // confirms the cancel; the repeat also retires a row an older list put back
+  // while the DELETE was in flight.
+  const cancelByCid = useCallback((cid, { revision } = {}) => {
+    observeRevision(revision)
     // A cancelled entry is genuinely gone; drop its in-flight mark so it
     // cannot resurrect on the next hydrate.
     inFlightCidsRef.current.delete(cid)
     localMessageCidsRef.current.delete(cid)
     if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    intentDispositionsRef.current.set(cid, 'cancelled')
+    if (intentDispositionsRef.current.get(cid) !== 'completed') {
+      intentDispositionsRef.current.set(cid, 'cancelled')
+    }
     apply(prev => prev.filter(m => cidOf(m) !== cid))
     releaseSteerReservation([cid])
-  }, [apply, releaseSteerReservation])
+  }, [apply, observeRevision, releaseSteerReservation])
+
+  // Only an authoritative transcript cut may complete these queue identities.
+  // Unlike hydration this says nothing about siblings still being sent or
+  // retained locally after failure; their ownership and flags stay untouched.
+  const completeByCid = useCallback((cidList, { revision } = {}) => {
+    observeRevision(revision)
+    const cids = new Set((cidList || []).filter(cid => cid != null))
+    for (const cid of cids) {
+      inFlightCidsRef.current.delete(cid)
+      localMessageCidsRef.current.delete(cid)
+      acknowledgeServerIntent(cid)
+      intentDispositionsRef.current.set(cid, 'completed')
+      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
+    }
+    apply(prev => prev.filter(row => !cids.has(cidOf(row))))
+    releaseSteerReservation([...cids])
+  }, [acknowledgeServerIntent, apply, observeRevision, releaseSteerReservation])
 
   // Restore one optimistically-cancelled row after both the DELETE and its
   // authoritative fallback read fail. Reinsert into the CURRENT queue rather
@@ -377,7 +424,8 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   const restoreByCid = useCallback((msg, index) => {
     if (!msg) return
     const cid = cidOf(msg)
-    if (cid == null || pendingMessagesRef.current.some(row => cidOf(row) === cid)) return
+    if (cid == null || intentDispositionsRef.current.get(cid) === 'completed'
+        || pendingMessagesRef.current.some(row => cidOf(row) === cid)) return
     if (msg.serverTs !== true) inFlightCidsRef.current.add(cid)
     apply(current => {
       const next = [...current]
@@ -401,19 +449,28 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
   // Identity matching is BY CID: the server row carries the same cid the client
   // minted (or a legacy-<ts> derivation), so a server row reuses that exact
   // identity. No content-identity heuristic is needed anymore.
+  //
+  // A list older than the newest revision seen is ignored whole (ordering
+  // contract): it could bring back a cancelled or steered row and drop a row
+  // whose queue write was already confirmed.
   const hydrate = useCallback((serverList, opts = {}) => {
     // Only exact transcript identities prove that a delivered local intent
     // completed its queue-to-history handoff. Empty runtime snapshots may have
     // been read before delivery; they do not prove that the intent disappeared.
     const completedCids = new Set(opts.completedCids || [])
-    for (const cid of completedCids) {
-      localMessageCidsRef.current.delete(cid)
-      inFlightCidsRef.current.delete(cid)
-      acknowledgeServerIntent(cid)
-      if (initialReadPendingRef.current) observedCidsRef.current.add(cid)
-    }
-    const local = (pendingMessagesRef.current || []).filter(m => !completedCids.has(cidOf(m)))
-    const serverRows = (serverList || []).filter(m => !completedCids.has(cidOf(m)))
+    // A committed transcript identity is terminal for this mounted chat's
+    // queue. A list still containing it was read before that cut, even when
+    // its revision is not older than one seen here: the transcript proving
+    // the cut carries no queue revision (a detail read takes its queue
+    // before its transcript), so this view may not have seen the cut's.
+    if (completedCids.size) completeByCid([...completedCids])
+    const staleQueue = (serverList || []).some(row => (
+      intentDispositionsRef.current.get(cidOf(row)) === 'completed'
+    ))
+    if (staleQueue || !(opts.revision >= revisionRef.current)) return
+    revisionRef.current = opts.revision
+    const local = pendingMessagesRef.current || []
+    const serverRows = serverList || []
     const serverCidSet = new Set(serverRows.map(m => cidOf(m)))
 
     const reconciled = serverRows.map(m => {
@@ -458,14 +515,15 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       const kept = new Set([...prev].filter(cid => nextCidSet.has(cid)))
       return kept.size === prev.size ? prev : kept
     })
-  }, [acknowledgeServerIntent, applySteerReservations])
+  }, [acknowledgeServerIntent, applySteerReservations, completeByCid])
 
   // A runtime-only empty queue cannot end a local intent's lifetime. A
   // version-matched authoritative transcript can: its exact user identities
   // own the handoff, including when the initial outbox read settles later.
   // Never use the mounted optimistic suffix as acceptance evidence.
-  const hydrateFromTranscript = useCallback((serverList, authoritativeMessages) => {
+  const hydrateFromTranscript = useCallback((serverList, authoritativeMessages, revision) => {
     hydrate(serverList, {
+      revision,
       completedCids: (authoritativeMessages || [])
         .filter(message => message.role === 'user' && !message.optimistic)
         .flatMap(message => [cidOf(message), ...(message._consumed_cids || [])])
@@ -480,6 +538,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     }
     localMessageCidsRef.current.clear()
     inFlightCidsRef.current.clear()
+    revisionRef.current = 0
     pendingMessagesRef.current = []
     setPendingMessages([])
     applySteerReservations(new Set())
@@ -537,7 +596,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
       } else if (!record.body.hidden) {
         // A late failed POST cannot undo a newer authoritative queue/cut.
         if (intentDispositionsRef.current.has(cid)) {
-          if (intentDispositionsRef.current.get(cid) === 'accepted' && record.recovery === 'rejected') {
+          if (['accepted', 'completed'].includes(intentDispositionsRef.current.get(cid)) && record.recovery === 'rejected') {
             void retireIntent(cid, { chatId, principalKey, outcome: 'delivered' })
           }
           return
@@ -618,6 +677,7 @@ export default function usePendingQueue(initialServerList = [], { chatId, princi
     promoteAll,
     promoteManyByCid,
     cancelByCid,
+    completeByCid,
     restoreByCid,
     hydrate,
     hydrateFromTranscript,

@@ -1657,7 +1657,7 @@ def test_catalog_index_file_is_not_enumerated_as_a_skill(client, auth, skills_di
 
 def test_generated_indexes_do_not_count_as_skill_loads(skills_dir):
   from app.claude_sdk_runner import _skill_file_read_name
-  from app.codex_sdk_runner import _skill_names_in_command
+  from app.codex_events import _skill_names_in_command
   from app.config import get_settings
 
   data_dir = get_settings().data_dir
@@ -2518,7 +2518,7 @@ def test_corrupt_sidecar_fails_install_closed_and_preserves_ownership(
 
 def test_codex_usage_counts_directory_entry_by_id(skills_dir):
   """A directory entry counts by id; its resources are not another load."""
-  from app.codex_sdk_runner import _skill_names_in_command
+  from app.codex_events import _skill_names_in_command
   from app.config import get_settings
 
   data_dir = get_settings().data_dir

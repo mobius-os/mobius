@@ -137,7 +137,6 @@ export function presentAssistantReply(rows, { activeIndex = -1, positions = new 
         ...ownerBlocks[owner.block], content: replay.text,
         markdown_range: replay.prefixRange?.source !== replay.text
           ? splitSteerMarkdown(replay.prefixRange?.source, replay.text.length)?.before : undefined,
-        reply_text_owner: true,
         reply_live_text: index === activeIndex && after.length === 1,
       }
       // The owner now shows the later row's text, so it needs that row's

@@ -214,6 +214,60 @@ def test_saving_again_keeps_art_and_removes_art_no_longer_listed(client, auth):
   assert not (source / hero_path).exists()
 
 
+def test_the_store_category_is_set_kept_by_older_clients_and_removable(client, auth):
+  source = _source()
+  app_id = _create(client, auth, source)
+
+  def category():
+    return json.loads((source / "mobius.json").read_text(encoding="utf-8"))["store"].get("category")
+
+  # The Store shows its category picker only for a string draft value.
+  assert _preview(client, auth, app_id)["draft"]["category"] == ""
+  assert _save(client, auth, app_id, **_complete_listing(category="action")).status_code == 200
+  assert category() == "action"
+  assert _preview(client, auth, app_id)["draft"]["category"] == "action"
+  # A client that does not know the field leaves the creator's choice alone.
+  assert _save(client, auth, app_id, **_complete_listing()).status_code == 200
+  assert category() == "action"
+  assert _save(client, auth, app_id, **_complete_listing(category="")).status_code == 200
+  assert category() is None
+  assert _save(client, auth, app_id, **_complete_listing(category="Not A Slug")).status_code == 422
+
+
+@pytest.mark.parametrize("written", ["Games", "action\n", "x" * 41, 7])
+def test_a_category_the_save_refuses_never_blocks_saving_the_draft_back(
+  client, auth, db, written,
+):
+  source = _source()
+  app_id = _create(client, auth, source)
+  manifest = json.loads(_MANIFEST)
+  manifest["store"] = {"category": written}
+  (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
+  _commit_accepted(db, source, app_id, "a category typed by hand")
+
+  draft = _preview(client, auth, app_id)["draft"]
+  assert draft["category"] == ""
+
+  saved = _save(client, auth, app_id, **_complete_listing(category=draft["category"]))
+
+  assert saved.status_code == 200, saved.text
+  assert "category" not in json.loads((source / "mobius.json").read_text(encoding="utf-8"))["store"]
+
+
+def test_an_unapplied_category_edit_counts_as_a_listing_change(client, auth):
+  source = _source()
+  app_id = _create(client, auth, source)
+  accepted = app_git.head_sha(source, "HEAD")
+  manifest = json.loads(_MANIFEST)
+  manifest["store"] = {"category": "puzzle"}
+  (source / "mobius.json").write_text(json.dumps(manifest, indent=2))
+
+  assert store_listing_source.changes_beyond_listing(source, accepted) is False
+  # A client that does not send a category keeps the one already written.
+  assert _save(client, auth, app_id, **_complete_listing()).status_code == 200
+  assert json.loads((source / "mobius.json").read_text(encoding="utf-8"))["store"]["category"] == "puzzle"
+
+
 def test_art_from_an_older_listing_layout_moves_into_static_store(client, auth):
   source = _source()
   (source / "listing").mkdir()

@@ -235,6 +235,9 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
   """Returns the cached application settings singleton."""
+  # The settings read the launcher address, so the side must be settled first.
+  from app.launcher_side import boot_side
+  boot_side()
   return Settings()
 
 

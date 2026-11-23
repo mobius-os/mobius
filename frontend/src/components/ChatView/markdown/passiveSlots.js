@@ -2,15 +2,17 @@
    the viewport asks for a slot; the nearest PASSIVE_IDLE_CAP idle blocks of an
    app get one and the rest stay static (explicit open). A retained session,
    which owns an unacknowledged event or an unresolved outcome, always keeps
-   its frame and does not use an idle slot. */
+   its frame and does not use an idle slot. Neither does a block the reader
+   just tapped while it slept (`waking`): the tap gets a frame at once rather
+   than waiting behind idle on-screen blocks. */
 import { useEffect, useState, useSyncExternalStore } from 'react'
 
 export const PASSIVE_IDLE_CAP = 3
 
 /** The ids granted a frame among one app's entries. */
 export function grantedSlots(entries, cap = PASSIVE_IDLE_CAP) {
-  const granted = new Set(entries.filter(entry => entry.retained).map(entry => entry.id))
-  entries.filter(entry => entry.wanted && !entry.retained)
+  const granted = new Set(entries.filter(entry => entry.retained || entry.wanted && entry.waking).map(entry => entry.id))
+  entries.filter(entry => entry.wanted && !granted.has(entry.id))
     .sort((a, b) => a.distance - b.distance).slice(0, cap)
     .forEach(entry => granted.add(entry.id))
   return granted
@@ -46,11 +48,11 @@ export function createPassiveSlots(cap = PASSIVE_IDLE_CAP) {
 
 export const passiveSlots = createPassiveSlots()
 
-export function usePassiveSlot(appId, { wanted, retained, distance }, slots = passiveSlots) {
+export function usePassiveSlot(appId, { wanted, retained, distance, waking = false }, slots = passiveSlots) {
   const [id] = useState(() => ({}))
   useEffect(() => {
-    slots.update(appId, id, { wanted, retained, distance })
-  }, [slots, appId, id, wanted, retained, distance])
+    slots.update(appId, id, { wanted, retained, distance, waking })
+  }, [slots, appId, id, wanted, retained, distance, waking])
   useEffect(() => () => slots.remove(appId, id), [slots, appId, id])
   return useSyncExternalStore(slots.subscribe, () => slots.granted(appId, id), () => false)
 }

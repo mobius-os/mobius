@@ -948,7 +948,7 @@ def _assert_service_lineage(db, token, *, delegated):
 def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
   client, auth, db, monkeypatch, route, delegated,
 ):
-  from app import app_jobs
+  from app import app_jobs, key_vault
 
   target = _service_app(db, service_bytes=SERVICE_TOKEN)
   (runtime_parent(target.id) / target.runtime_revision / "job.sh").write_text("#!/bin/sh\nexit 0\n")
@@ -984,12 +984,21 @@ def test_service_hop_cannot_launder_a_helpers_owner_control_restrictions(
   service_headers = {"Authorization": f"Bearer {token}"}
 
   # This real route reaches require_installation_owner_control through
-  # require_nondelegated_owner_or_app_control, without needing external I/O.
+  # require_nondelegated_owner_or_app_control. Its save goes to the key vault,
+  # which is stubbed so the gate, not vault I/O, decides the answer.
+  saved = []
+
+  async def save_app_key(app_id, install, name, value):
+    saved.append((app_id, name))
+    return name
+
+  monkeypatch.setattr(key_vault, "store_app_key", save_app_key)
   write = client.put(
     f"/api/apps/{target.id}/secrets/test-key", headers=service_headers,
     json={"value": "synthetic-test-value"},
   )
   assert write.status_code == (403 if delegated else 204), write.text
+  assert saved == ([] if delegated else [(target.id, "test-key")])
   _assert_service_lineage(db, token, delegated=delegated)
   # Exercise a direct installation-control gate too, without starting a job.
   job = client.post(f"/api/apps/{target.id}/run-job", headers=service_headers)
@@ -1191,8 +1200,8 @@ def test_public_invocation_cannot_spend_on_the_owners_providers(client, auth, db
   ).status_code == 403
   assert client.get("/api/app-chats", headers=public).status_code == 403
   assert client.get(
-    f"/api/apps/{app.id}/secrets/key", headers=public,
-  ).status_code == 403
+    "/api/keys/use/key/api.example.com/v1", headers=public,
+  ).status_code in (401, 403)
   # It keeps the few reads and notices a public service is reviewed to use.
   assert client.get("/api/apps/", headers=public).status_code == 200
   assert client.post(
@@ -2291,14 +2300,23 @@ async def test_decode_estimates_cover_measured_allocation_peaks(shape):
     print(f"{shape} {direction}: {len(raw)} bytes, decode peak {decode_peak} <= {estimate}")
     del value
   # The parsed tree alone, measured away from the event loop's own allocations.
+  # tracemalloc traces every thread, so count only the blocks the stdlib
+  # json package allocated and still holds (its C scanner runs under
+  # json/decoder.py, the pure-Python one in json/scanner.py), not what
+  # another thread did meanwhile.
   gc.collect()
   tracemalloc.start()
   try:
     value = json.loads(raw)
-    tree = tracemalloc.get_traced_memory()[0]
+    snapshot = tracemalloc.take_snapshot()
   finally:
     tracemalloc.stop()
-  assert tree <= retained
+  package = os.path.join(os.path.dirname(json.__file__), "*")
+  parsed = snapshot.filter_traces([tracemalloc.Filter(True, package)])
+  tree = sum(trace.size for trace in parsed.traces)
+  del snapshot, parsed
+  # The filter must still see the value: at least its top-level object.
+  assert sys.getsizeof(value) <= tree <= retained
   assert rendered == JSONResponse(value).body
   assert app_services._admitted_exchange_cost == 0
 
@@ -3308,28 +3326,40 @@ print(json.dumps({"body": {"length": len(value)}}))
   app = _service_app(db, access="public", service_bytes=service, max_bytes=60 * 1024 * 1024)
   raw = b'"' + escape * ((4 * 1024 * 1024) // len(escape)) + b'"'
   expected = len(json.loads(raw))
+  # Each beat records wall-clock and event-loop-thread CPU time. The CPU gap
+  # is the work other tasks did before the heartbeat ran again, which a
+  # loaded runner's descheduling does not inflate: its floor is the one
+  # json.loads of the whole text (about 30 ms), while one unyielding 4 MiB
+  # scan takes 0.2-0.4 s. The wall gap still catches a step that blocks
+  # without burning loop CPU (a sleep, a GIL-holding thread).
   beats = []
   running = True
 
   async def heartbeat():
     while running:
-      beats.append(time.monotonic())
+      beats.append((time.monotonic(), time.thread_time()))
       await asyncio.sleep(0.01)
 
-  beat = asyncio.create_task(heartbeat())
-  try:
-    await asyncio.sleep(0.02)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+    # The app's first request builds its routes and opens the database once;
+    # that one-time setup is not the scan this measures.
+    warmup = await http.post(f"/api/app-services/{app.slug}/echo", content=b'"x"')
+    assert warmup.json() == {"length": 1}
+    beat = asyncio.create_task(heartbeat())
+    try:
+      await asyncio.sleep(0.02)
       response = await http.post(f"/api/app-services/{app.slug}/echo", content=raw)
-    await asyncio.sleep(0.02)
-  finally:
-    running = False
-    await beat
+      await asyncio.sleep(0.02)
+    finally:
+      running = False
+      await beat
   assert response.status_code == 200
   assert response.json() == {"length": expected}
-  gap = max(b - a for a, b in zip(beats, beats[1:]))
-  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {gap:.4f}s")
-  assert gap < 0.2, "bounded scanner monopolized the event loop for an escaped scalar"
+  wall = max(b[0] - a[0] for a, b in zip(beats, beats[1:]))
+  cpu = max(b[1] - a[1] for a, b in zip(beats, beats[1:]))
+  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {wall:.4f}s wall, {cpu:.4f}s CPU")
+  assert cpu < 0.1, "bounded scanner monopolized the event loop for an escaped scalar"
+  assert wall < 0.2, "the event loop was blocked for an escaped scalar"
   assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
 
 

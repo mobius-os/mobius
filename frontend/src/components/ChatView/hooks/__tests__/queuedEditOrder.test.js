@@ -28,10 +28,10 @@ const EDITED = 'Then check the dark theme and the README'
  * ChatView's save — hydrates the queue from the server's answer. */
 function queueWithEditInFlight(order) {
   const { result } = renderHook(usePendingQueue)
-  result.current.hydrate([ROW])
+  result.current.hydrate([ROW], { revision: 0 })
   const response = deferred()
   const edit = order.run('q1', async () => {
-    result.current.hydrate(await response.promise)
+    result.current.hydrate(await response.promise, { revision: 0 })
     return 'saved'
   })
   return { queue: result, edit, respond: rows => response.resolve(rows) }
@@ -67,9 +67,9 @@ test('a late edit response cannot put a cancelled message back in the tray', asy
   // The failure mode the order prevents: cancel first, then the same late
   // response hydrates the row straight back.
   const { result: unordered } = renderHook(usePendingQueue)
-  unordered.current.hydrate([ROW])
+  unordered.current.hydrate([ROW], { revision: 0 })
   unordered.current.cancelByCid('q1')
-  unordered.current.hydrate([{ ...ROW, content: EDITED }])
+  unordered.current.hydrate([{ ...ROW, content: EDITED }], { revision: 0 })
   assert.deepEqual(cids(unordered), ['q1'])
 })
 
@@ -90,7 +90,7 @@ test('an edit opened during a slow cancellation waits for its outcome', async ()
   // the cancellation settles, when the queue already reflects the outcome.
   const order = createQueuedEditOrder()
   const { result: queue } = renderHook(usePendingQueue)
-  queue.current.hydrate([ROW])
+  queue.current.hydrate([ROW], { revision: 0 })
   const confirm = deferred()
   const log = []
   const cancel = order.run('q1', async () => {

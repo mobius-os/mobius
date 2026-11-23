@@ -5,7 +5,7 @@ capability contract, rather than editable source, is projected into the same
 provider registry used by chats, model pickers, app pickers, and background
 agents. That includes owner-built local apps: their `mobius.json` declaration
 is accepted with each source Apply (and kept across owner permission edits),
-limited to the HTTPS app-secret transport below; the broker transport stays
+limited to the HTTPS vault-key transport below; the broker transport stays
 reserved for the reviewed Möbius · You package, whose declaration the registry
 ignores (see below). The provider appears shortly
 after install/Apply and disappears shortly after uninstall (registry reads are
@@ -14,7 +14,7 @@ retain their saved provider/model selection but
 cannot run it while the provider app is absent; Möbius does not silently send
 those chats to a different company.
 
-An app-secret declaration names its wire protocol with optional `protocol`:
+A vault-key declaration names its wire protocol with optional `protocol`:
 
 - `responses` (the default) — **OpenAI Responses-compatible HTTPS**, driven by
   the Codex agent runtime; `/responses` is appended to `base_url` (commonly
@@ -40,7 +40,7 @@ reseeded from the chat.
 Both runtimes talk to the loopback model relay
 (`backend/app/routes/model_relay.py`), never to the provider. The agent
 process holds only a server-derived relay token; the relay checks it, attaches
-the decrypted key, repairs request shapes compatible providers reject, and
+the key it reads from the vault, repairs request shapes compatible providers reject, and
 streams the response back unchanged. Today's repairs: Messages requests fold
 mid-conversation `system` turns into user turns (the Claude runtime emits them;
 many compatible providers accept only user/assistant), and Responses requests
@@ -48,11 +48,17 @@ omit `content: null` on replayed reasoning items (some providers emit that and
 then reject it as input). The relay answers only direct loopback connections
 without proxy forwarding headers.
 
-The app owns its setup UI, connection instructions, and one encrypted app
-secret. The owner enters the key into the app's own browser UI (which writes
-`PUT /api/apps/{app_id}/secrets/{secret_name}`); it is not a manifest value and
-must not pass through a chat prompt. Availability checks only that the secret
-decrypts; only the relay uses the key, and it never leaves the server. The provider
+The app owns its setup UI and connection instructions; its key lives in the
+owner's key vault. The app asks for the key named by `secret_name`
+(`POST /api/keys/requests`) and the owner enters and approves it in
+**Settings › Keys**; it is not a manifest value and never passes through the
+app, the agent process or a chat prompt. The models are available while the
+owner's grant to the app stands and that grant's sites allow every path the
+relay calls for the declared protocol (`POST <base_url>/responses`, or
+`POST <base_url>/v1/messages` and `/v1/messages/count_tokens` for
+`anthropic_messages`); availability never reads the value. Only the
+relay reads the key (logged as `platform:app-<id>`), and it never leaves the
+server. The provider
 app's endpoint receives the conversation and tool requests, so installing and
 connecting one is a substantive trust and billing decision. No background
 provider is enabled automatically by adding an app. Runs record only the usage
@@ -80,7 +86,8 @@ illustrative and should be updated by the app publisher as the API changes):
 
 The other required `mobius.json` fields (`id`, `name`, `version`,
 `description`, `entry`) are omitted above. The app also needs an actual setup
-screen to save/delete its `api_key` secret; the platform does not invent one.
+screen that asks for its `api_key` key and shows whether it is approved; the
+platform does not invent one.
 Model IDs are provider wire IDs, not display labels. They must be unique across
 installed providers. The provider identity is the stable local app row ID
 (`app-<id>`), independent of an app rename or its repository URL. An update can
@@ -124,7 +131,7 @@ to picker context display; the service may also publish an explicit
 `replacements` for picker/background selection. Claude and Codex discovery is
 unchanged. The `identity_broker` manifest transport remains accepted only for
 the reviewed `identity` app but inert; uninstalling that app cannot remove the
-provider. Other connector apps use HTTPS and their own encrypted keys.
+provider. Other connector apps use HTTPS and their own vault keys.
 The default-on `GET/PATCH /api/auth/providers/{provider_id}/enabled` switch
 removes a provider from pickers and blocks new turns without deleting chats.
 
@@ -146,7 +153,7 @@ removes a provider from pickers and blocks new turns without deleting chats.
 - App models are currently manifest-declared, not discovered live. An app can
   publish an update when its upstream model list changes. A later version can
   add an app-owned model-discovery service without changing picker consumers.
-- One provider per app, one protocol per provider, and one bearer-key secret.
+- One provider per app, one protocol per provider, and one vault key.
   OAuth, provider-specific headers, multiple endpoints per app, and further
   protocols (such as Chat Completions, which Codex no longer speaks) need
   separate reviewed contracts, not ad-hoc fields.

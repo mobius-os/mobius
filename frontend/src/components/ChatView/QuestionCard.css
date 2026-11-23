@@ -1,8 +1,11 @@
+/* The card fills the reply column and shares the reply text's left edge, so
+   an open card, an answered one and an app block all line up. Its row in the
+   transcript stretches for it (.chat__owner-card). */
 .qcard {
   box-sizing: border-box;
-  width: min(100%, 640px);
+  width: 100%;
   overflow-wrap: anywhere;
-  margin: 10px auto;
+  margin: 10px 0;
   padding: 16px;
   border-radius: 14px;
   background: var(--surface, rgba(255,255,255,.06));
@@ -346,6 +349,14 @@
   box-sizing: border-box;
 }
 
+/* A question with no choices is answered only by typing, often with pasted
+   output, so its box opens with room for a few lines. The box under a list of
+   choices stays one line. The pixel value is for browsers without `lh`. */
+.qcard__answer-row--typed .qcard__input {
+  min-height: 96px;
+  min-height: calc(4lh + 20px);
+}
+
 /* The composer carries the keyboard focus ring; don't draw a second one
    around its textarea under the global textarea:focus-visible rule. */
 .qcard__input:focus-visible {
@@ -521,3 +532,18 @@
     padding-inline: 14px;
   }
 }
+
+/* A key request (KeyRequestDetails.jsx): the shared card's lines
+   (KeyRequest.jsx) between the question and its choices, and the paste
+   field for a new key below them. */
+.qcard__key {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.qcard__key-line {
+  margin: 0 0 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.qcard .settings-keys__paste { margin-top: 8px; }

@@ -142,9 +142,11 @@ def read_credits_topup(
 @router.get("/transactions")
 def read_credits_transactions(
   limit: int = 50,
+  before: str | None = None,
   _owner: models.Owner = Depends(get_credits_reader),
 ):
-  return _credits(credits_client.transactions, limit)
+  """One page of wallet history; pass the previous page's ``next_cursor`` as ``before``."""
+  return _credits(credits_client.transactions, limit, before)
 
 
 @router.post("/model-funding")

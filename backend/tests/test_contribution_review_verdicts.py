@@ -602,3 +602,114 @@ def test_an_unconfirmed_comment_verdict_is_looked_for_as_a_comment(setup, monkey
   seen = _look(monkeypatch, {"id": 81, "html_url": "https://github.com/x/pull/7#pullrequestreview-81"})
   assert _observe(setup)["state"] == "posted"
   assert seen[0][2] == "COMMENT" and [e[:2] for e in events] == [("post", "COMMENT")]
+
+
+# Only the owner turns on automatic sending, and small notes are a comment
+
+def _review_grant(setup, **options):
+  db, row = _grant(setup, propose_verdict=True, **options)
+  row.mode = "review"
+  db.commit()
+  return db, row
+
+
+AUTO_SEND = {"post_review": True, "propose_verdict": True, "agent_submits_verdict": True}
+
+
+def test_an_agent_cannot_turn_on_automatic_verdict_sending_for_itself(setup):
+  db, _, agent = setup
+  with pytest.raises(HTTPException) as refused:
+    routes.review_preview(1, routes.ReviewPreview(mode="review", options=AUTO_SEND), db, agent)
+  assert refused.value.status_code == 403 and refused.value.detail == routes.AGENT_ENABLED_AUTO_SEND
+  with pytest.raises(HTTPException) as core_refused:
+    routes.core_review_preview(routes.ReviewPreview(mode="review", options=AUTO_SEND), db, agent)
+  assert core_refused.value.status_code == 403
+
+
+def _app_minted_by_agent(setup, *, via_agent_chat):
+  """An app token an agent minted (deps._generic_principal): app principal, chat/run
+  cleared, the agent's chat kept only as via_agent_chat provenance."""
+  return Principal(owner=setup[2].owner, app_id=1, scope="app",
+                   app_instance_id="nonce", via_agent_chat=via_agent_chat)
+
+
+def test_an_agent_cannot_turn_on_automatic_sending_through_an_app_token_it_minted(setup):
+  # _snapshot is the one seam every app/core preview and fresh start passes through.
+  db = setup[0]
+  minted = _app_minted_by_agent(setup, via_agent_chat=setup[2].chat_id)
+  with pytest.raises(HTTPException) as refused:
+    routes._snapshot(db, routes.ReviewPreview(mode="review", options=AUTO_SEND), minted)
+  assert refused.value.status_code == 403 and refused.value.detail == routes.AGENT_ENABLED_AUTO_SEND
+
+
+def test_the_owners_own_browser_app_access_can_still_choose_automatic_sending(setup):
+  db = setup[0]
+  owner_browser_app = _app_minted_by_agent(setup, via_agent_chat=None)
+  frozen = routes._snapshot(db, routes.ReviewPreview(mode="review", options=AUTO_SEND), owner_browser_app)
+  assert frozen["agent_submits_verdict"] is True
+
+
+def test_the_owners_own_review_window_can_still_choose_automatic_sending(setup):
+  db = setup[0]
+  frozen = routes.review_preview(1, routes.ReviewPreview(mode="review", options=AUTO_SEND), db, _owner(setup))
+  assert frozen["options"]["agent_submits_verdict"] is True
+
+
+def test_an_agent_can_still_preview_a_review_whose_verdict_waits_for_the_owner(setup):
+  db, row, agent = setup
+  db.get(routes.models.Chat, row.chat_id).agent_settings_json = {"model": "m"}
+  db.commit()
+  drafted = {"post_review": True, "propose_verdict": True}
+  frozen = routes.review_preview(1, routes.ReviewPreview(mode="review", options=drafted), db, agent)
+  assert "agent_submits_verdict" not in frozen["options"]
+
+
+def test_findings_that_hold_nothing_up_are_sent_as_a_plain_comment_not_a_change_request(setup, monkeypatch):
+  _review_grant(setup, agent_submits_verdict=True)
+  events = []
+  _record(monkeypatch, events)
+  result = report(setup, publish=True, state="needs_you", summary="Two small nits", blocking=False)
+  (kind, event, _head, body), = events
+  assert (kind, event) == ("post", "COMMENT") and body.startswith("**Möbius review: Changes suggested**")
+  assert (result["verdict"]["state"], result["verdict"]["event"]) == ("posted", "COMMENT")
+
+
+def test_non_blocking_findings_wait_for_the_owner_as_a_comment_when_they_send_it_themselves(setup, monkeypatch):
+  _review_grant(setup)
+  events = []
+  _record(monkeypatch, events)
+  proposal = report(setup, publish=True, state="needs_you", summary="Two small nits",
+                    blocking=False)["run"]["items"][0]["verdict_proposal"]
+  assert events == [] and (proposal["state"], proposal["event"]) == ("proposed", "COMMENT")
+  assert proposal["body"] == proposal["comment_body"]
+  _decide(setup, "submit", proposal["id"])
+  assert [e[:2] for e in events] == [("post", "COMMENT")]
+
+
+def test_frozen_non_blocking_findings_cannot_later_become_a_change_request(setup, monkeypatch):
+  _review_grant(setup)
+  _record(monkeypatch, [])
+  report(setup, publish=True, state="needs_you", summary="Two small nits", blocking=False)
+  with pytest.raises(HTTPException) as refused:
+    report(setup, publish=True, state="needs_you", summary="Two small nits")
+  assert refused.value.status_code == 409
+
+
+def test_an_all_clear_result_has_no_findings_to_call_non_blocking():
+  from pydantic import ValidationError
+  with pytest.raises(ValidationError):
+    routes.ReviewOutcome(**ITEM, state="all_clear", summary="Clean", blocking=False)
+
+
+def test_evidence_frozen_before_non_blocking_findings_existed_still_matches_a_retry():
+  older = {"state": "needs_you", "summary": "Blocking bug", "head_sha": ITEM["head_sha"]}
+  assert public.evidence(older) == public.evidence({**older, "blocking": True})
+  assert public.evidence(older) != public.evidence({**older, "blocking": False})
+
+
+def test_the_brief_leaves_review_children_to_the_owners_prompt_and_explains_notes_only(setup):
+  _, row = _review_grant(setup, agent_submits_verdict=True)
+  text = domain.brief(row)
+  assert "review prompt above decides whether independent review children are used" in text
+  assert "Use core built-in durable Delegation for independent PR reviews in parallel" not in text
+  assert domain.NOTES_ONLY_RULE in text and "without asking again in chat" in text

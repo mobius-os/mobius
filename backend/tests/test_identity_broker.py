@@ -41,6 +41,10 @@ def test_entrypoint_scrubs_managed_credentials_before_starting_the_app():
   )
   assert "-u MOBIUS_SSO_CLIENT_SECRET" in env_scrub
   assert "-u MOBIUS_COMPUTE_INSTANCE_TOKEN" in env_scrub
+  # A developer's staging launcher credential is the broker's alone too.
+  for name in ("MOBIUS_STAGING_CLIENT_SECRET", "MOBIUS_STAGING_BOOTSTRAP"):
+    assert name in scrubbed
+    assert f"-u {name}" in env_scrub
   assert source.index("identity_broker &") < source.index(
     "unset MOBIUS_SSO_CLIENT_SECRET"
   ) < source.index("exec $_env_scrub uvicorn")
@@ -350,14 +354,268 @@ def test_unlink_clears_only_matching_identity_and_keeps_instance_keys(broker):
   assert broker.instance_id == instance_before
 
 
-def _unsigned_receipt(instance_id, *, expires_in=600):
+def _unsigned_receipt(instance_id, *, expires_in=600, issuer=None):
   header = broker_module._b64(b'{"alg":"HS256","typ":"JWT"}')
-  payload = broker_module._b64(json.dumps({
+  claims = {
     "instance_id": instance_id,
     "jti": "receipt_test_123456789",
     "exp": int(time.time()) + expires_in,
-  }).encode())
+  }
+  if issuer:
+    claims["iss"] = issuer
+  payload = broker_module._b64(json.dumps(claims).encode())
   return f"{header}.{payload}.signature"
+
+
+STAGING_LAUNCHER = "https://staging.launcher.example"
+
+
+@pytest.mark.parametrize(("environ", "expected"), [
+  ({}, "https://www.mobius.you"),
+  ({"MOBIUS_IDENTITY_ISSUER": ""}, "https://www.mobius.you"),
+  ({"MOBIUS_IDENTITY_ISSUER": "HTTPS://WWW.MOBIUS.YOU/"}, "https://www.mobius.you"),
+  # Managed sign-in alone never moves an installation to another launcher.
+  ({"MOBIUS_SSO_ISSUER": STAGING_LAUNCHER}, "https://www.mobius.you"),
+  ({"MOBIUS_IDENTITY_ISSUER": STAGING_LAUNCHER + "/"}, STAGING_LAUNCHER),
+])
+def test_only_the_explicit_identity_issuer_moves_an_instance_to_another_launcher(
+  environ, expected,
+):
+  assert broker_module.launcher_origin(environ) == expected
+
+
+def test_default_launcher_keeps_its_historical_link_files(tmp_path):
+  for name in broker_module.LAUNCHER_FILES:
+    assert broker_module.launcher_file(
+      tmp_path, name, broker_module.DEFAULT_LAUNCHER
+    ) == tmp_path / name
+
+
+def test_each_other_launcher_gets_its_own_link_files(tmp_path):
+  other = "https://other.launcher.example"
+  for name in broker_module.LAUNCHER_FILES:
+    staging = broker_module.launcher_file(tmp_path, name, STAGING_LAUNCHER)
+    assert staging.parent == tmp_path
+    assert staging != tmp_path / name
+    assert staging.suffix == Path(name).suffix
+    assert staging == broker_module.launcher_file(tmp_path, name, STAGING_LAUNCHER)
+    assert staging != broker_module.launcher_file(tmp_path, name, other)
+
+
+def _use_launcher(monkeypatch, launcher):
+  private = broker_module.PRIVATE_DIR
+  for attribute, name in (
+    ("STATE_PATH", "identity.json"),
+    ("PENDING_BOOTSTRAP_PATH", "pending-enrollment.jwt"),
+    ("OAUTH_STATE_PATH", "oauth-states.json"),
+  ):
+    monkeypatch.setattr(
+      broker_module, attribute,
+      broker_module.launcher_file(private, name, launcher),
+    )
+  monkeypatch.setattr(broker_module, "IDENTITY_BASE_URL", launcher)
+
+
+def test_linking_with_another_launcher_never_touches_the_default_link(
+  broker, monkeypatch,
+):
+  production_link = json.dumps({
+    "issuer": broker_module.DEFAULT_LAUNCHER,
+    "subject": "user_example",
+    "instance_id": broker.instance_id,
+    "key_thumbprint": broker.thumbprint(),
+    "key_generation": 1,
+  }, separators=(",", ":")).encode()
+  default_link_path = broker_module.STATE_PATH
+  broker_module._atomic_root_write(default_link_path, production_link)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["linked"] is False
+    posted = {}
+
+    class Enrolled:
+      def raise_for_status(self):
+        return None
+
+      def json(self):
+        return {"identity": {
+          "issuer": STAGING_LAUNCHER,
+          "subject": "user_example",
+          "instance_id": on_staging.instance_id,
+          "key_thumbprint": on_staging.thumbprint(),
+          "key_generation": 1,
+        }}
+
+    def post(url, **_kwargs):
+      posted["url"] = url
+      return Enrolled()
+
+    monkeypatch.setattr(on_staging.client, "post", post)
+    linked = on_staging.enroll(_unsigned_receipt(on_staging.instance_id))
+    assert posted["url"] == STAGING_LAUNCHER + "/identity/runtime-enroll"
+    assert linked["issuer"] == STAGING_LAUNCHER
+    assert broker_module.STATE_PATH.exists()
+    assert broker_module.STATE_PATH != default_link_path
+    assert default_link_path.read_bytes() == production_link
+
+    on_staging.unlink("user_example")
+    assert default_link_path.read_bytes() == production_link
+  finally:
+    on_staging.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  back_on_production = broker_module.Broker()
+  try:
+    identity = back_on_production.identity()
+    assert identity["linked"] is True
+    assert identity["issuer"] == broker_module.DEFAULT_LAUNCHER
+    assert default_link_path.read_bytes() == production_link
+  finally:
+    back_on_production.close()
+
+
+def test_pending_enrollment_for_another_launcher_survives_a_switch_back(
+  broker, monkeypatch,
+):
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  staging_receipt = _unsigned_receipt(broker.instance_id)
+  on_staging = broker_module.Broker()
+  try:
+    on_staging.queue_bootstrap(staging_receipt)
+    staging_pending = broker_module.PENDING_BOOTSTRAP_PATH
+  finally:
+    on_staging.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  on_production = broker_module.Broker()
+  try:
+    on_production.state = {"subject": "user_example"}
+    assert on_production.retry_pending_once() is True
+    assert staging_pending.read_text() == staging_receipt
+  finally:
+    on_production.close()
+
+
+def _link(broker, issuer):
+  return json.dumps({
+    "issuer": issuer,
+    "subject": "user_example",
+    "instance_id": broker.instance_id,
+    "key_thumbprint": broker.thumbprint(),
+    "key_generation": 1,
+  }, separators=(",", ":")).encode()
+
+
+def test_an_existing_link_with_another_launcher_survives_the_update(
+  broker, monkeypatch,
+):
+  # Earlier versions saved every launcher's link under the historical name.
+  historical = broker_module.STATE_PATH
+  staging_link = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, staging_link)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  updated = broker_module.Broker()
+  try:
+    identity = updated.identity()
+    assert identity["linked"] is True
+    assert identity["issuer"] == STAGING_LAUNCHER
+    assert broker_module.STATE_PATH.read_bytes() == staging_link
+    assert not historical.exists()
+  finally:
+    updated.close()
+
+  _use_launcher(monkeypatch, broker_module.DEFAULT_LAUNCHER)
+  on_default = broker_module.Broker()
+  try:
+    assert on_default.identity()["linked"] is False
+  finally:
+    on_default.close()
+
+
+def test_a_pending_enrollment_for_another_launcher_survives_the_update(
+  broker, monkeypatch,
+):
+  historical = broker_module.PENDING_BOOTSTRAP_PATH
+  receipt = _unsigned_receipt(broker.instance_id, issuer=STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, receipt.encode("ascii"))
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  updated = broker_module.Broker()
+  try:
+    assert not historical.exists()
+    enrolled = []
+    monkeypatch.setattr(updated, "enroll", enrolled.append)
+    assert updated.retry_pending_once() is True
+    assert enrolled == [receipt]
+  finally:
+    updated.close()
+
+
+@pytest.mark.parametrize("issuer", [broker_module.DEFAULT_LAUNCHER, None])
+def test_the_update_leaves_files_another_launcher_did_not_issue(
+  broker, monkeypatch, issuer,
+):
+  link = _link(broker, issuer)
+  receipt = _unsigned_receipt(broker.instance_id, issuer=issuer).encode("ascii")
+  historical_link = broker_module.STATE_PATH
+  historical_receipt = broker_module.PENDING_BOOTSTRAP_PATH
+  broker_module._atomic_root_write(historical_link, link)
+  broker_module._atomic_root_write(historical_receipt, receipt)
+
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["linked"] is False
+    assert on_staging.retry_pending_once() is False
+    assert historical_link.read_bytes() == link
+    assert historical_receipt.read_bytes() == receipt
+    assert not broker_module.STATE_PATH.exists()
+    assert not broker_module.PENDING_BOOTSTRAP_PATH.exists()
+  finally:
+    on_staging.close()
+
+
+def test_the_update_never_replaces_a_launchers_own_link(broker, monkeypatch):
+  historical = broker_module.STATE_PATH
+  older = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, older)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  current = _link(broker, STAGING_LAUNCHER).replace(b"user_example", b"user_current")
+  broker_module._atomic_root_write(broker_module.STATE_PATH, current)
+
+  on_staging = broker_module.Broker()
+  try:
+    assert on_staging.identity()["subject"] == "user_current"
+    assert broker_module.STATE_PATH.read_bytes() == current
+    assert historical.read_bytes() == older
+  finally:
+    on_staging.close()
+
+
+def test_root_broker_reclaims_the_default_link_while_another_launcher_is_active(
+  tmp_path, monkeypatch,
+):
+  private, key = _legacy_state_paths(tmp_path, monkeypatch)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  default_link = private / "identity.json"
+  default_link.write_text("{}", encoding="utf-8")
+  default_link.chmod(0o600)
+  staging_link = broker_module.STATE_PATH
+  staging_link.write_text("{}", encoding="utf-8")
+  staging_link.chmod(0o600)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert {inode for inode, _uid, _gid in adopted} == {
+    private.stat().st_ino,
+    key.stat().st_ino,
+    default_link.stat().st_ino,
+    staging_link.stat().st_ino,
+  }
 
 
 def test_transient_bootstrap_is_root_persisted_and_survives_restart(
@@ -1847,3 +2105,276 @@ def test_broker_cost_opt_in_cannot_escape_the_metrics_read(method, path):
 ])
 def test_broker_refuses_every_other_managed_query(method, path):
   assert broker_module._managed_upstream_path(method, "/managed" + path) is None
+
+
+def test_stray_link_from_other_launcher_is_not_loaded(broker):
+  broker_module._atomic_root_write(broker_module.STATE_PATH, _link(broker, STAGING_LAUNCHER))
+  assert broker._load_state() is None
+  broker_module._atomic_root_write(broker_module.STATE_PATH, _link(broker, "HTTPS://WWW.MOBIUS.YOU/"))
+  assert broker._load_state() is not None
+
+
+@pytest.mark.parametrize("occupied", [False, True])
+def test_case_sensitive_launcher_files_are_adopted_without_overwrite(
+  broker, monkeypatch, occupied,
+):
+  raw = "HTTPS://STAGING.LAUNCHER.EXAMPLE"
+  launcher = broker_module.launcher_origin({"MOBIUS_IDENTITY_ISSUER": raw})
+  _use_launcher(monkeypatch, launcher)
+  old_link = broker_module.launcher_file(broker_module.PRIVATE_DIR, "identity.json", raw)
+  old_receipt = broker_module.launcher_file(broker_module.PRIVATE_DIR, "pending-enrollment.jwt", raw)
+  link = _link(broker, raw)
+  receipt = _unsigned_receipt(broker.instance_id, issuer=raw).encode("ascii")
+  broker_module._atomic_root_write(old_link, link)
+  broker_module._atomic_root_write(old_receipt, receipt)
+  if occupied:
+    current = _link(broker, launcher).replace(b"user_example", b"user_current")
+    broker_module._atomic_root_write(broker_module.STATE_PATH, current)
+    broker_module._atomic_root_write(broker_module.PENDING_BOOTSTRAP_PATH, b"current")
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["subject"] == ("user_current" if occupied else "user_example")
+    assert broker_module.STATE_PATH.read_bytes() == (current if occupied else link)
+    assert broker_module.PENDING_BOOTSTRAP_PATH.read_bytes() == (b"current" if occupied else receipt)
+    assert old_link.exists() is occupied
+    assert old_receipt.exists() is occupied
+  finally:
+    updated.close()
+
+
+def test_case_sensitive_default_file_is_adopted(broker, monkeypatch):
+  raw = "HTTPS://WWW.MOBIUS.YOU"
+  old = broker_module.launcher_file(broker_module.PRIVATE_DIR, "identity.json", raw)
+  link = _link(broker, raw)
+  broker_module._atomic_root_write(old, link)
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["linked"] is True
+    assert broker_module.STATE_PATH.read_bytes() == link
+    assert not old.exists()
+  finally:
+    updated.close()
+
+
+def test_case_sensitive_file_with_wrong_issuer_is_not_adopted(broker, monkeypatch):
+  raw = "HTTPS://STAGING.LAUNCHER.EXAMPLE"
+  _use_launcher(monkeypatch, broker_module.launcher_origin({"MOBIUS_IDENTITY_ISSUER": raw}))
+  old = broker_module.launcher_file(broker_module.PRIVATE_DIR, "identity.json", raw)
+  broker_module._atomic_root_write(old, _link(broker, broker_module.DEFAULT_LAUNCHER))
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["linked"] is False
+    assert old.exists()
+    assert not broker_module.STATE_PATH.exists()
+  finally:
+    updated.close()
+
+
+def test_case_changed_at_upgrade_finds_unambiguous_hashed_files(broker, monkeypatch):
+  old_spelling = "HTTPS://STAGING.LAUNCHER.EXAMPLE"
+  launcher = "https://staging.launcher.example"
+  _use_launcher(monkeypatch, launcher)
+  old_link = broker_module.launcher_file(broker_module.PRIVATE_DIR, "identity.json", old_spelling)
+  old_receipt = broker_module.launcher_file(broker_module.PRIVATE_DIR, "pending-enrollment.jwt", old_spelling)
+  link = _link(broker, launcher)
+  receipt = _unsigned_receipt(broker.instance_id, issuer=launcher).encode("ascii")
+  broker_module._atomic_root_write(old_link, link)
+  broker_module._atomic_root_write(old_receipt, receipt)
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["linked"] is True
+    assert broker_module.STATE_PATH.read_bytes() == link
+    assert broker_module.PENDING_BOOTSTRAP_PATH.read_bytes() == receipt
+    assert not old_link.exists() and not old_receipt.exists()
+  finally:
+    updated.close()
+
+
+def test_multiple_matching_legacy_files_are_not_arbitrarily_adopted(broker, monkeypatch):
+  launcher = "https://staging.launcher.example"
+  _use_launcher(monkeypatch, launcher)
+  for name in ("identity.json", "pending-enrollment.jwt"):
+    for spelling in ("HTTPS://STAGING.LAUNCHER.EXAMPLE", "https://STAGING.launcher.example"):
+      path = broker_module.launcher_file(broker_module.PRIVATE_DIR, name, spelling)
+      value = (_link(broker, launcher) if name == "identity.json" else
+               _unsigned_receipt(broker.instance_id, issuer=launcher).encode("ascii"))
+      broker_module._atomic_root_write(path, value)
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["linked"] is False
+    assert not broker_module.PENDING_BOOTSTRAP_PATH.exists()
+    assert len(list(broker_module.PRIVATE_DIR.glob("identity.*.json"))) == 2
+    assert len(list(broker_module.PRIVATE_DIR.glob("pending-enrollment.*.jwt"))) == 2
+  finally:
+    updated.close()
+
+
+def test_hashed_and_unsuffixed_matching_links_are_ambiguous(broker, monkeypatch):
+  launcher = "https://staging.launcher.example"
+  historical = broker_module.STATE_PATH
+  link = _link(broker, launcher)
+  broker_module._atomic_root_write(historical, link)
+  _use_launcher(monkeypatch, launcher)
+  hashed = broker_module.launcher_file(
+    broker_module.PRIVATE_DIR, "identity.json", "HTTPS://STAGING.LAUNCHER.EXAMPLE"
+  )
+  broker_module._atomic_root_write(hashed, link)
+  updated = broker_module.Broker()
+  try:
+    assert updated.identity()["linked"] is False
+    assert not broker_module.STATE_PATH.exists()
+    assert historical.read_bytes() == hashed.read_bytes() == link
+  finally:
+    updated.close()
+
+
+def test_compat_reclaim_includes_inactive_launcher_files_before_scanning(
+  tmp_path, monkeypatch,
+):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  inactive = []
+  for name in broker_module.LAUNCHER_FILES:
+    path = broker_module.launcher_file(private, name, STAGING_LAUNCHER)
+    path.write_text('{}', encoding='utf-8')
+    path.chmod(0o600)
+    inactive.append(path)
+  adopted = _record_adopted_inodes(monkeypatch)
+
+  broker_module._reclaim_private_state_after_compat_chown()
+
+  assert {path.stat().st_ino for path in inactive} <= {
+    inode for inode, _uid, _gid in adopted
+  }
+
+
+@pytest.mark.parametrize('kind', ['symlink', 'hardlink', 'permissive'])
+def test_compat_reclaim_refuses_unsafe_inactive_launcher_file(
+  tmp_path, monkeypatch, kind,
+):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  path = broker_module.launcher_file(private, 'identity.json', STAGING_LAUNCHER)
+  target = tmp_path / 'outside'
+  target.write_text('{}', encoding='utf-8')
+  target.chmod(0o600)
+  if kind == 'symlink':
+    path.symlink_to(target)
+  elif kind == 'hardlink':
+    os.link(target, path)
+  else:
+    path.write_text('{}', encoding='utf-8')
+    path.chmod(0o644)
+  adopted = _record_adopted_inodes(monkeypatch)
+  with pytest.raises(RuntimeError, match='file is unsafe'):
+    broker_module._reclaim_private_state_after_compat_chown()
+  assert adopted == []
+  assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
+
+def test_boot_reclaims_inactive_link_before_issuer_scan(tmp_path, monkeypatch):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  monkeypatch.setattr(broker_module, 'IDENTITY_BASE_URL', broker_module.DEFAULT_LAUNCHER)
+  inactive = broker_module.launcher_file(private, 'identity.json', STAGING_LAUNCHER)
+  inactive.write_text(json.dumps({'issuer': STAGING_LAUNCHER}), encoding='utf-8')
+  inactive.chmod(0o600)
+  adopted = _record_adopted_inodes(monkeypatch)
+  real_lstat = os.lstat
+
+  def simulated_lstat(path, *args, **kwargs):
+    info = real_lstat(path, *args, **kwargs)
+    # Simulate ownership restored by the fake fchown, without requiring root.
+    if info.st_ino in {inode for inode, _uid, _gid in adopted}:
+      fields = list(info)
+      fields[stat.ST_UID] = fields[stat.ST_GID] = 0
+      return os.stat_result(fields)
+    return info
+
+  monkeypatch.setattr(broker_module.os, 'lstat', simulated_lstat)
+  with pytest.raises(RuntimeError, match='file is unsafe'):
+    broker_module._adopt_historical_launcher_files()
+  broker_module._reclaim_private_state_after_compat_chown()
+  broker_module._adopt_historical_launcher_files()
+  assert inactive.exists()
+
+
+@pytest.mark.parametrize('crash_after_rename', [False, True])
+def test_interrupted_adoption_does_not_leave_hard_links(
+  broker, monkeypatch, crash_after_rename,
+):
+  historical = broker_module.STATE_PATH
+  link = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, link)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  real_rename = broker_module._rename_noreplace
+
+  def interrupted(source, destination):
+    if crash_after_rename:
+      assert real_rename(source, destination)
+    raise RuntimeError('simulated crash')
+
+  monkeypatch.setattr(broker_module, '_rename_noreplace', interrupted)
+  with pytest.raises(RuntimeError, match='simulated crash'):
+    broker_module._adopt_historical_launcher_files()
+  paths = [path for path in (historical, broker_module.STATE_PATH) if path.exists()]
+  assert len(paths) == 1
+  assert paths[0].stat().st_nlink == 1
+  assert paths[0].read_bytes() == link
+  # Simulate the next root boot's reclamation, without requiring root.
+  with monkeypatch.context() as boot:
+    boot.setattr(broker_module.os, 'geteuid', lambda: 0)
+    boot.setattr(broker_module.os, 'fchown', lambda *_args: None)
+    boot.setattr(
+      broker_module.pwd, 'getpwnam',
+      lambda _name: SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid()),
+    )
+    broker_module._reclaim_private_state_after_compat_chown()
+  monkeypatch.setattr(broker_module, '_rename_noreplace', real_rename)
+  broker_module._adopt_historical_launcher_files()
+  assert broker_module.STATE_PATH.read_bytes() == link
+  assert not historical.exists()
+  assert broker_module.STATE_PATH.stat().st_nlink == 1
+
+
+def test_noreplace_rename_does_not_overwrite_destination_created_during_adoption(
+  broker, monkeypatch,
+):
+  historical = broker_module.STATE_PATH
+  original = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, original)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  current = original.replace(b'user_example', b'user_current')
+  real_rename = broker_module._rename_noreplace
+
+  def race(source, destination):
+    broker_module._atomic_root_write(destination, current)
+    return real_rename(source, destination)
+
+  monkeypatch.setattr(broker_module, '_rename_noreplace', race)
+  broker_module._adopt_historical_launcher_files()
+  assert broker_module.STATE_PATH.read_bytes() == current
+  assert historical.read_bytes() == original
+  assert historical.stat().st_nlink == broker_module.STATE_PATH.stat().st_nlink == 1
+
+
+def test_unavailable_atomic_rename_leaves_legacy_file_untouched(broker, monkeypatch):
+  historical = broker_module.STATE_PATH
+  value = _link(broker, STAGING_LAUNCHER)
+  broker_module._atomic_root_write(historical, value)
+  _use_launcher(monkeypatch, STAGING_LAUNCHER)
+  monkeypatch.setattr(broker_module.ctypes, 'CDLL', lambda *_args, **_kwargs: object())
+  broker_module._adopt_historical_launcher_files()
+  assert historical.read_bytes() == value
+  assert not broker_module.STATE_PATH.exists()
+
+
+def test_reclaim_still_rejects_two_known_names_with_same_inode(tmp_path, monkeypatch):
+  private, _key = _legacy_state_paths(tmp_path, monkeypatch)
+  source = private / 'identity.json'
+  source.write_text('{}', encoding='utf-8')
+  source.chmod(0o600)
+  dest = broker_module.launcher_file(private, 'identity.json', STAGING_LAUNCHER)
+  os.link(source, dest)
+  adopted = _record_adopted_inodes(monkeypatch)
+  with pytest.raises(RuntimeError, match='file is unsafe'):
+    broker_module._reclaim_private_state_after_compat_chown()
+  assert adopted == []
+  assert source.exists() and dest.exists()

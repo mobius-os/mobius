@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
+from app.agent_roles import AgentKey, confined_role_for_app
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -102,6 +103,10 @@ class Principal:
   owner: models.Owner
   app_id: int | None
   app_instance_id: str | None = None
+  # The installation (``App.install_id``) of the row an app token's nonce was
+  # checked against; None for any other caller and for a token that names no
+  # nonce. The key vault matches app callers by it (routes/keys.py).
+  app_install_id: str | None = None
   scope: str = "owner"
   chat_id: str | None = None
   run_id: str | None = None
@@ -117,10 +122,11 @@ class Principal:
   via_agent_chat: str | None = None
   app_is_service: bool = False
   app_is_public_service: bool = False
-  # Signed supervised-job identity/grant; never copied into frame bearers.
-  app_job_secrets: frozenset[str] = frozenset()
   # Set when this bearer acts for a shared-browser guest (see browser_access).
   browser: BrowserLineage | None = None
+  # Set for the key of one confined app agent run: the role, tools and
+  # provider its room was built for (agent_roles.AgentKey).
+  app_agent: AgentKey | None = None
 
   @property
   def browser_grant_id(self) -> str | None:
@@ -497,11 +503,11 @@ def authorize_current_owner_detached(
     db.close()
 
 
-def _enforce_app_scope(payload: dict, db: Session) -> int | None:
-  """Validates an app-scoped token's app identity; returns its app_id.
+def _enforce_app_scope(payload: dict, db: Session) -> models.App | None:
+  """Validates an app-scoped token's app identity; returns its app row.
 
-  Returns the int app_id for an app-scoped token, or None for an owner
-  token. Raises 401 when the token is app-scoped but:
+  Returns the live app row an app-scoped token was checked against, or None
+  for an owner token. Raises 401 when the token is app-scoped but:
     - it carries no integer app_id (malformed — it would otherwise read
       as an owner caller downstream), or
     - the app no longer exists (uninstalled: the token must stop working
@@ -539,7 +545,12 @@ def _enforce_app_scope(payload: dict, db: Session) -> int | None:
     raise HTTPException(status_code=401, detail="App token no longer valid.")
   if not app_consent.session_valid(app, payload.get("consent")):
     raise HTTPException(status_code=401, detail="App has not been approved.")
-  return app_id
+  key = AgentKey.from_claims(payload)
+  if key is not None and not key.matches(confined_role_for_app(app)):
+    # A narrower role (or none) applies from the next request of a run that
+    # started under a wider one, not from its next run.
+    raise HTTPException(status_code=401, detail="This app's agent access has changed.")
+  return app
 
 
 def _enforce_chat_embed_scope(
@@ -750,11 +761,14 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
   # error or dropping the caller's restrictions. Refuse it at resolution.
   if (payload.get("delegation_id") is None) != (payload.get("delegation_chat") is None):
     raise HTTPException(status_code=401, detail="Incomplete delegation lineage.")
-  app_id = _enforce_app_scope(payload, db)
+  app = _enforce_app_scope(payload, db)
+  app_id = app.id if app is not None else None
   return Principal(
     owner=owner,
     app_id=app_id,
     app_instance_id=payload.get("app_nonce") if app_id is not None else None,
+    # Only a token bound to its installation's nonce names the installation.
+    app_install_id=app.install_id if app is not None and payload.get("app_nonce") is not None else None,
     scope="app" if app_id is not None else "owner",
     # App tokens retain the initiating helper's restrictions, never its agent
     # identity. Consumers of chat_id/run_id must not mistake an app for it.
@@ -765,7 +779,7 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     via_agent_chat=payload.get("via_agent_chat") if app_id is not None else None,
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
-    app_job_secrets=frozenset(payload.get("job_secrets", [])) if app_id is not None else frozenset(),
+    app_agent=AgentKey.from_claims(payload) if app_id is not None else None,
   )
 
 
@@ -848,6 +862,14 @@ def is_installation_owner_control(principal: Principal) -> bool:
   ``require_installation_owner_control``, for reads that stay private by
   returning nothing rather than refusing."""
   return principal.delegation_id is None and not acts_for_guest(principal)
+
+
+def refuse_app_agent(principal: Principal, action: str) -> None:
+  """A confined app agent's key reaches only the routes its declared tools open
+  (agent_roles.AgentKeyScope). A route that hands out keys or secrets refuses
+  it itself too, so a looser allow-list can never open it by accident."""
+  if principal.app_agent is not None:
+    raise HTTPException(status_code=403, detail=f"An app's agent cannot {action}.")
 
 
 def require_installation_owner_control(principal: Principal) -> None:
@@ -965,8 +987,16 @@ def get_agent_run_principal(
   token: str = Depends(_oauth2),
   db: Session = Depends(get_db),
 ) -> Principal:
-  """Resolve the owner bearer minted for one exact physical agent run."""
+  """Resolve the bearer minted for one exact physical agent run.
+
+  A confined app agent's key is one too, bound to its app's own chat. The key
+  allow-list (agent_roles.AgentKeyScope) decides which of these run-bound
+  routes it reaches: the ones its app's declared tools name.
+  """
   principal = get_principal(token, db)
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   if (
     principal.scope != "owner"
     or principal.app_id is not None
@@ -1012,6 +1042,10 @@ def get_delegation_principal(
       status_code=403,
       detail="Delegated app tokens cannot act as helper agents.",
     )
+  agent = principal.app_agent
+  if agent is not None and agent.chat and agent.run:
+    # A confined app agent steers only its own chat's helpers.
+    return replace(principal, chat_id=agent.chat, run_id=agent.run)
   return principal
 
 

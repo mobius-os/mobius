@@ -890,6 +890,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "goal": None,
     "handoff": {"kind": "working", "reason": None},
     "pending_messages": [],
+    "pending_revision": 0,
     "pending_question_id": None,
     "updated_at": created.json()["updated_at"],
     "waits": [],
@@ -901,6 +902,7 @@ def test_runtime_route_does_not_select_transcript_json(
     if "from chats" in statement and "chats.pending_messages" in statement
   )
   assert "chats.pending_messages" in chat_select
+  assert "chats.pending_revision" in chat_select
   assert "chats.updated_at" in chat_select
   assert "chats.active_assistant_message_id" in chat_select
   assert "chats.messages as" not in chat_select

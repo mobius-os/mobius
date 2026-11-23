@@ -374,7 +374,8 @@ def test_completed_retry_with_failed_receipt_exposes_recovery_and_manual_resume_
   with monkeypatch.context() as patch:
     patch.setattr(ChatWriterActor, "_acknowledge_provider_success", fail_receipt)
     asyncio.run(chat_mod._acknowledge_provider_success(chat_id=chat.id,
-      run_token=retry_id, delivered_through=None, wait_results=(wait.id,)))
+      run_token=retry_id, delivered_through=None, provider_responded=True,
+      wait_results=(wait.id,)))
   get_writer().submit(FinishRun(chat_id=chat.id, run_token=retry_id,
     terminal_status="completed")).result(timeout=5)
   db.expire_all()

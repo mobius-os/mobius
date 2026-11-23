@@ -60,24 +60,15 @@ above. Origin-bound facilities such as cookies, service workers and durable
 origin storage still require a host provider or a separate service origin; a
 raw general shell-origin bridge would recreate the authority opacity removed.
 
-### Named secret reads for supervised jobs
+### Keys are borrowed, never read
 
-An app may declare `permissions.job_secret_read`, up to 16 unique names from
-its own encrypted secret store. The accepted capability contract includes the
-names in owner review. Omitted or empty means no job read access; ordinary app
-frames still cannot read secret values. Only the owner-authorized supervised-job
-mint includes a signed `job_secrets` claim, bounded by the accepted names at
-mint time. Every read also checks the current accepted names, app installation
-nonce, owner epoch and token expiry. Removing a grant denies future reads;
-adding names does not expand an already-running job's token. Applying a manifest
-without the grant revokes it. The existing owner/service behavior is unchanged.
-
-This is not a process sandbox: reviewed jobs already run as trusted local code.
-They must not log, persist unencrypted, or expose these values through browser
-responses. A compromised permitted job could leak its own keys; denial cannot
-retract a key already read. Keep provider transport and secret handling in the
-app, not in new platform proxy routes. No grant implies permission to activate
-bots, send messages or make paid calls.
+Apps never read key values: not the frame, the service or a supervised job.
+An app asks for a key by name (`POST /api/keys/requests`) and, once the owner
+approves it in Settings › Keys, borrows it through `/api/keys/use/…`, where
+the server attests the app from its own token and the key vault adds the key
+(see SECURITY.md and KEY_VAULT_DESIGN.md). The retired
+`permissions.job_secret_read` is refused with a pointer to that route. No grant
+implies permission to activate bots, send messages or make paid calls.
 
 ### Paying for priced calls with credits
 
@@ -791,6 +782,90 @@ stages the app. Source: `backend/app/app_consent.py`.
   skills, the first-run job) still start at install; a Store update's new
   grants still apply before the owner answers; local and agent-built apps are
   not gated; there is no Settings screen for revoking.
+
+## App agent access
+
+An app's `agent` declaration (`scope`, `allow_tools`, `reason`) decides what
+every agent it starts can reach (manifest shape in the `building-apps` skill). Source: `backend/app/agent_roles.py`,
+`backend/app/agent_gateway.py` and `backend/scripts/mobius_fence.py`.
+
+- **Scopes.** `tools` starts in an empty folder and reaches only what its
+  tools give it, `read` reads the app's files and data, `edit` reads and
+  changes them, and `admin` has full access and omits `allow_tools`. An app
+  that declares no scope keeps full access. The older `agent_role` field, and
+  any scope name not in this list, is a manifest error rather than ignored,
+  and a stored declaration Möbius cannot read runs as `tools` with no tools.
+- **The room.** A Tools, Read or Edit agent runs whole in a room built
+  before it starts: Landlock walls (system folders read-only, the app's storage
+  directory read-only or writable by scope with ordinary files only, nothing
+  else), a seccomp connect guard that admits only the room's door (only TCP
+  sockets, plus route netlink to list interfaces; no TCP Fast Open), and
+  `no_new_privs`, with signals scoped to the room. Each grant (scope and tools)
+  has its own durable home in the chat's folder, holding its sessions, and
+  Möbius never writes into it: what it hands the runtime sits in a read-only
+  folder beside it. A host that cannot build rooms (Linux
+  6.12 or later with libseccomp) does not start the agent.
+- **The agent key.** The run's bearer is the app's own credential bound to the
+  live run (`auth.create_app_agent_token`), carrying its scope, tools and
+  provider. `AgentKeyScope` refuses it everywhere except the Agent Gateway, the
+  app's own storage by scope, and the routes of declared tools; route checks
+  still apply after it. The room's door is this server on its own loopback
+  address (`agent_roles.ROOM_HOST`, 127.0.0.2), and a request that arrives on
+  that address must carry only agent keys, so a credential a room finds
+  anywhere else (another process's command line, a file) is refused there.
+  The server tells a room's request by the address it arrived on, which no
+  header can change. The key stops working as soon as the app's scope
+  differs from its grant. Any change of scope, tools or consent (apply, Store
+  update, revoke) also ends the app's running agent turns through the
+  ordinary chat Stop; a Stop that fails is reported.
+- **The Agent Gateway.** `/api/agent-gateway/v1/...` serves only the run
+  provider's model endpoints (Claude, Codex, Möbius models), drops provider-run
+  tools the app did not declare (including any tool the provider would run in
+  its own container) and hosted MCP servers, refuses a request that forces a
+  removed tool or asks the provider to fetch content from a web address, and
+  adds the owner's login outside the room.
+- **Tools.** An agent's own tools (shell, file edits, planning) always work,
+  inside its room. `allow_tools` adds Möbius tools that reach beyond it. `web` is
+  provider-hosted search through the gateway plus `open_page` through the
+  guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
+  activity. `notify` is `notify_owner`. `ask` is `request_question` and
+  `request_approval` for the run's own chat (a confined key is an agent run of
+  that chat; an approval's work claim is namespaced to the app and chat; Codex
+  ends the turn through the owner-card hook inside the room).
+  `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
+  page outside the room, with a sign-in bound to the run. That capture browser
+  is signed in as the owner, so the app's page could navigate it; the popup's
+  consent covers this, and a capture sign-in limited to the app is a planned
+  narrowing. `helpers` is `spawn_agent` and its siblings for the run's own chat's
+  helpers. `keys` opens only the vault's borrow route (`/api/keys/use/...`):
+  the vault attests the app from the agent's key, so the agent uses exactly
+  the keys and sites the owner approved for that app, never reads a value and
+  never asks for a key; each use is recorded as an `app_agent_web` activity
+  (key and site). Routes that hand out keys or secrets (agent and app key
+  requests, sealed secret cards) also refuse a confined key themselves
+  (`deps.refuse_app_agent`). Every agent an app owns runs at the app's scope: a helper's chat
+  belongs to the app that owns the delegation, so its runs get a room and an
+  agent key with the same grant (never a delegation token).
+  `<app>.<tool>` (such as `memory.search`) offers that one installed-app tool
+  through `/api/agent/app-tools`, which serves a confined key only that exact
+  app and tool (agent-facing names can collide, so they are never the
+  authority). A new tool is one `agent_roles.TOOLS` entry naming its control
+  tools, key routes and gateway types.
+- **Consent.** One `agent_role` row whose scope names what the declaration
+  reaches (`data:read`, `data:write`, `tool:<name>`), so an update asks again
+  only when it adds reach, and shows only what it adds. The popup shows the
+  scope's label, the platform's description of what it grants, the app's
+  reason and the requested tools. Admin and undeclared agent apps use the
+  critical `agent_start` row ("Full access to your Möbius"), which covers every
+  confined scope; dropping an accepted scope asks for it.
+- **History.** A confined agent continues only its own grant's session. The
+  chat transcript is never reseeded into a room, because it may hold what a
+  wider grant (or the era before scopes) read.
+- **Not yet covered:** a room can read other processes' command lines, so
+  nothing secret may be passed as an argument (`mapi` and platform scripts send
+  bearers through a pipe); app jobs and services still run unconfined; searches
+  that run at Anthropic are not recorded one by one; the screenshot capture
+  browser holds the owner's sign-in rather than one limited to the app.
 
 ## Stable error codes
 

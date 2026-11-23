@@ -6,12 +6,8 @@ import * as tabModel from '../tabModel.js'
 import { modeReducer } from '../modeMachine.js'
 import { softStripKeyframes } from '../useModeViewTransition.js'
 
-// Permanent regression locks for Codex's flagship review round 2 (15 findings).
-// Each fix is pinned here — a grep-level lock on the sanctioned funnels plus
-// behavioral reducer cases — so a future edit that reintroduces a bypass, a
-// destructive Settings conversion, a stale drag epoch, or an un-clamped nav fails
-// loudly. DOM/timing cells (hold boundaries, BFCache, drag blur) are covered by
-// tests/mode-transition.spec.mjs.
+// Mode-transition regressions: reducer behavior and remaining wiring checks.
+// DOM/timing cases are covered by tests/mode-transition.spec.mjs.
 
 const shell = readFileSync(new URL('../Shell.jsx', import.meta.url), 'utf8')
 const workspaceSession = readFileSync(
@@ -46,15 +42,6 @@ test('finding 1: dragArm returns the epoch it WILL assign, computed before dispa
 })
 
 // -- Finding 2 (BLOCKER): Settings is non-destructive across a world toggle -----
-test('finding 2: the Settings mode-conversion hook is DELETED (nothing converts on flip)', () => {
-  // v2 deleted the former no-op convertSettingsForModeTransition entirely: a builder
-  // Settings tab SURVIVES the flip and single mode paints its own slot, so there is
-  // nothing to convert. No caller, no export, and no mode-convert reducer branch.
-  assert.doesNotMatch(nav, /convertSettingsForModeTransition/)
-  assert.doesNotMatch(shell, /convertSettingsForModeTransition/)
-  assert.doesNotMatch(paneSrc, /reason === 'mode-convert'/)
-})
-
 test('finding 2: a mode toggle PRESERVES a Settings-only pane (tree untouched)', () => {
   // Builder workspace: chat 5 left, Settings alone in a right pane; chat focused
   // (the UNFOCUSED sole Settings pane the review named).

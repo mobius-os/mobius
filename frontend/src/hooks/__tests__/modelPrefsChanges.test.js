@@ -39,7 +39,7 @@ test('a switch sends only its own change and shows it before the server answers'
   assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), { hidden_ids: ['b', 'set-elsewhere'], recent_ids: [] })
 })
 
-test('visibility reply cannot undo a model picked while the save was in flight', async t => {
+test('visibility reply cannot undo a newer send refresh while the save was in flight', async t => {
   const queryClient = client(['a'])
   let answer
   serve(t, () => new Promise(resolve => { answer = resolve }))
@@ -52,6 +52,15 @@ test('visibility reply cannot undo a model picked while the save was in flight',
   assert.equal(await saving, true)
   assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), {
     hidden_ids: [], recent_ids: ['new-model'],
+  })
+})
+
+test('visibility reply adopts a send committed before its server response', async t => {
+  const queryClient = client(['a'])
+  serve(t, () => json({ hidden_ids: [], recent_ids: ['used-during-save'] }))
+  assert.equal(await modelQueries.prefs.saveChanges(queryClient, { a: false }), true)
+  assert.deepEqual(queryClient.getQueryData(modelQueries.prefs.key), {
+    hidden_ids: [], recent_ids: ['used-during-save'],
   })
 })
 

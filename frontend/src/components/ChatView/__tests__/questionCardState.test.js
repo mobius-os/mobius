@@ -15,7 +15,7 @@ test('every answer has its own paperclip, an icon left of its box', () => {
   const single = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'clip', questionId: 'clip-q', questions: [{ question: 'Anything else?', options: [] }],
   }))
-  assert.match(single, /class="qcard__answer-row"><button[^>]*class="qcard__attach"[\s\S]*?<\/button><div class="qcard__composer/)
+  assert.match(single, /class="qcard__answer-row[^"]*"><button[^>]*class="qcard__attach"[\s\S]*?<\/button><div class="qcard__composer/)
   assert.equal((single.match(/class="qcard__file-input"/g) || []).length, 1)
   assert.doesNotMatch(single, /attach or paste/)
   const grouped = renderToStaticMarkup(createElement(QuestionCard, {
@@ -24,7 +24,7 @@ test('every answer has its own paperclip, an icon left of its box', () => {
       { question: 'Second?', options: [] },
     ],
   }))
-  assert.equal((grouped.match(/class="qcard__answer-row"><button[^>]*class="qcard__attach"/g) || []).length, 2)
+  assert.equal((grouped.match(/class="qcard__answer-row[^"]*"><button[^>]*class="qcard__attach"/g) || []).length, 2)
   assert.equal((grouped.match(/class="qcard__file-input"/g) || []).length, 1)
 })
 
@@ -264,7 +264,7 @@ test('multiple questions read as one compact decision panel', () => {
   assert.match(component, /className=\{`qcard\$\{grouped \? ' qcard--grouped'/)
   assert.match(component, /\{questions\.length\} decisions/)
   assert.match(component, /Answer each question, then submit them together\./)
-  assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*min\(100%, 640px\);[\s\S]*?margin:\s*10px auto;/)
+  assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*100%;[\s\S]*?margin:\s*10px 0;/)
   assert.match(css, /\.qcard--grouped\s*\{[\s\S]*?overflow:\s*hidden;/)
   assert.match(css, /\.qcard--grouped \.qcard__q \+ \.qcard__q\s*\{[\s\S]*?margin-top:\s*0;/)
 })
@@ -399,4 +399,23 @@ test('incomplete cards omit progress counts but still guide a Submit attempt', a
   assert.doesNotMatch(submit, /\sdisabled=""/, 'a native disabled button could not lead to the missing question')
   assert.match(html, /data-question-index="2"/)
   assert.match(component, /if \(needsAnswers\) \{\s*showFirstUnanswered/)
+})
+
+test('a question card fills the reply column whatever its text, open or answered', () => {
+  // Replies shrink each piece to its content. A card sized that way was as
+  // narrow as its question and changed width once an answer was typed.
+  const messages = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
+  const chatCss = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
+  assert.match(chatCss, /\.chat__owner-card\s*\{[^}]*align-self:\s*stretch;/)
+  assert.match(messages, /className="chat__owner-card">\s*<Card\b/,
+    'the question card row takes the reply column')
+  assert.match(messages, /className="chat__owner-card" ref=\{answerable \? pendingQuestionRef : undefined\}>\s*<SecureInputCard/,
+    'the secure-input card row takes it too')
+  assert.doesNotMatch(css, /\.qcard\s*\{[^}]*(?:max-width|640px)/, 'no cap narrower than the reply text')
+})
+
+test('a typed-only question opens with room for several lines; the box under choices stays one line', () => {
+  assert.match(component, /qcard__answer-row\$\{hasOptions \? '' : ' qcard__answer-row--typed'\}/)
+  assert.match(css, /\.qcard__answer-row--typed \.qcard__input\s*\{\s*min-height:\s*96px;\s*min-height:\s*calc\(4lh \+ 20px\);/,
+    'a pixel height first, for browsers without the lh unit')
 })

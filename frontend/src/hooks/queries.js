@@ -496,6 +496,7 @@ async function saveModelPrefsChanges(queryClient, changes) {
     }
     return { ...prev, hidden_ids: [...hidden] }
   })
+  const optimisticPrefs = queryClient.getQueryData(modelPrefsKey)
   const save = latestPrefsSave.then(() => sendModelPrefsChanges(changes))
   latestPrefsSave = save
   const saved = await save
@@ -503,9 +504,12 @@ async function saveModelPrefsChanges(queryClient, changes) {
     if (saved) queryClient.setQueryData(modelPrefsKey, previous => ({
       ...previous,
       hidden_ids: saved.hidden_ids,
-      // A model pick can commit while this visibility request is in flight.
-      // Its newer local recency must not be replaced by an older reply.
-      recent_ids: previous?.recent_ids ?? saved.recent_ids ?? [],
+      // The server response includes concurrent sends committed before this
+      // visibility save. Keep a newer cache refresh only when one actually
+      // landed after our optimistic write.
+      recent_ids: previous === optimisticPrefs
+        ? (saved.recent_ids ?? [])
+        : (previous?.recent_ids ?? saved.recent_ids ?? []),
     }))
     if (!saved || prefsSaveOutcomeUnknown) void queryClient.invalidateQueries({ queryKey: modelPrefsKey })
     prefsSaveOutcomeUnknown = false

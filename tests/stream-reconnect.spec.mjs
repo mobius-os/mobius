@@ -920,7 +920,7 @@ test.describe('Stream reconnection', () => {
       route.fulfill({
         status: 200,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pending_messages: [] }),
+        body: JSON.stringify({ pending_messages: [], pending_revision: 0 }),
       })
     })
 

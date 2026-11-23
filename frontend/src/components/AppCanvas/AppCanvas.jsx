@@ -1,5 +1,5 @@
 import {
-  forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo,
+  forwardRef, lazy, Suspense, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo,
   useReducer, useRef, useState,
 } from 'react'
 import { flushSync } from 'react-dom'
@@ -71,6 +71,8 @@ import {
 } from '../../lib/previewSwapState.js'
 import { GlobeOffRealTimeSearch } from '@openai/apps-sdk-ui/components/Icon'
 import './AppCanvas.css'
+
+const AppKeyRequestCard = lazy(() => import('./AppKeyRequestCard.jsx'))
 
 function appFrameRequestUrl(appId, version, frameRev) {
   return `${api.apps.frameUrl(appId)}?v=${encodeURIComponent(version)}`
@@ -459,6 +461,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // honestly not hidden, but app-frame.html holds its sound and animation
   // frames, the same as leaving does.
   covered = false,
+  // Whether this canvas asks its app's key requests over it
+  // (AppKeyRequestCard): only the owner's own shell does.
+  keyRequests = false,
   // Whether this canvas's live frame is the app's shell navigation target:
   // `data-app-id` (below) and the app's saved shell location. An embedded
   // transcript view of the same app neither restores nor overwrites that place.
@@ -1970,7 +1975,7 @@ const AppCanvas = forwardRef(function AppCanvas({
             src={serviceSurfaceFrameUrl(serviceSurface.url, serviceSurface.correlation)}
             title={appName || serviceSurface.slug}
             sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-downloads allow-same-origin allow-top-navigation-by-user-activation"
-            allow="clipboard-read; clipboard-write; fullscreen; gamepad"
+            allow="clipboard-read; clipboard-write; fullscreen; gamepad; web-share"
           />
         )}
         {!loaded && (
@@ -2129,10 +2134,12 @@ const AppCanvas = forwardRef(function AppCanvas({
             // host clipboard broker. The motion sensors (accelerometer,
             // gyroscope, magnetometer) let `devicemotion` and
             // `deviceorientation` events reach the app; unlike camera and
-            // location they carry no shell-owned permission grant. Pointer
+            // location they carry no shell-owned permission grant. `web-share *`
+            // lets an app open the device share sheet from a tap; the browser
+            // still requires that user gesture and shows its own sheet. Pointer
             // lock is a sandbox flag in the frame's response CSP (backend
             // `app_frame_csp`), not a feature.
-            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *"
+            allow="clipboard-write; fullscreen *; gamepad *; accelerometer *; gyroscope *; magnetometer *; web-share *"
             allowFullScreen
             onLoad={() => handleFrameLoad(v)}
           />
@@ -2154,6 +2161,12 @@ const AppCanvas = forwardRef(function AppCanvas({
           busy={paymentBusy} error={paymentError} refusal={paymentRefusal}
           onCancel={() => answerPayment(false)} onPay={() => answerPayment(true)}
           onClose={() => setPaymentRefusal(null)} />
+      )}
+      {keyRequests && visible && (
+        <Suspense fallback={null}>
+          <AppKeyRequestCard appId={appId} covered={Boolean(pendingFileExport || pendingOwnerGrant || shownPayment
+            || covered || !swap.liveLoaded || intentHandoffPending)} />
+        </Suspense>
       )}
       {/* One-shot "updated" shimmer on a successful swap. Keyed on the SWAP
           COUNT — not the live version and not gated on liveLoaded — so it

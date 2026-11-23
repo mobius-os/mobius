@@ -35,6 +35,15 @@ test('desktop density belongs to the shell and never scales standalone apps', ()
   assert.doesNotMatch(indexCss, /:root\s*\{[^}]*zoom:/)
 })
 
+test('WebKit pane-filling app frames cancel the desktop density so apps fill their pane', () => {
+  const rule = shellCss.match(
+    /@supports \(hanging-punctuation: first\)\s*\{([\s\S]*?zoom:\s*calc\(1 \/ 0\.9\);)/,
+  )?.[1] || ''
+  for (const frame of ['iframe.canvas', '.artifact-preview__frame', '.shared-app__frame']) {
+    assert.ok(rule.includes(frame), `missing WebKit counter-zoom for ${frame}`)
+  }
+})
+
 test('browser pinch cannot scale the shell chrome and active app together', () => {
   const viewport = viewportContent(indexHtml)
   assert.match(viewport, /width=device-width/)

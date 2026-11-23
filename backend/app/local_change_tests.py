@@ -22,6 +22,8 @@ incomplete runs are retained as incomplete evidence, never an all-clear.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import posixpath
@@ -56,6 +58,26 @@ _FRONTEND_TEST_SUFFIXES = (".test.js", ".hooktest.js")
 # ``ssrLoadModule`` paths and source files read as text all count as a
 # reference. Over-selecting costs test time; missing a reference costs evidence.
 _PATH_LITERAL = re.compile(r"""['"`]((?:\.{1,2}/|/src/)[^'"`\s]+)['"`]""")
+
+
+# The run marker (``process_groups.RUN_MARKER_ENV``) every runner started in
+# this context carries. Runners lead their own sessions, so a dead owner never
+# takes them down; the marker lets the operation that proves its owner gone
+# end exactly them (``process_groups.terminate_run_processes``). Unset, a
+# runner keeps the marker it inherited (an agent turn's, ending with its turn).
+_PROCESS_MARKER: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+  "local_change_tests_process_marker", default=None,
+)
+
+
+@contextlib.contextmanager
+def process_marker(marker: str):
+  """Mark every runner started inside this block with ``marker``."""
+  token = _PROCESS_MARKER.set(marker)
+  try:
+    yield
+  finally:
+    _PROCESS_MARKER.reset(token)
 
 
 @dataclass(frozen=True)
@@ -202,6 +224,10 @@ def _run_process(repo: Path, argv: list[str], runtime: Path, deadline: float) ->
   env = {key: value for key, value in os.environ.items() if key not in _SCRUBBED_ENV}
   # Contain the runner's runtime directories too: SIGKILL cannot run its trap.
   env["TMPDIR"] = str(runtime)
+  marker = _PROCESS_MARKER.get()
+  if marker:
+    from app.process_groups import RUN_MARKER_ENV
+    env[RUN_MARKER_ENV] = marker
   try:
     proc = subprocess.Popen(
       argv, cwd=str(repo), env=env, start_new_session=True,

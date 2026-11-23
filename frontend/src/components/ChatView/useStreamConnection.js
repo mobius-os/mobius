@@ -209,7 +209,7 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
  *   Fired when the backend is about to promote queued follow-ups; `ts`
  *   identifies the first pending entry in the promoted group and `message`
  *   is the backend-authoritative combined user message when available.
- * @param {(info: {ts: number|null, content: string}) => void} [callbacks.onSteeredIntoTurn]
+ * @param {(info: {ts: number|null, content: string, pendingRevision?: number}) => void} [callbacks.onSteeredIntoTurn]
  *   Fired when the steer's transcript split has COMMITTED. The caller seals the
  *   live stream into its own message, drops the queued-tray entry, and renders
  *   the steered message inline.
@@ -267,6 +267,7 @@ export default function useStreamConnection(chatId, {
   onLiveQuestion,
   onQuestionResponseStart,
   onContextUsage,
+  onOwnerSendAccepted,
 }) {
   // sessionStorage reads and JSON parsing are synchronous. Lazy initialization
   // keeps them off every frame-paced render while a reply is revealing.
@@ -758,6 +759,8 @@ export default function useStreamConnection(chatId, {
   onQueuedTurnStartingRef.current = onQueuedTurnStarting
   const onSteeredIntoTurnRef = useRef(onSteeredIntoTurn)
   onSteeredIntoTurnRef.current = onSteeredIntoTurn
+  const onOwnerSendAcceptedRef = useRef(onOwnerSendAccepted)
+  onOwnerSendAcceptedRef.current = onOwnerSendAccepted
   const onSteerDeliveryFailedRef = useRef(onSteerDeliveryFailed)
   onSteerDeliveryFailedRef.current = onSteerDeliveryFailed
   const onLiveQuestionRef = useRef(onLiveQuestion)
@@ -1278,6 +1281,7 @@ export default function useStreamConnection(chatId, {
               if (event.response_mode) incoming.response_mode = event.response_mode
               if (event.secure_input) incoming.secure_input = event.secure_input
               if (event.platform_action) incoming.platform_action = event.platform_action
+              if (event.key_request) incoming.key_request = event.key_request
               if (event.message) incoming.message = event.message
               if (event.question_id) incoming.question_id = event.question_id
               // Re-arm the replayed event with any answer the user already
@@ -1371,6 +1375,10 @@ export default function useStreamConnection(chatId, {
               message: event.message || null,
             })
           } else if (event.type === 'steered_into_turn') {
+            // The writer committed the selected durable rows and their model
+            // use together. HTTP steer acceptance alone can still fail at
+            // provider delivery, so refresh only at this exact cut.
+            onOwnerSendAcceptedRef.current?.()
             // THE CUT. The backend has committed the split — the pre-steer
             // assistant segment is sealed and the user message is in the
             // transcript — so the caller drops the queued-tray entry and
@@ -1438,6 +1446,7 @@ export default function useStreamConnection(chatId, {
                 items: Array.isArray(event.items)
                   ? event.items.filter(Boolean)
                   : [],
+                pendingRevision: event.pending_revision,
               })
               // The callback seals A1 synchronously. Re-base the hook onto the
               // server's A2 snapshot before any later deltas are reduced.
@@ -1865,6 +1874,11 @@ export default function useStreamConnection(chatId, {
       }
       const data = await res.json()
       responseData = data
+      if (!hidden && !forceSteer && !answers && !selected_options
+        && continuation !== 'manual' && continuation !== 'queue'
+        && (data.status === 'started' || data.started === true)) {
+        onOwnerSendAccepted?.()
+      }
       // Any parsed 2xx response is authoritative acceptance (including
       // duplicate/queued/answer-delivered). A lost response instead leaves the
       // record in place for the shell-wide reconnect drain.
@@ -2027,6 +2041,7 @@ export default function useStreamConnection(chatId, {
   }, [
     clearQuestionResponseTracking,
     disconnect,
+    onOwnerSendAccepted,
     setStreamAssistantMessageId,
     setStreamItems,
   ])

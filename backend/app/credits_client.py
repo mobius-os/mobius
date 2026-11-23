@@ -14,7 +14,8 @@ the same reason.
 The installation key (``mbc_…``) belongs to the installation, not to an app,
 like every account credential this Möbius holds: it stays in the Möbius
 backend, and an app receives only its ordinary app token. It lives in
-``<data_dir>/credits-client/credentials.json``, mode 0600, a folder the file
+``<data_dir>/credits-client/credentials.json`` (``credentials.staging.json``
+on a developer's staging side), mode 0600, a folder the file
 API (``routes/fs.py``) refuses to every caller, backups keep with the other
 secrets, and the ``/data`` safety repository ignores. The service address is
 sealed together with the key under the installation secret, so whoever can
@@ -44,6 +45,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import get_settings
+from app.launcher_side import STAGING, boot_side
 from app.runtime_identity import broker_client
 
 TIMEOUT_SECONDS = 20.0
@@ -115,7 +117,15 @@ def payer_refusal_view(error: CreditsUnavailable) -> CreditsUnavailable:
 
 
 def _credentials_path() -> Path:
-  return Path(get_settings().data_dir) / "credits-client" / "credentials.json"
+  """The pairing of the launcher side this boot runs on.
+
+  Production keeps the historical file, so an existing pairing is found
+  unchanged. A developer's staging side has its own, so one instance never
+  holds the previous side's wallet after a switch.
+  """
+  settings = get_settings()
+  name = "credentials.staging.json" if boot_side().side == STAGING else "credentials.json"
+  return Path(settings.data_dir) / "credits-client" / name
 
 
 def _fernet() -> Fernet:
@@ -469,8 +479,14 @@ def purchase_terms() -> dict:
   return {**_call("GET", "purchase-terms", credentials), "pairing": credentials["pairing"]}
 
 
-def transactions(limit: int = 50) -> dict:
-  return _call("GET", f"transactions?limit={max(1, min(int(limit), 200))}", _paired())
+def transactions(limit: int = 50, before: str | None = None) -> dict:
+  """One page of the wallet's history, newest first. ``before`` is the
+  ``next_cursor`` of the previous page (a ledger entry id); the service
+  answers ``next_cursor`` only while older entries remain."""
+  path = f"transactions?limit={max(1, min(int(limit), 200))}"
+  if before is not None:
+    path += f"&before={_path_piece(before, _UUID)}"
+  return _call("GET", path, _paired())
 
 
 def fund_models(amount_micro: int, idempotency_key: str) -> dict:

@@ -62,6 +62,8 @@ class AppTool:
   # Owner-declared routine bookkeeping: the chat folds a successful call into
   # the surrounding activity (agent_activity.is_routine_tool).
   routine: bool = False
+  # The serving app's slug: with ``name``, the tool's identity.
+  app_slug: str = ""
 
   def listing(self) -> dict[str, Any]:
     listing = {
@@ -114,6 +116,7 @@ def live_app_tools(db: Session) -> list[AppTool]:
         input_schema=declaration["input_schema"],
         always_load=declaration.get("always_load") is True,
         routine=declaration.get("routine") is True,
+        app_slug=app.slug,
       ))
   return tools
 

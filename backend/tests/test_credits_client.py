@@ -360,6 +360,32 @@ def test_pairing_keeps_the_service_path_and_stores_the_key_privately(
   assert not stored.exists()
 
 
+def test_each_launcher_side_has_its_own_credits_pairing(
+  client, auth, service, tmp_path, monkeypatch
+):
+  from app import launcher_side
+  folder = tmp_path / "credits-client"
+  pair = lambda key: client.post(
+    "/api/identity/credits/pair",
+    json={"operator_url": "https://www.mobius.you/credits", "key": key}, headers=auth)
+  production = launcher_side.LauncherSide(available=True, side="production")
+  staging = launcher_side.LauncherSide(available=True, side="staging")
+
+  monkeypatch.setattr(launcher_side, "_boot_side", production)
+  assert pair("mbc_production_key").status_code == 200
+
+  # After a switch the production wallet is not this instance's wallet.
+  monkeypatch.setattr(launcher_side, "_boot_side", staging)
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "unpaired"
+  assert pair("mbc_staging_key").status_code == 200
+  assert sorted(p.name for p in folder.iterdir()) == ["credentials.json", "credentials.staging.json"]
+  assert client.post("/api/identity/credits/unpair", headers=auth).json() == {"paired": False}
+  assert sorted(p.name for p in folder.iterdir()) == ["credentials.json"]
+
+  monkeypatch.setattr(launcher_side, "_boot_side", production)
+  assert client.get("/api/identity/credits", headers=auth).json()["mode"] == "customer"
+
+
 def test_a_key_the_service_refuses_is_not_stored(client, auth, service, tmp_path):
   service.answers["balance"] = (401, {"detail": {
     "code": "invalid_api_key", "message": "Invalid API key."}})
@@ -541,6 +567,8 @@ def test_owner_actions_reach_the_service_routes(client, auth, paired):
     ("get", f"/api/identity/credits/topups/{TOPUP_ID}", None, "GET", f"topups/{TOPUP_ID}"),
     ("get", "/api/identity/credits/transactions?limit=500", None,
      "GET", "transactions?limit=200"),
+    ("get", f"/api/identity/credits/transactions?limit=50&before={TOPUP_ID}", None,
+     "GET", f"transactions?limit=50&before={TOPUP_ID}"),
     ("post", "/api/identity/credits/model-funding",
      {"amount_micro": 5_000_000, "idempotency_key": "fund-0001"}, "POST", "model-funding"),
     ("get", "/api/identity/credits/prices/ana?app_slug=prompts", None,
@@ -1232,7 +1260,7 @@ def test_a_spending_app_cannot_escape_the_sellers_price_path(
 
 @pytest.mark.parametrize("piece", [".", "..", "../balance", "%2e%2e", "name?x=y",
                                   "name#balance", "name\\balance", "name\n", ""])
-@pytest.mark.parametrize("field", ["seller", "topup_id", "app", "action", "app_slug"])
+@pytest.mark.parametrize("field", ["seller", "topup_id", "app", "action", "app_slug", "before"])
 def test_invalid_credits_names_never_send_the_installation_key(paired, piece, field):
   calls = len(paired.calls)
   with pytest.raises(credits_client.CreditsUnavailable) as refused:
@@ -1240,6 +1268,8 @@ def test_invalid_credits_names_never_send_the_installation_key(paired, piece, fi
       credits_client.prices(piece)
     elif field == "topup_id":
       credits_client.read_topup(piece)
+    elif field == "before":
+      credits_client.transactions(50, piece)
     elif field == "app_slug":
       credits_client.prices("ana", piece)
     else:

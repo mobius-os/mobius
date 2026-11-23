@@ -30,6 +30,7 @@ from sqlalchemy.orm import Session
 from app import contribution_direct_merge as direct_merge
 from app import contribution_pr_machine as machine
 from app import contribution_pull_status as pull_status
+from app import contribution_review_post_findings as post_findings
 from app import contribution_review_runs as reviews
 from app import models, owner_grants
 from app.config import get_settings
@@ -49,7 +50,7 @@ REVIEW_EVENTS = {"APPROVE": ("Approve", "an approval"), "REQUEST_CHANGES": ("Req
 QUIET_VERDICTS = {
   "discard": ("Discard the proposed verdict on {pr}", "Discard", "plain",
               "The proposed review is thrown away. Nothing is sent to GitHub."),
-  "dismiss": ("Dismiss the unconfirmed verdict on {pr}", "Dismiss", "plain",
+  "dismiss": ("Discard the unconfirmed verdict on {pr}", "Discard", "plain",
               "Stops waiting for GitHub to confirm it. Nothing is sent to GitHub."),
   "continue_merge": ("Continue the merge of {pr}", "Continue merge", "caution",
                      "The review agent continues the guarded merge of the approval GitHub already holds. "
@@ -147,7 +148,8 @@ async def _describe_status(ask: Ask, name: str) -> dict:
   action = next((a for a in machine.decide(facts)["actions"] if a["id"] == change.machine_action), None)
   if action is None:  # the machine has no words for an action this role does not have
     raise HTTPException(409, machine.action_blocker(facts, change.machine_action))
-  detail = [_fact("What happens", action["detail"])] if action["detail"] else []
+  # The sheet is the confirmation the Close action's own detail ("Asks you to confirm first.") promises.
+  detail = [_fact("What happens", action["detail"])] if action["detail"] and name != "close" else []
   return _sheet(f"{action['title']}: {body.repo}#{body.number}",
                 [*_pull_facts(body, pull), *detail, *_asked_of(body), _standing(facts)], action["title"],
                 "caution" if name in ("close", "ask-approval") else "plain")
@@ -177,6 +179,22 @@ async def _describe_verdict(ask: Ask) -> dict:
     raise HTTPException(409, routes.VERDICT_CHANGED)
   verb, words = REVIEW_EVENTS[event]
   return _sheet(f"Post {words} on {pr}", [*facts, _fact("Posted exactly as", text)], verb, "caution")
+
+
+async def _describe_post_findings(ask: Ask) -> dict:
+  """A finished private review going out as a plain comment: the sheet quotes the exact words."""
+  body = ask.body
+  row = routes._row(ask.db, ask.app_id, ask.scope["run_id"], ask.principal)
+  _item_key, target, item = routes._saved_item(row, body)
+  words = post_findings.preview(item, target)
+  if words["preview_sha256"] != body.preview_sha256:
+    raise HTTPException(409, post_findings.CHANGED)
+  pr = f"{body.repo}#{body.number}"
+  return _sheet(f"Post a comment on {pr}", [
+    _fact("Pull request", pr), _fact("Version", body.head_sha[:7]),
+    _fact("Result", "A plain comment review from your connected account. Not an approval or a change request."),
+    _fact("Posted exactly as", words["body"]),
+  ], REVIEW_EVENTS["COMMENT"][0], "caution")
 
 
 async def _describe_repair(ask: Ask) -> dict:
@@ -270,6 +288,7 @@ GUARDED = {
   "ask_approval": Guarded(routes.ApprovalRequest, partial(_describe_status, name="ask-approval")),
   "verdict": Guarded(routes.VerdictDecision, _describe_verdict, ("run_id",)),
   "repair": Guarded(routes.RepairDecision, _describe_repair, ("run_id",)),
+  "post_findings": Guarded(routes.PostFindings, _describe_post_findings, ("run_id",)),
   "respond_post": Guarded(RespondPost, _describe_respond_post),
   "follow": Guarded(publication.AutopilotToggleBody, _describe_follow, ("record_id",)),
 }

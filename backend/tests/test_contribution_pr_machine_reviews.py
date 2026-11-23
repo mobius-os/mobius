@@ -97,9 +97,21 @@ def test_anyone_who_reviewed_or_commented_can_be_asked_except_who_approved_this_
   assert action(approved, "ask_rereview")["reason"] == "Everyone who reviewed it has already approved this version."
 
 
-def test_a_review_in_a_state_beyond_the_three_is_still_askable_and_names_its_commit():
+def test_a_review_in_a_state_the_notes_cannot_word_and_a_deleted_account_name_nobody_to_ask():
+  """The app's rule (`askableReview`): a dismissed review and GitHub's "ghost" are nobody to ask, wherever the
+  platform read them: among the writers' opinions (`reviews`) or among everyone's newest review (`reviewers`)."""
   dismissed = {"by": "sam", "state": "DISMISSED", "commit": "h1", "bot": False}
-  assert machine.decide(facts([dismissed]))["askable"] == [{"by": "sam", "reason": "commented_older", "commit": "h1"}]
+  ghost = {"by": "ghost", "state": "COMMENTED", "commit": "h1", "bot": False}
+  kim = {"by": "kim", "state": "COMMENTED", "commit": "h1", "bot": False}
+  assert machine.decide(facts([dismissed]))["askable"] == []
+  assert machine.decide(facts([ghost]))["askable"] == []
+  assert machine.decide(facts([], reviewers=[dismissed, ghost]))["askable"] == []
+  for decision in (machine.decide(facts([dismissed])), machine.decide(facts([], reviewers=[dismissed, ghost]))):
+    assert action(decision, "ask_rereview")["reason"] == "Nobody has reviewed this PR yet."
+    assert action(decision, "ask_approval")["reason"] == "Nobody has reviewed this PR yet."
+  # Only they are left out: anyone else who reviewed is still asked.
+  mixed = machine.decide(facts([dismissed, kim], reviewers=[ghost, {**dismissed, "by": "pat"}, kim]))
+  assert mixed["askable"] == [{"by": "kim", "reason": "commented_older", "commit": "h1"}]
 
 
 def test_reviewers_without_write_access_can_be_asked_but_never_count_toward_merging():

@@ -2,7 +2,7 @@
 
 Locks in that unattended/app-initiated provider selection walks the owner's
 background-agents list to the first provider with usage quota, records a limit's
-reset time, and heals when the window elapses or the provider runs again.
+reset time, and heals when the window elapses or the provider answers a newer run.
 """
 
 import json
@@ -48,14 +48,14 @@ def test_within_quota_true_when_no_row(db):
   assert pa.provider_within_quota(db, "claude") is True
 
 
-def test_limit_blocks_until_reset_then_successful_newer_run_heals(db):
+def test_limit_blocks_until_reset_then_newer_provider_response_heals(db):
   pa.mark_provider_limited(
     db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit",
   )
   db.commit()
   assert pa.provider_within_quota(db, "claude") is False
   row = db.get(ProviderAvailability, "claude")
-  pa.clear_provider_availability_after_success(
+  pa.clear_provider_availability_after_response(
     db,
     "claude",
     row.updated_at.replace(tzinfo=UTC) + timedelta(seconds=1),
@@ -64,14 +64,14 @@ def test_limit_blocks_until_reset_then_successful_newer_run_heals(db):
   assert pa.provider_within_quota(db, "claude") is True
 
 
-def test_older_overlapping_success_does_not_clear_newer_limit(db):
+def test_older_overlapping_response_does_not_clear_newer_limit(db):
   run_started_at = datetime.now(UTC) - timedelta(minutes=5)
   pa.mark_provider_limited(
     db, "claude", now_naive_utc() + timedelta(hours=1), "usage_limit",
   )
   db.commit()
 
-  pa.clear_provider_availability_after_success(
+  pa.clear_provider_availability_after_response(
     db, "claude", run_started_at,
   )
   db.commit()

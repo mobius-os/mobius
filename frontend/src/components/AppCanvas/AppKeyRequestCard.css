@@ -1,0 +1,39 @@
+/* A key request asked over an app's window (AppKeyRequestCard.jsx): a dialog in the middle of the app, which waits dimmed behind it. */
+/* AppCanvas draws it only while none of its own dialogs (file export,
+   owner confirmation, payment) is open, so it never sits under one. */
+.app-key-request {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, .5);
+}
+
+.app-key-request__card {
+  box-sizing: border-box;
+  display: grid;
+  gap: 8px;
+  width: min(400px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 16px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 18px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+}
+
+/* The dialog is the frame; the request inside needs no second one. */
+.app-key-request__card .settings-keys__request {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+
+.app-key-request__note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.45; }
