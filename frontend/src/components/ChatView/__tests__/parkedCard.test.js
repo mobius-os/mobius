@@ -294,7 +294,7 @@ test('a provider refusal offers moves that change the request, never a timed ret
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: true,
     onResume() {},
-    onRefusalModelChoice() {},
+    onChooseModel() {},
     onRefusalFreshSession() {},
   }))
   assert.match(html, /This model declined to continue/)
@@ -313,7 +313,7 @@ test('a refusal card away from the transcript tail offers no actions', (t) => {
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: false,
     onResume() {},
-    onRefusalModelChoice() {},
+    onChooseModel() {},
     onRefusalFreshSession() {},
   }))
   assert.match(html, /This model declined to continue/)
@@ -338,7 +338,7 @@ function refusalCardFor(viewer) {
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: true,
     onResume() {},
-    onRefusalModelChoice: viewer.showPicker ? () => {} : undefined,
+    onChooseModel: viewer.showPicker ? () => {} : undefined,
     onRefusalFreshSession: freshSession ? () => {} : undefined,
   }))
 }
@@ -488,7 +488,7 @@ test('the parked card has styling distinct from a plain error', () => {
 })
 
 test('the rate-limit card keeps automatic recovery and an explicit early retry', () => {
-  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange/,
+  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity\s+&& autoResumeAvailable && !!onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
   assert.match(msgContent, /Auto-continue this chat/,
     'a future reset names the persistent chat policy')

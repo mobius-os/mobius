@@ -1565,7 +1565,7 @@ async def _send_message_impl(
   if body.force_steer and questions.is_waiting(chat_id):
     return _not_steered_response(chat_id)
 
-  # Serialize an ordinary send with the provider-switch synthesis/commit.
+  # Serialize an ordinary send with the provider-switch commit.
   # Whichever request owns the lock first establishes the state the other
   # observes: a send first makes the switch see a busy chat; a switch first
   # makes the send reload and start on the newly committed provider. This

@@ -13,7 +13,11 @@ from sqlalchemy.orm import Session
 
 from app import transcript_rows
 from app import models, schemas
+from app.chat_continuity import note_path
+from app.compaction import CompactionError
+from app.config import get_settings
 from app.continuations import not_owner_speech_label
+from app.direct_handover import build_direct_handover
 from app.prompt_blocks import as_block_data, json_block_data
 from app.goal_commands import (
   goal_argument as _goal_argument,
@@ -505,42 +509,17 @@ def _latest_compaction_brief(chat_row) -> str | None:
   return None
 
 
-_RESUME_CONTEXT_CHAR_BUDGET = 12000
-
-
-# Retired quiet-write frames that leaked into saved replies. A reseeded session
-# must not see itself writing them, or it keeps copying the withdrawn protocol.
-_WRITE_FRAME = re.compile(
-  r"<MOBIUS_WRITE\b[^>]*/>"  # A self-closing tag.
-  r"|<MOBIUS_WRITE\b[^>]*>.*?</MOBIUS_WRITE>"  # A complete frame.
-  r"|<MOBIUS_WRITE\b[^>]*>\s*\{(?:(?!\n[ \t]*\n).)*"  # An unclosed one, to its paragraph end.
-  r"|</?MOBIUS_WRITE\b[^>]*>",  # Any stray tag.
-  re.DOTALL,
-)
-
-
-def _without_write_frames(text: str) -> str:
-  return _WRITE_FRAME.sub("", text) if "MOBIUS_WRITE" in text else text
-
-
 def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
-  """Compact prior-transcript block for a chat whose provider session is gone.
+  """Saved-state context for a chat whose provider session cannot be resumed.
 
   When a chat's stored `session_id` no longer has a resumable CLI
-  transcript (a pre-fix phantom id, or one the CLI's ~30-day cleanup
-  deleted), `claude --resume` would die "No conversation found" and the
-  whole turn would hard-fail. Möbius owns the durable transcript in the
-  DB (`Chat.messages`), so instead of resuming we start a fresh session
-  and hand the agent its own prior conversation as context — continuity
-  is preserved without the CLI session file.
-
-  Truncation: we keep only the most recent messages that fit in a
-  ~12 KB character budget (oldest-first dropped), so a long history
-  can't blow the context window. Each assistant message contributes its
-  final `content` text only — tool blocks are summarized away — because
-  the goal is conversational continuity, not a byte-exact replay. Real
-  user/assistant turns only (compaction/system rows are skipped).
-  Returns None when there is nothing usable to reseed from.
+  transcript (a pre-fix phantom id, one the CLI's ~30-day cleanup deleted,
+  or a session Möbius retired), `claude --resume` would die "No conversation
+  found" and the whole turn would hard-fail. Möbius owns the durable state,
+  so instead of resuming we start a fresh session and hand the agent the same
+  direct handover a provider switch uses: the chat's saved summary and
+  digest, then the messages after it. A chat with no note gets its most
+  recent messages. Returns None when there is nothing usable to reseed from.
 
   ``keep_task`` always keeps the opening request as well: a delegated
   helper's task exists only there, and a helper reseeded without it would
@@ -548,50 +527,18 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   """
   if chat_row is None:
     return None
-  entries: list[tuple[dict, str]] = []
-  for msg in transcript_rows.history(chat_row):
-    if not isinstance(msg, dict):
-      continue
-    role = msg.get("role")
-    if role not in ("user", "assistant"):
-      continue
-    content = msg.get("content")
-    if not isinstance(content, str) or not content.strip():
-      continue
-    if role == "assistant":
-      content = _without_write_frames(content)
-      if not content.strip():
-        continue
-    speaker = not_owner_speech_label(msg) or (
-      "User" if role == "user" else "Assistant"
+  try:
+    note = note_path(get_settings().data_dir, chat_row.id).read_text(encoding="utf-8")
+  except OSError:
+    note = ""
+  try:
+    handover = build_direct_handover(
+      note, list(transcript_rows.history(chat_row)), keep_opening_request=keep_task,
     )
-    # Every entry is recalled text inside one tagged block; none may end it.
-    content = as_block_data(content.strip(), "resumed_context")
-    entries.append((msg, f"{speaker}: {content}"))
-  task = None
-  if (
-    keep_task and entries and entries[0][0].get("role") == "user"
-    and not_owner_speech_label(entries[0][0]) is None
-  ):
-    task = entries.pop(0)[1]
-  budget = _RESUME_CONTEXT_CHAR_BUDGET - len(task or "")
-  lines: list[str] = []
-  used = 0
-  # Walk newest-first, accumulating until the budget is hit, then
-  # reverse so the block reads oldest-first like a real transcript.
-  for _msg, line in reversed(entries):
-    if used + len(line) > budget and lines:
-      break
-    lines.append(line)
-    used += len(line)
-  lines.reverse()
-  if task is not None:
-    if len(lines) < len(entries):
-      lines.insert(0, "[Earlier turns omitted.]")
-    lines.insert(0, task)
-  if not lines:
+  except CompactionError:
     return None
-  body = "\n\n".join(lines)
+  # The handover is recalled text inside one tagged block; none of it may end it.
+  body = as_block_data(handover, "resumed_context")
   return (
     "The <resumed_context> block below is the earlier history of THIS "
     "same chat. The underlying provider session could not be resumed, so "

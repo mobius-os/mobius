@@ -38,7 +38,8 @@ import {
 } from './streamReducers.js'
 import { stripAugmentation } from './msgText.js'
 import ErrorCard, { errorCardViewModel } from './ErrorCard.jsx'
-import { ownsRecoveryAction } from './recoveryCard.js'
+import { ownsRecoveryAction, ownsSwitchResume } from './recoveryCard.js'
+import ResumeButton from './ResumeButton.jsx'
 import { helperCanRetry } from './helperRecovery.js'
 import { ParentChatLink } from './HelperChatSendNotice.jsx'
 import { HELPER_CHAT_SEND_LINK_TEXT } from './sendFailure.js'
@@ -232,9 +233,11 @@ function MsgContentInner({
   // interrupt note (a resumable error block on the last message) shows the
   // button. Compared in the memo below, so pass a stable reference.
   onResume,
-  // A provider refusal changes the request instead of retrying it: open the
-  // model picker, or compact into a fresh provider session. Stable references.
-  onRefusalModelChoice,
+  // Open the composer's model picker, for a card whose way out is another
+  // model or provider (a refusal, a usage limit, a credits pause). Absent when
+  // the picker is hidden. A stable reference; compared in the memo below.
+  onChooseModel,
+  // A provider refusal can also start a fresh provider session. Stable reference.
   onRefusalFreshSession,
   // Only the installation owner may bypass the storage or process floor; the
   // server refuses Continue anyway from anyone else, who keeps plain Resume.
@@ -260,6 +263,9 @@ function MsgContentInner({
   // fresh function reference every render and defeat it.
   isLastMsg,
   liveQuestionId,
+  // The visible row before the transcript tail, given only to the tail row. A
+  // provider switch card needs it to see whether it follows a paused turn.
+  previousMsg = null,
   // Callback refs (ChatView's useNudgeTargetRef) that publish the DOM node of
   // the card each footer nudge watches. This renderer serves BOTH surfaces of
   // the active answer — the durable message row and the live streaming <li> —
@@ -304,9 +310,31 @@ function MsgContentInner({
     // Render the compaction as its own labeled card rather than the generic
     // ToolBlock — see CompactionCard. The stored `content` is untouched, so
     // chat.py's `_latest_compaction_brief` still replays the same text.
+    const continuesPausedWork = ownsSwitchResume({
+      msg,
+      previousMsg,
+      isLastMessage: isLastMsg,
+      canResume: !!onResume,
+    })
     return (
       <div className="chat__tools">
         <CompactionCard msg={msg} />
+        {continuesPausedWork && (
+          <div className="chat__recovery-actions">
+            <ResumeButton
+              label="Continue"
+              pendingLabel="Continuing…"
+              onClick={() => onResume()}
+              resumeState={resumeState}
+              submissionBlocked={submissionBlocked}
+            />
+            {resumeState?.error && (
+              <span className="chat__recovery-action-error" role="alert">
+                {resumeState.error}
+              </span>
+            )}
+          </div>
+        )}
       </div>
     )
   }
@@ -622,7 +650,7 @@ function MsgContentInner({
           canResume: !!onResume,
           questionOwnsTurn,
         })
-        const { parked, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
+        const { parked, credits, resourceWait, modelCapacity, providerRefusal } = errorCardViewModel(block)
         const automaticContinuation = recoveryOwner && parked
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
         // Resource waits retain automatic retry. A warned storage or process
@@ -642,6 +670,13 @@ function MsgContentInner({
           && (!helperChat || helperCanRetry(block))
         // The server would refuse these actions here, so name where they live.
         const parentOwnsRecovery = recoveryOwner && helperChat && !manualResumeAvailable
+        const autoResumeToggleAvailable = recoveryOwner && parked && !modelCapacity
+          && autoResumeAvailable && !!onAutoResumeChange
+        // A provider limit or credits pause can be answered by moving the chat
+        // to a provider that still has allowance. Model-busy and resource waits
+        // are not about the provider's allowance, so they never offer it.
+        const switchProviderAvailable = recoveryOwner && !!onChooseModel
+          && ((parked && !modelCapacity && !resourceWait) || credits)
         return (
           <ErrorCard
             key={assistantBlockKey(block, i)}
@@ -652,41 +687,53 @@ function MsgContentInner({
             resetElapsed={!!limitResetElapsed}
             recoveryCredit={recoveryCredit}
             refusalActions={recoveryOwner && providerRefusal ? {
-              switchModel: !!onRefusalModelChoice,
+              switchModel: !!onChooseModel,
               freshSession: !!onRefusalFreshSession,
             } : null}
             cardRef={recoveryOwner ? resumeCardRef : undefined}
           >
-            {recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange && (
+            {(autoResumeToggleAvailable || switchProviderAvailable) && (
               <div className="chat__recovery-actions">
-                <button
-                  type="button"
-                  className={`chat__recovery-action${autoResumeEnabled
-                    ? ' chat__recovery-action--quiet'
-                    : ''}`}
-                  onClick={() => onAutoResumeChange(!autoResumeEnabled)}
-                  disabled={!!autoResumeSaving || submissionBlocked}
-                >
-                  {autoResumeSaving
-                    ? 'Saving…'
-                    : autoResumeEnabled
-                      ? 'Turn off auto-continue'
-                      : 'Auto-continue this chat'}
-                </button>
-                {autoResumeError && (
+                {autoResumeToggleAvailable && (
+                  <button
+                    type="button"
+                    className={`chat__recovery-action${autoResumeEnabled
+                      ? ' chat__recovery-action--quiet'
+                      : ''}`}
+                    onClick={() => onAutoResumeChange(!autoResumeEnabled)}
+                    disabled={!!autoResumeSaving || submissionBlocked}
+                  >
+                    {autoResumeSaving
+                      ? 'Saving…'
+                      : autoResumeEnabled
+                        ? 'Turn off auto-continue'
+                        : 'Auto-continue this chat'}
+                  </button>
+                )}
+                {switchProviderAvailable && (
+                  <button
+                    type="button"
+                    className="chat__recovery-action"
+                    onClick={onChooseModel}
+                    disabled={submissionBlocked}
+                  >
+                    Switch provider
+                  </button>
+                )}
+                {autoResumeToggleAvailable && autoResumeError && (
                   <span className="chat__recovery-action-error" role="alert">
                     {autoResumeError}
                   </span>
                 )}
               </div>
             )}
-            {recoveryOwner && providerRefusal && (onRefusalModelChoice || onRefusalFreshSession) && (
+            {recoveryOwner && providerRefusal && (onChooseModel || onRefusalFreshSession) && (
               <div className="chat__recovery-actions">
-                {onRefusalModelChoice && (
+                {onChooseModel && (
                   <button
                     type="button"
                     className="chat__recovery-action"
-                    onClick={onRefusalModelChoice}
+                    onClick={onChooseModel}
                     disabled={submissionBlocked}
                   >
                     Switch model
@@ -715,26 +762,17 @@ function MsgContentInner({
               </span>
             )}
             {(manualResumeAvailable || continueAnywayAvailable) && (
-              <button
-                type="button"
-                className="chat__resume chat__recovery-action"
-                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
-                disabled={submissionBlocked || resumeState?.pending || resumeState?.unavailable}
-                aria-busy={resumeState?.pending || undefined}
-                title={submissionBlocked
-                  ? 'Wait for the provider switch to finish.'
-                  : resumeState?.unavailable
-                    ? 'Möbius is reconnecting this paused turn.'
-                  : undefined}
-              >
-                {resumeState?.pending
-                  ? continueAnywayAvailable ? 'Continuing…' : 'Resuming…'
-                  : resumeState?.unavailable ? 'Reconnecting…'
-                  : continueAnywayAvailable ? 'Continue anyway'
+              <ResumeButton
+                label={continueAnywayAvailable
+                  ? 'Continue anyway'
                   : parked
                   ? limitResetElapsed ? 'Try now' : (recoveryCredit?.actionLabel || 'Try now')
                   : 'Resume'}
-              </button>
+                pendingLabel={continueAnywayAvailable ? 'Continuing…' : 'Resuming…'}
+                onClick={() => onResume({ allowLowStorage: continueAnywayAvailable })}
+                resumeState={resumeState}
+                submissionBlocked={submissionBlocked}
+              />
             )}
             {recoveryOwner && resumeState?.error && (
               <span className="chat__recovery-action-error" role="alert">
@@ -897,7 +935,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.onQuestionSubmitIntent === next.onQuestionSubmitIntent
     && prev.onQuestionSubmitCancel === next.onQuestionSubmitCancel
     && prev.onResume === next.onResume
-    && prev.onRefusalModelChoice === next.onRefusalModelChoice
+    && prev.onChooseModel === next.onChooseModel
     && prev.onRefusalFreshSession === next.onRefusalFreshSession
     && prev.canContinueAnyway === next.canContinueAnyway
     && prev.helperChat === next.helperChat
@@ -915,6 +953,7 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.recoveryCredit === next.recoveryCredit
     && prev.submissionBlocked === next.submissionBlocked
     && prev.isLastMsg === next.isLastMsg
+    && prev.previousMsg === next.previousMsg
     && prev.liveQuestionId === next.liveQuestionId
     // The nudge refs are props, so an exhaustive comparator has to include
     // them: a ref whose identity changed must reach the DOM node, or React

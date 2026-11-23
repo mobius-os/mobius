@@ -3027,33 +3027,55 @@ async def switch_chat_provider(
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
-  """Have the incoming provider prepare and atomically commit a handoff.
+  """Move a chat to another provider and atomically commit its handover.
 
-  The selected provider reads the full per-chat ``## Digest`` plus the
-  complete visible transcript and synthesizes its own compact starting context
-  in bounded disposable sessions. The writer then appends that context, changes
-  provider/settings, and clears the outgoing session in one transaction. Any
-  synthesis or contention failure leaves every durable field unchanged.
+  No provider is asked to prepare anything: the handover is assembled from the
+  chat's saved note and the messages after its digest (``direct_handover``),
+  so a switch takes the same moment whatever the chat's size and works while
+  either provider is out of allowance. The writer appends that context,
+  changes provider/settings, and clears the outgoing session in one
+  transaction. Any contention failure leaves every durable field unchanged.
   """
   from app.chat_queue import get_transition_lock
 
   async with get_transition_lock(chat_id):
-    return await _compact_chat_locked(body, chat_id, db)
+    return await _switch_chat_provider_locked(body, chat_id, db)
 
 
-async def _compact_chat_locked(
+def _switch_handover(
+  data_dir: str, chat_id: str, messages: list[dict],
+) -> tuple[str, str | None]:
+  """Return the handover text and the digest hash its commit must still match."""
+  from app.chat_continuity import note_path
+  from app.chat_notes import extract_full_digest
+  from app.compaction import CompactionError
+  from app.direct_handover import build_direct_handover
+
+  try:
+    note = note_path(data_dir, chat_id).read_text(encoding="utf-8")
+  except OSError:
+    note = ""
+  try:
+    handover = build_direct_handover(note, messages)
+  except CompactionError as exc:
+    raise HTTPException(status_code=422, detail=str(exc))
+  digest = extract_full_digest(note)
+  digest_hash = (
+    hashlib.sha256(digest.encode("utf-8")).hexdigest()
+    if digest is not None else None
+  )
+  return handover, digest_hash
+
+
+async def _switch_chat_provider_locked(
   body: ChatProviderSwitch,
   chat_id: str,
   db: Session,
 ):
   """Run one provider switch while settings PATCHes are excluded."""
-  from app.chat_compaction_state import compacting
   from app.chat_writer import (
     SwitchProviderWithCompaction, await_ack, get_writer,
     messages_fingerprint,
-  )
-  from app.compaction import (
-    CompactionError, load_full_digest, summarize_chat,
   )
 
   chat = get_active_chat_or_404(db, chat_id)
@@ -3137,119 +3159,74 @@ async def _compact_chat_locked(
   if auth_error is not None:
     raise HTTPException(status_code=409, detail=auth_error)
 
-  # Only a switch that will actually run marks the chat; refused or replayed
-  # requests return above without flashing the notice in every view.
-  with compacting(chat_id, "provider_switch"):
-    messages = list(transcript_rows.history(chat))
-    source_messages_hash = messages_fingerprint(messages)
-    source_digest = load_full_digest(data_dir, chat_id)
-    source_digest_hash = (
-      hashlib.sha256(source_digest.encode("utf-8")).hexdigest()
-      if source_digest is not None
-      else None
-    )
-    try:
-      summary = await summarize_chat(
-        messages,
-        data_dir=data_dir,
-        provider_id=body.provider,
-        source_digest=source_digest,
-        model=settings_patch.get("model"),
-        effort=settings_patch.get("effort"),
-      )
-    except CompactionError as exc:
-      raise HTTPException(status_code=422, detail=str(exc))
-    except Exception as exc:
-      log.warning(
-        "provider-switch synthesis failed for chat %s: %s", chat_id, exc,
-      )
-      raise HTTPException(
-        status_code=502,
-        detail="The incoming provider could not prepare the chat.",
-      )
+  messages = list(transcript_rows.history(chat))
+  handover, source_digest_hash = _switch_handover(data_dir, chat_id, messages)
 
-    # The note is a separate file the agent saves as it works. If it was
-    # rewritten while synthesis ran, retry from the fresh detailed source rather
-    # than committing a handoff the incoming provider derived from stale data.
-    latest_digest = load_full_digest(data_dir, chat_id)
-    latest_hash = (
-      hashlib.sha256(latest_digest.encode("utf-8")).hexdigest()
-      if latest_digest is not None
-      else None
-    )
-    if latest_hash != source_digest_hash:
-      raise HTTPException(
-        status_code=409,
-        detail=(
-          "The chat summary changed while preparing the switch. Try again."
-        ),
-      )
-
-    ack = get_writer().submit(
-      SwitchProviderWithCompaction(
-        chat_id=chat_id,
-        switch_id=body.switch_id,
-        expected_provider=source_provider,
-        provider=body.provider,
-        settings_patch=settings_patch,
-        summary=summary,
-        source_messages_hash=source_messages_hash,
-        source_digest_hash=source_digest_hash,
-        data_dir=data_dir,
-        request_fingerprint=request_fingerprint,
-      )
-    )
-    try:
-      result = await await_ack(ack)
-    except Exception:
-      raise HTTPException(
-        status_code=503, detail="Could not save the provider switch; try again."
-      )
-    if result.get("status") == "conflict":
-      reason = result.get("reason")
-      if reason == "busy":
-        detail = "Chat is busy — finish or stop the turn before switching."
-      elif reason == "provider_pinned":
-        detail = (
-          "This chat runs in the background and stays on its original "
-          "provider; its provider can't be switched."
-        )
-      elif reason == "request_mismatch":
-        detail = "That provider-switch request id has different settings."
-      else:
-        detail = "The chat changed while preparing the switch. Try again."
-      raise HTTPException(status_code=409, detail=detail)
-
-    # The actor used its own session. Refresh this request's identity map before
-    # mirroring the committed choice to new-chat defaults.
-    db.expire_all()
-    settings_obj = _coerce_agent_settings(result.get("agent_settings_json"))
-    _mirror_agent_defaults(
-      db,
+  ack = get_writer().submit(
+    SwitchProviderWithCompaction(
+      chat_id=chat_id,
+      switch_id=body.switch_id,
+      expected_provider=source_provider,
+      provider=body.provider,
+      settings_patch=settings_patch,
+      summary=handover,
+      source_messages_hash=messages_fingerprint(messages),
+      source_digest_hash=source_digest_hash,
       data_dir=data_dir,
-      provider_id=body.provider,
-      settings_obj=settings_obj,
+      request_fingerprint=request_fingerprint,
     )
-    if result.get("status") == "committed":
-      activity.log_event(
-        "provider_switch",
-        chat_id=chat_id,
-        provider=body.provider,
-        from_provider=source_provider,
+  )
+  try:
+    result = await await_ack(ack)
+  except Exception:
+    raise HTTPException(
+      status_code=503, detail="Could not save the provider switch; try again."
+    )
+  if result.get("status") == "conflict":
+    reason = result.get("reason")
+    if reason == "busy":
+      detail = "Chat is busy — finish or stop the turn before switching."
+    elif reason == "provider_pinned":
+      detail = (
+        "This chat runs in the background and stays on its original "
+        "provider; its provider can't be switched."
       )
+    elif reason == "request_mismatch":
+      detail = "That provider-switch request id has different settings."
+    else:
+      detail = "The chat changed while switching. Try again."
+    raise HTTPException(status_code=409, detail=detail)
 
-    return {
-      "ok": True,
-      "protocol": "provider-switch-v1",
-      "switch_id": body.switch_id,
-      "summary": (result.get("stored") or {}).get("content", ""),
-      "stored": result.get("stored"),
-      "provider": body.provider,
-      "agent_settings_json": settings_obj or None,
-      "effective": providers.effective_agent_settings(
-        data_dir, settings_obj or None, provider=body.provider,
-      ),
-    }
+  # The actor used its own session. Refresh this request's identity map before
+  # mirroring the committed choice to new-chat defaults.
+  db.expire_all()
+  settings_obj = _coerce_agent_settings(result.get("agent_settings_json"))
+  _mirror_agent_defaults(
+    db,
+    data_dir=data_dir,
+    provider_id=body.provider,
+    settings_obj=settings_obj,
+  )
+  if result.get("status") == "committed":
+    activity.log_event(
+      "provider_switch",
+      chat_id=chat_id,
+      provider=body.provider,
+      from_provider=source_provider,
+    )
+
+  return {
+    "ok": True,
+    "protocol": "provider-switch-v1",
+    "switch_id": body.switch_id,
+    "summary": (result.get("stored") or {}).get("content", ""),
+    "stored": result.get("stored"),
+    "provider": body.provider,
+    "agent_settings_json": settings_obj or None,
+    "effective": providers.effective_agent_settings(
+      data_dir, settings_obj or None, provider=body.provider,
+    ),
+  }
 
 
 @router.post(

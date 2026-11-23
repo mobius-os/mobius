@@ -243,8 +243,8 @@ def test_a_kept_side_question_never_reads_as_the_owner_in_replayed_history(chat)
     resumed = _build_resumed_context(db.get(models.Chat, chat.id))
   compacted = build_transcript_text(rows)
 
-  assert f"{SIDE_QUESTION_LABEL}: Side question: what runs?" in resumed
-  assert "User: Side question" not in resumed
+  assert f"{SIDE_QUESTION_LABEL.upper()}: Side question: what runs?" in resumed
+  assert "USER: Side question" not in resumed
   assert resumed.count("</resumed_context>") == 1
   assert resumed.rstrip().endswith("</resumed_context>")
   assert f"{SIDE_QUESTION_LABEL.upper()}: Side question: what runs?" in compacted

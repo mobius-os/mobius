@@ -83,6 +83,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { previousVisibleMessage } from './recoveryCard.js'
 import { sendRecoveryResume } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
@@ -4450,12 +4451,13 @@ export default function ChatView({
     onRefresh: refreshResume,
     blocked: resumeBlocked,
   })
-  // A provider refusal is answered by changing the request, not by retrying
-  // it: the card reuses the composer's model picker and the /compact handoff.
-  // Stable references keep MsgContent's memo intact.
+  // A provider refusal, usage limit or credits pause is answered by changing
+  // the request, not by retrying it: the card reuses the composer's model
+  // picker, and a refusal also the /compact handoff. Stable references keep
+  // MsgContent's memo intact.
   const runCompactCommandRef = useRef(null)
   runCompactCommandRef.current = runCompactCommand
-  const handleRefusalModelChoice = useCallback(() => {
+  const handleChooseModel = useCallback(() => {
     setModelSelectionRequest(request => request + 1)
   }, [])
   const handleRefusalFreshSession = useCallback(() => {
@@ -6095,7 +6097,7 @@ export default function ChatView({
       onQuestionSubmitIntent={prepareQuestionSubmission}
       onQuestionSubmitCancel={cancelQuestionSubmission}
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
-      onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
+      onChooseModel={showPicker ? handleChooseModel : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       canContinueAnyway={canStartFreshSession}
       helperChat={!!helperDelegationId}
@@ -6117,6 +6119,7 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
+      previousMsg={last ? previousVisibleMessage(peerTimeline.messages, tail.index) : null}
       // Each complete answer keeps its own footer; only one the running turn
       // is still writing, or briefly the one it is leaving, has no controls.
       footer={groupFooter?.state ?? null}
@@ -6657,7 +6660,6 @@ export default function ChatView({
           sendFailure={sendFailure}
           notice={compactionNotice(
             serverCompactingKind || (preparingCompaction ? 'compact' : null),
-            { sendBlockedBySwitch: providerSwitching },
           )}
           submissionBlocked={
             (!activationSettled && !activationFailed)
@@ -6704,7 +6706,7 @@ export default function ChatView({
                    a message and getting a reply in the same session
                    would skip the cross-provider handoff confirmation:
                    the user could flip Claude ↔ Codex mid-chat without
-                   preparing the incoming provider's context. */
+                   confirming that the new provider starts a fresh session. */
                 hasAssistantTurns={
                   (chatInfo?.has_assistant_turns ?? false)
                   || messages.some(m => m.role === 'assistant')

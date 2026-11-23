@@ -1265,7 +1265,11 @@ class AuthorizeCheckpoint(_Command):
 
 @dataclass
 class SwitchProviderWithCompaction(_Command):
-  """Atomically append the incoming handoff and change provider/session."""
+  """Atomically append the direct handover and change provider/session.
+
+  ``summary`` is the handover text from ``direct_handover``; it keeps the
+  compaction row's field name because both are replayed the same way.
+  """
 
   chat_id: str = ""
   run_token: str = ""
@@ -5268,8 +5272,8 @@ class ChatWriterActor:
           "agent_settings_json": chat.agent_settings_json,
         }
 
-    # Visibility can change while the incoming provider synthesizes its
-    # briefing. Recheck at the writer-owned commit boundary so a chat that was
+    # Visibility can change between the route's check and this commit.
+    # Recheck at the writer-owned commit boundary so a chat that was
     # hidden in the meantime never lands a provider mutation. Keep idempotent
     # retries above this gate: an already-committed switch remains reportable
     # even if the chat is hidden later.
@@ -5299,6 +5303,10 @@ class ChatWriterActor:
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
+      # Saved state handed over as it stands, not a model-written briefing.
+      "handover": "direct",
+      # The replayed block points the incoming provider at these originals.
+      "source_evidence": {"chat_id": chat.id, "message_count": len(messages)},
       "switch_id": cmd.switch_id,
       "request_fingerprint": cmd.request_fingerprint,
       "from_provider": cmd.expected_provider,

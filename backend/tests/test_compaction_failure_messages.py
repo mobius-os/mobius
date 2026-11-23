@@ -68,11 +68,11 @@ def test_structured_failure_takes_precedence_over_unrelated_stderr():
 
 
 @pytest.mark.parametrize("cause,action", CASES)
-def test_known_refusal_reaches_switch_response_without_changing_chat(
+def test_known_refusal_reaches_compact_response_without_changing_chat(
   client, auth, db, monkeypatch, cause, action,
 ):
-  monkeypatch.setattr("app.providers.CodexProvider.check_auth", lambda *_args: None)
-
+  # Provider switches no longer ask a provider to summarize; manual compaction
+  # still does, so the refusal reaches the owner through /compact.
   async def refuse(_messages, **_kwargs):
     stdout = json.dumps({"type": "error", "message": cause}).encode()
     raise compaction.CompactionError(compaction._codex_compaction_failure(stdout, b""))
@@ -91,12 +91,7 @@ def test_known_refusal_reaches_switch_response_without_changing_chat(
   before = transcript_rows.read_all(db, row)
   db.commit()
 
-  response = client.post(
-    f"/api/chats/{chat_id}/provider-switch", headers=auth, json={
-      "switch_id": "known-refusal", "provider": "codex",
-      "agent_settings_json": {"model": "gpt-5.4", "effort": "high"},
-    },
-  )
+  response = client.post(f"/api/chats/{chat_id}/compact", headers=auth)
   assert response.status_code == 422
   assert action in response.json()["detail"]
   db.expire_all()

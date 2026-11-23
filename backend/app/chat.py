@@ -78,7 +78,6 @@ from app.chat_branches import (
   with_resumed_context,
 )
 from app.chat_context import (
-  _RESUME_CONTEXT_CHAR_BUDGET,
   _build_app_context,
   _build_app_report_block,
   _build_resumed_context,
@@ -93,6 +92,7 @@ from app.chat_context import (
   _strip_report_html,
   recent_chat_summary_order,
 )
+from app.prompt_blocks import as_block_data
 from app.chat_logging import (
   get_chat_log_handler,
   get_logger as _get_logger,
@@ -6264,12 +6264,15 @@ async def _run_chat_impl_with_db(
   if starts_fresh and run_policy is None:
     compaction_brief = _latest_compaction_brief(chat_row)
     if compaction_brief:
+      # A direct handover carries owner and assistant text word for word, so
+      # a literal closing tag inside it must not end the block early.
+      brief = as_block_data(compaction_brief, "compacted_chat")
       block = (
-        "The <compacted_chat> block below is a portable summary of earlier "
-        "turns in this same chat. It was written so this conversation can "
-        "continue after a context compaction or provider switch. Treat it as "
-        "conversation history, not as a new user request.\n\n"
-        f"<compacted_chat>\n{compaction_brief}\n</compacted_chat>"
+        "The <compacted_chat> block below is the portable context of earlier "
+        "turns in this same chat. It lets this conversation continue after a "
+        "context compaction or provider switch. Treat it as conversation "
+        "history, not as a new user request.\n\n"
+        f"<compacted_chat>\n{brief}\n</compacted_chat>"
       )
       user_message = f"{block}\n\n{user_message}"
 
