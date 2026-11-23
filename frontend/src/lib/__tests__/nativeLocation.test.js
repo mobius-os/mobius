@@ -369,6 +369,24 @@ test('fixes outside the server bounds are dropped on arrival', async () => {
   assert.deepEqual(page.calls.batches.flat().map((p) => p.timestamp), [fix(4).timestamp])
 })
 
+test('missing coordinates are not uploaded as real zeroes', async () => {
+  const page = await loadPage()
+  await page.mod.initLocationTracking()
+  deliver([
+    fix(1, { latitude: null }),
+    fix(2, { longitude: null }),
+    fix(3, { latitude: ' ' }),
+    fix(4, { longitude: false }),
+    fix(5, { latitude: 0, longitude: 0 }),
+    fix(6, { latitude: '12.5', longitude: '-34.25' }),
+  ])
+  await settle()
+  assert.deepEqual(
+    page.calls.batches.flat().map((p) => [p.timestamp, p.latitude, p.longitude]),
+    [[fix(5).timestamp, 0, 0], [fix(6).timestamp, 12.5, -34.25]],
+  )
+})
+
 test('a rejected upload drops only the fix the server refuses', async () => {
   const bad = fix(3).timestamp
   const page = await loadPage({
