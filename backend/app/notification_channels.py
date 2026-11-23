@@ -44,6 +44,8 @@ _TIMEOUT = httpx.Timeout(10.0)
 _BODY_MAX = 500
 # A post is written on purpose, so it may say more than a notification copy.
 POST_TEXT_MAX = 3000
+# Discord refuses a message over this, so the whole rendered message must fit.
+_DISCORD_CONTENT_MAX = 2000
 # Recent sends kept per channel for its activity list.
 ACTIVITY_KEPT = 20
 _SENDS = ThreadPoolExecutor(max_workers=2, thread_name_prefix="notify-channel")
@@ -200,8 +202,19 @@ def build_request(kind: str, url: str, message: Message, include_body: bool) -> 
     if message.url:
       # Angle brackets keep Discord from unfurling a preview of the shell.
       lines.append(f"[{message.link_text}](<{_markup_url(message.url)}>)")
+    content = "\n".join(lines)
+    if len(content) > _DISCORD_CONTENT_MAX:
+      if message.formatted:
+        # A post is written on purpose: cutting it could drop its last lines
+        # and its link while the send still reports success.
+        raise HTTPException(400, (
+          f"This post is {len(content) - _DISCORD_CONTENT_MAX} characters too long "
+          f"for Discord, which takes {_DISCORD_CONTENT_MAX} including the title "
+          "and link. Shorten it or split it into two posts."
+        ))
+      content = content[:_DISCORD_CONTENT_MAX]
     return url, {
-      "content": "\n".join(lines)[:2000],
+      "content": content,
       "username": "Möbius",
       # Remote senders choose titles and text: never let them ping anyone.
       "allowed_mentions": {"parse": []},

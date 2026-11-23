@@ -226,6 +226,28 @@ def test_native_push_devices_are_owner_controls_not_app_or_delegation(
   ).status_code == 200
 
 
+def test_a_helper_cannot_reach_channels_through_an_app_credential(
+  client, controls, db,
+):
+  # An app granted channels_manage reaches channels, but a helper that mints
+  # that app's credential keeps its delegation and is still refused.
+  app = controls["app_row"]
+  app.capability_contract = {"schema": 1, "data": {"channels_manage": True}}
+  db.commit()
+  assert client.get("/api/channels", headers=controls["app"]).status_code == 200
+
+  minted = client.post(
+    "/api/auth/app-token", headers=controls["delegated"], json={"app_id": app.id},
+  )
+  assert minted.status_code == 200, minted.text
+  helper_app = {"Authorization": f"Bearer {minted.json()['token']}"}
+  assert client.get("/api/channels", headers=helper_app).status_code == 403
+  assert client.post(
+    "/api/channels", headers=helper_app,
+    json={"url": "https://hooks.slack.com/services/T0/B0/x"},
+  ).status_code == 403
+
+
 def test_screen_browser_surfaces_require_human_owner_not_agent(
   client, controls,
 ):

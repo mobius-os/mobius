@@ -1486,14 +1486,12 @@ def get_owner_or_app_with_channels_manage(
   other places, so, like a push subscription, a delegated helper or a
   shared-browser guest may not manage or post to one. The grant lives in the
   accepted capability contract (see ``_identity_manager``): omission on a later
-  app version revokes it on the next request.
+  app version revokes it on the next request. A helper can mint an app
+  credential that keeps its delegation, so both branches check lineage first.
   """
+  require_installation_owner_control(principal)
   if principal.app_id is None:
-    owner = _owner_principal_or_403(principal)
-    require_installation_owner_control(principal)
-    return owner
-  if acts_for_guest(principal):
-    raise HTTPException(403, "Only the installation owner can manage channels.")
+    return _owner_principal_or_403(principal)
   app = db.query(models.App).filter(models.App.id == principal.app_id).first()
   if not app:
     raise HTTPException(status_code=401, detail="App not found.")

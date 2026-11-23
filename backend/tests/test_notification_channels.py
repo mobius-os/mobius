@@ -304,6 +304,25 @@ def test_a_post_keeps_its_formatting_but_cannot_ping(client, auth, sent):
   assert discord_payload["allowed_mentions"] == {"parse": []}
 
 
+def test_a_post_too_long_for_discord_is_refused_not_cut(client, auth, sent):
+  channel = _add(client, auth, url=DISCORD, accept_posts=True, copy_notifications=False)
+  url = f"/api/channels/{channel['id']}/send"
+  text = "x" * 2500 + "\nFinal step: run the migration."
+  result = client.post(url, headers=auth, json={
+    "title": "Released", "text": text, "link": "https://github.com/x/y/releases",
+  }).json()
+  assert result["ok"] is False and "too long for Discord" in result["error"]
+  assert sent == []
+
+  fits = client.post(url, headers=auth, json={
+    "title": "Released", "text": "x" * 1900 + "\nFinal step.",
+    "link": "https://github.com/x/y/releases",
+  }).json()
+  assert fits == {"ok": True, "error": None}
+  (_, payload), = sent
+  assert payload["content"].endswith("(<https://github.com/x/y/releases>)")
+
+
 def test_a_post_links_to_a_page_or_an_https_address(client, auth, sent):
   channel = _add(client, auth, url=SLACK, accept_posts=True)
   url = f"/api/channels/{channel['id']}/send"
