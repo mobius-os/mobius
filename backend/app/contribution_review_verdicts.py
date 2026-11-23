@@ -44,19 +44,22 @@ def proposed_event(outcome) -> str:
   return EVENTS[outcome["state"]]
 
 
-def propose(outcome, target) -> dict:
-  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
+def propose(outcome, target, moved_to="") -> dict:
+  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment.
+
+  ``moved_to`` names the head the PR has since moved to, for a review of an older version the owner chose to send
+  anyway: the wording says so, and submitting accepts that PR at any head (see submit)."""
   event = proposed_event(outcome)
   proposal_id = uuid.uuid4().hex
   # The marker is part of the frozen wording: GitHub's body limit is applied to
   # exactly what will be posted, so submitting can never overflow it.
   marker = f"<!-- mobius-review:{proposal_id} -->"
-  body = public.review_comment_body(outcome, marker=marker, event=event)
-  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT")
+  body = public.review_comment_body(outcome, marker=marker, event=event, moved_to=moved_to)
+  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT", moved_to=moved_to)
   return {"id": proposal_id, "state": "proposed", "event": event, "marker": marker, "body": body,
           "body_sha256": _sha256(body), "comment_body": comment_body, "comment_body_sha256": _sha256(comment_body),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
-          "proposed_at": reviews.utc_now_iso()}
+          "proposed_at": reviews.utc_now_iso(), **({"moved_to": moved_to} if moved_to else {})}
 
 
 def _sent_as(saved: dict, event: str | None) -> dict:
@@ -113,21 +116,21 @@ def _arm(db, row, item_key, proposal_id, authorize, event=None):
   return armed["verdict_proposal"]
 
 
-def _preflight(gh, cwd, row, target):
+def _preflight(gh, cwd, row, target, read_pull):
   actor = reviews.read(gh, cwd, "user")
   if str(actor.get("id") or "") != row.github_actor_id:
     raise HTTPException(409, "The connected GitHub account changed. Nothing was posted.")
-  _, pull = reviews.current_pull(gh, cwd, target)
+  _, pull = read_pull(gh, cwd, target)
   if pull.get("state") != "open" or pull.get("merged"):
     raise HTTPException(409, "The pull request is no longer open. Nothing was posted.")
   if own_pull(row, pull):
     raise HTTPException(409, "GitHub does not allow a verdict on your own pull request. Nothing was posted.")
 
 
-async def _prove_target(gh, cwd, row, target):
-  """Read-only proof of actor, open PR, exact head and authorship; a failed read proves non-dispatch."""
+async def _prove_target(gh, cwd, row, target, read_pull):
+  """Read-only proof of actor, open PR, head (per ``read_pull``) and authorship; a failed read proves non-dispatch."""
   try:
-    await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
+    await asyncio.to_thread(_preflight, gh, cwd, row, target, read_pull)  # unsettled: read-only (actor, PR head and author proof)
   except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
     raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
 
@@ -153,15 +156,19 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, 
 
   Returns its settled receipt; its ``event`` is what was actually sent.
   """
+  # A proposal made for a review of an older version (moved_to) is sent against the commit it covered, so the PR may be at
+  # any head; every other proposal still needs the PR at exactly the head it was proposed for.
+  saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
+  read_pull = reviews.moved_pull if saved.get("id") == proposal_id and saved.get("moved_to") else reviews.current_pull
   async with _github_connection_transaction():
-    await _prove_target(gh, cwd, row, target)
+    await _prove_target(gh, cwd, row, target, read_pull)
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
       armed = _arm(db, row, item_key, proposal_id, authorize, event)
       # Admission and the reservation's database fence can both wait, so the
       # proof above may be stale. Repeat it now that the dispatch is reserved;
       # anything that ends before the post is a definite non-dispatch.
       try:
-        await _prove_target(gh, cwd, row, target)
+        await _prove_target(gh, cwd, row, target, read_pull)
       except BaseException as exc:
         summary = str(exc.detail) if isinstance(exc, HTTPException) else "The request ended before anything was posted."
         _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": summary})

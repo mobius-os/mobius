@@ -67,7 +67,7 @@ VERDICT_HEADERS = {"COMMENT": None, "APPROVE": "Approved", "REQUEST_CHANGES": "C
 MARKER_RESERVE_UNITS = _body_units(f"\n\n<!-- mobius-review:{'0' * 32} -->")
 
 
-def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMENT") -> str:
+def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMENT", moved_to: str = "") -> str:
   """The public text of an owner-requested review: verdict, findings, checks.
 
   Stored evidence is never cut. Only the posted copy is bounded to GitHub's
@@ -78,7 +78,8 @@ def review_comment_body(outcome: dict, *, marker: str = "", event: str = "COMMEN
   header = f"**Möbius review: {verdict}**"
   summary = (outcome.get("summary") or "").strip()
   tests = (outcome.get("tests") or "").strip()
-  footer = f"_Reviewed at {str(outcome.get('head_sha') or '')[:12]}._"
+  reviewed_at = str(outcome.get("head_sha") or "")[:12]
+  footer = f"_Reviewed at {reviewed_at}; the pull request has since moved to {moved_to[:12]}._" if moved_to else f"_Reviewed at {reviewed_at}._"
   if marker:
     footer += f"\n\n{marker}"
   def render(summary_text, tests_text):

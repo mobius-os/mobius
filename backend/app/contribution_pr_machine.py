@@ -9,7 +9,7 @@ places and in that corpus together.
 
 Facts use the app's keys (role, author, head, lifecycle, checks, mergeable,
 permission, reviews[{by, state, commit, bot, sameWork}], reviewers[{by, state, commit, bot}], myReview,
-openThreads, job, result, outbox, readComplete, reviewRequested). A fact that could not be read is 'unknown'
+openThreads, job, result, outbox, readComplete, reviewRequested, heldReview). A fact that could not be read is 'unknown'
 (or readComplete is False) and never enables anything that needs it. `reviewers` is the platform's
 own list of everyone's newest review, writers or not: it only widens who the Ask actions may name, and is
 absent in the app's facts and in the shared corpus (then the askable pool is the people in `reviews`). A deleted
@@ -195,6 +195,12 @@ def _askable(people: list[dict], standing: dict, others: list[dict], head) -> li
   return askable
 
 
+def _held_review(held, head) -> dict | None:
+  """A finished review of another version whose findings were held back, unsent, because the PR moved first."""
+  record = _record(held)
+  return record if record is not None and record.get("head") != head else None
+
+
 def derive(facts: dict) -> dict:
   """The few values every rule below is written in."""
   head = facts.get("head")
@@ -217,6 +223,7 @@ def derive(facts: dict) -> dict:
     "result": result,
     "open_findings": result is not None and result.get("outcome") == "findings" and not result.get("setAside"),
     "outbox": _for_this_head(facts.get("outbox"), head),
+    "held_review": _held_review(facts.get("heldReview"), head),
   }
 
 
@@ -480,6 +487,11 @@ def _draft_verdict_guard(facts: dict, d: dict) -> str:
   return _first_reason(_readable(facts), "" if reviewed_here else "Review this version first.")
 
 
+def _post_at_reviewed_commit_stops(facts: dict, d: dict) -> str:
+  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts), _nothing_in_flight(d),
+                       "" if d["held_review"] else "No held-back review to post.")
+
+
 def _set_aside_guard(facts: dict, d: dict) -> str:
   result = d["result"]
   open_result = result is not None and not result.get("setAside")
@@ -540,6 +552,10 @@ ACTIONS = (
   Action("check_github", "you", BOTH, "Check GitHub", lambda facts, d: _outbox_is(d, "unconfirmed")),
   Action("dismiss", "you", BOTH, "Discard", _dismiss_guard),
   Action("draft_verdict", "you", ("reviewer",), "Approve, request changes or comment…", _draft_verdict_guard),
+  # Sends the held-back review against the commit it covered, never as a verdict on the new version. It saves the exact
+  # proposal the owner then submits: the platform refuses a formal verdict that is not one saved proposal.
+  Action("post_at_reviewed_commit", "you", ("reviewer",), "Post it anyway", _post_at_reviewed_commit_stops,
+         "Sent against the commit you reviewed, never as a verdict on the new version."),
   Action("set_aside", "you", BOTH, "Set aside…", _set_aside_guard),
   Action("open_for_review", "you", ("author",), "Open for review", _status_stops),
   Action("back_to_draft", "you", ("author",), "Back to draft", _status_stops),
@@ -600,7 +616,8 @@ def _action_view(action: Action, facts: dict, d: dict, next_action: str) -> dict
 def decide(facts: dict) -> dict:
   """The one entry point: facts in, where the PR stands and every action for this role out.
 
-  approved_by names who approved this version (carried_from: those of them whose
+  held_review is {reviewed, now} when a finished review of another version was held back unsent because the PR
+  moved (None otherwise); approved_by names who approved this version (carried_from: those of them whose
   approval is of an older commit with the same work, as {by, commit}); looked_again
   who looked at this version and only commented while their change request stands;
   changes_from who holds a change request, of this version or an older one;
@@ -618,7 +635,9 @@ def decide(facts: dict) -> dict:
           "label": state["label"].replace("{author}", facts.get("author") or "the author"),
           "headline": _headline(key, facts, d), "next": state["next"],
           "waiting_on": _waiting_on(key, facts, d), "actions": actions,
-          "approved_by": d["approved_at_head"], "carried_from": d["carried"],
+          "approved_by": d["approved_at_head"],
+          "held_review": {"reviewed": d["held_review"]["head"], "now": facts.get("head")} if d["held_review"] else None,
+          "carried_from": d["carried"],
           "changes_from": [*d["changes_at_head"], *d["changes_older"]],
           "looked_again": d["looked_again"], "approval_from": d["approval_from"],
           "rereview_from": d["rereview"], "askable": d["askable"]}
