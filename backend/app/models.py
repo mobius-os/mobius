@@ -2145,17 +2145,18 @@ class PushDevice(Base):
 
 
 class NotificationChannel(Base):
-  """An outside place owner notifications are copied to (Slack, Discord, …).
+  """An outside place Möbius posts to (Slack, Discord, ntfy, any webhook).
 
-  A channel receives a notification exactly when phones and browsers would
-  get a push: not while the owner is watching its source, never for quiet
-  maintenance notices. ``app_ids`` limits it to those apps' notifications;
-  null means every notification. The webhook URL is itself a credential, so it
-  is stored encrypted (``app.notification_channels``) and never returned;
-  ``url_hint`` names it in Settings. Delivery is best effort, like a push:
-  ``last_*`` records the latest outcome so Settings can show a broken link.
-
-  This is a new table, so ``create_all`` adds it to existing installations.
+  Two feeds can reach a channel. With ``copy_notifications`` it receives an
+  owner notification exactly when phones and browsers would get a push: not
+  while the owner is watching its source, never for quiet maintenance notices;
+  ``app_ids`` limits that to those apps' notifications (null means every one)
+  and ``include_body`` lets the text go along. With ``accept_posts`` the owner,
+  their agents, and the Channels app may also post to it on demand, such as a
+  release note. The webhook URL is itself a credential, so it is stored
+  encrypted (``app.notification_channels``) and never returned; ``url_hint``
+  names it. Delivery is best effort, like a push: ``last_*`` records the latest
+  outcome and ``ChannelDelivery`` the recent ones, so a broken link shows.
   """
 
   __tablename__ = "notification_channels"
@@ -2171,9 +2172,32 @@ class NotificationChannel(Base):
   url_hint = Column(String(200), nullable=False)
   app_ids = Column(JSON, nullable=True)
   include_body = Column(Boolean, nullable=False, default=False)
+  copy_notifications = Column(Boolean, nullable=False, default=True)
+  accept_posts = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
   last_sent_at = Column(DateTime, nullable=True)
   last_error = Column(String(300), nullable=True)
+
+
+class ChannelDelivery(Base):
+  """One recent send to a ``NotificationChannel``, for its activity list.
+
+  Only the title is kept, never the text, and only the latest few per channel
+  (``notification_channels.ACTIVITY_KEPT``). ``source`` is ``notification``,
+  ``post`` or ``test``; ``error`` is null when the service accepted it.
+  """
+
+  __tablename__ = "channel_deliveries"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  channel_id = Column(
+    String(64), ForeignKey("notification_channels.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  sent_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  source = Column(String(16), nullable=False)
+  title = Column(String(200), nullable=False)
+  error = Column(String(300), nullable=True)
 
 
 class Notification(Base):

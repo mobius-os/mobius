@@ -7347,6 +7347,31 @@ def _add_chat_pending_revision(eng) -> None:
       ))
 
 
+def _add_channel_feeds(eng) -> None:
+  """Choose what reaches an outside channel: notification copies, posts, or both.
+
+  Every existing channel was made to copy notifications and keeps doing so;
+  on-demand posts start off until the owner allows them.
+  """
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "notification_channels" not in inspector.get_table_names():
+    return
+  columns = {c["name"] for c in inspector.get_columns("notification_channels")}
+  with eng.begin() as conn:
+    if "copy_notifications" not in columns:
+      conn.execute(text(
+        "ALTER TABLE notification_channels ADD COLUMN copy_notifications "
+        "BOOLEAN NOT NULL DEFAULT 1"
+      ))
+    if "accept_posts" not in columns:
+      conn.execute(text(
+        "ALTER TABLE notification_channels ADD COLUMN accept_posts "
+        "BOOLEAN NOT NULL DEFAULT 0"
+      ))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7477,6 +7502,7 @@ _SCHEMA_MIGRATIONS = (
   ("0106_browser_grant_full_access", _add_browser_grant_full_access),
   ("0107_app_install_id", _add_app_install_ids),
   ("0108_chat_pending_revision", _add_chat_pending_revision),
+  ("0109_channel_feeds", _add_channel_feeds),
 )
 
 
