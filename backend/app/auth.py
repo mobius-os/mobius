@@ -1,6 +1,7 @@
 """Password hashing and JWT utilities."""
 
 import hashlib
+import hmac
 import os
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -11,8 +12,12 @@ import bcrypt
 import jwt
 from jwt.exceptions import InvalidTokenError
 
+from app import launcher_side
 from app.browser_access import BrowserLineage
 from app.config import get_settings
+
+# The launcher a token's sign-in belongs to (launcher_side.session_issuer).
+ISSUER_CLAIM = "idp"
 
 
 # A tool-using turn can legitimately stay alive for many hours: long builds,
@@ -94,6 +99,7 @@ def create_access_token(
   payload["exp"] = expire
   if token_epoch is not None:
     payload["epoch"] = token_epoch
+  payload[ISSUER_CLAIM] = launcher_side.session_issuer()
   return jwt.encode(
     payload, settings.secret_key, algorithm="HS256"
   )
@@ -461,11 +467,25 @@ def create_chat_embed_session_token(
 
 
 def decode_access_token(token: str) -> Optional[dict]:
-  """Decodes a JWT and returns the payload, or None if invalid."""
+  """Decodes a JWT and returns the payload, or None if invalid.
+
+  A token issued under another launcher is invalid here, whatever else it
+  says: switching an instance between production and staging must never let
+  a session from one side in on the other. A token from before tokens named
+  their launcher is accepted only on an instance that has one launcher.
+  """
   settings = get_settings()
   try:
-    return jwt.decode(
+    payload = jwt.decode(
       token, settings.secret_key, algorithms=["HS256"]
     )
   except InvalidTokenError:
     return None
+  issuer = payload.get(ISSUER_CLAIM)
+  if issuer is None:
+    return None if launcher_side.is_developer_instance() else payload
+  if not isinstance(issuer, str) or not hmac.compare_digest(
+    issuer, launcher_side.session_issuer(),
+  ):
+    return None
+  return payload

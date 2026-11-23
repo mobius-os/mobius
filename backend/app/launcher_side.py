@@ -10,11 +10,19 @@ The identity broker owns that decision (``select_launcher_side`` in
 ``backend/runtime/identity_broker.py``): it starts first, as root, and holds
 the credentials. This server only asks what was decided and follows it, so the
 two can never disagree.
+
+Every session this server issues belongs to the launcher that signed its owner
+in (``session_issuer``). A session from the other launcher must never carry
+over a switch: tokens are refused under any other issuer, and the first boot on
+a new issuer signs everyone out (``settle_sessions``). ``published_issuer`` is
+what ``/api/health`` tells anyone who asks, such as the staging phone app.
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import stat
 import time
 from collections.abc import MutableMapping
 from dataclasses import dataclass
@@ -24,9 +32,17 @@ import httpx
 
 from app.runtime_identity import broker_client, broker_socket_path
 
+log = logging.getLogger(__name__)
+
 PRODUCTION = "production"
 STAGING = "staging"
 SIDE_FILE = "launcher-side"
+# The broker's own bound (LAUNCHER_SIDE_FILE_LIMIT): both read the same choice.
+SIDE_FILE_LIMIT = 64
+# The issuer the sessions in the database were issued under, recorded at boot.
+SESSION_ISSUER_FILE = "session-issuer"
+# An issuer is one HTTPS origin, far shorter than this.
+SESSION_ISSUER_FILE_LIMIT = 4096
 BROKER_RETRIES = 3
 STAGING_ENV = (
   "MOBIUS_STAGING_ISSUER",
@@ -98,3 +114,112 @@ def choose_side(side: str, data_dir: Path) -> None:
     path.write_text(STAGING + "\n", encoding="utf-8")
   else:
     path.unlink(missing_ok=True)
+
+
+def _read_control_file(path: Path, limit: int) -> str:
+  """The stripped text of a small control file in the data directory.
+
+  The app user can put anything at these names, so they are opened the way the
+  broker opens ``launcher-side``: no symlink followed, no wait on a FIFO or
+  device, only a regular file read, and never more than ``limit`` bytes.
+  Raises FileNotFoundError when there is no file, and OSError or ValueError
+  for anything that is not a small UTF-8 regular file.
+  """
+  descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+  try:
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+      raise ValueError(f"{path.name} is not a regular file")
+    content = os.read(descriptor, limit + 1)
+  finally:
+    os.close(descriptor)
+  if len(content) > limit:
+    raise ValueError(f"{path.name} is larger than {limit} bytes")
+  return content.decode("utf-8").strip()
+
+
+def _choice(data_dir: Path) -> str:
+  """The word in ``launcher-side``, accepted exactly as the broker accepts it."""
+  try:
+    return _read_control_file(data_dir / SIDE_FILE, SIDE_FILE_LIMIT)
+  except (OSError, ValueError):
+    return ""
+
+
+def _chosen_side(data_dir: Path) -> str:
+  """The side the next boot will run, by the broker's rule."""
+  chosen = _choice(data_dir)
+  return STAGING if chosen == STAGING and boot_side().available else PRODUCTION
+
+
+def session_issuer() -> str:
+  """The launcher every session of this boot belongs to; "" with local sign-in."""
+  from app.config import get_settings
+
+  settings = get_settings()
+  return settings.mobius_sso_issuer if settings.mobius_sso_enabled else ""
+
+
+def is_developer_instance() -> bool:
+  """Whether this instance can run on a second launcher, or still does."""
+  side = boot_side()
+  return side.available or side.side == STAGING
+
+
+def published_issuer() -> str | None:
+  """The launcher this instance sends people to sign in with, for anyone.
+
+  None when it has no launcher sign-in, and while a switch to the other side
+  waits for its restart: the current issuer would be about to stop being true.
+  """
+  from app.config import get_settings
+
+  issuer = session_issuer()
+  if not issuer or _chosen_side(Path(get_settings().data_dir)) != boot_side().side:
+    return None
+  return issuer
+
+
+def settle_sessions(db, data_dir: Path) -> bool:
+  """Sign everyone out when this boot's issuer is not the one sessions had.
+
+  Bumping the owner's token epoch is "sign out everywhere": it ends every
+  owner token, browser-access and install session, handoff, delegation and
+  service token at once. The record is written only after the bump commits,
+  so a boot that dies in between bumps again rather than not at all. Tokens
+  also carry their issuer (see ``app.auth``), so even a missed bump cannot
+  carry a session over a switch.
+
+  An ordinary instance's first boot only records its issuer. A developer's
+  instance has no record of where its older sessions came from, so its first
+  boot signs everyone out once. Returns whether sessions were ended.
+  """
+  from app import auth, models
+  from app.storage_io import atomic_write
+
+  current = session_issuer()
+  path = data_dir / SESSION_ISSUER_FILE
+  try:
+    recorded: str | None = _read_control_file(path, SESSION_ISSUER_FILE_LIMIT)
+  except FileNotFoundError:
+    recorded = None
+  except (OSError, ValueError):
+    # Where earlier sessions came from is unknown: treat it as a switch.
+    recorded = "unreadable"
+  if recorded == current:
+    return False
+  revoke = recorded is not None or is_developer_instance()
+  if revoke:
+    db.query(models.Owner).update(
+      {models.Owner.token_epoch: models.Owner.token_epoch + 1},
+      synchronize_session=False,
+    )
+    db.commit()
+    log.warning("launcher sign-in changed; every earlier session was ended")
+    # The Host controller drains a cutover with this file; keep it usable.
+    for owner in db.query(models.Owner).all():
+      try:
+        auth.write_service_token(owner.username, owner.token_epoch)
+      except OSError as exc:
+        log.warning("Could not refresh the service token: %s", exc)
+  atomic_write(path, current + "\n")
+  return revoke

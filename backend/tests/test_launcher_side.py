@@ -6,9 +6,11 @@ follows its answer (``app.launcher_side``).
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import os
 import shutil
+import signal
 import sys
 import tempfile
 import threading
@@ -168,6 +170,62 @@ def test_an_oversized_choice_file_is_not_read_as_a_choice(tmp_path):
   environ = {**DEFAULT_ENV, **STAGING_ENV}
 
   assert broker_module.select_launcher_side(environ, tmp_path)["side"] == "production"
+
+
+class _Blocked(Exception):
+  """Not an OSError, so a reader that swallows those cannot hide the stall."""
+
+
+@contextlib.contextmanager
+def _fails_instead_of_hanging(seconds: int = 5):
+  """Turns a read that blocks on a FIFO into a failure, not a stuck suite."""
+  def stop(_signum, _frame):
+    raise _Blocked("blocked reading the choice file")
+
+  previous = signal.signal(signal.SIGALRM, stop)
+  signal.alarm(seconds)
+  try:
+    yield
+  finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
+def _plant_choice(data_dir: Path, planted: str) -> None:
+  path = data_dir / "launcher-side"
+  if planted == "word":
+    path.write_text("staging\n", encoding="utf-8")
+  elif planted == "at the bound":
+    path.write_text("staging".ljust(64), encoding="utf-8")
+  elif planted == "over the bound":
+    path.write_text("staging\n" + " " * 4096, encoding="utf-8")
+  elif planted == "not utf-8":
+    path.write_bytes(b"\xffstaging\n")
+  elif planted == "fifo":
+    os.mkfifo(path)
+  elif planted == "link":
+    (data_dir / "elsewhere").write_text("staging\n", encoding="utf-8")
+    path.symlink_to(data_dir / "elsewhere")
+  elif planted == "directory":
+    path.mkdir()
+
+
+@pytest.mark.parametrize("planted, word", [
+  ("word", "staging"),
+  ("at the bound", "staging"),
+  ("over the bound", ""),
+  ("not utf-8", ""),
+  ("fifo", ""),
+  ("link", ""),
+  ("directory", ""),
+  ("absent", ""),
+])
+def test_the_server_reads_the_choice_exactly_as_the_broker_does(tmp_path, planted, word):
+  _plant_choice(tmp_path, planted)
+
+  with _fails_instead_of_hanging():
+    assert broker_module._chosen_side(tmp_path) == word
+    assert launcher_side._choice(tmp_path) == word
 
 
 class _NoUpstreamRoutes:
