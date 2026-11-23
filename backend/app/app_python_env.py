@@ -23,8 +23,11 @@ Lifecycle:
   wheels-only (no package build code runs), then passes ``pip check``. Every
   tree passed to ``prepare_env``, including one reusing an env, smoke-runs
   every present declared Python entry. The smoke run executes the app's own
-  setup code as the backend user with no sandbox: it is reviewed app code,
-  like the service it checks. Every build step runs in its own process group,
+  setup code before the owner has necessarily approved the app (a Store
+  install or update runs it first), so it runs inside an agent room
+  (``scripts/mobius_fence.py``): no network, its source and env read-only, and
+  nothing else of the owner's data. A host that cannot build rooms runs it as
+  the backend user, as before. Every build step runs in its own process group,
   which is killed when the step ends or times out; this is best effort, since
   a descendant that calls ``setsid`` leaves the group, but waiting for a step
   is always bounded. A matching env is reused; a failure fails the Apply or
@@ -72,6 +75,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.agent_roles import FENCE_SCRIPT
 from app.manifest_contract import (
   ManifestContractError,
   job_interpreter,
@@ -409,19 +413,57 @@ def _build(build: Path, runtime_root: Path, manifest: dict, lock: Path, relative
   )
 
 
+# Settings the smoke run passes into a room beyond the fence's own basics.
+_SMOKE_ROOM_ENV = (
+  "VIRTUAL_ENV", "APP_ID", "APP_SLUG", "APP_TOKEN", "APP_STORAGE_DIR", "API_BASE_URL",
+)
+
+
+@functools.cache
+def _rooms_available() -> bool:
+  """Whether this host can build agent rooms, asked before any app code runs.
+
+  A room that cannot be built exits 125, but so can the app code inside one,
+  so that status can never be the reason to run the code again unconfined.
+  """
+  try:
+    answer = subprocess.run(
+      [sys.executable, "-I", str(FENCE_SCRIPT), "--check"],
+      capture_output=True, text=True, timeout=CHECK_TIMEOUT_SECONDS, check=True,
+    )
+    return json.loads(answer.stdout).get("available") is True
+  except (OSError, subprocess.SubprocessError, ValueError):
+    return False
+
+
+def _in_room(command: list[str], *, storage: str, env: Path, runtime_root: Path) -> list[str]:
+  """``command`` run inside a room: its storage writable; its env and source
+  read-only; no doors, so it reaches no network."""
+  room = [
+    sys.executable, "-I", str(FENCE_SCRIPT), "--home", storage,
+    "--ro", str(env), "--ro", str(runtime_root), "--cwd", str(runtime_root),
+  ]
+  for name in _SMOKE_ROOM_ENV:
+    room += ["--keep-env", name]
+  return [*room, "--", *command]
+
+
 def _smoke(env: Path, runtime_root: Path, manifest: dict, relative: str) -> None:
   python = str(env / "bin" / "python")
   for kind, path in _smoke_targets(runtime_root, manifest):
     with tempfile.TemporaryDirectory(prefix="mobius-env-check-") as storage:
       # Inert values: setup must not need a live token, and the check must not
-      # touch the app's real storage. This is not a sandbox.
+      # touch the app's real storage.
       smoke_env = activated_environment(_base_env(), env)
       smoke_env.update({
         "APP_ID": "0", "APP_SLUG": "", "APP_TOKEN": "",
         "APP_STORAGE_DIR": storage, "API_BASE_URL": "http://127.0.0.1:9",
       })
+      command = [python, "-c", _SMOKE_PROGRAM, kind, str(path)]
+      if _rooms_available():
+        command = _in_room(command, storage=storage, env=env, runtime_root=runtime_root)
       _run(
-        [python, "-c", _SMOKE_PROGRAM, kind, str(path)],
+        command,
         step=f"Starting the app's {kind} `{path.name}` with `{relative}`",
         timeout=SMOKE_TIMEOUT_SECONDS, env=smoke_env, cwd=str(runtime_root),
       )

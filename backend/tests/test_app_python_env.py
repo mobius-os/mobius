@@ -5,6 +5,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import socket
 import sys
 import zipfile
 from pathlib import Path
@@ -525,6 +526,80 @@ def test_build_smoke_runs_the_service_setup_and_names_a_missing_import(
   root = _runtime_tree(tmp_path / "rev", lock=lock, service=b"import tinypkg\nimport notlocked\n")
   with pytest.raises(app_python_env.PythonEnvBuildError, match="notlocked"):
     app_python_env.prepare_env(tmp_path, 7, root)
+
+
+_needs_rooms = pytest.mark.skipif(
+  not app_python_env._rooms_available(), reason="this host cannot build agent rooms",
+)
+
+
+def _smoke_runs(monkeypatch) -> list[list[str]]:
+  actual_run = app_python_env._run
+  runs = []
+
+  def observe(command, **kwargs):
+    if kwargs["step"].startswith("Starting the app's"):
+      runs.append(command)
+    return actual_run(command, **kwargs)
+
+  monkeypatch.setattr(app_python_env, "_run", observe)
+  return runs
+
+
+@_needs_rooms
+def test_app_code_checked_before_approval_cannot_read_the_owners_files(
+  monkeypatch, tmp_path,
+):
+  """A Store install checks the app's code before the owner approves it, so
+  that check must not hand the code the server's own power."""
+  _fake_builds(monkeypatch)
+  secret = tmp_path / "owner-secret"
+  secret.write_text("not for apps")
+  root = _runtime_tree(
+    tmp_path / "rev", lock="a==1\n", service=f"open({str(secret)!r}).read()\n".encode(),
+  )
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="PermissionError"):
+    app_python_env.prepare_env(tmp_path, 7, root)
+
+
+@_needs_rooms
+def test_app_code_checked_before_approval_reaches_no_network(monkeypatch, tmp_path):
+  _fake_builds(monkeypatch)
+  with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    service = f"import socket\nsocket.create_connection(('127.0.0.1', {port}), 5)\n"
+    root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=service.encode())
+    with pytest.raises(app_python_env.PythonEnvBuildError, match="PermissionError"):
+      app_python_env.prepare_env(tmp_path, 7, root)
+
+
+def test_app_code_exiting_like_an_unbuildable_room_is_never_rerun_unconfined(
+  monkeypatch, tmp_path,
+):
+  """The room's own "could not build" status is one the app can exit with too;
+  whether to confine is decided before any app code runs, never after."""
+  _fake_builds(monkeypatch)
+  monkeypatch.setattr(app_python_env, "_rooms_available", lambda: True)
+  runs = _smoke_runs(monkeypatch)
+  root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=b"raise SystemExit(125)\n")
+  with pytest.raises(app_python_env.PythonEnvBuildError):
+    app_python_env.prepare_env(tmp_path, 7, root)
+  assert len(runs) == 1
+  assert runs[0][2].endswith("mobius_fence.py")
+
+
+def test_a_host_without_rooms_still_checks_the_app_before_publishing(
+  monkeypatch, tmp_path,
+):
+  _fake_builds(monkeypatch)
+  monkeypatch.setattr(app_python_env, "_rooms_available", lambda: False)
+  runs = _smoke_runs(monkeypatch)
+  root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=b"import notlocked\n")
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="notlocked"):
+    app_python_env.prepare_env(tmp_path, 7, root)
+  assert not any(part.endswith("mobius_fence.py") for part in runs[0])
 
 
 @pytest.mark.parametrize("reused", [False, True], ids=["new-env", "reused-env"])
