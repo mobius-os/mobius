@@ -10,15 +10,26 @@ const chatView = new URL('../frontend/src/components/ChatView/', import.meta.url
 let vite
 let StandardMarkdown
 let QuestionCard
+let previousNodeEnv
 
 test.beforeAll(async () => {
+  previousNodeEnv = process.env.NODE_ENV
   vite = await createSsrRenderServer({ configFile: false, plugins: [react()] })
   const markdown = await vite.ssrLoadModule(fileURLToPath(new URL('markdown/BlockRenderer.jsx', chatView)))
   StandardMarkdown = markdown.StandardMarkdown
   const questions = await vite.ssrLoadModule(fileURLToPath(new URL('QuestionCard.jsx', chatView)))
   QuestionCard = questions.default
 })
-test.afterAll(async () => { await vite?.close() })
+test.afterAll(async () => {
+  try {
+    await vite?.close()
+  } finally {
+    // Creating the SSR server defaults the worker to development. Leave its
+    // original environment for later specs that build browser fixtures.
+    if (previousNodeEnv === undefined) delete process.env.NODE_ENV
+    else process.env.NODE_ENV = previousNodeEnv
+  }
+})
 
 test('chat tables wrap prose, retain alignment and widen for unbroken code', async ({ page }) => {
   const prose = 'The layout should wrap readable prose instead of squeezing it into tiny columns. '.repeat(3)
