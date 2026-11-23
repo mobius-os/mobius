@@ -62,7 +62,7 @@ export default function ProjectCopyPanel({ project }) {
         <small>Files only—no chats or app data. Link expires in 7 days.</small>
       </>}
     </section>
-    {created && <section className="project-copy__result"><h3>Your copy link</h3><p>Expires: {formatDateTime(created.expires_at)}.</p><label htmlFor="project-copy-link">Share this link</label><input id="project-copy-link" readOnly value={created.copy_url} onFocus={event => event.target.select()} /><button onClick={copy}><Copy width={16} height={16} /> Copy link</button></section>}
+    {created && <section className="project-copy__result"><h3>Your copy link</h3><p>Expires: {formatDateTime(copyDate(created.expires_at))}.</p><label htmlFor="project-copy-link">Share this link</label><input id="project-copy-link" readOnly value={created.copy_url} onFocus={event => event.target.select()} /><button onClick={copy}><Copy width={16} height={16} /> Copy link</button></section>}
     {error && <p className="project-copy__error" role="alert">{error}</p>}
     {notice && <p role="status">{notice}</p>}
     {(shares.isPending || shares.isError || shares.data?.length > 0) && <section><h3>Copy links</h3>
@@ -70,7 +70,7 @@ export default function ProjectCopyPanel({ project }) {
       {shares.isError && <div role="alert"><p>{shares.error.message}</p><button onClick={() => shares.refetch()}>Try again</button></div>}
       {(shares.data || []).map(share => {
         const ended = share.revoked_at || copyDate(share.expires_at).getTime() <= Date.now()
-        return <div key={share.id} className="project-copy__share"><div><strong>Created {formatDateTime(share.created_at)}</strong><small>{share.revoked_at ? 'Stopped' : ended ? 'Expired' : `Expires: ${formatDateTime(share.expires_at)}`}</small></div>
+        return <div key={share.id} className="project-copy__share"><div><strong>Created {formatDateTime(copyDate(share.created_at))}</strong><small>{share.revoked_at ? 'Stopped' : ended ? 'Expired' : `Expires: ${formatDateTime(copyDate(share.expires_at))}`}</small></div>
           {!ended && (confirmStop === share.id ? <div><p>Stop new copies from this link? Existing copies won’t change.</p><button disabled={!!busy} onClick={() => stop(share.id)}>Stop link</button><button disabled={!!busy} onClick={() => setConfirmStop('')}>Keep link</button></div> : <button disabled={!!busy} onClick={() => setConfirmStop(share.id)}>Stop sharing</button>)}
         </div>
       })}

@@ -1,6 +1,9 @@
 /* Copy links carry access only in fragments and never select an existing project. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { createElement } from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { selectedCopyPaths, projectCopyDestination, readProjectCopyRequest, clearProjectCopyRequest, copyByteLabel, copyDate, projectCopyRequest, readPublicProjectCopy, rememberProjectCopyRequest, consumeProjectCopyRequest } from '../projectCopies.js'
 
 test('copy destination keeps source capability out of query strings and preserves deployment prefix', () => {
@@ -40,6 +43,30 @@ test('copy request uses the existing API prefix once and serializes reviewed sel
 test('copy expiry interprets server naive timestamps as UTC and keeps explicit offsets', () => {
   assert.equal(copyDate('2026-09-09T12:00:00').toISOString(), '2026-09-09T12:00:00.000Z')
   assert.equal(copyDate('2026-09-09T12:00:00+01:00').toISOString(), '2026-09-09T11:00:00.000Z')
+})
+
+test('copy-link history presents UTC creation and expiry in the local timezone', async t => {
+  const previousTimezone = process.env.TZ
+  process.env.TZ = 'Europe/Paris'
+  t.mock.method(Date, 'now', () => Date.UTC(2026, 10, 24))
+  const client = new QueryClient()
+  try {
+    // The production formatter captures the local zone when imported.
+    const { default: ProjectCopyPanel } = await import('../../components/Projects/ProjectCopyPanel.jsx')
+    client.setQueryData(['project-copy', 'project', 'shares'], [{
+      id: 'test-share',
+      created_at: '2026-11-23T12:00:00',
+      expires_at: '2026-11-30T12:00:00',
+    }])
+    const html = renderToStaticMarkup(createElement(QueryClientProvider, { client },
+      createElement(ProjectCopyPanel, { project: { id: 'project' } })))
+    assert.match(html, /Created 23rd Nov 2026, 13:00/)
+    assert.match(html, /Expires: 30th Nov 2026, 13:00/)
+  } finally {
+    client.clear()
+    if (previousTimezone === undefined) delete process.env.TZ
+    else process.env.TZ = previousTimezone
+  }
 })
 
 test('public copy metadata sends the capability in a body without owner credentials', async () => {

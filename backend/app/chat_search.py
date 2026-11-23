@@ -14,6 +14,7 @@ release, which reconciles them from ``updated_at`` after a rollback.
 import heapq
 import json
 import re
+import unicodedata
 from types import SimpleNamespace
 
 from sqlalchemy import text as sql
@@ -27,15 +28,29 @@ _MARK_OPEN = "\ue000"
 _MARK_CLOSE = "\ue001"
 
 
-def _fts_query(tokens: list[str]) -> str:
-  """Build a safe FTS5 query from already-neutralized tokens."""
-  quoted = [f'"{token}"' for token in tokens]
-  quoted[-1] = f"{quoted[-1]}*"
-  return " ".join(quoted)
+def _fts_query(tokens: list[str], original_tokens: list[str]) -> str:
+  """Select both Unicode forms without reindexing the original documents."""
+  def conjunction(words: list[str], *, include_decomposed: bool) -> str:
+    clauses = []
+    for index, token in enumerate(words):
+      suffix = "*" if index == len(words) - 1 else ""
+      exact = f'"{token}"{suffix}'
+      decomposed = unicodedata.normalize("NFD", token) if include_decomposed else token
+      clauses.append(
+        exact if token == decomposed else f'({exact} OR "{decomposed}"{suffix})'
+      )
+    return " AND ".join(clauses)
+
+  query = conjunction(tokens, include_decomposed=True)
+  # Preserve the index query for an original spelling that is neither NFC
+  # nor NFD. The normalized exact match below still owns final relevance.
+  if original_tokens and original_tokens != tokens:
+    original = conjunction(original_tokens, include_decomposed=False)
+    query = f"({query}) OR ({original})"
+  return query
 
 
 def _query_tokens(raw: str) -> list[str]:
-  """Normalize one query consistently across both database backends."""
   return re.findall(r"\w+", raw, flags=re.UNICODE)
 
 
@@ -93,7 +108,7 @@ def _snippet(
   return "".join(pieces)
 
 
-def _candidate_rows(db: Session, tokens: list[str]):
+def _candidate_rows(db: Session, fts_query: str):
   """Stream FTS candidates of live chats, grouped by chat and position.
 
   While the previous release's column exists, a chat's prose entries count
@@ -117,7 +132,7 @@ def _candidate_rows(db: Session, tokens: list[str]):
       "(SELECT 1 FROM chat_transcript_state s WHERE s.chat_id = e.chat_id)) "
       "ORDER BY e.chat_id, e.seq"
     ).execution_options(stream_results=True, max_row_buffer=256),
-    {"query": _fts_query(tokens),
+    {"query": fts_query,
      "rows_authoritative": transcript_rows.rows_are_authority(db)},
   )
 
@@ -189,6 +204,10 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
         "match_count": 0,
         "best_prose": None,
       }
+    # FTS already admits equivalent spellings. Use the same Unicode form
+    # for the exact comparison and the displayed snippet, without changing
+    # the original transcript or its reveal anchor.
+    doc_text = unicodedata.normalize("NFC", doc_text)
     spans = _match_spans(doc_text, patterns)
     if not spans:
       continue
@@ -255,7 +274,8 @@ def unindexed_chat_count(db: Session) -> int:
 
 def search(db: Session, raw_query: str, limit: int = 20) -> list[dict]:
   """Return ranked chat hits with only the fields consumed by the shell."""
-  tokens = _query_tokens(raw_query)
+  tokens = _query_tokens(unicodedata.normalize("NFC", raw_query))
   if not tokens or limit <= 0:
     return []
-  return _rank_results(_visible_rows(_candidate_rows(db, tokens)), tokens, limit)
+  fts_query = _fts_query(tokens, _query_tokens(raw_query))
+  return _rank_results(_visible_rows(_candidate_rows(db, fts_query)), tokens, limit)

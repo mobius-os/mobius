@@ -156,6 +156,35 @@ def test_search_finds_unicode_document_text(db):
   assert "café" in hit["snippet"]
 
 
+@pytest.mark.parametrize("query", ["Réunion", "Re\u0301union"])
+def test_search_matches_canonically_equivalent_titles_and_prose(db, query):
+  title = _make_chat(db, "Re\u0301union", ["unrelated body"])
+  prose = _make_chat(db, "Meeting notes", ["The Re\u0301union is tomorrow."])
+
+  hits = {hit["id"]: hit for hit in chat_search.search(db, query)}
+  assert title.id in hits
+  assert hits[prose.id]["anchor_key"] == "user-1000"
+  assert "\ue000Réunion\ue001" in hits[prose.id]["snippet"]
+
+
+@pytest.mark.parametrize("query", ["한글 제목", "한글 제목"])
+def test_search_considers_both_index_spellings_per_word(db, query):
+  # unicode61 indexes Hangul syllables and their decomposed jamo separately.
+  titles = [
+    _make_chat(db, "한글 제목", ["body"]),
+    _make_chat(db, "한글 제목", ["body"]),
+    _make_chat(db, "한글 제목", ["body"]),
+  ]
+  assert {hit["id"] for hit in chat_search.search(db, query)} == {
+    title.id for title in titles
+  }
+
+
+def test_search_retains_a_word_mixing_composed_and_decomposed_letters(db):
+  title = _make_chat(db, "한글 제목", ["body"])
+  assert [hit["id"] for hit in chat_search.search(db, title.title)] == [title.id]
+
+
 def test_search_keeps_recent_matches_beyond_the_old_512_chat_cap(db):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
