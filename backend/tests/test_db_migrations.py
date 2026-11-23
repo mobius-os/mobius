@@ -1905,6 +1905,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0106_browser_grant_full_access",
     "0107_app_install_id",
     "0108_chat_pending_revision",
+    "0109_channel_feeds",
   ]
   assert second == first
 
@@ -5028,3 +5029,35 @@ def test_shared_peer_note_bodies_migration_is_additive_and_idempotent(tmp_path):
     assert conn.execute(text(
       "SELECT body, body_id FROM agent_coordination_messages"
     )).one() == ("Old body", None)
+
+
+def test_existing_channels_keep_copying_notifications_after_the_feeds_upgrade(tmp_path):
+  """A channel made before feeds existed keeps copying notifications and does
+  not start accepting posts; a crash retry of the migration changes nothing."""
+  db_path = tmp_path / "channel-feeds.db"
+  with sqlite3.connect(db_path) as connection:
+    connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+    # The channel table as the previous release created it.
+    connection.executescript(
+      "CREATE TABLE notification_channels ("
+      "id VARCHAR(64) PRIMARY KEY, owner_id INTEGER NOT NULL, kind VARCHAR(16) NOT NULL, "
+      "label VARCHAR(80) NOT NULL, url_encrypted TEXT NOT NULL, url_hint VARCHAR(200) NOT NULL, "
+      "app_ids JSON, include_body BOOLEAN NOT NULL, created_at DATETIME NOT NULL, "
+      "last_sent_at DATETIME, last_error VARCHAR(300));"
+      "INSERT INTO notification_channels (id, owner_id, kind, label, url_encrypted, url_hint, "
+      "include_body, created_at) VALUES ('earlier', 1, 'slack', 'Slack', 'x', 'h', 0, "
+      "'2026-11-01 00:00:00');"
+    )
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_channel_feeds(eng)  # Idempotent on a crash retry.
+
+  assert "0109_channel_feeds" in {row["version"] for row in schema_migration_history(eng)}
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT copy_notifications, accept_posts FROM notification_channels WHERE id = 'earlier'"
+    )).one()
+  assert tuple(row) == (1, 0)
+  eng.dispose()

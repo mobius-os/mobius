@@ -35,7 +35,7 @@ BASELINE = (
 CRITICAL = frozenset({
   "filesystem_access", "manage_apps", "manage_skills", "connections_manage",
   "connect_manage", "identity_manage", "credits_manage", "railway_manage",
-  "spend_credits",
+  "channels_manage", "spend_credits",
   "agent_start", "project_builders", "workspace.screen-control",
 })
 
@@ -85,6 +85,9 @@ _FLAGS = (
    "prices of your apps, and keep or withdraw your earnings."),
   ("railway_manage", "railway_manage", "Manage Railway deployments",
    "Can manage deployments on your Railway account."),
+  ("channels_manage", "channels_manage", "Manage your outside channels",
+   "Can add and remove the Slack, Discord, ntfy and webhook channels Möbius "
+   "posts to, choose which notifications they get, and post to them."),
   ("location_history_read", "location_history_read", "See your location history",
    "Can read the locations your phone recorded."),
   ("helper_activity_read", "helper_activity_read", "Read helper activity",

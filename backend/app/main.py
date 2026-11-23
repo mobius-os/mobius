@@ -108,7 +108,7 @@ from app.routes import (
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
-  location_router,
+  channels_router, location_router,
   screen_control_router,
   shared_folders_router,
   public_apps_router,
@@ -1221,6 +1221,7 @@ app.include_router(reviewer_router)
 app.include_router(identity_router)
 app.include_router(credits_router)
 app.include_router(push_router)
+app.include_router(channels_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
 app.include_router(theme_router)

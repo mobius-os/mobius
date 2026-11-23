@@ -1476,6 +1476,40 @@ def get_owner_or_app_with_railway_manage(
   )
 
 
+def get_owner_or_app_with_channels_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """The owner or their top-level agent, or an app holding ``channels_manage``.
+
+  Outside channels receive owner notifications and speak for the owner in
+  other places, so, like a push subscription, a delegated helper or a
+  shared-browser guest may not manage or post to one. The grant lives in the
+  accepted capability contract (see ``_identity_manager``): omission on a later
+  app version revokes it on the next request.
+  """
+  if principal.app_id is None:
+    owner = _owner_principal_or_403(principal)
+    require_installation_owner_control(principal)
+    return owner
+  if acts_for_guest(principal):
+    raise HTTPException(403, "Only the installation owner can manage channels.")
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("channels_manage") is True:
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.channels_manage=true in its manifest "
+      "to manage or post to your outside channels."
+    ),
+  )
+
+
 def get_owner_or_app_with_location_history_read(
   principal: Principal = Depends(get_principal),
   db: Session = Depends(get_db),

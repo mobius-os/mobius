@@ -216,9 +216,9 @@ def test_native_push_devices_are_owner_controls_not_app_or_delegation(
       "/api/push/devices/some-device", headers=controls[denied],
     ).status_code == 403
     # An outside notification channel receives owner notifications too.
-    assert client.get("/api/push/channels", headers=controls[denied]).status_code == 403
+    assert client.get("/api/channels", headers=controls[denied]).status_code == 403
     assert client.post(
-      "/api/push/channels", headers=controls[denied],
+      "/api/channels", headers=controls[denied],
       json={"url": "https://hooks.slack.com/services/T0/B0/x"},
     ).status_code == 403
   assert client.put(
