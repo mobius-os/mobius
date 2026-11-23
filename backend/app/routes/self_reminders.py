@@ -21,6 +21,7 @@ dispatcher calls /dispatch with the service token.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -38,6 +39,7 @@ from app.resource_access import get_active_chat_or_404
 router = APIRouter(prefix="/api/self-reminders", tags=["self-reminders"])
 
 log = logging.getLogger(__name__)
+_dispatch_lock = asyncio.Lock()
 
 
 class EnqueueReminder(BaseModel):
@@ -176,6 +178,15 @@ async def dispatch_due(
   if not self_reminders.is_dispatcher_enabled():
     return {"enabled": False, "fired": 0, "reminders": []}
 
+  # One API worker owns delivery. Do not take a second snapshot of pending
+  # reminders while a send from the first snapshot is still in flight.
+  if _dispatch_lock.locked():
+    return {"enabled": True, "fired": 0, "reminders": []}
+  async with _dispatch_lock:
+    return await _dispatch_pending(db)
+
+
+async def _dispatch_pending(db: Session):
   owner = db.query(models.Owner).first()
   if owner is None:
     # No owner means setup never ran — there is no session to resume
@@ -201,6 +212,9 @@ async def dispatch_due(
     body = schemas.SendMessage(
       content=_checkin_prompt(rec["note"]),
       hidden=True,
+      # If delivery was committed before a crash, the ordinary send path can
+      # acknowledge the same durable message instead of sending it again.
+      cid=f"self-reminder:{rec['id']}",
     )
     try:
       # send_message reuses the queue/turn-start machinery: if a turn is

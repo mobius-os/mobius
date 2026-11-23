@@ -1,5 +1,6 @@
 """Agent self-scheduling: helper (enqueue/list_due/cap/cancel) + endpoint."""
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -315,3 +316,50 @@ def test_dispatch_retires_reminder_for_deleted_chat(client, auth, monkeypatch):
   assert r.status_code == 200
   assert r.json()["fired"] == 0
   assert self_reminders.list_pending("ghost-chat") == []
+
+@pytest.mark.asyncio
+async def test_overlapping_dispatches_only_send_one_checkin(db, chat, monkeypatch):
+  from app.routes import self_reminders as route
+
+  _enable_dispatch()
+  self_reminders.enqueue(chat.id, "due now", due_at=1, now=0)
+  entered = asyncio.Event()
+  release = asyncio.Event()
+  sent = []
+
+  async def send(**kwargs):
+    sent.append(kwargs["body"].cid)
+    if len(sent) == 1:
+      entered.set()
+      await release.wait()
+
+  monkeypatch.setattr(route, "_send_checkin", send)
+  first = asyncio.create_task(route.dispatch_due(db=db))
+  try:
+    await asyncio.wait_for(entered.wait(), timeout=2)
+    second = await route.dispatch_due(db=db)
+  finally:
+    release.set()
+    first_result = await first
+  assert [first_result["fired"], second["fired"]] == [1, 0]
+  assert len(sent) == 1
+
+
+def test_dispatch_retry_uses_same_durable_message_identity(client, auth, chat, monkeypatch):
+  _enable_dispatch()
+  reminder = self_reminders.enqueue(chat.id, "due now", due_at=1, now=0)
+  attempts = []
+
+  async def send(**kwargs):
+    attempts.append(kwargs["body"].cid)
+    if len(attempts) == 1:
+      raise OSError("send acknowledgement lost")
+
+  monkeypatch.setattr("app.routes.self_reminders._send_checkin", send)
+  first = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert first.json()["fired"] == 0
+  assert [row["id"] for row in self_reminders.list_pending(chat.id)] == [reminder["id"]]
+  second = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert second.json()["fired"] == 1
+  assert attempts[0] and attempts[0] == attempts[1]
+  assert self_reminders.list_pending(chat.id) == []
