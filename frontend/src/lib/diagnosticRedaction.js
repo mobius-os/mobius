@@ -7,7 +7,7 @@ const SECRET_QUERY_VALUE = /([?&](?:access_token|auth|authorization|code|key|pas
 // line, exactly like COOKIE_VALUE below. The key itself may be quoted.
 const AUTHORIZATION_VALUE = /\b(authorization["']?\s*[:=]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]+)/gi
 const COOKIE_VALUE = /\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi
-const SECRET_ASSIGNMENT = /(["']?)\b((?:[a-z0-9]+[_-])*(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|token|password|passwd|pwd|secret))\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&#]+)/gi
+const SECRET_ASSIGNMENT = /(["']?)\b((?:[a-z0-9]+[_-])*(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|signing[_-]?key|token|password|passwd|pwd|secret))\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&#]+)/gi
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
 const PRIVATE_KEY_BLOCK = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/g
 const PROVIDER_TOKEN = /\b(?:A(?:KIA|SIA)[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,})\b/g
