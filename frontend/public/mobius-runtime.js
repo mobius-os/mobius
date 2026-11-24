@@ -3571,9 +3571,22 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 }
 
 // src/lib/speech/speechDocument.js
+function cutWord(word, maxChars) {
+	const parts = [];
+	let part = "";
+	for (const char of word) {
+		if (part.length + char.length > maxChars) {
+			parts.push(part);
+			part = "";
+		}
+		part += char;
+	}
+	if (part) parts.push(part);
+	return parts;
+}
 function splitClause(sentence, maxChars) {
 	if (sentence.length <= maxChars) return [sentence];
-	const clauses = sentence.match(/[^,;:—–-]+(?:[,;:—–-]+|$)/g) || [sentence];
+	const clauses = sentence.split(/(?<=[,;:—–-])\s+/);
 	const out = [];
 	let current = "";
 	for (const clause of clauses) {
@@ -3592,17 +3605,17 @@ function splitClause(sentence, maxChars) {
 			continue;
 		}
 		let line = "";
-		for (const word of clause.split(/\s+/)) if (line && line.length + 1 + word.length > maxChars) {
+		for (const word of clause.split(/\s+/)) for (const part of word.length > maxChars ? cutWord(word, maxChars) : [word]) if (line && line.length + 1 + part.length > maxChars) {
 			wrapped.push(line);
-			line = word;
-		} else line = line ? `${line} ${word}` : word;
+			line = part;
+		} else line = line ? `${line} ${part}` : part;
 		if (line) wrapped.push(line);
 	}
 	return wrapped.length ? wrapped : [sentence];
 }
 function splitSpeakable(text, maxChars = MAX_SPEAKABLE_CHARS) {
 	if (text.length <= maxChars) return [text];
-	const sentences = text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text];
+	const sentences = text.split(/(?<=[.!?])\s+/);
 	const chunks = [];
 	let current = "";
 	for (const sentence of sentences) {

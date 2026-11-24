@@ -211,3 +211,25 @@ test('pieces of a long segment keep the index of the segment they came from', ()
     [0, ...value.segments.slice(1).map(() => 1)])
   assert.equal(value.segments.at(-1).pauseAfterMs, 600)
 })
+
+test('long text is split without rewriting the words it speaks', () => {
+  for (const text of [
+    'Over the last quarter the company reported steady growth across all of its regional markets and divisions. '
+      + 'Revenue rose 3.5 percent to 1,234,567 dollars, according to example.com and the well-known analyst Dr. Smith.',
+    'In the fiscal year the company, which operates in many markets across the region and has grown steadily for a '
+      + 'decade while expanding into adjacent product categories, reported revenue of 1,234,567 dollars and a '
+      + 'well-known margin of 12.5 percent overall',
+  ]) {
+    const pieces = normalizeSpeechInput({ text }).segments.map(({ text: piece }) => piece)
+    assert.ok(pieces.length > 1)
+    assert.ok(pieces.every(piece => piece.length <= 200), JSON.stringify(pieces))
+    assert.equal(pieces.join(' '), text)
+  }
+})
+
+test('a word longer than one generation is cut to the cap without splitting a character', () => {
+  const word = `https://example.com/${'a'.repeat(151)}${'😀'.repeat(60)}`
+  const pieces = normalizeSpeechInput({ text: `Visit ${word} now.` }).segments.map(({ text }) => text)
+  assert.ok(pieces.every(piece => piece.length <= 200 && piece.isWellFormed()), JSON.stringify(pieces))
+  assert.equal(pieces.join('').replaceAll(' ', ''), `Visit${word}now.`)
+})
