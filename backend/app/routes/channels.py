@@ -162,6 +162,9 @@ def update_channel(
   row = _owned_channel(db, owner.id, channel_id)
   if body.url is not None:
     kind = notification_channels.detect_kind(body.url.strip())
+    # No service claims a self-hosted ntfy link; keep the kind chosen for it.
+    if kind == "webhook" and row.kind in ("ntfy", "webhook"):
+      kind = row.kind
     url = notification_channels.check_url(body.url, kind)
     if row.label == notification_channels.KIND_NAMES[row.kind]:
       row.label = notification_channels.KIND_NAMES[kind]

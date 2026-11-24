@@ -181,6 +181,21 @@ def test_replacing_a_link_keeps_the_channel_settings(client, auth, db, sent):
   assert notification_channels.decrypt_url(row.url_encrypted) == DISCORD
 
 
+def test_replacing_a_self_hosted_ntfy_link_keeps_it_ntfy(client, auth, db, sent):
+  app = _app(db, "channel-social-ntfy")
+  channel = _add(client, auth, url="https://ntfy.example.org/alerts", kind="ntfy")
+  patched = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth,
+    json={"url": "https://ntfy.example.org/alerts-v2"},
+  ).json()
+  assert patched["kind"] == "ntfy" and patched["label"] == "ntfy"
+  _notify(client, auth, app)
+  url, payload = sent[-1]
+  assert url == "https://ntfy.example.org/" and payload["topic"] == "alerts-v2"
+  # A link a known service claims still moves the channel to that service.
+  moved = client.patch(f"/api/channels/{channel['id']}", headers=auth, json={"url": SLACK}).json()
+  assert moved["kind"] == "slack" and moved["label"] == "Slack"
+
 def test_a_crafted_link_back_cannot_add_a_mention_or_another_link(client, auth, db, sent):
   social = _app(db, "channel-social-6")
   _add(client, auth, url=SLACK)
