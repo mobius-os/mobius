@@ -382,3 +382,25 @@ def test_new_file_stat_reads_are_bounded_and_report_partial_counts(tmp_path, mon
   (tmp_path / 'large').write_text('a\n' * 100)
   monkeypatch.setattr(project_git, '_DIFF_OUTPUT_MAX', 10)
   assert project_git.project_status(tmp_path)['line_stats']['truncated'] is True
+
+
+def test_project_file_diff_is_independent_of_the_status_summary_limit(tmp_path, monkeypatch):
+  _git(tmp_path, "init", "-b", "main")
+  earlier = tmp_path / "ahead.txt"
+  selected = tmp_path / "target.txt"
+  earlier.write_text("old earlier\n")
+  selected.write_text("old selected\n")
+  _git(tmp_path, "add", "--all")
+  _git(tmp_path, "commit", "-m", "Before changes")
+  earlier.write_text("new earlier\n")
+  selected.write_text("new selected\n")
+  monkeypatch.setattr(project_git, "_CHANGE_LIMIT", 1)
+
+  status = project_git.project_status(tmp_path)
+  assert status["truncated"]
+  assert [change["path"] for change in status["changes"]] == ["ahead.txt"]
+  diff = project_git.project_file_diff(tmp_path, selected)
+  assert diff["status"] == "modified"
+  assert diff["changed_lines"] == [1]
+  assert "+new selected" in diff["patch"]
+  assert "new earlier" not in diff["patch"]

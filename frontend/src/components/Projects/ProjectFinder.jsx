@@ -382,13 +382,14 @@ export default function ProjectFinder({
     () => gitChanges.find(change => change.path === selected) || null,
     [gitChanges, selected],
   )
+  const checkSelectedGitChange = !!selected && (!!selectedGitChange || !!gitStatus?.truncated)
   const gitDiffQuery = useQuery({
     queryKey: source.gitDiffKey(selected || ''),
     queryFn: async ({ signal }) => jsonOrThrow(
       await source.gitDiff(selected, { signal }),
       'File changes failed:',
     ),
-    enabled: !!selected && !!selectedGitChange,
+    enabled: checkSelectedGitChange,
     staleTime: 5_000,
   })
   const previewable = (fileKind === 'text' && (markdownLike || htmlLike || csvLike)) || ['image', 'pdf', 'binary'].includes(fileKind)
@@ -1147,7 +1148,7 @@ export default function ProjectFinder({
                 </div>
               )}
               <div className="project-finder__surface">
-                {fileView === 'changes' ? <ProjectFileDiff query={gitDiffQuery} changed={!!selectedGitChange} dirty={dirty} /> : fileLoading && fileKind === 'none' ? (
+                {fileView === 'changes' ? <ProjectFileDiff query={gitDiffQuery} changed={checkSelectedGitChange && gitDiff?.status !== 'clean'} dirty={dirty} /> : fileLoading && fileKind === 'none' ? (
                   <div className="project-document__empty" role="status"><p>Opening file…</p></div>
                 ) : fileKind === 'text' ? (
                   csvLike && fileView === 'preview' && !windowed ? (
