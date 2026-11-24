@@ -147,3 +147,25 @@ test('a reorder retires both offline shell-list snapshots', async (t) => {
     'https://mobius.test/api/chats',
   ])
 })
+
+test('chat requests keep the chat id inside one path segment', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  const id = '../storage/apps/7/fake-chat.json?'
+  await api.chats.detail(id, { limit: 20, compact: true })
+  await api.chats.update(id, { title: 'x' })
+  await api.chats.setPinned(id, true)
+  await api.chats.remove(id)
+  await api.chats.recover(id)
+  assert.equal(urls.length, 5)
+  for (const url of urls) {
+    assert.equal(new URL(url, 'https://mobius.test').pathname.startsWith(
+      `/api/chats/${encodeURIComponent(id)}`,
+    ), true, url)
+  }
+})

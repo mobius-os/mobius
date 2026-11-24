@@ -1072,7 +1072,7 @@ export const api = {
       if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
-        `/chats/${chatId}${query ? `?${query}` : ''}`,
+        `/chats/${encodeURIComponent(chatId)}${query ? `?${query}` : ''}`,
         { signal, timeoutMs },
       )
     },
@@ -1086,12 +1086,12 @@ export const api = {
         { signal },
       )
     },
-    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
+    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${encodeURIComponent(chatId)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
     setPinned: (chatId, pinned, options) => pinnedResourceMutation(
-      'chats', `/chats/${chatId}`, pinned, options,
+      'chats', `/chats/${encodeURIComponent(chatId)}`, pinned, options,
     ),
     markFailureSeen: (chatId, activityVersion) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
@@ -1113,10 +1113,10 @@ export const api = {
       'chats', `/chats/${encodeURIComponent(chatId)}/unarchive`, { method: 'POST' },
     ),
     remove: (chatId) => listAffectingMutation(
-      'chats', `/chats/${chatId}`, { method: 'DELETE' },
+      'chats', `/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' },
     ),
     recover: (chatId, payload) => listAffectingMutation(
-      'chats', `/chats/${chatId}/recover`, {
+      'chats', `/chats/${encodeURIComponent(chatId)}/recover`, {
         method: 'POST',
         body: payload ? JSON.stringify(payload) : undefined,
       },

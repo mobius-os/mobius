@@ -68,6 +68,23 @@ test('shell intent callbacks keep identity while navTo changes per render', asyn
   ])
 })
 
+test('an in-chat link with a non-id chat does not navigate', () => {
+  const calls = []
+  const { result } = renderHook(useAppIntentNavigation, {
+    appsRef: { current: [] },
+    refreshApps: async () => [],
+    notifyShell: (...args) => calls.push(['notice', ...args]),
+    setAppIntents: () => {},
+    navToRef: { current: (...args) => calls.push(args) },
+    requestComposer: (...args) => calls.push(['composer', ...args]),
+  })
+  result.current.handleChatInternalNav(
+    new URL('https://mobius.test/shell/?chat=..%2Fstorage%2Fapps%2F7%2Ffake-chat.json%3F'),
+    { draft: 'hello' },
+  )
+  assert.deepEqual(calls, [])
+})
+
 test('internal navigation crosses stable markdown memo boundaries', () => {
   const chatView = read('../ChatView.jsx')
   const message = read('../MsgContent.jsx')
