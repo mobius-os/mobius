@@ -966,20 +966,32 @@
     display: none;
   }
 
-  /* The collapsed rail is only as wide as the logo, so the Staging pill
-     shrinks to a dot on the logo's corner. The label stays for screen readers
-     and the hover title. */
+  /* The bar is the size container for the Staging pill. Both the 58px rail and
+     a sidebar dragged narrower than ~304px (the pill would run into search and
+     bell) have no room for the label, so the pill shrinks to a dot: in its own
+     slot beside the wordmark, or on the logo's corner in the rail. The label
+     stays for screen readers and the hover title. */
+  .shell__bar {
+    container: shell-bar / inline-size;
+  }
+
+  @container shell-bar (max-width: 303px) {
+    .shell__launcher-badge {
+      width: 10px;
+      height: 10px;
+      padding: 0;
+      overflow: hidden;
+      font-size: 0;
+      border: 0;
+      background: var(--warning, #f59e0b);
+    }
+  }
+
   .shell:not(.shell--drawer-docked) .shell__launcher-badge {
     position: absolute;
     top: 0;
     left: 21px;
-    width: 10px;
-    height: 10px;
-    padding: 0;
-    overflow: hidden;
-    font-size: 0;
     border: 2px solid var(--bg);
-    background: var(--warning, #f59e0b);
   }
 
   .shell--drawer-docked .shell__bar {

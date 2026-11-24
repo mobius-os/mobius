@@ -539,8 +539,12 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
 test('ShellBrand shows the Staging badge only on the staging launcher side', () => {
   assert.match(shellBrand, /api\.platform\.launcherSide\(\)[\s\S]*?setOnStaging\(value\?\.side === 'staging'\)/)
   assert.match(shellBrand, /\{onStaging && \(\s*<span className="shell__launcher-badge"/)
-  // The collapsed desktop rail is only as wide as the logo, so the pill becomes a dot there.
-  assert.match(shellCss, /\.shell:not\(\.shell--drawer-docked\) \.shell__launcher-badge \{[^}]*font-size: 0;/)
+  // The bar is the size container; with no room for the label (the 58px rail, or a
+  // sidebar under ~304px that would meet search and bell) the pill shrinks to a dot.
+  assert.match(shellCss, /\.shell__bar \{\s*container: shell-bar \/ inline-size;/)
+  assert.match(shellCss, /@container shell-bar \(max-width: 303px\) \{\s*\.shell__launcher-badge \{[^}]*font-size: 0;/)
+  // In the rail the dot sits on the logo's corner; in a narrow sidebar it keeps its own slot.
+  assert.match(shellCss, /\.shell:not\(\.shell--drawer-docked\) \.shell__launcher-badge \{[^}]*position: absolute;/)
 })
 
 test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
