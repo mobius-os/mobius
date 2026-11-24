@@ -29,7 +29,10 @@ _SECTION_HEADING = re.compile(r"^[ \t]*## ", re.MULTILINE)
 
 
 def _as_note_text(value: str) -> str:
-  return _SECTION_HEADING.sub("### ", value.strip())
+  # Readers split lines with str.splitlines(), which also breaks on "\r",
+  # U+2028 and similar. Write only "\n" so a heading cannot hide behind them
+  # and the bound digest fingerprint matches the text readers rebuild.
+  return _SECTION_HEADING.sub("### ", "\n".join(value.strip().splitlines()))
 
 
 def note_path(data_dir: str | Path, chat_id: str) -> Path:
