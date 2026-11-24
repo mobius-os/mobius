@@ -268,6 +268,22 @@ def test_tool_noise_roles_are_not_indexed(db):
   )
 
 
+def test_search_ignores_the_hidden_upload_manifest(db):
+  # The send path appends this server-only file list to the stored user row;
+  # the owner never sees it, so search must neither match nor show it.
+  manifest = (
+    "\n\n[Files in this session:\n"
+    "- okapibudget.xlsx → /data/chats/c1/uploads/okapibudget.xlsx "
+    "(application/vnd.ms-excel, 2 KB) — attached to this message]"
+  )
+  c = _make_chat(db, "Weekly plan", [f"please summarise the okapi numbers{manifest}"])
+
+  assert c.id not in {r["id"] for r in chat_search.search(db, "okapibudget")}
+  assert c.id not in {r["id"] for r in chat_search.search(db, "attached")}
+  hit = next(r for r in chat_search.search(db, "okapi") if r["id"] == c.id)
+  assert hit["snippet"] == "please summarise the okapi numbers"
+
+
 def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):
   c = chat_writer.create_chat(
     id=str(uuid.uuid4()),
