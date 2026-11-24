@@ -784,16 +784,20 @@ export default function ProjectFinder({
     } finally { setBusy(false) }
   }
 
+  function setCsvRows(rows) {
+    setContent(serializeProjectCsv(rows, { bom: content.startsWith('\uFEFF') }))
+  }
+
   function updateCsv(rowIndex, columnIndex, value) {
-    setContent(serializeProjectCsv(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value)))
+    setCsvRows(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value))
   }
 
   function appendCsvRow() {
-    setContent(serializeProjectCsv(addProjectCsvRow(csvRows)))
+    setCsvRows(addProjectCsvRow(csvRows))
   }
 
   function appendCsvColumn() {
-    setContent(serializeProjectCsv(addProjectCsvColumn(csvRows)))
+    setCsvRows(addProjectCsvColumn(csvRows))
   }
 
   async function downloadFile(target = selected) {

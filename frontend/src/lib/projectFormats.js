@@ -10,7 +10,7 @@ function csvGridWidth(rows) {
  * ordinary RFC 4180-style CSV rather than inventing a parallel sheet format.
  */
 export function parseProjectCsv(value) {
-  const source = String(value ?? '')
+  const source = String(value ?? '').replace(/^\uFEFF/, '')
   if (!source) return [['']]
   const rows = []
   let row = []
@@ -42,9 +42,10 @@ function serializeCell(value) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
-export function serializeProjectCsv(rows) {
+export function serializeProjectCsv(rows, { bom = false } = {}) {
   const matrix = Array.isArray(rows) && rows.length ? rows : [['']]
-  return matrix.map(row => (Array.isArray(row) ? row : [row]).map(serializeCell).join(',')).join('\n') + '\n'
+  const text = matrix.map(row => (Array.isArray(row) ? row : [row]).map(serializeCell).join(',')).join('\n') + '\n'
+  return bom ? '\uFEFF' + text : text
 }
 
 export function updateProjectCsvCell(rows, rowIndex, columnIndex, value) {
