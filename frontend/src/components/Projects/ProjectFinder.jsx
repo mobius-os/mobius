@@ -375,8 +375,8 @@ export default function ProjectFinder({
     return DOMPurify.sanitize(String(PROJECT_MARKDOWN.parse(content) || ''))
   }, [content, fileKind, markdownLike])
   const csvRows = useMemo(
-    () => (fileKind === 'text' && csvLike ? parseProjectCsv(content) : []),
-    [content, csvLike, fileKind],
+    () => (fileKind === 'text' && csvLike && !windowed ? parseProjectCsv(content) : []),
+    [content, csvLike, fileKind, windowed],
   )
   const selectedGitChange = useMemo(
     () => gitChanges.find(change => change.path === selected) || null,

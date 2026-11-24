@@ -31,3 +31,13 @@ test('CSV grid mutations preserve a rectangular durable matrix', () => {
   ])
   assert.equal(serializeProjectCsv(rows), 'A,B,\n1,3,\n,,\n')
 })
+
+test('large CSV files parse and add rows without spreading the matrix as arguments', () => {
+  const rows = parseProjectCsv('Header\n' + 'x\n'.repeat(150_000))
+  assert.equal(rows.length, 150_001)
+  assert.deepEqual(rows[0], ['Header'])
+  assert.deepEqual(rows.at(-1), ['x'])
+  const extended = addProjectCsvRow(rows)
+  assert.equal(extended.length, rows.length + 1)
+  assert.deepEqual(extended.at(-1), [''])
+})

@@ -1,3 +1,7 @@
+function csvGridWidth(rows) {
+  return rows.reduce((width, row) => Math.max(width, row.length), 1)
+}
+
 /** Durable spreadsheet helpers for Project Finder's CSV surface.
  *
  * The parser handles quoted commas, embedded newlines, and doubled quotes. It
@@ -29,7 +33,7 @@ export function parseProjectCsv(value) {
   if (cell || row.length || !source.endsWith('\n')) {
     row.push(cell); rows.push(row)
   }
-  const width = Math.max(1, ...rows.map(item => item.length))
+  const width = csvGridWidth(rows)
   return rows.map(item => [...item, ...Array(width - item.length).fill('')])
 }
 
@@ -50,7 +54,7 @@ export function updateProjectCsvCell(rows, rowIndex, columnIndex, value) {
 }
 
 export function addProjectCsvRow(rows) {
-  const width = Math.max(1, ...(rows || []).map(row => row.length))
+  const width = csvGridWidth(rows || [])
   return [...(rows || []), Array(width).fill('')]
 }
 
