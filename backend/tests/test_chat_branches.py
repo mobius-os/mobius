@@ -817,3 +817,32 @@ def test_branch_brings_screenshots_viewed_images_and_long_thinking(client, auth,
   (branch_media / "shot.png").write_bytes(b"edited")
   assert (media / "shot.png").read_bytes() == b"png shot.png"
   assert client.get(f"/api/chats/{branch_id}/thinking-trace/think-1", headers=auth).text == "long thought"
+
+
+def test_seeded_history_leaves_out_the_current_request(client, auth, db, monkeypatch):
+  # The provider receives this turn's message as the request; repeating it
+  # inside the recalled history sends it twice.
+  source_id = _chat(client, auth, db, CONVERSATION)
+  branch_id = client.post(
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
+  ).json()["id"]
+
+  prompt = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")["user_message"]
+
+  block = prompt[prompt.index("<resumed_context>"):prompt.index("</resumed_context>")]
+  assert "Rome or Paris?" in block
+  assert "Paris instead" not in block
+  assert prompt.count("Paris instead") == 1
+
+
+def test_a_long_current_request_does_not_evict_the_seeded_history(client, auth, db, monkeypatch):
+  source_id = _chat(client, auth, db, CONVERSATION)
+  branch_id = client.post(
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
+  ).json()["id"]
+  pasted = "Here is my log:\n" + "ERROR line\n" * 1200  # over the reseed budget
+
+  prompt = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, pasted)["user_message"]
+
+  assert "Rome or Paris?" in prompt
+  assert prompt.count("Here is my log:") == 1

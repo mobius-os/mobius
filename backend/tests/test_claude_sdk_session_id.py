@@ -222,8 +222,9 @@ def test_resumed_context_block_round_trips_transcript(db):
   # Order preserved, oldest-first, with speaker labels.
   i_first = block.index("build me a notes app")
   i_mid = block.index("Done — notes app is live.")
-  i_last = block.index("add tags")
-  assert i_first < i_mid < i_last
+  assert i_first < i_mid
+  # The trailing owner message is this turn's request, sent once as such.
+  assert "add tags" not in block
   assert "USER: build me a notes app" in block
   assert "ASSISTANT: Done" in block
 
@@ -252,7 +253,7 @@ def test_resumed_context_labels_automatic_continuation_as_product_event(db):
     "kind": "auto_continuation",
     "continuation_reason": "restart",
     "content": "continue",
-  }])
+  }, {"role": "assistant", "content": "Continued."}])
   block = _build_resumed_context(row)
 
   assert "AUTOMATIC CONTINUATION (RESTART): continue" in block
@@ -281,7 +282,10 @@ def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
     {"role": "user", "content": "COVERED opening request"},
     {"role": "assistant", "content": "COVERED first answer"},
   ]
-  row = _chat_row(db, covered + [{"role": "user", "content": "TAIL follow-up"}])
+  row = _chat_row(db, covered + [
+    {"role": "user", "content": "TAIL follow-up"},
+    {"role": "assistant", "content": "TAIL answer"},
+  ])
   path = note_path(get_settings().data_dir, row.id)
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(apply_checkpoint(
@@ -297,7 +301,7 @@ def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
   assert "TAIL follow-up" in block
   assert "COVERED first answer" not in block
   # What the digest stands in for stays readable from the originals.
-  assert f"/api/chats/{row.id}?limit=100&before=3" in block
+  assert f"/api/chats/{row.id}?limit=100&before=4" in block
 
 
 def test_resumed_context_truncates_to_budget(db):
@@ -311,7 +315,7 @@ def test_resumed_context_truncates_to_budget(db):
 
   big = "x" * 4000
   msgs = [{"role": "user", "content": f"{i} {big}"} for i in range(40)]
-  msgs.append({"role": "user", "content": "MOST_RECENT marker"})
+  msgs.append({"role": "assistant", "content": "MOST_RECENT marker"})
   block = _build_resumed_context(_chat_row(db, msgs))
   assert block is not None
   assert "MOST_RECENT marker" in block
