@@ -106,6 +106,37 @@ def test_branch_brings_attached_files_and_full_tool_outputs(client, auth, db):
   assert branch.uploads == [{"name": "notes.txt", "claimed": True}]
 
 
+def test_branch_upload_records_point_at_the_branch_copy(client, auth, db):
+  # A real upload records its file's path; the branch's agent is shown that
+  # path, so it must name the branch's own copy, never the source's file.
+  from app.routes.chats_stream import _content_with_uploads
+
+  data_dir = Path(get_settings().data_dir)
+  messages = [
+    {"role": "user", "content": "Read this", "cid": "u1", "ts": 1,
+     "attachments": [{"name": "notes.txt"}]},
+    {"id": "a1", "role": "assistant", "content": "Done", "ts": 2},
+  ]
+  source_id = _chat(client, auth, db, messages)
+  uploaded = client.post(
+    f"/api/chats/{source_id}/uploads",
+    files=[("files", ("notes.txt", b"hello", "text/plain"))], headers=auth,
+  ).json()[0]
+  source = db.query(models.Chat).filter(models.Chat.id == source_id).one()
+  source.uploads = [{**uploaded, "claimed": True}]
+  db.commit()
+
+  branch_id = client.post(
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
+  ).json()["id"]
+
+  db.expire_all()
+  branch = db.query(models.Chat).filter(models.Chat.id == branch_id).one()
+  copied = data_dir / "chats" / branch_id / "uploads" / "notes.txt"
+  assert branch.uploads == [{**uploaded, "claimed": True, "path": str(copied)}]
+  assert f"notes.txt → {copied.resolve()}" in _content_with_uploads(branch, "next")
+
+
 def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text, *, runner=None):
   monkeypatch.setattr("app.providers.ClaudeProvider.check_auth", lambda self, _d: None)
   monkeypatch.setattr("app.providers.ClaudeProvider.ensure_auth", lambda self, _d: asyncio.sleep(0))
