@@ -1,7 +1,7 @@
 """Which chats are rebuilding their context right now, for every viewer.
 
-Manual compaction and provider switches summarize the chat in a disposable
-provider turn that can take minutes while holding the chat's transition lock.
+Manual compaction summarizes the chat in a disposable provider turn that can
+take minutes while holding the chat's transition lock.
 Sends wait behind that lock, so without a shared signal a reloaded tab, another
 pane, or another device sees an idle chat whose new message silently sits in
 flight. This process-local registry is the authority for that window: the
@@ -20,7 +20,7 @@ from typing import Iterator, Literal
 
 from app.broadcast import get_system_broadcast
 
-CompactionKind = Literal["compact", "provider_switch"]
+CompactionKind = Literal["compact"]
 
 _active: dict[str, CompactionKind] = {}
 _guard = threading.Lock()

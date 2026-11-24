@@ -856,7 +856,7 @@ class ChatCompactRequest(BaseModel):
 
 
 class ChatProviderSwitch(BaseModel):
-  """Atomic cross-provider switch prepared by the incoming provider."""
+  """Atomic cross-provider switch, handed over from saved chat state."""
 
   provider: str
 

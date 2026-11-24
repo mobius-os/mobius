@@ -1,15 +1,15 @@
-"""Incoming-provider synthesis for portable cross-provider chat context.
+"""Model-written synthesis of a chat's context for manual compaction.
 
-Native SDK sessions are provider-specific. A Claude session id cannot seed a
-Codex thread, or vice versa, so the provider selected by the owner runs one
-fresh, tool-free synthesis turn over the chat's full ``## Digest``.
-Only that provider-neutral result is stored and replayed into the selected
-provider's first real turn; the disposable synthesis session is never attached
-to the chat.
+When the owner compacts a chat, its provider runs fresh, tool-free synthesis
+turns over the chat's full ``## Digest`` and writes one portable briefing.
+Only that result is stored and replayed into the next fresh session; the
+disposable synthesis session is never attached to the chat. A provider switch
+does not use this module: it hands over saved state without a model call
+(``direct_handover``).
 
 Callers include the visible transcript as a freshness backstop, or its uncovered
 tail when a verified note replaces the prefix. Legacy chats without a note use
-the transcript alone. The route and writer actor own the atomic switch; this
+the transcript alone. The route and writer actor own the atomic commit; this
 module only reads the selected source and produces compacted text.
 """
 
@@ -229,7 +229,7 @@ async def summarize_chat(
   effort: str | None = None,
   custom_instructions: str | None = None,
 ) -> str:
-  """Let the incoming provider synthesize its portable starting context.
+  """Let the chat's provider synthesize a portable starting context.
 
   ``source_digest`` is the preferred, complete ``## Digest`` from the
   per-chat note. The caller supplies the complete visible transcript unless it
@@ -520,8 +520,8 @@ def _provider_compaction_failure(
 ) -> str:
   """Return only fixed, actionable messages for known synthesis refusals.
 
-  The summarizer serves both provider switches and manual /compact, so the
-  wording must hold for either caller.
+  The summarizer serves /compact and manual recovery, so the wording must
+  hold for either caller.
   """
   unchanged = " Your existing conversation is unchanged."
   kind = classify_provider_error(text, status=status, error_type=error_type)
