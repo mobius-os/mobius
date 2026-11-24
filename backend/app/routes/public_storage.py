@@ -192,7 +192,10 @@ def _assert_write(grant: PublicStorageGrant, path: str) -> str:
   if not prefix:
     raise HTTPException(403, "This public surface does not accept writes.")
   normalized = prefix.rstrip("/")
-  if not _within(path, normalized):
+  # Strictly below the prefix: a file AT the prefix would block the area.
+  # A "." segment (from a prefix installed before manifests refused it)
+  # would resolve past the prefix this check sees.
+  if {".", ".."} & set(path.split("/")) or not path.startswith(normalized + "/"):
     raise HTTPException(403, "Path is outside this app's public write area.")
   return normalized
 

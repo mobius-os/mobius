@@ -167,6 +167,44 @@ def test_anonymous_read_write_scoping_cas_and_quota(client, auth, monkeypatch):
   ).status_code == 403
 
 
+def test_anonymous_writes_stay_strictly_under_the_write_prefix(client, auth):
+  """The prefix node itself is not inside the area: a file there would block
+  every later submission."""
+  app = _create(client, auth)
+  assert _publish(client, auth, app["id"]).status_code == 200
+  bearer = {"Authorization": f"Bearer {_public_token(client, app['slug'])}"}
+
+  at_prefix = client.put(
+    "/api/public-storage/public/submissions",
+    content=b"x", headers={**bearer, "Content-Type": "text/plain"},
+  )
+  assert at_prefix.status_code == 403
+  assert client.delete(
+    "/api/public-storage/public/submissions", headers=bearer,
+  ).status_code == 403
+  assert client.put(
+    "/api/public-storage/public/submissions/b1.json",
+    json={"name": "Sam"}, headers=bearer,
+  ).status_code == 204
+  # Reads and listing of the prefix itself stay available.
+  assert client.get(
+    "/api/public-storage", params={"prefix": "public/submissions"},
+    headers=bearer,
+  ).status_code == 200
+
+
+def test_installed_dot_segment_write_prefix_cannot_reach_outside(client):
+  """A grant saved before manifests refused "." must not resolve past it."""
+  from types import SimpleNamespace
+  from fastapi import HTTPException
+  from app.routes.public_storage import _assert_write
+  grant = SimpleNamespace(write_prefix="public/./")
+  with pytest.raises(HTTPException) as refused:
+    _assert_write(grant, "public/./config.json")
+  assert refused.value.status_code == 403
+  assert _assert_write(SimpleNamespace(write_prefix="public/inbox/"), "public/inbox/a.json") == "public/inbox"
+
+
 def test_storage_closed_by_default_and_write_needs_declared_prefix(client, auth):
   # An app that only opts into READ cannot be written anonymously.
   app = _create(client, auth, public_access={"storage": {"read": True}})
