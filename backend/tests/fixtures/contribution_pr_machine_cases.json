@@ -2606,6 +2606,185 @@
     "merge",
     "close"
    ]
+  },
+  {
+   "name": "A finished review of an older version was held back because the PR moved",
+   "rule": "held-back review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "heldReview": {
+     "head": "h1"
+    }
+   },
+   "state": "reviewer.to_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "post_at_reviewed_commit",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "The held-back review is of this very version",
+   "rule": "held-back review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "heldReview": {
+     "head": "h2"
+    }
+   },
+   "state": "reviewer.to_review",
+   "next": "review",
+   "enabled": [
+    "review",
+    "merge",
+    "close"
+   ]
+  },
+  {
+   "name": "A held-back review waits while an agent works on the PR",
+   "rule": "held-back review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": {
+     "kind": "review",
+     "state": "running"
+    },
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "heldReview": {
+     "head": "h1"
+    }
+   },
+   "state": "working",
+   "next": "",
+   "enabled": []
+  },
+  {
+   "name": "A held-back review of a PR that is now closed",
+   "rule": "held-back review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "closed",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "reviewer",
+    "heldReview": {
+     "head": "h1"
+    }
+   },
+   "state": "closed",
+   "next": "",
+   "enabled": []
+  },
+  {
+   "name": "A held-back review is not offered while the PR cannot be read",
+   "rule": "held-back review",
+   "facts": {
+    "author": "sam",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": false,
+    "role": "reviewer",
+    "heldReview": {
+     "head": "h1"
+    }
+   },
+   "state": "unknown",
+   "next": "retry",
+   "enabled": [
+    "retry"
+   ]
+  },
+  {
+   "name": "Your own PR never offers to post a held-back review",
+   "rule": "held-back review",
+   "facts": {
+    "author": "alex",
+    "head": "h2",
+    "lifecycle": "open",
+    "checks": "pass",
+    "mergeable": "yes",
+    "permission": "WRITE",
+    "reviews": [],
+    "openThreads": 0,
+    "myReview": null,
+    "job": null,
+    "result": null,
+    "outbox": null,
+    "readComplete": true,
+    "role": "author",
+    "heldReview": {
+     "head": "h1"
+    }
+   },
+   "state": "author.waiting_review",
+   "next": "",
+   "enabled": [
+    "check_my_pr",
+    "respond",
+    "finish_it",
+    "open_for_review",
+    "back_to_draft",
+    "request_review",
+    "merge",
+    "close"
+   ]
   }
  ]
 }

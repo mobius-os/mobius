@@ -24,6 +24,7 @@ from app import contribution_review_lifecycle as review_lifecycle
 from app import contribution_review_queries as queries
 from app import contribution_review_settle as review_settle
 from app import contribution_review_presets as presets
+from app import contribution_review_held as held
 from app import contribution_review_post_findings as post_findings
 from app import contribution_review_public as public
 from app import contribution_review_repair_actions as repair_actions
@@ -704,6 +705,10 @@ async def _record_failed_live_read(db, row, item_key, body, principal, error):
     outcome.update(state=body.state if posting else "needs_you", live_blocker=str(error.detail))
     if posting:
       outcome["public_review"] = {"state": "not_dispatched", "summary": str(error.detail)}
+    else:
+      # The display state is downgraded to "needs_you", but the reviewed verdict must survive the delivery
+      # failure so "Post it anyway" proposes the judgment the run actually reached, not a request for changes.
+      outcome["reviewed_state"] = body.state
     reviews.save_outcome(db, row, item_key, outcome)
 
 
@@ -831,7 +836,10 @@ async def report_outcome(app_id: int | None, run_id: str, body: ReviewOutcome,
       repo, pull = await asyncio.to_thread(reviews.current_pull, _gh, cwd, target)  # unsettled: read-only (GitHub observation)
     except HTTPException as exc:
       await _record_failed_live_read(db, row, item_key, body, principal, exc)
-      return {"run": _run_view(db, row)}
+      # Say so in the reply itself: the refusal is saved as a private result, and a reply that only carries the run
+      # reads as success to the agent that submitted it.
+      return {"run": _run_view(db, row),
+              "not_posted": held.not_posted_reply(str(exc.detail), target["head_sha"], await held.current_head(_gh, cwd, target))}
     outcome = {**_reported_outcome(previous, body, row, principal),
                "independent_receipt_id": body.independent_receipt_id}
     if attempted:
@@ -1025,7 +1033,8 @@ def _decorate_items(row, value, vectors) -> None:
   saved = row.outcomes_json or {}
   for item in value["items"]:
     item[review_lifecycle.KEY] = vectors[reviews.key(item)]
-    item[ITEM_POST_FINDINGS] = post_findings.offer(saved.get(reviews.key(item)) or {})
+    kept = saved.get(reviews.key(item)) or {}
+    item[ITEM_POST_FINDINGS] = {**post_findings.offer(kept), **held.mark(kept, _proposes_verdict(row))}
 
 
 def _conversation_overlay(db, value, chat, last) -> None:
@@ -1483,6 +1492,33 @@ async def post_findings_now(app_id: int, run_id: str, body: PostFindings, db: Se
     cwd = Path(get_settings().data_dir) / "platform"
     return await post_findings.post(db, row, item_key, target, body.preview_sha256, principal, cwd, gh=_gh,
                                     authorize=lambda: _owner_decision_authority(db, row))
+
+
+class HeldVerdict(PullIdentity):
+  # An owner's tap: a misspelled field must fail loudly, never be ignored.
+  model_config = ConfigDict(extra="forbid")
+
+
+@router.post(APP_PREFIX + "/{app_id}/review-runs/{run_id}/held-verdict",
+             dependencies=[Depends(reject_cross_site), Depends(require_nondelegated_owner_or_app_control)])
+async def propose_held_verdict(app_id: int, run_id: str, body: HeldVerdict, db: Session = Depends(get_db),
+                               principal: Principal = Depends(get_principal)):
+  """The owner's own tap, Post it anyway: save the exact verdict proposal for a review the platform held back because the
+  PR moved, worded with the commit it covered. It sends nothing; the owner then submits it like any other verdict.
+
+  200 {run}; 409 with a plain reason when nothing was proposed. See contribution_review_held.
+  """
+  _require_owner_hands(principal, "Only you can post a held-back review. An agent cannot press Post it anyway.")
+  row = _row(db, app_id, run_id, principal)
+  async with chat_queue.get_transition_lock(f"review-outcome:{run_id}"):
+    _owner_decision_authority(db, row)
+    item_key, target, _item = _saved_item(row, body)
+    cwd = Path(get_settings().data_dir) / "platform"
+    await held.propose(db, row, item_key, target, proposes_verdict=_proposes_verdict(row), gh=_gh, cwd=cwd,
+                       authorize=lambda: _owner_decision_authority(db, row),
+                       job=_pr_job(db, row.owner_id, target["repo"], target["number"], exclude_run_id=row.id, app_id=row.app_id))
+    db.refresh(row)
+    return {"run": _run_view(db, row)}
 
 
 class DirectMerge(PullIdentity):

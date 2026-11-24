@@ -132,12 +132,14 @@ def merge_permission(repo: dict) -> bool:
   )
 
 
-def current_pull(gh, cwd, target):
+def _identical_pull(gh, cwd, target, head_sha):
+  """The selected PR as GitHub shows it now, refused unless it is the same repository, PR, base branch and head
+  repository and branch. ``head_sha`` is the commit it must be at; None accepts any."""
   repo = read(gh, cwd, f"repos/{target['repo']}")
   pull = read(gh, cwd, f"repos/{target['repo']}/pulls/{target['number']}")
   if (repo.get("id") != target["repo_id"]
       or pull.get("node_id") != target["pr_id"]
-      or pull.get("head", {}).get("sha") != target["head_sha"]
+      or (head_sha is not None and pull.get("head", {}).get("sha") != head_sha)
       or pull.get("base", {}).get("ref") != target["base_ref"]
       or (target.get("head_repo_id") is not None and (
         (pull.get("head", {}).get("repo") or {}).get("id") != target["head_repo_id"]
@@ -145,6 +147,16 @@ def current_pull(gh, cwd, target):
         or pull.get("head", {}).get("ref") != target["head_ref"]))):
     raise HTTPException(409, "This pull request no longer matches the approved selection.")
   return repo, pull
+
+
+def current_pull(gh, cwd, target):
+  return _identical_pull(gh, cwd, target, target["head_sha"])
+
+
+def moved_pull(gh, cwd, target):
+  """The same pull request at whatever head it has now: the proof for a review of an older version the owner chose to send
+  anyway. Everything but the head must still match, and the review is posted against the commit it covered."""
+  return _identical_pull(gh, cwd, target, None)
 
 
 def selected_pull(gh, cwd, target):
@@ -822,6 +834,8 @@ AGENT_SUBMITS_NOTE = ("The owner chose, when starting this review, to let its ve
   "tap: right after you send publish:true the server submits that proposal itself (never on the owner's own PR). "
   "That choice is the owner's approval of this review's verdict, so send it without asking again in chat or "
   "showing the text first. If it could not be sent, it waits for the owner in Contribute; never retry it. ")
+NOT_POSTED_RULE = ("If the reply to /outcomes carries not_posted, nothing was proposed or posted: tell the owner what it "
+  "says, plainly, and end your turn. Do not retry it. ")
 NOTES_ONLY_RULE = ("Ask for changes only when a finding must be fixed before this PR merges. When every finding "
   "is a small note, add \"blocking\": false to that needs_you outcome: the same findings then go out as a plain "
   "comment, not a change request. ")
@@ -861,10 +875,12 @@ def brief(row):
     "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
     "never only a private note. " + NOTES_ONLY_RULE
     + "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
+    + NOT_POSTED_RULE
   ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
+    + NOT_POSTED_RULE
   )
   public_note = ((
     publish_rule +
