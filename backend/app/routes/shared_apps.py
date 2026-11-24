@@ -19,7 +19,10 @@ from sqlalchemy.orm import Session
 from app import auth, models, project_builders
 from app.config import get_settings
 from app.database import get_db
-from app.deps import SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site
+from app.deps import (
+  SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site,
+  require_nondelegated_owner_control,
+)
 from app.path_utils import validate_path_within_base
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.shared_app_retention import owned_snapshot_root
@@ -83,6 +86,8 @@ def _require_membership_administration(principal: SharedAppPrincipal) -> None:
   # Browser guests cannot create independent access that escapes their grant.
   if principal.browser is not None:
     raise HTTPException(403, "Only the installation owner can change shared access.")
+  # Delegated helpers are refused here as they are for project invites.
+  require_nondelegated_owner_control(principal)
 
 
 def _invite_hash(secret: str) -> str:
