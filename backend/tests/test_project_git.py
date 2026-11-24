@@ -337,6 +337,38 @@ def test_applied_source_status_distinguishes_clean_commits_from_deployment(tmp_p
   assert project_git.applied_source_status(root, 'a' * 40, project_git.project_status(root)) == {'state': 'unknown'}
 
 
+def test_nested_artifacts_folders_are_reviewable_source(client, auth, db):
+  project = client.post('/api/projects', headers=auth, json={'name': 'Nested', 'template_id': 'blank'}).json()
+  root = _project_root(db, project)
+  nested = ('src/artifacts/config.js', 'components/artifacts/Card.jsx')
+  for relative in (*nested, 'artifacts/site/index.html'):
+    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+    (root / relative).write_text('v1\n')
+  _git(root, 'init', '-b', 'main')
+  _git(root, 'add', '-f', '.')
+  _git(root, 'commit', '-m', 'Accepted')
+  accepted = _git(root, 'rev-parse', 'HEAD')
+  for relative in (*nested, 'artifacts/site/index.html'):
+    (root / relative).write_text('v2\n')
+
+  status = client.get(f"/api/projects/{project['id']}/git/status", headers=auth).json()
+  rows = {row['path']: row['status'] for row in status['changes']}
+  assert rows == {relative: 'modified' for relative in nested}
+  for relative in nested:
+    diff = client.get(f"/api/projects/{project['id']}/git/diff?path={relative}", headers=auth).json()
+    assert diff['status'] == 'modified'
+    assert (diff['additions'], diff['deletions']) == (1, 1)
+
+  def state():
+    return project_git.applied_source_status(root, accepted, project_git.project_status(root))['state']
+  assert state() == 'pending'
+  for relative in nested:
+    (root / relative).write_text('v1\n')
+  # Only the root build-output folder differs now, and it stays out of review.
+  assert project_git.project_status(root)['changes'] == []
+  assert state() == 'current'
+
+
 def test_status_line_counts_and_unified_patches_include_new_deleted_and_binary_files(tmp_path):
   root = tmp_path
   _git(root, 'init', '-b', 'main')

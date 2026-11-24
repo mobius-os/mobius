@@ -362,7 +362,9 @@ def get_app_source_git_status(
   db: Session = Depends(get_db),
 ):
   _app, root = _app_source_root(db, app_id)
-  return project_git.project_status(root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
+  return project_git.project_status(
+    root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS, hidden_root_dirs=frozenset(),
+  )
 
 
 @router.get("/{app_id}/source/git/diff")
@@ -382,6 +384,7 @@ def get_app_source_git_diff(
       raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
     root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+    hidden_root_dirs=frozenset(),
   )
 
 

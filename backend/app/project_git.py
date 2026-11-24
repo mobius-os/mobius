@@ -22,6 +22,10 @@ _STATUS_OUTPUT_MAX = 512 * 1024
 _DIFF_OUTPUT_MAX = 1024 * 1024
 _CHANGE_LIMIT = 1000
 _LINE_LIMIT = 5000
+# Only the project-root `artifacts/` folder is managed build output: the file
+# tree and commit staging (`:(exclude)artifacts`) reserve that one folder, so a
+# nested `src/artifacts/` is ordinary, reviewable source.
+_PROJECT_HIDDEN_ROOT_DIRS = frozenset({"artifacts"})
 _HUNK_RE = re.compile(
   r"^@@ -(?P<old_start>\d+)(?:,(?P<old_count>\d+))? "
   r"\+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@",
@@ -441,6 +445,7 @@ def _project_relative(
   context: _GitContext,
   repo_path: str,
   hidden_dirs: frozenset[str],
+  hidden_root_dirs: frozenset[str] = frozenset(),
 ) -> str | None:
   value = PurePosixPath(repo_path)
   if context.scope == ".":
@@ -452,6 +457,8 @@ def _project_relative(
       return None
   path = relative.as_posix()
   if not path or path == "." or any(part in hidden_dirs for part in relative.parts):
+    return None
+  if relative.parts[0] in hidden_root_dirs:
     return None
   return path
 
@@ -483,7 +490,8 @@ def _branch_and_head(context: _GitContext) -> tuple[str | None, str | None]:
 def project_status(
   root: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  hidden_dirs: frozenset[str] = frozenset(),
+  hidden_root_dirs: frozenset[str] = _PROJECT_HIDDEN_ROOT_DIRS,
 ) -> dict:
   """Return repository identity and working changes confined to ``root``."""
   context = _discover(root)
@@ -522,7 +530,7 @@ def project_status(
       continue
     record = raw.decode("utf-8", "replace")
     code_value = record[:2]
-    path = _project_relative(context, record[3:], hidden_dirs)
+    path = _project_relative(context, record[3:], hidden_dirs, hidden_root_dirs)
     if path is None:
       continue
     status = _status_name(code_value)
@@ -537,7 +545,7 @@ def project_status(
       truncated = True
   changes.sort(key=lambda row: row["path"].lower())
   branch, head = _branch_and_head(context)
-  line_stats = _status_line_stats(context, changes, hidden_dirs)
+  line_stats = _status_line_stats(context, changes, hidden_dirs, hidden_root_dirs)
   return {
     "line_stats": line_stats,
     "available": True,
@@ -597,7 +605,8 @@ def project_file_diff(
   root: Path,
   target: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  hidden_dirs: frozenset[str] = frozenset(),
+  hidden_root_dirs: frozenset[str] = _PROJECT_HIDDEN_ROOT_DIRS,
 ) -> dict:
   """Return compact line annotations for one confined Project file."""
   context = _discover(root)
@@ -614,7 +623,9 @@ def project_file_diff(
   relative = target.resolve().relative_to(context.root).as_posix()
   status_row = next(
     (
-      row for row in project_status(root, hidden_dirs=hidden_dirs)["changes"]
+      row for row in project_status(
+        root, hidden_dirs=hidden_dirs, hidden_root_dirs=hidden_root_dirs,
+      )["changes"]
       if row["path"] == relative
     ),
     None,
@@ -686,7 +697,14 @@ def project_file_diff(
   }
 
 
-def applied_source_status(root: Path, accepted_commit: str | None, status: dict) -> dict:
+def applied_source_status(
+  root: Path,
+  accepted_commit: str | None,
+  status: dict,
+  *,
+  hidden_dirs: frozenset[str] = frozenset(),
+  hidden_root_dirs: frozenset[str] = _PROJECT_HIDDEN_ROOT_DIRS,
+) -> dict:
   """Compare saved source with the accepted build, not merely with local HEAD.
 
   A local commit is not a deployment. Unknown baselines and bounded read failures
@@ -705,7 +723,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   )
   if code != 0 or truncated:
     return unknown
-  changed = any(_project_relative(context, path.decode("utf-8", "replace"), frozenset({"artifacts"}))
+  changed = any(_project_relative(context, path.decode("utf-8", "replace"), hidden_dirs, hidden_root_dirs)
                 for path in output.split(b"\0") if path)
   # Git diff omits new, untracked source files. The existing bounded status read
   # already includes them and applies the Project's source visibility boundary.
@@ -713,7 +731,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   return {"state": "pending" if changed or added else "current"}
 
 
-def _status_line_stats(context, changes, hidden_dirs) -> dict:
+def _status_line_stats(context, changes, hidden_dirs, hidden_root_dirs) -> dict:
   """One bounded numstat read plus a shared read budget for untracked text."""
   code, output, truncated = _run_git(
     context.repo, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "HEAD", "--", context.scope,
@@ -723,7 +741,7 @@ def _status_line_stats(context, changes, hidden_dirs) -> dict:
     fields = record.split(b"\t", 2)
     if len(fields) != 3:
       continue
-    path = _project_relative(context, fields[2].decode("utf-8", "replace"), hidden_dirs)
+    path = _project_relative(context, fields[2].decode("utf-8", "replace"), hidden_dirs, hidden_root_dirs)
     if path is None:
       continue
     binary = fields[0] == b"-"
