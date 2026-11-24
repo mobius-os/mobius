@@ -138,6 +138,28 @@ def schedule_choice_rollback(app_id: int):
     raise
 
 
+@contextmanager
+def preserved_schedule_declaration(app_id: int):
+  """Keep the durable schedule files across a wipe of the app's data tree.
+
+  They live under ``/data/apps/<id>/schedule``; clearing app data keeps cron,
+  and without them reconciliation loses the schedule's timezone identity.
+  """
+  saved = []
+  for name in (_SCHEDULE_CHOICE_FILE, "init-cron.sh"):
+    path = schedule_state_dir(app_id) / name
+    try:
+      saved.append((path, path.read_bytes(), path.stat().st_mode & 0o7777))
+    except FileNotFoundError:
+      continue
+  try:
+    yield
+  finally:
+    for path, data, mode in saved:
+      path.parent.mkdir(parents=True, exist_ok=True)
+      _restore_schedule_file(path, data, mode)
+
+
 def read_schedule_choice(app_id: int) -> ScheduleChoice | None:
   try:
     raw = json.loads(

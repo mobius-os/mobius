@@ -339,3 +339,32 @@ def test_a_failing_rollback_never_replaces_the_original_error(monkeypatch):
         source="owner", cron="0 3 * * *", job="fetch.sh",
       ))
       raise RuntimeError("registration failed")
+
+
+def test_clearing_app_data_keeps_its_wall_clock_schedule(
+  client, auth, db, scheduled_app, tmp_path, monkeypatch,
+):
+  """Clear data keeps cron, so a reconcile afterwards must not downgrade the
+  every-minute wall-clock gate into a real every-minute job."""
+  _fake_crontab(tmp_path, monkeypatch)
+  monkeypatch.setenv(
+    "MOBIUS_APP_BASE", str(Path(get_settings().data_dir) / "apps"),
+  )
+  saved = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "0 5 * * *", "job": "fetch.sh",
+          "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert saved.status_code == 200, saved.text
+  choice = app_cron.read_schedule_choice(scheduled_app.id)
+
+  wiped = client.delete(f"/api/apps/{scheduled_app.id}/data", headers=auth)
+  assert wiped.status_code == 204, wiped.text
+
+  from app.routes.app_schedules import reconcile_app_cron_supervision
+  _count, warnings, _ready = reconcile_app_cron_supervision(db)
+  live = (tmp_path / "crontab.txt").read_text()
+  assert warnings == []
+  assert "--wall-clock Europe/Belgrade" in live, live
+  assert app_cron.read_schedule_choice(scheduled_app.id) == choice

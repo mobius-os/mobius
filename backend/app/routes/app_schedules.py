@@ -159,6 +159,17 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
   return None
 
 
+def _has_live_wall_clock_gate(source_dir: Path, live_crontab: str) -> bool:
+  """Whether a live supervised entry for this app is a ``--wall-clock`` gate."""
+  needle = f"{str(source_dir).rstrip('/')}/"
+  return any(
+    app_cron.is_supervised_crontab_entry(line)
+    and app_cron.crontab_command_path(line).startswith(needle)
+    and "--wall-clock" in line.split()
+    for line in live_crontab.splitlines()
+  )
+
+
 def _is_orphaned_supervised_entry(line: str, apps_root: Path, runtime_roots: dict[Path, Path] | None = None) -> bool:
   """True when `line` is a supervised app entry whose job script is gone.
 
@@ -323,6 +334,14 @@ def reconcile_app_cron_supervision(
       declaration = _app_zone_declaration(app)
     except (OSError, RuntimeError, ValueError) as exc:
       warnings.append(f"app {app.id}: {exc}")
+      rejected_sources.add(resolved_source)
+      continue
+    if declaration is None and _has_live_wall_clock_gate(source_dir, live_crontab):
+      # The gate's every-minute cadence is not the schedule: without its
+      # declaration, re-registering it would run the job every minute.
+      warnings.append(
+        f"app {app.id}: wall-clock schedule has no timezone declaration"
+      )
       rejected_sources.add(resolved_source)
       continue
     try:

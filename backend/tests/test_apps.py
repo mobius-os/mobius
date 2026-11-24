@@ -757,6 +757,42 @@ def test_reconcile_fails_closed_on_malformed_zone_declaration(
   register.assert_not_called()
 
 
+def test_reconcile_never_downgrades_a_wall_clock_gate_without_declaration(
+  client, auth, db,
+):
+  """A live wall-clock gate whose declaration is gone (cleared app data, or an
+  app deleting its schedule folder) is disabled, never re-registered as an
+  every-minute job."""
+  source_dir = Path(get_settings().data_dir) / "apps" / "memory"
+  source_dir.mkdir(parents=True)
+  (source_dir / "fetch.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+  app_id = create_local_app(
+    client, _service_auth(), name="Memory", description="test",
+    source_dir=source_dir,
+  )["id"]
+  gate = (
+    f"* * * * * python3 /app/scripts/app-job-runner.py --scheduled "
+    f"--wall-clock Europe/Belgrade 0\\ 5\\ \\*\\ \\*\\ \\* "
+    f"{app_id} {source_dir}/fetch.sh"
+  )
+  owner_line = "0 1 * * * /usr/local/bin/owner-backup"
+
+  from app.routes import app_schedules as apps_module
+  with patch(
+    "app.app_cron.read_crontab", return_value=f"{gate}\n{owner_line}\n",
+  ), \
+       patch("app.app_cron.write_crontab", return_value=True) as write, \
+       patch("app.app_cron.register_cron") as register:
+    count, warnings, infrastructure_ready = apps_module.reconcile_app_cron_supervision(db)
+
+  assert count == 0
+  assert len(warnings) == 1
+  assert "no timezone declaration" in warnings[0]
+  assert infrastructure_ready is True
+  write.assert_called_once_with(f"{owner_line}\n")
+  register.assert_not_called()
+
+
 def test_reconcile_blocks_cron_when_rejected_entry_cannot_be_disabled(
   client, auth, db,
 ):
