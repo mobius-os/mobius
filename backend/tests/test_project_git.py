@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app import models
 from app import project_git
 
@@ -278,6 +280,39 @@ def test_github_remote_flow_reviews_pushes_and_fast_forward_pulls(
   pulled = project_git.pull_project(root, pushed["head"])
   assert pulled["behind"] == 0
   assert (root / "README.md").read_text() == "from GitHub\n"
+
+
+def test_project_push_uses_the_branch_reviewed_in_remote_status(tmp_path, monkeypatch):
+  _git(tmp_path, "init", "-b", "main")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Remote base")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Reviewed change")
+  _git(tmp_path, "remote", "add", "origin", "https://github.com/example/project.git")
+  _git(tmp_path, "update-ref", "refs/remotes/origin/release", "HEAD^")
+  _git(tmp_path, "branch", "--set-upstream-to=origin/release", "main")
+  commands = []
+  monkeypatch.setattr(project_git, "_run_git_write", lambda root, *args, **kw: commands.append(args))
+  status = project_git.project_remote_status(tmp_path)
+  assert status["upstream"] == "origin/release"
+  assert status["ahead"] == 1
+
+  project_git.push_project(tmp_path, status["head"])
+
+  assert commands[-1] == ("push", "origin", "refs/heads/main:refs/heads/release")
+
+
+def test_project_push_refuses_a_local_upstream_that_looks_like_origin(tmp_path, monkeypatch):
+  _git(tmp_path, "init", "-b", "main")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Base")
+  _git(tmp_path, "branch", "origin/release")
+  _git(tmp_path, "branch", "--set-upstream-to=origin/release", "main")
+  _git(tmp_path, "remote", "add", "origin", "https://github.com/example/project.git")
+  writes = []
+  monkeypatch.setattr(project_git, "_run_git_write", lambda root, *args, **kw: writes.append(args))
+
+  with pytest.raises(project_git.GitProjectError, match="Track a branch on the connected"):
+    project_git.push_project(tmp_path)
+
+  assert writes == []
 
 
 def test_project_remote_routes_keep_network_actions_owner_confirmed(

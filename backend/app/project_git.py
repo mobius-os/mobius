@@ -178,11 +178,11 @@ def connect_github_remote(root: Path, repository: str) -> dict:
 
 def _remote_tracking_ref(context: _GitContext, branch: str) -> str | None:
   code, output, _truncated = _run_git(
-    context.repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
+    context.repo, "rev-parse", "--symbolic-full-name",
     "@{upstream}", limit=1024,
   )
   if code == 0 and output.strip():
-    return output.decode("utf-8", "replace").strip()
+    return output.decode("utf-8", "replace").strip().removeprefix("refs/remotes/")
   candidate = f"refs/remotes/origin/{branch}"
   code, _output, _truncated = _run_git(
     context.repo, "show-ref", "--verify", "--quiet", candidate, limit=128,
@@ -318,19 +318,26 @@ def push_project(root: Path, expected_head: str | None = None) -> dict:
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   if not status["connected"]:
     raise GitProjectError("Connect a GitHub repository before pushing.")
-  if not status["branch"]:
+  branch = status["branch"]
+  if not branch:
     raise GitProjectError("Switch to a named branch before pushing.")
+  upstream = status["upstream"]
+  if upstream and not upstream.startswith("origin/"):
+    raise GitProjectError("Track a branch on the connected GitHub remote before pushing.")
+  destination = upstream.removeprefix("origin/") if upstream else branch
   _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
-  status = project_remote_status(root)
-  if status["behind"]:
+  refreshed = project_remote_status(root)
+  if (
+    refreshed["branch"] != branch
+    or refreshed["head"] != status["head"]
+    or refreshed["upstream"] not in (upstream, f"origin/{destination}")
+  ):
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
+  if refreshed["behind"]:
     raise GitProjectError("GitHub has newer commits. Pull and review them before pushing.")
-  if status["upstream"]:
-    _run_git_write(context.repo, "push", "origin", status["branch"], timeout=60)
-  else:
-    _run_git_write(
-      context.repo, "push", "--set-upstream", "origin", status["branch"],
-      timeout=60,
-    )
+  refspec = f"refs/heads/{branch}:refs/heads/{destination}"
+  args = ("push", "origin") if refreshed["upstream"] else ("push", "--set-upstream", "origin")
+  _run_git_write(context.repo, *args, refspec, timeout=60)
   return project_remote_status(root)
 
 
