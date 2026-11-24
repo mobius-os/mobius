@@ -6108,3 +6108,55 @@ def test_wedged_codex_turn_is_reported_not_stopped():
     return await active.stop(timeout=0.2)
 
   assert asyncio.run(_scenario()) is False
+
+
+def test_command_output_deltas_are_marked_as_pieces(monkeypatch):
+  """Only CommandExecutionOutputDelta pieces carry output_delta, so reducers
+  append them while every other tool_output keeps replacing."""
+  class CommandExecutionOutputDeltaNotification:
+    def __init__(self, item_id: str, delta: str):
+      self.item_id = item_id
+      self.delta = delta
+
+  turn_handle = _FakeTurnHandle(
+    notifications=[
+      SimpleNamespace(
+        method="item/commandExecution/outputDelta",
+        payload=CommandExecutionOutputDeltaNotification("cmd-1", chunk),
+      )
+      for chunk in ("first\n", "second\n")
+    ],
+    stream_exc=RuntimeError("stream ended"),
+  )
+  thread = _FakeThread("thread-1", turn_handle)
+
+  class FakeAsyncCodex:
+    def __init__(self, config=None):
+      self.config = config
+
+    async def __aenter__(self):
+      return self
+
+    async def __aexit__(self, _exc_type, _exc, _tb):
+      return None
+
+    async def thread_start(self, *_args, **_kwargs):
+      return thread
+
+  sdk = _fake_sdk(FakeAsyncCodex)
+  sdk["CommandExecutionOutputDeltaNotification"] = (
+    CommandExecutionOutputDeltaNotification
+  )
+  monkeypatch.setattr(codex_sdk_runner, "_sdk_imports", lambda: sdk)
+  bc = _FakeBroadcast()
+  asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
+    user_message="run tests", session_id=None, base_env={}, cwd="/tmp",
+    chat_id="chat-1", bc=bc, pending_questions={}, db=None,
+  ))
+
+  assert [e for e in bc.events if e.get("type") == "tool_output"] == [
+    {"type": "tool_output", "content": "first\n", "tool_use_id": "cmd-1",
+     "output_delta": True},
+    {"type": "tool_output", "content": "second\n", "tool_use_id": "cmd-1",
+     "output_delta": True},
+  ]

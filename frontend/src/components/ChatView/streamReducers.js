@@ -585,20 +585,27 @@ function openToolLifecycleIndex(items, toolUseId = null) {
   return -1
 }
 
+// Matches backend events.TOOL_OUTPUT_INLINE_THRESHOLD: the live tail kept for
+// a running command's appended output pieces.
+const LIVE_TOOL_OUTPUT_TAIL = 4096
+
 /**
- * Applies a `tool_output` event. Replace-semantics on purpose:
- * Codex publishes per-delta outputs that each carry the full text so
- * far, and the completed event carries the final aggregate — both
- * backend (events.process_event) and this reducer overwrite rather
- * than append. Output aimed at an absorbed question is swallowed:
- * the answered card already shows the same content as the
- * "Your questions have been answered" echo.
+ * Applies a `tool_output` event. A piece marked `output_delta` (Codex
+ * command output, streamed as new chunks rather than the text so far)
+ * is appended, keeping a bounded tail. Every other output — including
+ * the completed event's full aggregate — replaces, exactly as
+ * backend events.process_event does. Output aimed at an absorbed
+ * question is swallowed: the answered card already shows the same
+ * content as the "Your questions have been answered" echo.
  */
 export function attachToolOutput(prev, content, event = null) {
   const i = openToolLifecycleIndex(prev, event?.tool_use_id)
   if (i === -1 || prev[i].type === 'question') return prev
   const updated = [...prev]
-  const block = { ...updated[i], output: content }
+  const output = event?.output_delta === true
+    ? `${updated[i].output || ''}${content || ''}`.slice(-LIVE_TOOL_OUTPUT_TAIL)
+    : content
+  const block = { ...updated[i], output }
   // The backend reduces large output before it reaches either SSE or
   // persistence. Preserve the reduction metadata on the live item too, so an
   // expanded tool can fetch its stashed full text immediately instead of
