@@ -113,37 +113,35 @@ export default class ErrorBoundary extends Component {
   // Recovery reload shared by auto-heal and the manual refresh: escape a stale
   // generation through the SW handoff, reloading via applyRecoveryReload.
   // Resolves true when a newer generation was found and a reload was initiated.
-  recoverReload = (context) => reloadIfGenerationStale({
+  recoverReload = (context, { automatic = false } = {}) => reloadIfGenerationStale({
     serviceWorker: safeServiceWorker(),
-    reload: () => this.applyRecoveryReload(context),
+    beforeReload: () => this.recordRecoveryReload(context) || !automatic,
+    reload: this.applyRecoveryReload,
   })
 
   selfHealIfStale = async () => {
     const context = this.crashContext
     let healing = false
     try {
-      healing = await this.recoverReload(context)
+      healing = await this.recoverReload(context, { automatic: true })
     } catch {
       healing = false
     }
-    // No newer generation: the running build itself is broken. Drop the
-    // "updating" state and show the recovery panel (manual refresh + ask agent).
+    // No safe automatic reload: drop "updating" and show the recovery panel.
     // The identity guard skips this if a newer crash has since replaced context.
     if (!healing && this.crashContext === context) {
       this.setState({ selfHealing: false }, () => this.headingRef?.focus())
     }
   }
 
-  // Single reload executor for both auto-heal and the manual refresh button:
-  // record the attempt (loop guard for a repeat crash), notify the owning
-  // surface, then reload through the ordinary launch cover.
-  applyRecoveryReload = (context) => {
-    if (context) {
-      writeRefreshedRecoveryAttempt({
-        surfaceKey: context.surfaceKey,
-        fingerprint: context.fingerprint,
-      })
-    }
+  // An automatic reload needs a durable loop guard. A manual refresh remains
+  // available even in browsers that deny access to session storage.
+  recordRecoveryReload = (context) => context && writeRefreshedRecoveryAttempt({
+    surfaceKey: context.surfaceKey,
+    fingerprint: context.fingerprint,
+  })
+
+  applyRecoveryReload = () => {
     this.props.onReset?.()
     window.location.reload()
   }
@@ -155,7 +153,10 @@ export default class ErrorBoundary extends Component {
     // Escape a stale generation if one exists; otherwise honor the refresh with a
     // plain reload. A blind reload alone can be answered by the outgoing worker's
     // precache and land back on the same stale bundle.
-    if (!(await this.recoverReload(context))) this.applyRecoveryReload(context)
+    if (!(await this.recoverReload(context))) {
+      this.recordRecoveryReload(context)
+      this.applyRecoveryReload()
+    }
   }
 
   render() {

@@ -25,6 +25,32 @@ function memoryStorage() {
   }
 }
 
+test('recovery stays usable when the browser throws on the sessionStorage getter', async () => {
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage')
+  Object.defineProperty(globalThis, 'sessionStorage', {
+    configurable: true,
+    get() { throw new DOMException('Storage denied', 'SecurityError') },
+  })
+  try {
+    const context = { surfaceKey: 'chat:blocked-storage', fingerprint: 'crash' }
+    assert.equal(readErrorRecoveryAttempt(context), null)
+    assert.equal(writeErrorRecoveryAttempt({ ...context, phase: 'refreshed' }), false)
+    assert.equal(writeRefreshedRecoveryAttempt(context), false)
+    const result = await runAgentRepair({
+      ...context,
+      client: { chats: {
+        create: async () => ({ ok: true, json: async () => ({ id: 'repair' }) }),
+        send: async () => ({ ok: true }),
+      } },
+      prompt: 'Diagnose the crash.',
+    })
+    assert.equal(result.chatId, 'repair')
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'sessionStorage', original)
+    else delete globalThis.sessionStorage
+  }
+})
+
 test('temporary update repair freezes its agent and starts a Goal, ordinary repairs do neither', async () => {
   for (const temporary of [false, true]) {
     const created = [], sent = []
