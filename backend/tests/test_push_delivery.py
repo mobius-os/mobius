@@ -200,3 +200,77 @@ def test_chat_presence_suppresses_only_chat_sources_not_app_sources(
 
   asyncio.run(go())
   assert [payload["title"] for payload in sent] == ["App message"]
+
+
+def test_web_push_request_fits_the_push_service_limit(db, auth, monkeypatch):
+  """Push services refuse an encrypted request over 4096 bytes (413), so the
+  body, then the title, is shortened to fit; every other field is untouched."""
+  import base64
+  import json
+  import os
+
+  import http_ece
+  import pywebpush
+  from cryptography.hazmat.primitives import serialization
+  from cryptography.hazmat.primitives.asymmetric import ec
+  from py_vapid import Vapid
+
+  from app import push
+
+  vapid = Vapid()
+  vapid.generate_keys()
+  monkeypatch.setattr(push, "_vapid", vapid)
+  receiver = ec.generate_private_key(ec.SECP256R1())
+  auth_secret = os.urandom(16)
+
+  def b64(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+  owner = db.query(models.Owner).first()
+  owner_id = owner.id
+  db.add(models.PushSubscription(
+    id="sub-size", owner_id=owner_id, endpoint="https://push.example/sub-size",
+    p256dh=b64(receiver.public_key().public_bytes(
+      serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint,
+    )),
+    auth=b64(auth_secret),
+  ))
+  db.commit()
+  requests_sent = []
+
+  class Response:
+    status_code, reason, text, headers = 201, "Created", "", {}
+
+  def push_service(endpoint, timeout=None, data=None, headers=None, **_kwargs):
+    requests_sent.append(data)
+    return Response()
+
+  monkeypatch.setattr(pywebpush.requests, "post", push_service)
+  target = "/shell/?chat=chat-size"
+  for title, body in [
+    ("Build finished", "x" * 4000),
+    ("Party", "\U0001F389" * 400),
+    ("新消息", "你" * 700),
+  ]:
+    requests_sent.clear()
+    notification_id = notify_owner(
+      db, owner_id, title=title, body=body, source_type="agent",
+      source_id="chat-size", target=target, tag="thread",
+    )
+    assert len(requests_sent) == 1
+    assert len(requests_sent[0]) <= 4096, len(requests_sent[0])
+    delivered = json.loads(http_ece.decrypt(
+      requests_sent[0], private_key=receiver, auth_secret=auth_secret,
+    ))
+    assert delivered["title"] == title
+    if len(body.encode()) < 4000:
+      # Sent as UTF-8, not \u escapes, the whole text fits.
+      assert delivered["body"] == body
+    else:
+      assert delivered["body"].endswith("…")
+      assert body.startswith(delivered["body"][:-1])
+    assert delivered["id"] == notification_id
+    assert delivered["target"] == target
+    assert delivered["tag"] == "agent:chat-size:thread"
+    # The full text stays in the owner's history.
+    assert db.get(models.Notification, notification_id).body == body

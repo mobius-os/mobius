@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 
 import httpx
 
@@ -88,7 +89,20 @@ def fit_notification(
   """
   title = _clip(title, MAX_TITLE_CHARS)
   body = _clip(body, MAX_BODY_CHARS)
-  while (excess := _payload_bytes(title, body, data) - MAX_PAYLOAD_BYTES) > 0:
+  return fit_text(
+    title, body, lambda t, b: _payload_bytes(t, b, data), MAX_PAYLOAD_BYTES,
+  )
+
+
+def fit_text(
+  title: str, body: str, measure: Callable[[str, str], int], max_bytes: int,
+) -> tuple[str, str]:
+  """Shorten body, then title, until ``measure(title, body)`` fits.
+
+  ``measure`` returns the encoded size, in which every character of either
+  text takes at least one byte. At least the title's first character stays.
+  """
+  while (excess := measure(title, body) - max_bytes) > 0:
     if body:
       body = _shrink(body, excess, keep=0)
     elif len(title) > 2:
