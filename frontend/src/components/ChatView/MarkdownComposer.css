@@ -1,5 +1,6 @@
 /* Inline editor geometry stays inside the composer's existing room and theme. */
 .chat__input.chat__markdown-input {
+  --composer-link-text: light-dark(#075cac, #339cff);
   padding: 0;
   min-width: 0;
   overflow: hidden;
@@ -44,13 +45,39 @@
 .chat__markdown-input .cm-md-strong { font-weight: 700; }
 .chat__markdown-input .cm-md-emphasis { font-style: italic; }
 .chat__markdown-input .cm-md-strike { text-decoration: line-through; }
-.chat__markdown-input .cm-md-heading { font-weight: 700; }
-.chat__markdown-input .cm-md-heading-1 { font-size: 1.3em; }
-.chat__markdown-input .cm-md-heading-2 { font-size: 1.15em; }
+.chat__markdown-input .cm-md-heading { font-weight: 650; line-height: max(1.15em, 1.55rem); }
+.chat__markdown-input .cm-md-heading-1 { font-size: 1.25em; }
+.chat__markdown-input .cm-md-heading-2 { font-size: 1.125em; }
+.chat__markdown-input .cm-md-heading-3 { font-size: 1.0625em; }
 .chat__markdown-input .cm-md-code,
-.chat__markdown-input .cm-md-code-line { font-family: var(--mono); background: color-mix(in srgb, var(--text) 7%, transparent); }
-.chat__markdown-input .cm-md-code { border-radius: 3px; }
+.chat__markdown-input .cm-md-code-line { font-family: var(--mono); }
+.chat__markdown-input .cm-md-code {
+  padding: 0.08em 0.27em;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+  font-size: 0.94em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.chat__markdown-input .cm-md-code-line {
+  margin-inline: 8px;
+  padding-inline: 9px;
+  background: light-dark(color-mix(in srgb, var(--text) 7%, transparent), color-mix(in srgb, black 48%, transparent));
+  font-size: 0.875em;
+}
+.chat__markdown-input .cm-md-code-start { border-start-start-radius: 12px; border-start-end-radius: 12px; padding-top: 8px; }
+.chat__markdown-input .cm-md-code-end { border-end-start-radius: 12px; border-end-end-radius: 12px; padding-bottom: 8px; }
+.chat__markdown-input .cm-md-code-fence { font-size: 0.45rem; line-height: 1; }
 .chat__markdown-input .cm-md-quote { color: var(--muted); font-style: italic; }
-.chat__markdown-input .cm-md-link { color: var(--accent-text, var(--accent)); text-decoration: underline; text-underline-offset: 3px; }
+.chat__markdown-input .cm-md-link { color: var(--composer-link-text); }
+.chat__markdown-input .cm-md-github-mark {
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-inline-end: 0.35em;
+  background: var(--composer-link-text);
+  mask: url('../ui/github-mark.svg') center / contain no-repeat;
+  user-select: none;
+}
 .chat__markdown-input .cm-md-syntax { color: var(--muted); }
 .chat__markdown-input .cm-md-task { font-family: var(--mono); color: var(--accent-text, var(--accent)); }

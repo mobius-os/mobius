@@ -37,8 +37,45 @@ test('headings, lists and fenced code render without hiding line breaks', () => 
   const spans = presentation(text)
   assert.ok(spans.some(span => span.class?.includes('cm-md-heading')))
   assert.ok(spans.some(span => span.widget))
-  assert.ok(spans.some(span => span.class === 'cm-md-code-line'))
+  assert.ok(spans.some(span => span.class?.startsWith('cm-md-code-line')))
   assert.ok(hidden(spans).every(span => !text.slice(span.from, span.to).includes('\n')))
+})
+test('headings align with prose, with the original Markdown visible when editing', () => {
+  const text = '###   Heading\nnext'
+  assert.deepEqual(hidden(presentation(text)).map(span => text.slice(span.from, span.to)), ['###   '])
+  assert.equal(hidden(presentation(text, text.indexOf('Heading'))).length, 0)
+})
+test('the draft previews the GitHub mark only for GitHub links, never for text inside code', () => {
+  const sources = [
+    'https://github.com/owner/repo',
+    '<https://github.com/owner/repo>',
+    '[label](https://github.com/owner/repo)',
+    'https://github.com.example.com/owner/repo',
+    'https://github.com@example.com/owner/repo',
+    '`https://github.com/owner/repo`',
+  ]
+  const text = sources.join('\n')
+  const marks = presentation(text).filter(span => span.widget)
+  assert.deepEqual(marks.map(mark => text.slice(mark.from).split('\n')[0]), sources.slice(0, 3))
+  assert.ok(presentation(text).some(span => span.class === 'cm-md-link' && span.from === 0))
+  assert.equal(presentation(sources[0], 5).filter(span => span.widget).length, 0)
+})
+test('code content forms one rounded block without hiding fence rows from the caret', () => {
+  const text = '```js\nfirst\n\nlast\n```\nnext'
+  const codeLines = (spans) => spans.filter(span => span.class?.startsWith('cm-md-code'))
+    .map(span => [text.slice(span.from).split('\n')[0], span.class])
+  assert.deepEqual(codeLines(presentation(text)), [
+    ['```js', 'cm-md-code-fence'],
+    ['first', 'cm-md-code-line cm-md-code-start'],
+    ['', 'cm-md-code-line'],
+    ['last', 'cm-md-code-line cm-md-code-end'],
+    ['```', 'cm-md-code-fence'],
+  ])
+  assert.deepEqual(codeLines(presentation(text, text.indexOf('first'))).filter(([, style]) => /-start|-end/.test(style)), [
+    ['```js', 'cm-md-code-line cm-md-code-start'],
+    ['```', 'cm-md-code-line cm-md-code-end'],
+  ])
+  assert.equal(hidden(presentation(text, text.indexOf('first'))).length, 0)
 })
 test('blur renders even the construct containing the saved caret', () => {
   assert.equal(hidden(presentation('**bold**', 4, { focused: false })).length, 2)

@@ -227,7 +227,12 @@ button.settings-item:disabled { cursor: default; opacity: 0.6; }
 }
 
 /* GitHub: brand mark until the avatar arrives, then the avatar fills it. */
-.settings-github__mark svg { width: 20px; height: 20px; }
+.settings-github__logo {
+  width: 20px;
+  height: 20px;
+  background: currentColor;
+  mask: url('../ui/github-mark.svg') center / contain no-repeat;
+}
 .settings-github__panel { display: grid; gap: 12px; }
 .settings-github__panel .settings-item-panel__text { margin: 0; }
 .settings-github__check {
