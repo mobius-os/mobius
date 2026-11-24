@@ -1116,6 +1116,41 @@ def test_broker_drops_allowed_response_headers_that_reflect_secrets():
   assert headers == {"content-type": "application/json"}
 
 
+@pytest.mark.parametrize("echo", [
+  lambda key: key,
+  # PHP's json_encode (by default) and others escape '/' as '\/'.
+  lambda key: key.replace("/", "\\/"),
+  # Others write \uXXXX, in either case.
+  lambda key: key.replace("+", "\\u002b"),
+  lambda key: key.replace("+", "\\u002B"),
+  lambda key: key.replace("/", "%2F").replace("+", "%2b"),
+])
+@pytest.mark.parametrize("split", [1, 7, 4096])
+def test_broker_redacts_an_escaped_echo_of_the_key(echo, split):
+  key = "sk_live/AbCdEf+GhIjKlMnOp/QrStUv"
+  snapshot = connector_routes._BrokerSnapshot(
+    url="https://remote.example/mcp", auth_header="X-Api-Key", secret=key,
+  )
+  body = (
+    '{"jsonrpc":"2.0","id":3,"error":{"code":-32001,"message":"Invalid API key '
+    + echo(key) + '"}}'
+  ).encode()
+
+  class Upstream:
+    async def aiter_bytes(self):
+      for start in range(0, len(body), split):
+        yield body[start:start + split]
+
+  async def collect():
+    return b"".join([
+      chunk async for chunk in connector_routes._redacted_broker_stream(Upstream(), snapshot)
+    ])
+  message = json.loads(asyncio.run(collect()))["error"]["message"]
+  assert message == "Invalid API key [redacted]"
+  upstream = httpx.Response(200, headers={"mcp-session-id": echo(key), "content-type": "application/json"})
+  assert connector_routes._broker_response_headers(upstream, snapshot) == {"content-type": "application/json"}
+
+
 def test_broker_revalidates_pins_and_streams_each_mcp_method(
   client, db, monkeypatch,
 ):

@@ -281,6 +281,17 @@ def sites_outside(sites: list[dict], requested: list[dict]) -> list[dict]:
   return _vault_rules().sites_outside(sites, requested)
 
 
+def secret_echoes(*values: str):
+  """The vault's matcher for every echo of ``values``, however a site escaped them."""
+  rules = _vault_rules()
+  # Longest value first, so an echo of a whole header value wins over its key.
+  matchers = [rules.secret_echoes(value) for value in sorted(values, key=len, reverse=True)]
+  return rules.SecretEchoes(
+    re.compile(b"|".join(matcher.pattern.pattern for matcher in matchers)),
+    max(matcher.longest for matcher in matchers),
+  )
+
+
 def stored_slot(inject):
   """A slot as the vault stores it, so one written differently but stored the
   same (spacing around its name, an absent prefix) compares equal; one the

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
-import json
 import logging
 import secrets
 import dataclasses
@@ -22,6 +21,7 @@ from sqlalchemy.orm import Session
 from app import access_signal
 from app import connectors as core
 from app import connector_oauth as connector_oauth_mod
+from app import key_vault
 from app import models
 from app.database import SessionLocal, get_db
 from app.deps import (
@@ -351,22 +351,19 @@ def _broker_request_headers(
   return headers
 
 
-def _broker_secret_patterns(snapshot: _BrokerSnapshot) -> tuple[bytes, ...]:
+def _broker_secret_patterns(snapshot: _BrokerSnapshot):
+  """The key vault's matcher for every echo of the connection credential,
+  however the service escaped it (JSON ``\\/`` and ``\\u`` escapes, percent
+  encoding, HTML entities, base64), or None when the request sends no secret."""
   if not snapshot.secret:
-    return ()
+    return None
   submitted = snapshot.secret
   values = {
     submitted,
     core.bare_secret(snapshot.auth_header, submitted),
     *core.auth_headers(snapshot.auth_header, submitted).values(),
   }
-  # JSON string escaping can transform quotes/newlines in a reflected key.
-  values.update(json.dumps(value)[1:-1] for value in tuple(values))
-  return tuple(sorted(
-    {value.encode("utf-8") for value in values if value},
-    key=len,
-    reverse=True,
-  ))
+  return key_vault.secret_echoes(*sorted(value for value in values if value))
 
 
 def _broker_response_headers(
@@ -374,12 +371,12 @@ def _broker_response_headers(
   snapshot: _BrokerSnapshot,
 ) -> dict[str, str]:
   """Forward only transport headers whose values cannot reflect a secret."""
-  patterns = _broker_secret_patterns(snapshot)
+  echoes = _broker_secret_patterns(snapshot)
   return {
     name: value
     for name, value in upstream.headers.items()
     if name.lower() in _BROKER_RESPONSE_HEADERS
-    and not any(pattern in value.encode("utf-8") for pattern in patterns)
+    and not (echoes and echoes.pattern.search(value.encode("utf-8")))
   }
 
 
@@ -388,47 +385,34 @@ async def _redacted_broker_stream(
   snapshot: _BrokerSnapshot,
 ):
   """Stream MCP bytes without leaking a reflected connection credential."""
-  patterns = _broker_secret_patterns(snapshot)
-  if not patterns:
+  echoes = _broker_secret_patterns(snapshot)
+  if echoes is None:
     async for chunk in upstream.aiter_bytes():
       yield chunk
     return
 
   pending = b""
-  keep = max(len(pattern) for pattern in patterns) - 1
+  # Any echo starting before the held-back tail fits in what has arrived.
+  keep = max(echoes.longest - 1, 0)
   replacement = b"[redacted]"
   async for chunk in upstream.aiter_bytes():
     pending += chunk
-    scan_before = max(0, len(pending) - keep)
-    if not scan_before:
+    scan_before = len(pending) - keep
+    if scan_before <= 0:
       continue
-    output = bytearray()
-    position = 0
-    while position < scan_before:
-      match = next(
-        (pattern for pattern in patterns if pending.startswith(pattern, position)),
-        None,
-      )
-      if match is not None:
-        output.extend(replacement)
-        position += len(match)
-      else:
-        output.append(pending[position])
-        position += 1
-    pending = pending[position:]
-    if output:
-      yield bytes(output)
-  while pending:
-    match = next(
-      (pattern for pattern in patterns if pending.startswith(pattern)),
-      None,
-    )
-    if match is not None:
-      yield replacement
-      pending = pending[len(match):]
-    else:
-      yield pending[:1]
-      pending = pending[1:]
+    output, position = [], 0
+    for match in echoes.pattern.finditer(pending):
+      if match.start() >= scan_before:
+        break
+      output += [pending[position:match.start()], replacement]
+      position = match.end()
+    end = max(position, scan_before)
+    output.append(pending[position:end])
+    pending = pending[end:]
+    if any(output):
+      yield b"".join(output)
+  if pending:
+    yield echoes.pattern.sub(replacement, pending)
 
 
 async def _open_broker_upstream(
