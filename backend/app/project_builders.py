@@ -92,7 +92,16 @@ def slug_artifact_id(name: str) -> str:
   ).strip("-_")
   while "--" in slug:
     slug = slug.replace("--", "-")
-  return (slug or "artifact")[:64]
+  slug = (slug or "artifact")[:64]
+  if slug.isascii():
+    return slug
+
+  # Keep existing valid IDs. A localized title that cannot be used as an ID
+  # gets a short ASCII stem plus a stable suffix so distinct titles that
+  # reduce to the same stem do not all register as the same result.
+  suffix = hashlib.sha256(lowered.encode("utf-8")).hexdigest()[:12]
+  stem = re.sub(r"[^a-z0-9_-]+", "-", slug)[:64 - 1 - len(suffix)].strip("-_")
+  return f"{stem or 'artifact'}-{suffix}"
 
 
 def _clean_artifact_type(value: Any) -> dict[str, Any] | None:

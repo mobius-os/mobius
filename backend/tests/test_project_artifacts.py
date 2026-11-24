@@ -160,6 +160,28 @@ def test_creation_open_recency_is_navigation_state(client, auth, db):
   ).status_code == 404
 
 
+def test_localized_result_titles_get_distinct_valid_ids(client, auth):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Hello</h1>")
+  titles = ("Izvještaj o troškovima", "研究ノート", "設計メモ", "a" * 60 + "é")
+  ids = set()
+  for title in titles:
+    created = client.post(
+      f"/api/projects/{project['id']}/artifacts", headers=auth,
+      json={"name": title, "builder": "website", "source": "index.html"},
+    )
+    assert created.status_code == 201, created.text
+    artifact = created.json()
+    artifact_id = artifact["id"]
+    assert artifact["name"] == title
+    assert project_builders.ARTIFACT_ID_RE.fullmatch(artifact_id)
+    assert artifact_id == project_builders.slug_artifact_id(title)
+    assert artifact_id not in ids
+    ids.add(artifact_id)
+
+  assert project_builders.slug_artifact_id("Annual report!") == "annual-report"
+
+
 def test_build_missing_source_records_error_not_500(client, auth, db):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>x</h1>")
