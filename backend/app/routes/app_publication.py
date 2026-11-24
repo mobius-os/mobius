@@ -34,7 +34,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   Principal, get_principal, reject_cross_site,
-  require_nondelegated_owner_control,
+  require_installation_owner_control, require_nondelegated_owner_control,
 )
 from app.publication import (
   InvalidPublicationRegistry,
@@ -549,6 +549,9 @@ async def publish_app_site(
   updates the SAME URL. Owner or the app's own token only.
   """
   require_nondelegated_owner_control(principal)
+  if principal.app_id is None:
+    # A public URL outlives a guest's grant; the app's own token is unchanged.
+    require_installation_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(403, "An app may only publish its own site.")
   project_id = (body.project_id or "").strip() or None
@@ -683,6 +686,9 @@ async def unpublish_app_site(
 ):
   """Revoke a published URL permanently, then remove its snapshot and hint."""
   require_nondelegated_owner_control(principal)
+  if principal.app_id is None:
+    # A public URL outlives a guest's grant; the app's own token is unchanged.
+    require_installation_owner_control(principal)
   if principal.app_id is not None and principal.app_id != app_id:
     raise HTTPException(403, "An app may only unpublish its own site.")
   if project_id and not _PUBLISH_PROJECT_RE.match(project_id):

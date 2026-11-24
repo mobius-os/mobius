@@ -586,6 +586,19 @@ def test_browser_guest_cannot_create_independent_shared_membership(https, auth):
   assert https.delete(base + "/invites/other", headers=guest).status_code == 403
 
 
+def test_browser_guest_cannot_create_public_links_that_outlive_the_grant(https, auth):
+  _, token, _ = invite(https)
+  guest = {"Authorization": "Bearer " + token}
+  copies = "/api/project-copies/projects/missing"
+  share = {"paths": ["index.html"], "digest": "0" * 64}
+  assert https.get(copies + "/preview", headers=guest).status_code == 403
+  assert https.get(copies + "/shares", headers=guest).status_code == 403
+  assert https.post(copies + "/shares", json=share, headers=guest).status_code == 403
+  assert https.delete("/api/project-copies/shares/missing", headers=guest).status_code == 403
+  assert https.post("/api/apps/999/publish", json={}, headers=guest).status_code == 403
+  assert https.delete("/api/apps/999/publish", headers=guest).status_code == 403
+
+
 def test_existing_shared_app_owner_keeps_resource_confined_administration(db):
   from app.deps import SharedAppPrincipal
   from app.routes.shared_apps import _require_membership_administration
