@@ -979,9 +979,25 @@ def capability_digest(contract: dict[str, Any]) -> str:
   return hashlib.sha256(canonical_contract_json(contract).encode("utf-8")).hexdigest()
 
 
+def access_review_digest(contract: dict[str, Any], *, project_builders: bool) -> str:
+  """The digest an install or update review binds to.
+
+  Shipping ``project_templates`` asks for the critical ``project_builders``
+  access row, but templates are not part of the contract, so the contract
+  digest alone would let a manifest gain that row after review. Without
+  templates this is exactly ``capability_digest(contract)``, so reviews of
+  every other manifest keep their digest.
+  """
+  if not project_builders:
+    return capability_digest(contract)
+  return capability_digest({"contract": contract, "project_builders": True})
+
+
 def contract_and_digest(manifest: dict[str, Any]) -> tuple[dict[str, Any], str]:
   contract = contract_from_manifest(manifest)
-  return contract, capability_digest(contract)
+  return contract, access_review_digest(
+    contract, project_builders=bool(manifest.get("project_templates")),
+  )
 
 
 def _semantic_contract(contract: dict[str, Any]) -> dict[str, Any]:

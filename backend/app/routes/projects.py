@@ -25,7 +25,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from app import chat_writer
 from app import (
-  auth, chat_queue, drawer_pins, fs_locks, github_auth, models,
+  app_consent, auth, chat_queue, drawer_pins, fs_locks, github_auth, models,
   project_builders, schemas,
   project_drawer, project_git, providers, questions, settled, workspace_files,
 )
@@ -877,6 +877,10 @@ def _templates(db: Session) -> list[tuple[dict, models.App | None]]:
     models.App.project_templates_json.isnot(None),
   ).order_by(models.App.name, models.App.id).all()
   for app in apps:
+    if app_consent.dormant(app):
+      # Its project types run builder scripts, so they wait for the owner's
+      # answer at first open like the rest of the app's access.
+      continue
     for template in app.project_templates_json or []:
       if isinstance(template, dict):
         rows.append((template, app))
