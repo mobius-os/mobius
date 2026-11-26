@@ -3571,22 +3571,25 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 }
 
 // src/lib/speech/speechDocument.js
+function graphemesOf(word) {
+	return graphemeSegmenter ? Array.from(graphemeSegmenter.segment(word), ({ segment }) => segment) : Array.from(word);
+}
 function cutWord(word, maxChars) {
 	const parts = [];
 	let part = "";
-	for (const char of word) {
-		if (part.length + char.length > maxChars) {
+	for (const grapheme of graphemesOf(word)) for (const unit of grapheme.length > maxChars ? grapheme : [grapheme]) {
+		if (part && part.length + unit.length > maxChars) {
 			parts.push(part);
 			part = "";
 		}
-		part += char;
+		part += unit;
 	}
 	if (part) parts.push(part);
 	return parts;
 }
 function splitClause(sentence, maxChars) {
 	if (sentence.length <= maxChars) return [sentence];
-	const clauses = sentence.split(/(?<=[,;:—–-])\s+/);
+	const clauses = sentence.split(/(?<=[,;:—–-]["'”’“»)\]]*)\s+/);
 	const out = [];
 	let current = "";
 	for (const clause of clauses) {
@@ -3615,7 +3618,7 @@ function splitClause(sentence, maxChars) {
 }
 function splitSpeakable(text, maxChars = MAX_SPEAKABLE_CHARS) {
 	if (text.length <= maxChars) return [text];
-	const sentences = text.split(/(?<=[.!?])\s+/);
+	const sentences = text.split(/(?<=[.!?]["'”’“»)\]]*)\s+/);
 	const chunks = [];
 	let current = "";
 	for (const sentence of sentences) {
@@ -3760,7 +3763,7 @@ function normalizeSpeechInput(input, maxTextChars = DEFAULT_MAX_TEXT_CHARS) {
 		segments
 	};
 }
-var MAX_SEGMENTS, MAX_HINTS, MAX_PAUSE_MS, MAX_LOCALE_CHARS, MAX_HINT_WRITTEN_CHARS, MAX_HINT_SPOKEN_CHARS, MAX_KIND_CHARS, MAX_RAW_INLINE_CHARS, DEFAULT_MAX_TEXT_CHARS, MAX_SPEAKABLE_CHARS;
+var MAX_SEGMENTS, MAX_HINTS, MAX_PAUSE_MS, MAX_LOCALE_CHARS, MAX_HINT_WRITTEN_CHARS, MAX_HINT_SPOKEN_CHARS, MAX_KIND_CHARS, MAX_RAW_INLINE_CHARS, DEFAULT_MAX_TEXT_CHARS, MAX_SPEAKABLE_CHARS, graphemeSegmenter;
 var init_speechDocument = __esmMin((() => {
 	MAX_SEGMENTS = 512;
 	MAX_HINTS = 100;
@@ -3772,6 +3775,7 @@ var init_speechDocument = __esmMin((() => {
 	MAX_RAW_INLINE_CHARS = 1024;
 	DEFAULT_MAX_TEXT_CHARS = 5e4;
 	MAX_SPEAKABLE_CHARS = 200;
+	graphemeSegmenter = typeof Intl !== "undefined" && typeof Intl.Segmenter === "function" ? new Intl.Segmenter(void 0, { granularity: "grapheme" }) : null;
 }));
 
 // src/lib/speech/speechWorkerAsset.js

@@ -233,3 +233,48 @@ test('a word longer than one generation is cut to the cap without splitting a ch
   assert.ok(pieces.every(piece => piece.length <= 200 && piece.isWellFormed()), JSON.stringify(pieces))
   assert.equal(pieces.join('').replaceAll(' ', ''), `Visit${word}now.`)
 })
+
+test('an overlong word is cut between graphemes, never inside a flag, emoji sequence or accented letter', () => {
+  const graphemes = (text) => Array.from(
+    new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text),
+    ({ segment }) => segment,
+  )
+  for (const word of [
+    `https://example.com/ab${'🇩🇪'.repeat(60)}`,
+    `https://example.com/a${'👩\u200d👩\u200d👧'.repeat(30)}`,
+    `https://example.com/a${'e\u0301'.repeat(120)}`,
+    'ที่'.repeat(120),
+  ]) {
+    const pieces = normalizeSpeechInput({ text: word }).segments.map(({ text }) => text)
+    assert.ok(pieces.length > 1)
+    assert.ok(pieces.every(piece => piece.length <= 200), JSON.stringify(pieces))
+    assert.deepEqual(pieces.flatMap(graphemes), graphemes(word))
+  }
+})
+
+test('a single grapheme longer than one generation is still cut to the cap', () => {
+  const pieces = normalizeSpeechInput({ text: `e${'\u0301'.repeat(450)}` }).segments
+    .map(({ text }) => text)
+  assert.ok(pieces.every(piece => piece.length <= 200), JSON.stringify(pieces.map(p => p.length)))
+  assert.equal(pieces.join(''), `e${'\u0301'.repeat(450)}`)
+})
+
+test('a sentence or clause ending in a closing bracket or quote is still a boundary', () => {
+  const text = 'The service restarts on its own after an update (this usually takes under a minute.) '
+    + 'Your open chats stay where they were and nothing you typed is lost (drafts are saved locally.) '
+    + 'If it takes longer than five minutes, open Settings and check the status page for details.'
+  const pieces = normalizeSpeechInput({ text }).segments.map(({ text: piece }) => piece)
+  assert.ok(pieces[0].endsWith('locally.)'), JSON.stringify(pieces))
+  assert.equal(pieces.join(' '), text)
+
+  const words = (count) => Array.from({ length: count }, (_, index) => `word${index}`).join(' ')
+  for (const [firstPiece, text] of [
+    [`"${words(20)},"`, `"${words(20)}," she said ${words(20)}.`],
+    [`She wrote "${words(20)}."`, `She wrote "${words(20)}." ${words(20)}.`],
+    [`„${words(20)}.“`, `„${words(20)}.“ ${words(20)}.`],
+  ]) {
+    const pieces = normalizeSpeechInput({ text }).segments.map(({ text: piece }) => piece)
+    assert.equal(pieces[0], firstPiece)
+    assert.equal(pieces.join(' '), text)
+  }
+})
