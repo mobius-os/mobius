@@ -169,7 +169,8 @@ export function safeServiceWorker() {
 // Error recovery reloads only when worker inspection proves this document is
 // stale. Network-first shell navigation makes the reload itself ordinary.
 //
-// Reloads ONLY when inspection finds a newer generation; returns whether it did.
+// Reloads only when inspection finds a newer generation and the caller allows
+// the reload; returns whether it did.
 // The auto-heal caller keeps a
 // false as "genuine bug on the newest build → show the recovery panel, never
 // reload-loop"; the manual-refresh caller treats a false as "already newest →
@@ -178,9 +179,10 @@ export function safeServiceWorker() {
 export async function reloadIfGenerationStale({
   serviceWorker,
   reload,
+  beforeReload = () => true,
 } = {}) {
   const { registration, updateAvailable } = await inspectShellUpdate({ serviceWorker })
-  if (!updateAvailable) return false
+  if (!updateAvailable || !beforeReload()) return false
   releaseWaitingShellUpdate(registration)
   reload()
   return true
