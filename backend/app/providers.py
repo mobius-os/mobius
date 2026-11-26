@@ -838,6 +838,10 @@ class BaseProvider:
   def codex_config_overrides(self) -> list[str]:
     return []
 
+  def connection_kind(self, data_dir: str) -> str | None:
+    """Which of several connection methods is in use, for providers that offer more than one."""
+    return None
+
   def measured_run_accounting(
     self, cost_usd: float | None, usage: dict | None,
   ) -> tuple[float | None, dict | None]:
@@ -1470,6 +1474,8 @@ def model_relay_token(provider_id: str, consent_scope: str = "") -> str:
 class RelayKeyRead(NamedTuple):
   key: str | None
   unavailable: str | None
+  # The API root this key belongs to, when a provider has more than one.
+  base_url: str | None = None
 
 
 def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
@@ -1724,6 +1730,14 @@ class AppModelProvider(BaseProvider):
 
 
 GEMINI_KEY_NAME = "gemini"
+# Each way to connect: the vault key the owner saves from Settings and the
+# Gemini API root it belongs to. One is in use at a time; Settings removes the
+# other key when the owner switches.
+GEMINI_CONNECTIONS: dict[str, tuple[str, str]] = {
+  "ai_studio": (GEMINI_KEY_NAME, "https://generativelanguage.googleapis.com/v1beta"),
+  # Gemini Enterprise Agent Platform (formerly Vertex AI) in express mode.
+  "agent_platform": ("gemini-agent-platform", "https://aiplatform.googleapis.com/v1/publishers/google"),
+}
 # Google's Gemini API for AI Studio keys. Consumer subscription sign-in is not
 # a supported credential for third-party agents, so the owner saves a key.
 GEMINI_DECLARATION: dict[str, Any] = {
@@ -1764,14 +1778,27 @@ class GeminiProvider(AppModelProvider):
     self.provider_id = "gemini"
     self.auth_dir = "gemini"
 
+  def connection_kind(self, data_dir: str) -> str | None:
+    from app import key_vault
+    return next((
+      kind for kind, (name, _) in GEMINI_CONNECTIONS.items()
+      if key_vault.platform_key_sync(name, reveal=False, caller="platform:gemini")
+    ), None)
+
   def read_relay_key(self, data_dir, *, authorize=True, endpoint=None):
     if not provider_enabled(data_dir, self.provider_id):
       return RelayKeyRead(None, "Google Gemini is turned off in Settings.")
+    kind = self.connection_kind(data_dir)
+    if kind is None:
+      return RelayKeyRead(None, "Connect Google Gemini with an AI Studio or Agent Platform key in Settings › AI providers.")
+    name, base_url = GEMINI_CONNECTIONS[kind]
+    if not authorize:
+      return RelayKeyRead(None, None, base_url)
     from app import key_vault
-    key = key_vault.platform_key_sync(GEMINI_KEY_NAME, reveal=authorize, caller="platform:gemini")
+    key = key_vault.platform_key_sync(name, reveal=True, caller="platform:gemini")
     if key:
-      return RelayKeyRead(key if authorize else None, None)
-    return RelayKeyRead(None, "Connect Google Gemini with your AI Studio key in Settings › AI providers.")
+      return RelayKeyRead(key, None, base_url)
+    return RelayKeyRead(None, "Google Gemini's key could not be read from the key vault.")
 
   def _runtime_home(self, data_dir: str) -> Path:
     return Path(data_dir) / "cli-auth" / "gemini"
@@ -2547,11 +2574,12 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   elif provider_id == "gemini":
     from app import key_vault
-    try:
-      await key_vault.vault_call("DELETE", f"/keys/{GEMINI_KEY_NAME}", caller="owner")
-    except key_vault.VaultRefused as exc:
-      if exc.status != 404:
-        raise OSError("The key vault did not remove the Gemini key.") from exc
+    for name, _ in GEMINI_CONNECTIONS.values():
+      try:
+        await key_vault.vault_call("DELETE", f"/keys/{name}", caller="owner")
+      except key_vault.VaultRefused as exc:
+        if exc.status != 404:
+          raise OSError("The key vault did not remove a Gemini key.") from exc
   else:
     raise ValueError("This provider's connection is managed elsewhere")
 

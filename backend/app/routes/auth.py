@@ -923,6 +923,10 @@ async def providers_status(
       "error": error,
       "available": enabled,
     }
+    if error is None:
+      connection = await run_in_threadpool(provider.connection_kind, data_dir)
+      if connection is not None:
+        out[pid]["connection"] = connection
     if pid == "mobius" and error is None and is_owner_caller:
       try:
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)

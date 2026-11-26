@@ -51,7 +51,8 @@ async def relay_gemini(provider: Any, request: Request, data_dir: str):
   if credential.unavailable or credential.key is None:
     return _responses_error(403, "permission_error", credential.unavailable or "Model key unavailable.")
   body = await anyio.to_thread.run_sync(to_gemini_request, payload)
-  url = f"{provider.declaration['base_url'].rstrip('/')}{endpoint}?alt=sse"
+  base_url = credential.base_url or provider.declaration["base_url"]
+  url = f"{base_url.rstrip('/')}{endpoint}?alt=sse"
   return await _send(provider, url, credential.key, body, payload)
 
 

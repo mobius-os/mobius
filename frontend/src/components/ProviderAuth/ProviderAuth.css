@@ -433,3 +433,14 @@
 .provider-connection p { margin: 0; }
 .provider-connection__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .provider-connection__actions .pa__btn { min-height: 36px; }
+
+/* Google Gemini: one row per way to connect, the row in use marked Connected. */
+.gemini-connection { display: grid; gap: 4px; font-size: 13px; line-height: 1.5; }
+.gemini-connection > .pa__muted { margin: 0 0 6px; }
+.gemini-connection__row { display: grid; gap: 10px; padding: 10px 0; }
+.gemini-connection__row + .gemini-connection__row { border-top: 1px solid var(--border-light); }
+.gemini-connection__head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.gemini-connection__label { display: flex; align-items: center; gap: 8px; font-weight: 600; color: var(--text); }
+.gemini-connection__detail { display: block; }
+.gemini-connection__state { font-size: 12px; }
+.gemini-connection__form { padding-bottom: 4px; }

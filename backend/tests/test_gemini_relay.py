@@ -217,7 +217,7 @@ async def test_disconnecting_gemini_removes_its_saved_key(monkeypatch, tmp_path)
     return {}
   monkeypatch.setattr(key_vault, "vault_call", vault_call)
   await providers.disconnect_provider(str(tmp_path), "gemini")
-  assert calls == [("DELETE", "/keys/gemini", "owner")]
+  assert calls == [("DELETE", "/keys/gemini", "owner"), ("DELETE", "/keys/gemini-agent-platform", "owner")]
 
 
 def test_each_gemini_model_offers_its_documented_thinking_levels():
@@ -232,3 +232,34 @@ def test_each_gemini_model_offers_its_documented_thinking_levels():
   assert gemini.resolve_selection("gemini-4-carbon", "xhigh") == ("gemini-4-carbon", None)
   assert to_gemini_request({"input": [], "reasoning": {"effort": "max"}})[
     "generationConfig"]["thinkingConfig"] == {"includeThoughts": True}
+
+
+def test_an_agent_platform_key_sends_gemini_to_google_cloud(client, monkeypatch):
+  """The connection in use picks the key and the API root together."""
+  from app import key_vault
+  gemini = providers.PROVIDERS["gemini"]
+  monkeypatch.setitem(providers.PROVIDERS, "gemini", gemini)
+  monkeypatch.setattr(providers, "_app_providers_fresh", lambda: True)
+  monkeypatch.setattr(providers, "provider_enabled", lambda *_: True)
+  monkeypatch.setattr(model_relay, "_is_direct_loopback", lambda _request: True)
+  saved = {"gemini-agent-platform": REAL_KEY}
+  monkeypatch.setattr(key_vault, "platform_key_sync",
+                      lambda name, *, reveal, caller: saved.get(name) and (saved[name] if reveal else name))
+  seen = []
+
+  def upstream(request: httpx.Request) -> httpx.Response:
+    seen.append(request)
+    chunk = {"candidates": [{"content": {"parts": [{"text": "hi"}]}, "finishReason": "STOP"}]}
+    return httpx.Response(200, headers={"content-type": "text/event-stream"},
+                          content=f"data: {json.dumps(chunk)}\n\n".encode())
+  monkeypatch.setattr(model_relay, "_http_client", httpx.AsyncClient(transport=httpx.MockTransport(upstream)))
+
+  assert gemini.connection_kind("/unused") == "agent_platform"
+  response = client.post("/api/model-relay/gemini/v1/responses",
+                         json={"model": "gemini-3.5-flash", "input": []},
+                         headers={"authorization": f"Bearer {gemini.relay_token()}"})
+  assert response.status_code == 200
+  assert str(seen[0].url) == (
+    "https://aiplatform.googleapis.com/v1/publishers/google/models/gemini-3.5-flash:streamGenerateContent?alt=sse"
+  )
+  assert seen[0].headers["x-goog-api-key"] == REAL_KEY

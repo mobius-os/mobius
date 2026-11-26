@@ -150,10 +150,14 @@ removes a provider from pickers and blocks new turns without deleting chats.
 
 ## Boundaries and next steps
 
-- Google Gemini is built in on the same `gemini` relay path: Settings ›
-  AI providers › Google Gemini saves the owner's AI Studio key in the vault
-  (key `gemini`, kept from agents), the platform fixes its destination to
-  Google's Gemini API, and Disconnect deletes the key. Its model list is the
+- Google Gemini is built in on the same `gemini` relay path. Settings ›
+  AI providers › Google Gemini › Connection offers two keys, one in use at a
+  time: an AI Studio key (vault key `gemini`, Google's Gemini API) or a Gemini
+  Enterprise Agent Platform express-mode key (vault key
+  `gemini-agent-platform`, `aiplatform.googleapis.com/v1/publishers/google`).
+  Both are kept from agents; the platform fixes each key's destination
+  (`providers.GEMINI_CONNECTIONS`), the status reports which `connection` is
+  in use, and Disconnect deletes both keys. Its model list is the
   platform's declaration in `providers.GEMINI_DECLARATION`, with each model's
   documented thinking levels and default as its effort scale.
 - Claude, Codex and Möbius are built in. The Möbius provider keeps the stable

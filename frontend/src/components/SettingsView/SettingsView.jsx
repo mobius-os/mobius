@@ -21,7 +21,7 @@ import {
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
-import GeminiAuth from '../ProviderAuth/GeminiAuth.jsx'
+import GeminiConnection from '../ProviderAuth/GeminiConnection.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
@@ -1061,9 +1061,12 @@ export default function SettingsView({
         <ProviderAuth authenticated={claudeAuthenticated} compact onDone={onClaudeAuthDone} />
       </ProviderConnection>
     ) : selectedProvider === 'gemini' ? (
-      <ProviderConnection key={connectionEpoch} provider="gemini" name="Google Gemini" connected={geminiAuthenticated} onDisconnected={() => onProviderDisconnected('gemini')}>
-        <GeminiAuth onConnected={onGeminiAuthDone} />
-      </ProviderConnection>
+      <GeminiConnection
+        key={connectionEpoch}
+        active={geminiAuthenticated ? providerStatusQuery.data?.gemini?.connection : null}
+        onConnected={onGeminiAuthDone}
+        onDisconnected={() => onProviderDisconnected('gemini')}
+      />
     ) : null
     const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null
     // The Möbius account and its credit are the owner's: a guest sees neither.
