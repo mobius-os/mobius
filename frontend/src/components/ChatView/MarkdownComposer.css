@@ -75,14 +75,5 @@
 /* Match sent-message links (.md-blocks a in markdown.css): theme accent plus an
    underline, so a link never differs from prose by color alone. */
 .chat__markdown-input .cm-md-link { color: var(--accent-text, var(--accent)); text-decoration: underline; text-underline-offset: 2px; }
-.chat__markdown-input .cm-md-github-mark {
-  display: inline-block;
-  width: 0.8em;
-  height: 0.8em;
-  margin-inline-end: 0.35em;
-  background: var(--accent-text, var(--accent));
-  mask: url('../ui/github-mark.svg') center / contain no-repeat;
-  user-select: none;
-}
 .chat__markdown-input .cm-md-syntax { color: var(--muted); }
 .chat__markdown-input .cm-md-task { font-family: var(--mono); color: var(--accent-text, var(--accent)); }

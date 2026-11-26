@@ -12,29 +12,6 @@ class ListBullet extends WidgetType {
   }
 }
 
-class GithubLinkMark extends WidgetType {
-  toDOM() {
-    const span = document.createElement('span')
-    span.className = 'cm-md-github-mark'
-    span.setAttribute('aria-hidden', 'true')
-    return span
-  }
-}
-const githubLinkMark = new GithubLinkMark()
-
-function isGithubUrl(source) {
-  if (!/^https?:\/\//i.test(source)) return false
-  try {
-    const url = new URL(source)
-    // GitHub's own subdomains (www., gist.) are GitHub too; a host that only
-    // starts with "github.com." is not.
-    const host = url.hostname
-    return (host === 'github.com' || host.endsWith('.github.com')) && !url.username && !url.password
-  } catch {
-    return false
-  }
-}
-
 const inlineClasses = {
   StrongEmphasis: 'cm-md-strong', Emphasis: 'cm-md-emphasis',
   Strikethrough: 'cm-md-strike', InlineCode: 'cm-md-code',
@@ -113,17 +90,12 @@ export function composerMarkdownDecorations(state, { focused = true, composing =
       if (parent?.name === 'LinkReference') return
       const link = parent?.name === 'Link' || parent?.name === 'Autolink' ? parent : node
       if (link === node) {
-        // An autolink may stop before @, escapes, or an invalid port. Don't
-        // brand a recognized prefix of an address pointing somewhere else.
+        // A bare URL may stop before @, escapes, or an invalid port. Don't
+        // style a recognized prefix of an address pointing somewhere else.
         if (/[\\@%\p{L}\p{N}]/u.test(doc.sliceString(node.to, node.to + 1))) return
         mark(node, 'cm-md-link')
       }
-      if (!active(link)) {
-        if (parent?.name === 'Link') hide(node)
-        if (isGithubUrl(doc.sliceString(node.from, node.to))) {
-          ranges.push(Decoration.widget({ widget: githubLinkMark, side: -1 }).range(link.from))
-        }
-      }
+      if (parent?.name === 'Link' && !active(link)) hide(node)
     }
     if (name === 'LinkTitle' && node.parent?.name === 'Link' && !active(node.parent)) hide(node)
     if (name === 'CodeInfo' && !active(node.parent)) hide(node)

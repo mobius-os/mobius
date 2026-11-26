@@ -45,23 +45,17 @@ test('headings align with prose, with the original Markdown visible when editing
   assert.deepEqual(hidden(presentation(text)).map(span => text.slice(span.from, span.to)), ['###   '])
   assert.equal(hidden(presentation(text, text.indexOf('Heading'))).length, 0)
 })
-test('the draft previews the GitHub mark only for GitHub links, never for text inside code', () => {
-  const sources = [
-    'https://github.com/owner/repo',
-    '<https://github.com/owner/repo>',
-    '[label](https://github.com/owner/repo)',
-    'https://www.github.com/owner/repo',
-    'https://gist.github.com/owner/0123abcd',
-    'https://github.com.example.com/owner/repo',
-    'https://notgithub.com/owner/repo',
-    'https://github.com@example.com/owner/repo',
-    '`https://github.com/owner/repo`',
+test('bare URLs preview as links, but never a prefix of an address pointing elsewhere or text inside code', () => {
+  const links = ['https://example.com/owner/repo', 'https://docs.example.com/guide?page=2']
+  const notLinks = [
+    'https://example.com@other.example/path',
+    'https://example.com\\@other.example/path',
+    '`https://example.com/owner/repo`',
   ]
-  const text = sources.join('\n')
-  const marks = presentation(text).filter(span => span.widget)
-  assert.deepEqual(marks.map(mark => text.slice(mark.from).split('\n')[0]), sources.slice(0, 5))
-  assert.ok(presentation(text).some(span => span.class === 'cm-md-link' && span.from === 0))
-  assert.equal(presentation(sources[0], 5).filter(span => span.widget).length, 0)
+  const text = [...links, ...notLinks].join('\n')
+  const linked = presentation(text).filter(span => span.class === 'cm-md-link')
+  assert.deepEqual(linked.map(span => text.slice(span.from, span.to)), links)
+  assert.equal(presentation(text).filter(span => span.widget).length, 0)
 })
 test('code content forms one rounded block without hiding fence rows from the caret', () => {
   const text = '```js\nfirst\n\nlast\n```\nnext'
