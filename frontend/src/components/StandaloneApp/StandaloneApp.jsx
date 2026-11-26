@@ -23,6 +23,7 @@ import {
 } from '../../lib/standaloneHistory.js'
 import { retireAppEntries } from '../../lib/navHistory.js'
 import { settingsDeepLink } from '../../lib/settingsSections.js'
+import { isInstalledIosApp } from '../../utils/installPlatform.js'
 import StandaloneInstallCard from './StandaloneInstallCard.jsx'
 import './StandaloneApp.css'
 
@@ -43,6 +44,9 @@ export default function StandaloneApp({ initialApp }) {
   const [updateAvailable, setUpdateAvailable] = useState(false)
   const [removed, setRemoved] = useState(false)
   const [immersive, setImmersive] = useState(false)
+  // The app fills the screen; without a system back gesture its runtime turns
+  // a swipe from the left edge into Back.
+  const [edgeSwipeBack] = useState(() => isInstalledIosApp())
   const [crash, setCrash] = useState(null)
   const crashFingerprint = crash?.fingerprint || null
   const recoverySurfaceKey = `standalone-app:${initialApp.id}`
@@ -262,6 +266,7 @@ export default function StandaloneApp({ initialApp }) {
         visible
         interactive={!crash}
         immersive={immersive}
+        edgeSwipeBack={edgeSwipeBack}
         onImmersive={(_id, value) => setImmersive(value)}
         onNavPush={onNavPush}
         onNavPop={onNavPop}

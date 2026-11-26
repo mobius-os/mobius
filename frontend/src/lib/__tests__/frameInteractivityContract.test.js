@@ -911,5 +911,5 @@ test('a child frame that loads before any verdict is not told anything', () => {
 test('the drawer holds the app from the opening tap, before its panel commits', () => {
   assert.match(shell, /covered=\{modalDrawerOpen \|\| drawerOpening\}/)
   assert.match(canvas, /type: 'moebius:frame-visibility',\s+visible,\s+covered,/)
-  assert.match(canvas, /\[frameVisible, covered, visible, active, swap\.liveVersion, swap\.liveLoaded\]/)
+  assert.match(canvas, /\[frameVisible, covered, visible, active, swap\.liveVersion, swap\.liveLoaded, edgeSwipeBack\]/)
 })

@@ -1,15 +1,13 @@
 /** Saving a theme, then refreshing an installed iPhone app's status bar. */
 
-import { isStandaloneDisplay } from '../utils/installPlatform.js'
+import { isInstalledIosApp } from '../utils/installPlatform.js'
 
 /**
  * Installed iOS re-reads its opaque status-bar colour only when the document
- * loads or returns to the foreground. `navigator.standalone` exists only on
- * iOS (Android installs recolour live); display-mode excludes the in-app
- * browser, where Apple leaks `navigator.standalone` as true.
+ * loads or returns to the foreground (Android installs recolour live).
  */
 export function needsStatusBarReload(win = globalThis.window) {
-  return isStandaloneDisplay(win) && win?.navigator?.standalone === true
+  return isInstalledIosApp(win)
 }
 
 /**

@@ -201,7 +201,7 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      flight. Hidden/incoming frames receive false too.
 //
 //   3c. {type: 'moebius:frame-visibility', visible, covered, navigationReady,
-//        backgroundPlayback} parent → frame
+//        backgroundPlayback, edgeSwipeBack} parent → frame
 //      visible keeps painted frames foreground during shell handoffs;
 //      navigationReady requires a mounted, promoted, logically visible frame.
 //      app-frame.html turns visible:false into a hidden page and holds the
@@ -209,6 +209,8 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      unless backgroundPlayback says the document owns an open media session
 //      (deliberate playback the drawer still controls). covered holds the same
 //      work while the modal drawer is over a frame that stays painted.
+//      edgeSwipeBack lets the visible frame's runtime turn a swipe from its
+//      left edge into Back for its top nav entry (no system back gesture).
 //
 //   3d. {type: 'moebius:app-activity'}                     parent → frame
 //      The shell saw new activity for this app, or its system stream reopened
@@ -461,6 +463,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // honestly not hidden, but app-frame.html holds its sound and animation
   // frames, the same as leaving does.
   covered = false,
+  // The host has no system back gesture and this frame's left edge is the
+  // screen's, so the runtime turns an edge swipe into Back (edgeSwipeBack.js).
+  edgeSwipeBack = false,
   // Whether this canvas asks its app's key requests over it
   // (AppKeyRequestCard): only the owner's own shell does.
   keyRequests = false,
@@ -1774,6 +1779,7 @@ const AppCanvas = forwardRef(function AppCanvas({
         && v === liveVersionRef.current && swap.liveLoaded
         && frameNavRef.current.get(v)?.mounted === true,
       backgroundPlayback: frameMediaSessionRef.current.has(v),
+      edgeSwipeBack,
     })
   }
 
@@ -1817,7 +1823,7 @@ const AppCanvas = forwardRef(function AppCanvas({
       sendVisibility(swap.liveVersion, frameVisible)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [frameVisible, covered, visible, active, swap.liveVersion, swap.liveLoaded])
+  }, [frameVisible, covered, visible, active, swap.liveVersion, swap.liveLoaded, edgeSwipeBack])
 
   // Layout timing is deliberate. A drawer-open render removes the shell canvas
   // from hit-testing and sends this message before paint; app-frame.html then

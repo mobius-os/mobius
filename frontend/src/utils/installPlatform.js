@@ -31,6 +31,15 @@ export function isStandaloneDisplay(target = typeof window !== 'undefined' ? win
   }
 }
 
+/**
+ * True for a web app installed on an iPhone or iPad. `navigator.standalone`
+ * exists only on iOS, and display-mode excludes the in-app browser where Apple
+ * leaks it as true. Such an app has no system back gesture.
+ */
+export function isInstalledIosApp(win = typeof window !== 'undefined' ? window : null) {
+  return isStandaloneDisplay(win) && win?.navigator?.standalone === true
+}
+
 export function detectInstallPlatform(ua, maxTouchPoints) {
   if (ua === undefined) {
     ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : ''

@@ -239,6 +239,7 @@ import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
 import { KEYS_QUERY, useKeys } from '../SettingsView/keysQueries.js'
 import { appsWaitingForKeys } from '../../lib/keyRequestPlaces.js'
+import { isInstalledIosApp } from '../../utils/installPlatform.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -400,6 +401,9 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
   // This is the single semantic owner of reserved desktop navigation space.
   // Both the root class and the content-geometry transaction below read it.
   const desktopSidebarReserved = persistentDrawer && desktopSidebarOpen
+  // An installed iOS web app has no system back gesture, so an app frame whose
+  // left edge is the screen's gets an edge swipe instead (AppCanvas).
+  const [noSystemBackGesture] = useState(() => isInstalledIosApp())
   // Live mirrors for async project cleanup (closeRemovedProject).
   const activeProjectIdRef = useRef(activeProjectId)
   activeProjectIdRef.current = activeProjectId
@@ -5277,6 +5281,11 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           // CSS hides those pixels behind the shared neutral handoff. Its logical
           // runtime remains inactive, so it cannot navigate or claim a capability.
           const appFrameVisible = appRuntimeVisible || heldForChat
+          // Beside a pane divider or the docked sidebar, an edge swipe would
+          // fight the drag meant for them.
+          const edgeSwipeBack = noSystemBackGesture
+            && !(desktopSidebarReserved && !immersiveActive)
+            && (!paned || paned.x <= 0)
           const posStyle = paned ? {
             top: paned.y,
             left: paned.x,
@@ -5335,6 +5344,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // Reaching for the drawer holds whatever a leave would hold, so a
                 // heavy game cannot starve the drawer and its sound stops first.
                 covered={modalDrawerOpen || drawerOpening}
+                edgeSwipeBack={edgeSwipeBack}
                 // An app's key request waits over the app while the owner looks at it.
                 keyRequests={!isSharedBrowserAccess}
                 version={versionForApp(id)}
