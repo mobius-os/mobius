@@ -28,8 +28,17 @@ _MARK_OPEN = "\ue000"
 _MARK_CLOSE = "\ue001"
 
 
-def _fts_query(tokens: list[str], original_tokens: list[str]) -> str:
-  """Select both Unicode forms without reindexing the original documents."""
+def _fts_query(tokens: list[str], raw_query: str) -> str:
+  """Build the FTS5 candidate query for NFC ``tokens`` of ``raw_query``.
+
+  The index keeps each document's stored spelling. ``unicode61
+  remove_diacritics 2`` already folds a composed and a decomposed Latin
+  spelling of ``Réunion`` to one token, so Latin text needs only
+  the NFC comparison in ``_rank_results``. The per-word ``OR "<NFD>"`` and the
+  mixed-spelling branch exist for scripts whose decomposed form the tokenizer
+  does not fold, such as Hangul syllables versus their jamo. Keep them: they
+  find those documents without reindexing every stored transcript.
+  """
   def conjunction(words: list[str], *, include_decomposed: bool) -> str:
     clauses = []
     for index, token in enumerate(words):
@@ -42,11 +51,18 @@ def _fts_query(tokens: list[str], original_tokens: list[str]) -> str:
     return " AND ".join(clauses)
 
   query = conjunction(tokens, include_decomposed=True)
-  # Preserve the index query for an original spelling that is neither NFC
-  # nor NFD. The normalized exact match below still owns final relevance.
-  if original_tokens and original_tokens != tokens:
-    original = conjunction(original_tokens, include_decomposed=False)
-    query = f"({query}) OR ({original})"
+  # A query typed with some letters composed and others decomposed (Hangul
+  # pasted from mixed sources) matches a document stored with that same
+  # mixture only through its own spelling. A wholly NFC or NFD query is
+  # already covered above; ``\w+`` would also split a decomposed Latin query
+  # at its combining marks, which only adds candidates that ranking discards.
+  if raw_query not in (
+    unicodedata.normalize("NFC", raw_query),
+    unicodedata.normalize("NFD", raw_query),
+  ):
+    original = _query_tokens(raw_query)
+    if original:
+      query = f"({query}) OR ({conjunction(original, include_decomposed=False)})"
   return query
 
 
@@ -277,5 +293,5 @@ def search(db: Session, raw_query: str, limit: int = 20) -> list[dict]:
   tokens = _query_tokens(unicodedata.normalize("NFC", raw_query))
   if not tokens or limit <= 0:
     return []
-  fts_query = _fts_query(tokens, _query_tokens(raw_query))
+  fts_query = _fts_query(tokens, raw_query)
   return _rank_results(_visible_rows(_candidate_rows(db, fts_query)), tokens, limit)

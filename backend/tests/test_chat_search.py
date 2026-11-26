@@ -185,6 +185,13 @@ def test_search_retains_a_word_mixing_composed_and_decomposed_letters(db):
   assert [hit["id"] for hit in chat_search.search(db, title.title)] == [title.id]
 
 
+def test_decomposed_latin_query_does_not_add_its_split_spelling_to_fts():
+  # \w+ splits "Re\u0301union" at the accent; a wholly NFD query is already
+  # covered by each word's NFD alternative, so "Re" AND "union" stays out.
+  query = chat_search._fts_query(["R\u00e9union"], "Re\u0301union")
+  assert query == '("R\u00e9union"* OR "Re\u0301union"*)'
+
+
 def test_search_keeps_recent_matches_beyond_the_old_512_chat_cap(db):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
