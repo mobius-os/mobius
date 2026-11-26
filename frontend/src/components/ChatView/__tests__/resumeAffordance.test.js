@@ -9,6 +9,7 @@ import { ownsRecoveryAction } from '../recoveryCard.js'
 // tail note renders an acknowledged lifecycle action, not an owner send.
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
 const chatView = readFileSync(new URL('../ChatView.jsx', import.meta.url), 'utf8')
+const resumeButton = readFileSync(new URL('../ResumeButton.jsx', import.meta.url), 'utf8')
 const css = readFileSync(new URL('../ChatView.css', import.meta.url), 'utf8')
 
 // Slice ONE JSX element's own text, from its tag to the matching close of that
@@ -126,9 +127,10 @@ test('MsgContent gates the Resume button on a resumable tail note', () => {
     isLastMessage: true,
     canResume: true,
   }), false, 'an earlier resumable block cannot own a second action')
+  assert.match(resumeButton, /className="chat__resume chat__recovery-action"/)
   assert.match(
     msgContent,
-    /className="chat__resume chat__recovery-action"[\s\S]*?onClick=\{\(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)\}/,
+    /<RecoveryActions[\s\S]*?onClick: \(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)/,
     'the Resume control delegates an action without manufacturing message text',
   )
 })
@@ -139,9 +141,9 @@ test('restart recovery waits for a durable run identity instead of showing a fal
     'the resume state records when a restart has not published its replacement run')
   assert.match(resumeHook, /onRefresh\(\)\s*\n\s*return false/,
     'an unavailable recovery identity refreshes without an owner-facing failure')
-  assert.match(msgContent, /resumeState\?\.unavailable \? 'Reconnecting…'/,
+  assert.match(resumeButton, /resumeState\?\.unavailable \? 'Reconnecting…'/,
     'the interrupted-turn card explains the short restart handoff')
-  assert.match(msgContent, /resumeState\?\.pending \|\| resumeState\?\.unavailable/,
+  assert.match(resumeButton, /resumeState\?\.pending \|\| resumeState\?\.unavailable/,
     'the recovery action cannot be invoked before its identity is durable')
   assert.match(chatView, /goalResumeState\.pending \|\| goalResumeState\.unavailable/,
     'the exact-Goal rail action cannot run before its identity is durable')
@@ -337,7 +339,7 @@ test('message equality compares the error-card fields (stale-red-card guard)', (
 
 
 test('Resume keeps the shared recovery action compact inside the status grid', () => {
-  assert.match(msgContent, /className="chat__resume chat__recovery-action"/)
+  assert.match(resumeButton, /className="chat__resume chat__recovery-action"/)
   const layout = css.match(/\.chat__resume\s*\{[\s\S]*?\}/)?.[0] ?? ''
   assert.match(layout, /justify-self:\s*start/)
   assert.match(layout, /max-width:\s*100%/)

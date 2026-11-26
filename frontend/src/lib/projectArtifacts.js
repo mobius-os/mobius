@@ -17,6 +17,19 @@ export function normalizeArtifacts(data) {
   ))
 }
 
+// A filename-derived ID is only a hint; the server returns the result
+// that actually belongs to the selected source and builder.
+export async function buildProjectFileArtifact(client, readJson, projectId, path, builder) {
+  const name = (path.split('/').pop() || path).replace(/\.[^.]+$/, '') || 'output'
+  const id = path.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-')
+    .replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64) || 'artifact'
+  const artifact = await readJson(await client.createArtifact(projectId, {
+    id, name, builder, source: path, reuse_source: true,
+  }), 'Build failed:')
+  await readJson(await client.buildArtifact(projectId, artifact.id), 'Build failed:')
+  return artifact.id
+}
+
 export function queueArtifactBuildsAfterSourceChange(data, queueBuild) {
   const ready = normalizeArtifacts(data).filter(
     artifact => artifact.status !== 'building' && !artifact.source_missing,

@@ -584,6 +584,8 @@ def test_browser_guest_cannot_create_independent_shared_membership(https, auth):
   assert https.patch(base + "/members/other", json={"role": "editor"}, headers=guest).status_code == 403
   assert https.delete(base + "/members/other", headers=guest).status_code == 403
   assert https.delete(base + "/invites/other", headers=guest).status_code == 403
+  # Removing the app ends every member's access, so it is sharing too.
+  assert https.delete(base, headers=guest).status_code == 403
 
 
 def test_existing_shared_app_owner_keeps_resource_confined_administration(db):

@@ -153,6 +153,7 @@ for (const [label, overrides, kind] of [
 // promote-to-block, and the shared ErrorCard renderer. MsgContent owns the
 // block tree for BOTH persisted and live data, so those sources cannot diverge.
 const msgContent = readFileSync(new URL('../MsgContent.jsx', import.meta.url), 'utf8')
+const recoveryActions = readFileSync(new URL('../RecoveryActions.jsx', import.meta.url), 'utf8')
 const streamingMessage = readFileSync(new URL('../AssistantReply.jsx', import.meta.url), 'utf8')
 const errorCard = readFileSync(new URL('../ErrorCard.jsx', import.meta.url), 'utf8')
 const resetTime = readFileSync(new URL('../resetTime.js', import.meta.url), 'utf8')
@@ -294,7 +295,7 @@ test('a provider refusal offers moves that change the request, never a timed ret
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: true,
     onResume() {},
-    onRefusalModelChoice() {},
+    onChooseModel() {},
     onRefusalFreshSession() {},
   }))
   assert.match(html, /This model declined to continue/)
@@ -313,7 +314,7 @@ test('a refusal card away from the transcript tail offers no actions', (t) => {
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: false,
     onResume() {},
-    onRefusalModelChoice() {},
+    onChooseModel() {},
     onRefusalFreshSession() {},
   }))
   assert.match(html, /This model declined to continue/)
@@ -338,7 +339,7 @@ function refusalCardFor(viewer) {
     msg: { role: 'assistant', content: '', blocks: [refusalBlock] },
     isLastMsg: true,
     onResume() {},
-    onRefusalModelChoice: viewer.showPicker ? () => {} : undefined,
+    onChooseModel: viewer.showPicker ? () => {} : undefined,
     onRefusalFreshSession: freshSession ? () => {} : undefined,
   }))
 }
@@ -488,11 +489,11 @@ test('the parked card has styling distinct from a plain error', () => {
 })
 
 test('the rate-limit card keeps automatic recovery and an explicit early retry', () => {
-  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity && autoResumeAvailable && onAutoResumeChange/,
+  assert.match(msgContent, /recoveryOwner && parked && !modelCapacity\s+&& autoResumeAvailable && !!onAutoResumeChange/,
     'the action must require the tail resumable rate-limit state')
-  assert.match(msgContent, /Auto-continue this chat/,
+  assert.match(recoveryActions, /Auto-continue this chat/,
     'a future reset names the persistent chat policy')
-  assert.match(msgContent, /Turn off auto-continue/,
+  assert.match(recoveryActions, /Turn off auto-continue/,
     'an enabled policy stays reversible without a competing retry')
   const earlyRetry = renderToStaticMarkup(createElement(MsgContent, {
     msg: { role: 'assistant', blocks: [{ type: 'error', resumable: true, pause: { kind: 'usage_limit' } }] },
@@ -502,7 +503,7 @@ test('the rate-limit card keeps automatic recovery and an explicit early retry',
     'manual continuation remains available when credits restore usage early')
   assert.match(errorCard, /Continuing now may use it/,
     'paid recovery makes potential provider charges explicit')
-  assert.doesNotMatch(msgContent, /<Switch/,
+  assert.doesNotMatch(msgContent + recoveryActions, /<Switch/,
     'the card must not present a switch beside a competing action')
   assert.match(css, /\.chat__recovery-actions\s*\{/,
     'the in-card action has a dedicated layout')
@@ -547,7 +548,7 @@ test('continuations render as product markers, not user bubbles', () => {
   assert.match(continuationCard, /Resumed manually/)
   assert.match(continuationCard, /Server restarted — continuing automatically/)
   assert.match(continuationCard, /Retry check due — trying the provider again/)
-  assert.match(msgContent, /onClick=\{\(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)\}/,
+  assert.match(msgContent, /onClick: \(\) => onResume\(\{ allowLowStorage: continueAnywayAvailable \}\)/,
     'Resume delegates the lifecycle action instead of manufacturing owner text')
   assert.match(chatView, /const markerRow = isContinuationMessage\(msg\)/,
     'continuation rows are marker rows')

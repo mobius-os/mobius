@@ -375,20 +375,21 @@ export default function ProjectFinder({
     return DOMPurify.sanitize(String(PROJECT_MARKDOWN.parse(content) || ''))
   }, [content, fileKind, markdownLike])
   const csvRows = useMemo(
-    () => (fileKind === 'text' && csvLike ? parseProjectCsv(content) : []),
-    [content, csvLike, fileKind],
+    () => (fileKind === 'text' && csvLike && !windowed ? parseProjectCsv(content) : []),
+    [content, csvLike, fileKind, windowed],
   )
   const selectedGitChange = useMemo(
     () => gitChanges.find(change => change.path === selected) || null,
     [gitChanges, selected],
   )
+  const checkSelectedGitChange = !!selected && (!!selectedGitChange || !!gitStatus?.truncated)
   const gitDiffQuery = useQuery({
     queryKey: source.gitDiffKey(selected || ''),
     queryFn: async ({ signal }) => jsonOrThrow(
       await source.gitDiff(selected, { signal }),
       'File changes failed:',
     ),
-    enabled: !!selected && !!selectedGitChange,
+    enabled: checkSelectedGitChange,
     staleTime: 5_000,
   })
   const previewable = (fileKind === 'text' && (markdownLike || htmlLike || csvLike)) || ['image', 'pdf', 'binary'].includes(fileKind)
@@ -784,16 +785,20 @@ export default function ProjectFinder({
     } finally { setBusy(false) }
   }
 
+  function setCsvRows(rows) {
+    setContent(serializeProjectCsv(rows, { bom: content.startsWith('\uFEFF') }))
+  }
+
   function updateCsv(rowIndex, columnIndex, value) {
-    setContent(serializeProjectCsv(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value)))
+    setCsvRows(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value))
   }
 
   function appendCsvRow() {
-    setContent(serializeProjectCsv(addProjectCsvRow(csvRows)))
+    setCsvRows(addProjectCsvRow(csvRows))
   }
 
   function appendCsvColumn() {
-    setContent(serializeProjectCsv(addProjectCsvColumn(csvRows)))
+    setCsvRows(addProjectCsvColumn(csvRows))
   }
 
   async function downloadFile(target = selected) {
@@ -1147,7 +1152,7 @@ export default function ProjectFinder({
                 </div>
               )}
               <div className="project-finder__surface">
-                {fileView === 'changes' ? <ProjectFileDiff query={gitDiffQuery} changed={!!selectedGitChange} dirty={dirty} /> : fileLoading && fileKind === 'none' ? (
+                {fileView === 'changes' ? <ProjectFileDiff query={gitDiffQuery} changed={checkSelectedGitChange && gitDiff?.status !== 'clean'} dirty={dirty} /> : fileLoading && fileKind === 'none' ? (
                   <div className="project-document__empty" role="status"><p>Opening file…</p></div>
                 ) : fileKind === 'text' ? (
                   csvLike && fileView === 'preview' && !windowed ? (

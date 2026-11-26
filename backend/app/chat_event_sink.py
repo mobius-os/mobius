@@ -1215,7 +1215,14 @@ class ChatEventSink:
           )
           if blk is not None:
             turn_end_receipt_id = _turn_end_receipt_id(blk.get("output"))
-      output_reduced = self._reduce_tool_output(event)
+      if event.get("output_delta") is True:
+        # One piece is not the tool's full output, so never stash it under the
+        # tool's id. The reducer keeps only a bounded tail; bound the wire too.
+        output_reduced = False
+        if isinstance(event.get("content"), str):
+          event["content"] = event["content"][-TOOL_OUTPUT_INLINE_THRESHOLD:]
+      else:
+        output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(full_tool_output)
         if exit_code is not None:

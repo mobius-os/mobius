@@ -11,6 +11,7 @@ import {
   artifactTypeName,
   buildEventArtifactId,
   buildEventProjectId,
+  buildProjectFileArtifact,
   isArtifactBuildEvent,
   isBuilding,
   normalizeArtifacts,
@@ -23,6 +24,22 @@ test('normalizeArtifacts reads a bare array or an envelope, and drops malformed 
   // Lenient read: a hand-edited manifest with junk entries never throws.
   assert.deepEqual(normalizeArtifacts([{ id: 'a' }, null, {}, { id: '' }, 'x']).map(r => r.id), ['a'])
   assert.deepEqual(normalizeArtifacts(undefined), [])
+})
+
+test('build uses the registered result ID rather than the colliding filename hint', async () => {
+  const built = []
+  const client = {
+    createArtifact: async (_id, payload) => {
+      assert.equal(payload.source, 'Q1-summary.jsx')
+      assert.equal(payload.id, 'q1-summary')
+      assert.equal(payload.reuse_source, true)
+      return { id: 'q1-summary-2' }
+    },
+    buildArtifact: async (projectId, artifactId) => { built.push([projectId, artifactId]) },
+  }
+  const id = await buildProjectFileArtifact(client, response => response, 'project', 'Q1-summary.jsx', 'app')
+  assert.equal(id, 'q1-summary-2')
+  assert.deepEqual(built, [['project', 'q1-summary-2']])
 })
 
 test('a source change queues one idle envelope artifact and preserves build filters', async () => {

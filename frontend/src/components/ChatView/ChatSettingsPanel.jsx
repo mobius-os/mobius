@@ -29,9 +29,10 @@
  * ║   2. CROSS-PROVIDER SWITCHING                                    ║
  * ║      Sessions are not portable between providers (Claude session ║
  * ║      id ≠ Codex thread id), so switching after assistant turns   ║
- * ║      asks for confirmation, then the INCOMING provider prepares  ║
- * ║      its context from the detailed running summary. The briefing,║
- * ║      provider, settings, and cleared session commit atomically.  ║
+ * ║      asks for confirmation, then the server hands the chat over  ║
+ * ║      from its saved digest and recent messages, with no model    ║
+ * ║      call. The handover, provider, settings, and cleared session ║
+ * ║      commit atomically.                                          ║
  * ║      Same-provider model swaps need no handoff.                   ║
  * ║      `hasAssistantTurns` is LIVE-DERIVED in the parent           ║
  * ║      (ChatView): `chatInfo.has_assistant_turns ||                ║
@@ -151,7 +152,7 @@ export default function ChatSettingsPanel({
   const [saving, setSaving] = useState(false)
   const [localError, setLocalError] = useState('')
   const pendingSwitchPreviousRef = useRef(null)
-  // Synchronous guard for the paid atomic handoff. Routine picker writes use
+  // Synchronous guard for the atomic handoff. Routine picker writes use
   // the serialized tail and deliberately remain available while saving.
   const providerSwitchInFlightRef = useRef(false)
   const pendingSwitch = restorableProviderSwitch(
@@ -316,7 +317,7 @@ export default function ChatSettingsPanel({
         failProviderSwitch(
           chatId,
           request,
-          detail || 'Could not prepare this chat for the new provider.',
+          detail || 'Could not switch this chat to the new provider.',
         )
         return false
       }
@@ -338,7 +339,7 @@ export default function ChatSettingsPanel({
       failProviderSwitch(
         chatId,
         request,
-        'Network error while preparing the provider switch.',
+        'Network error while switching provider.',
       )
       return false
     }
@@ -667,7 +668,7 @@ export default function ChatSettingsPanel({
                 disabled={switchBusy || appCrossProvider || !providerConfigured}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
-                  : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
+                  : (isCrossProvider ? 'Switch this chat to this provider' : undefined)}
                 onSelect={() => {
                   if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
                 }}
@@ -691,7 +692,7 @@ export default function ChatSettingsPanel({
               {isPendingRow && (
                 <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
                   <p className="csp__confirm-copy">
-                    {info.label} will prepare its own context from this chat&apos;s history and running summary.
+                    {info.label} continues from this chat&apos;s saved digest and recent messages.
                   </p>
                   <div className="csp__confirm-actions">
                     <button
@@ -700,7 +701,7 @@ export default function ChatSettingsPanel({
                       onClick={handleConfirmProviderSwitch}
                       disabled={switchBusy}
                     >
-                      {switchBusy ? 'Preparing…' : 'Switch provider'}
+                      {switchBusy ? 'Switching…' : 'Switch provider'}
                     </button>
                     <button
                       type="button"
@@ -755,7 +756,7 @@ export default function ChatSettingsPanel({
           )}
           {switchBusy && (
             <p className="csp__note">
-              Preparing this chat for {providerInfoFor(pendingSwitch?.provider, providerStatusQuery.data).label || 'the new provider'}…
+              Switching this chat to {providerInfoFor(pendingSwitch?.provider, providerStatusQuery.data).label || 'the new provider'}…
             </p>
           )}
           {codexSwitchWarning && (

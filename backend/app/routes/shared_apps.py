@@ -348,6 +348,8 @@ def delete_shared_app(
   principal: SharedAppPrincipal = Depends(get_shared_app_principal),
   db: Session = Depends(get_db),
 ):
+  # Removal revokes every member and invite, so it is membership administration.
+  _require_membership_administration(principal)
   with PROJECT_LIFECYCLE_LOCK:
     row = _instance_for(db, instance_id, principal, "owner")
     now = now_naive_utc()

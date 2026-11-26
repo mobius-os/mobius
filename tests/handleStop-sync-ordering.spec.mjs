@@ -60,7 +60,8 @@ test.describe('handleStop keeps the queue for the owner', () => {
     const stopGate = new Promise(r => { resolveStop = r })
     let resolveSteer
     const steerGate = new Promise(r => { resolveSteer = r })
-    const live = await mockLiveRuntime(page)
+    // Keep detail reads mocked after Stop too: the test backend never saw these sends.
+    const live = await mockLiveRuntime(page, { idleDetail: true })
     const stream = await installControlledChatStream(page, 'streaming response...')
     let firstMessage
     let queuedMessage
