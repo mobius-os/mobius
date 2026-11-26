@@ -43,14 +43,15 @@ export function errorRecoveryFingerprint(surfaceKey, message, componentStack = '
 }
 
 export function readErrorRecoveryAttempt({
-  storage = globalThis.sessionStorage,
+  storage,
   surfaceKey,
   fingerprint,
   now = Date.now(),
 }) {
   try {
+    const ledger = storage === undefined ? globalThis.sessionStorage : storage
     const key = storageKey(surfaceKey)
-    const parsed = JSON.parse(storage.getItem(key) || 'null')
+    const parsed = JSON.parse(ledger.getItem(key) || 'null')
     if (
       !parsed
       || parsed.fingerprint !== fingerprint
@@ -59,7 +60,7 @@ export function readErrorRecoveryAttempt({
       || now - parsed.at < 0
       || now - parsed.at > ERROR_RECOVERY_MAX_AGE_MS
     ) {
-      storage.removeItem(key)
+      ledger.removeItem(key)
       return null
     }
     return parsed
@@ -69,7 +70,7 @@ export function readErrorRecoveryAttempt({
 }
 
 export function writeErrorRecoveryAttempt({
-  storage = globalThis.sessionStorage,
+  storage,
   surfaceKey,
   fingerprint,
   phase,
@@ -81,7 +82,8 @@ export function writeErrorRecoveryAttempt({
 }) {
   if (!ATTEMPT_PHASES.has(phase)) return false
   try {
-    storage.setItem(storageKey(surfaceKey), JSON.stringify({
+    const ledger = storage === undefined ? globalThis.sessionStorage : storage
+    ledger.setItem(storageKey(surfaceKey), JSON.stringify({
       fingerprint,
       phase,
       at: now,
@@ -97,7 +99,7 @@ export function writeErrorRecoveryAttempt({
 }
 
 export function writeRefreshedRecoveryAttempt({
-  storage = globalThis.sessionStorage,
+  storage,
   surfaceKey,
   fingerprint,
   now = Date.now(),
@@ -239,7 +241,7 @@ export async function runAgentRepair({
   previousAttempt = null,
   signal,
   onAttempt,
-  storage = globalThis.sessionStorage,
+  storage,
   agent,
   archiveOnGoalComplete = false,
 }) {

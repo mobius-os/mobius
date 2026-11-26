@@ -136,6 +136,41 @@ def test_artifact_crud_validates_and_confines(client, auth):
   ).status_code == 404
 
 
+def test_build_selection_reuses_only_the_same_source_and_builder(client, auth):
+  project = _make_project(client, auth)
+  url = f"/api/projects/{project['id']}/artifacts"
+  sources = ("Q1 summary.html", "Q1-summary.html")
+  for source in sources:
+    _write_file(client, auth, project, source, "<h1>Report</h1>")
+
+  def register(source, builder="website", **options):
+    return client.post(url, headers=auth, json={
+      "name": "Q1 summary", "source": source, "builder": builder,
+      "id": "q1-summary", **options,
+    })
+
+  # Reuse an existing result without invalidating its links.
+  first = register(sources[0])
+  assert first.status_code == 201, first.text
+  again = register(sources[0], reuse_source=True)
+  assert again.status_code == 200, again.text
+  assert again.json()["id"] == first.json()["id"]
+
+  second = register(sources[1], reuse_source=True)
+  assert second.status_code == 201, second.text
+  assert second.json()["id"] != first.json()["id"]
+  assert second.json()["source"] == sources[1]
+  assert register(sources[1], reuse_source=True).json()["id"] == second.json()["id"]
+
+  different_builder = register(sources[0], builder="app", reuse_source=True)
+  assert different_builder.status_code == 201, different_builder.text
+  assert different_builder.json()["id"] not in (first.json()["id"], second.json()["id"])
+  assert register(sources[0], builder="app", reuse_source=True).json()["id"] == different_builder.json()["id"]
+
+  # Explicit registration without the build-selection flag stays strict.
+  assert register(sources[1]).status_code == 409
+
+
 def test_creation_open_recency_is_navigation_state(client, auth, db):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>Hi</h1>")
@@ -393,6 +428,34 @@ def test_a_source_edit_after_a_build_marks_the_result_out_of_date(
 
   asyncio.run(project_builders.run_build(project["id"], "site"))
   assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+
+def test_legacy_filename_does_not_block_project_build_or_results(client, auth, db, monkeypatch):
+  async def copy_builder(*, root, source, output_dir, log_path):
+    (output_dir / source).write_text((root / source).read_text())
+
+  monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+  project = _make_project(client, auth)
+  project_id = project["id"]
+  _write_file(client, auth, project, "index.html", "<h1>Hello</h1>")
+  created = client.post(
+    f"/api/projects/{project_id}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+  asyncio.run(project_builders.run_build(project_id, "site"))
+  assert _artifact(client, auth, project_id, "site")["out_of_date"] is False
+
+  row = db.get(models.Project, project_id)
+  root = Path(os.environ["DATA_DIR"]) / row.root_path
+  (root / os.fsdecode(b"legacy-\xff.txt")).write_bytes(b"dependency")
+  assert _artifact(client, auth, project_id, "site")["out_of_date"] is True
+
+  asyncio.run(project_builders.run_build(project_id, "site"))
+  artifact = _artifact(client, auth, project_id, "site")
+  assert (artifact["status"], artifact["has_output"], artifact["out_of_date"]) == (
+    "ok", True, False,
+  )
 
 
 def test_source_fingerprint_ignores_build_outputs_and_git(tmp_path):

@@ -1,5 +1,6 @@
 """Tests for event processing (events.py)."""
 
+import copy
 from typing import get_args
 
 from app.chat import _ChatEventSink
@@ -1368,3 +1369,98 @@ def test_empty_completed_tool_output_never_erases_streamed_output():
   assert blocks[0]["output"] == "final stdout\n"
   process_event({"type": "tool_end", "tool_use_id": "t1"}, blocks)
   assert blocks[0]["status"] == "done"
+
+
+def _delta(content, tool_use_id="cmd-1"):
+  # The shape codex_sdk_runner publishes for CommandExecutionOutputDelta.
+  return {
+    "type": "tool_output", "content": content,
+    "tool_use_id": tool_use_id, "output_delta": True,
+  }
+
+
+_CHUNKS = ["collected 3 items\n", "test_a PASSED\n", "test_b FAILED\n"]
+
+
+def test_marked_output_deltas_accumulate_in_live_snapshot_and_saved_message():
+  """Codex command output streams as new chunks, not as the text so far. A
+  turn stopped before the completed item must keep everything that streamed."""
+  from app.broadcast import ChatBroadcast
+
+  sink = _ChatEventSink(ChatBroadcast("delta-chat"), chat_id=None)
+  sink.publish({
+    "type": "tool_start", "tool": "Bash", "input": "pytest",
+    "tool_use_id": "cmd-1",
+  })
+  for chunk in _CHUNKS:
+    sink.publish(_delta(chunk))
+
+  expected = "".join(_CHUNKS)
+  assert sink.assistant_blocks[0]["output"] == expected
+  snapshot, _stashes = sink._deferred_snapshot(sink.assistant_blocks)
+  assert snapshot["blocks"][0]["output"] == expected
+  saved = copy.deepcopy(sink.assistant_blocks)
+  finalize_blocks(saved)
+  assert build_assistant_message(saved)["blocks"][0]["output"] == expected
+
+
+def test_unmarked_file_change_output_still_replaces():
+  blocks = []
+  process_event({
+    "type": "tool_start", "tool": "Edit", "input": "a.py", "tool_use_id": "fc-1",
+  }, blocks)
+  for content in ("Proposed: update a.py", "Proposed: update a.py", "Updated a.py"):
+    process_event({
+      "type": "tool_output", "content": content, "tool_use_id": "fc-1",
+    }, blocks)
+  assert blocks[0]["output"] == "Updated a.py"
+
+
+def test_completion_replaces_accumulated_deltas_with_the_full_text():
+  blocks = []
+  process_event({
+    "type": "tool_start", "tool": "Bash", "input": "pytest", "tool_use_id": "cmd-1",
+  }, blocks)
+  for chunk in _CHUNKS:
+    process_event(_delta(chunk), blocks)
+  process_event({
+    "type": "tool_output", "content": "the complete aggregate",
+    "output_complete": True, "output_exit_code": 1, "tool_use_id": "cmd-1",
+  }, blocks)
+  assert blocks[0]["output"] == "the complete aggregate"
+
+
+def test_accumulated_delta_output_keeps_a_bounded_tail():
+  from app.events import TOOL_OUTPUT_INLINE_THRESHOLD
+
+  blocks = []
+  process_event({
+    "type": "tool_start", "tool": "Bash", "input": "build", "tool_use_id": "cmd-1",
+  }, blocks)
+  for index in range(2000):
+    process_event(_delta(f"line {index}\n"), blocks)
+  output = blocks[0]["output"]
+  assert len(output) <= TOOL_OUTPUT_INLINE_THRESHOLD
+  assert output.endswith("line 1999\n")
+
+
+def test_sink_bounds_a_large_delta_without_stashing_it_as_the_full_output():
+  """A delta is one piece of the output, so it must not be stashed under the
+  tool's id as its full text; the completed item owns that stash."""
+  from app.broadcast import ChatBroadcast
+  from app.events import TOOL_OUTPUT_INLINE_THRESHOLD
+
+  sink = _ChatEventSink(ChatBroadcast("delta-chat"), chat_id="delta-chat")
+  submitted = []
+  sink._submit_fire_and_forget = submitted.append
+  sink.publish({
+    "type": "tool_start", "tool": "Bash", "input": "cat big.log",
+    "tool_use_id": "cmd-1",
+  })
+  sink.publish(_delta("x" * 10_000 + "END\n"))
+
+  block = sink.assistant_blocks[0]
+  assert len(block["output"]) <= TOOL_OUTPUT_INLINE_THRESHOLD
+  assert block["output"].endswith("END\n")
+  assert "output_truncated" not in block
+  assert not [cmd for cmd in submitted if type(cmd).__name__ == "StashToolOutput"]

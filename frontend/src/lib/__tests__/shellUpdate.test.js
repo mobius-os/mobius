@@ -543,6 +543,24 @@ test('reloadIfGenerationStale: newer generation waiting → reloads and returns 
   assert.equal(reloads, 1)
 })
 
+test('reloadIfGenerationStale: a failed recovery ledger write prevents automatic reload', async () => {
+  const active = { id: 'a' }
+  const posted = []
+  const reg = makeReg({
+    waiting: { id: 'w', postMessage: message => posted.push(message) },
+    active,
+  })
+  let reloads = 0
+  const healed = await reloadIfGenerationStale({
+    serviceWorker: makeSwWith(reg, { controller: active }),
+    beforeReload: () => false,
+    reload: () => { reloads += 1 },
+  })
+  assert.equal(healed, false)
+  assert.deepEqual(posted, [])
+  assert.equal(reloads, 0)
+})
+
 test('reloadIfGenerationStale: already newest generation → no reload, returns false', async () => {
   const controller = { id: 'a' }
   // active === controller, nothing waiting, no stale flag → current generation.

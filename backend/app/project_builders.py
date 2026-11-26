@@ -250,7 +250,10 @@ def source_fingerprint(root: Path) -> str | None:
       if count > _FINGERPRINT_MAX_FILES:
         return None
       rel = path.relative_to(root).as_posix()
-      digest.update(f"{rel}\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
+      # POSIX names may contain undecodable bytes that Python round-trips as
+      # surrogate escapes. Hash those original bytes, just like UTF-8 names.
+      digest.update(os.fsencode(rel))
+      digest.update(f"\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
   return digest.hexdigest()
 
 

@@ -1,3 +1,7 @@
+function csvGridWidth(rows) {
+  return rows.reduce((width, row) => Math.max(width, row.length), 1)
+}
+
 /** Durable spreadsheet helpers for Project Finder's CSV surface.
  *
  * The parser handles quoted commas, embedded newlines, and doubled quotes. It
@@ -6,7 +10,7 @@
  * ordinary RFC 4180-style CSV rather than inventing a parallel sheet format.
  */
 export function parseProjectCsv(value) {
-  const source = String(value ?? '')
+  const source = String(value ?? '').replace(/^\uFEFF/, '')
   if (!source) return [['']]
   const rows = []
   let row = []
@@ -29,7 +33,7 @@ export function parseProjectCsv(value) {
   if (cell || row.length || !source.endsWith('\n')) {
     row.push(cell); rows.push(row)
   }
-  const width = Math.max(1, ...rows.map(item => item.length))
+  const width = csvGridWidth(rows)
   return rows.map(item => [...item, ...Array(width - item.length).fill('')])
 }
 
@@ -38,9 +42,10 @@ function serializeCell(value) {
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
-export function serializeProjectCsv(rows) {
+export function serializeProjectCsv(rows, { bom = false } = {}) {
   const matrix = Array.isArray(rows) && rows.length ? rows : [['']]
-  return matrix.map(row => (Array.isArray(row) ? row : [row]).map(serializeCell).join(',')).join('\n') + '\n'
+  const text = matrix.map(row => (Array.isArray(row) ? row : [row]).map(serializeCell).join(',')).join('\n') + '\n'
+  return bom ? '\uFEFF' + text : text
 }
 
 export function updateProjectCsvCell(rows, rowIndex, columnIndex, value) {
@@ -50,7 +55,7 @@ export function updateProjectCsvCell(rows, rowIndex, columnIndex, value) {
 }
 
 export function addProjectCsvRow(rows) {
-  const width = Math.max(1, ...(rows || []).map(row => row.length))
+  const width = csvGridWidth(rows || [])
   return [...(rows || []), Array(width).fill('')]
 }
 

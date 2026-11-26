@@ -527,6 +527,29 @@ def test_guarded_push_receipt_is_durable_and_original_grant_immutable(setup, mon
     report(setup, head_sha=NEW, reviewed_base_sha=BASE, tests_passed=True, independent_receipt_id="old-review")
 
 
+@pytest.mark.parametrize("ref", ["topic", "Owner-patch-1", "Feature/Login", "fix-\u00fcn\u00efcode", "x" * 240])
+def test_owner_push_reserves_a_valid_key_for_any_branch_name(setup, monkeypatch, ref):
+  """GitHub branch names may carry case, non-ASCII or 255 bytes; the exact-action key may not."""
+  db, row, principal = takeover(setup, monkeypatch)
+  row.targets_json = [{**row.targets_json[0], "head_ref": ref}]
+  db.commit()
+  snapshot = {"checkout": "/fake/server-repair", "initial_head_sha": SHA, "allowed_files": ["owned.py"]}
+  monkeypatch.setattr(repairs, "prepare_checkout", lambda *a: snapshot)
+  monkeypatch.setattr(repairs, "validate_repair", lambda *a, **kw: {**snapshot, "head_sha": NEW, "files": ["owned.py"], "diff_sha256": "d" * 64})
+  asyncio.run(routes.repair_checkout(1, row.id, checkout_body(), db, principal))
+  pushes = []
+  monkeypatch.setattr(repairs, "push_repair", lambda *a, **kw: pushes.append(1) or DispatchResult.confirmed({}))
+  result = propose_and_push(db, row, principal, publish_body())
+  assert pushes == [1]
+  assert result["run"]["items"][0]["successor"]["head_sha"] == NEW
+  key = row.outcomes_json[domain.key(ITEM)]["repair_attempts"][0]["work_key"]
+  assert key == domain.repair_work_key(row.targets_json[0])
+  if ref == "topic":  # A key that was already valid is unchanged, so saved attempts still match.
+    assert key == f"github:example/project:branch:topic:{SHA}:repair"
+  # Branches differing only by case are distinct actions.
+  assert domain.repair_work_key({**row.targets_json[0], "head_ref": ref.swapcase()}) != key or ref == ref.swapcase()
+
+
 def test_push_confirmed_while_pull_head_projection_lags(setup, monkeypatch):
   db, row, principal = configure_repair(setup, monkeypatch)
   def lagging_pull(_gh, _cwd, target):

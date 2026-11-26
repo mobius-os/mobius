@@ -31,3 +31,22 @@ test('CSV grid mutations preserve a rectangular durable matrix', () => {
   ])
   assert.equal(serializeProjectCsv(rows), 'A,B,\n1,3,\n,,\n')
 })
+
+test('large CSV files parse and add rows without spreading the matrix as arguments', () => {
+  const rows = parseProjectCsv('Header\n' + 'x\n'.repeat(150_000))
+  assert.equal(rows.length, 150_001)
+  assert.deepEqual(rows[0], ['Header'])
+  assert.deepEqual(rows.at(-1), ['x'])
+  const extended = addProjectCsvRow(rows)
+  assert.equal(extended.length, rows.length + 1)
+  assert.deepEqual(extended.at(-1), [''])
+})
+
+test('a leading UTF-8 BOM cannot split the first quoted header and can survive a grid edit', () => {
+  const source = '\uFEFF"Name, legal",Count\r\n"Example, Inc.",3\r\n'
+  const rows = parseProjectCsv(source)
+  assert.deepEqual(rows, [['Name, legal', 'Count'], ['Example, Inc.', '3']])
+  const edited = updateProjectCsvCell(rows, 1, 1, '4')
+  assert.equal(serializeProjectCsv(edited, { bom: true }), '\uFEFF"Name, legal",Count\n"Example, Inc.",4\n')
+  assert.deepEqual(parseProjectCsv('Header\n\uFEFFvalue\n'), [['Header'], ['\uFEFFvalue']])
+})

@@ -4,7 +4,7 @@ import { ChatCompose as MessageSquarePlus, Members as Users } from '@openai/apps
 import { api, jsonOrThrow } from '../../api/client.js'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { projectQueries } from '../../hooks/queries.js'
-import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import { buildProjectFileArtifact, queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import { liveProjectChat } from '../../lib/projectChats.js'
 import ProjectThemeResource, { ProjectThemeSourceView } from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
@@ -130,21 +130,9 @@ export default function ProjectWorkspace({
   // path so re-running "build as …" on the same file reuses one artifact rather
   // than piling up duplicates. Then build it and open it in its own viewer.
   async function buildFileAsArtifact(path, builder) {
-    const base = (path.split('/').pop() || path).replace(/\.[^.]+$/, '') || 'output'
-    const id = path.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64) || 'artifact'
     setError('')
     try {
-      try {
-        await jsonOrThrow(await api.projects.createArtifact(project.id, {
-          id, name: base, builder, source: path,
-        }), 'Build failed:')
-      } catch (cause) {
-        // An artifact for this file already exists — reuse it. Re-raise anything
-        // that is not a duplicate (e.g. the source vanished).
-        if (!/already|exist|409/i.test(cause?.message || '')) throw cause
-      }
-      await jsonOrThrow(await api.projects.buildArtifact(project.id, id), 'Build failed:')
+      const id = await buildProjectFileArtifact(api.projects, jsonOrThrow, project.id, path, builder)
       queryClient.invalidateQueries({ queryKey: projectQueries.keys.artifacts(project.id) })
       onOpenArtifact?.(id)
     } catch (cause) {

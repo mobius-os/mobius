@@ -82,7 +82,8 @@ export async function handleAppProjectsRequest({
       || String(imported.id) !== String(source.id)) {
       throw new Error('The server did not return a linked Project for this page.')
     }
-    await readProjects()
+    // The successful import already returned the linked Project. Open it
+    // without making completion depend on a second network request.
     onProjectCreated(project)
     openProject(project)
     return appRuntimeProjectView(project)

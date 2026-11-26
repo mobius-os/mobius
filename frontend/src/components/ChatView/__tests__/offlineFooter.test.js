@@ -69,6 +69,19 @@ test('only transient nudges float above the measured rail → connection → que
   )
 })
 
+test('desktop pointers keep the composer clear of the screen edge while the embed keeps its gutter', () => {
+  assert.match(
+    chatCss,
+    /@media \(hover: hover\) and \(pointer: fine\) \{\s*\.chat__foot \{ padding-bottom: 20px; \}\s*\}/,
+    'an auto-hiding dock or taskbar must not be one overshoot away from the composer',
+  )
+  assert.match(
+    chatCss,
+    /\.chat-embed \.chat__foot\s*\{[^}]*padding-bottom:\s*8px;/,
+    'the more specific embedded-composer rule keeps its flat 8px gutter',
+  )
+})
+
 test('the shell is the one persistent connection owner while send failures stay contextual', () => {
   assert.match(shell, /connectionStatusState = restartPending \? 'restarting'/)
   assert.match(shell, /connectionStatusState === 'restarting' \? 'Restarting…'/)
