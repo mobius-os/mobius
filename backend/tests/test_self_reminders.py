@@ -364,14 +364,16 @@ def send_statuses(monkeypatch):
   return statuses
 
 
-def _hidden_checkins(db, chat, reminder_id):
+def _posted_checkins(db, chat, reminder_id):
+  """Every transcript message carrying this reminder's check-in identity."""
   from app import models, transcript_rows
   db.expire_all()
   stored = db.get(models.Chat, chat.id)
-  seq = transcript_rows.client_message_seq(
-    db, stored, f"self-reminder:{reminder_id}",
-  )
-  return [] if seq is None else [seq]
+  cid = f"self-reminder:{reminder_id}"
+  return [
+    body for body in transcript_rows.iterate(db, stored)
+    if transcript_rows.attributes(body)["client_id"] == cid
+  ]
 
 
 def test_retry_after_a_lost_settle_does_not_post_the_checkin_twice(
@@ -406,7 +408,7 @@ def test_retry_after_a_lost_settle_does_not_post_the_checkin_twice(
   assert send_statuses[0] != "duplicate"
   assert send_statuses[1] == "duplicate"
   assert len(started_runs) == 1
-  assert len(_hidden_checkins(db, chat, reminder["id"])) == 1
+  assert len(_posted_checkins(db, chat, reminder["id"])) == 1
   assert self_reminders.list_pending(chat.id) == []
 
 
@@ -430,7 +432,7 @@ def test_dispatch_from_a_stale_snapshot_acknowledges_the_delivered_checkin(
   assert overlap.json()["fired"] == 0
   assert send_statuses[1] == "duplicate"
   assert len(started_runs) == 1
-  assert len(_hidden_checkins(db, chat, reminder["id"])) == 1
+  assert len(_posted_checkins(db, chat, reminder["id"])) == 1
 
 
 def test_reminder_cancelled_during_its_send_does_not_fail_the_dispatch(
