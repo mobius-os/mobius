@@ -8,10 +8,10 @@ from pathlib import Path
 
 import pytest
 
-from app import chat as chat_mod, chat_branches, models, schemas, transcript_rows
+from app import chat as chat_mod, chat_branches, models, transcript_rows
 from app.broadcast import create_broadcast
 from app.chat_branches import claude_fork_point, codex_fork_point
-from app.chat_writer import StartTurn, alloc_run_token, get_writer
+from app.chat_writer import AppendPending, PromotePending, StartTurn, alloc_run_token, get_writer
 from app.config import get_settings
 
 
@@ -120,13 +120,13 @@ def _first_turn_prompt(client, auth, db, monkeypatch, chat_id, text, *, runner=N
   db.commit()
   create_broadcast(chat_id)
   run_token = alloc_run_token()
-  get_writer().submit(StartTurn(
+  started = get_writer().submit(StartTurn(
     chat_id=chat_id, run_token=run_token,
     user_msg={"role": "user", "content": text, "ts": 10, "cid": f"next-{chat_id}"},
     title_source=text, default_provider="claude",
   )).result(timeout=5)
   asyncio.run(chat_mod._run_chat_impl(
-    messages=[schemas.ChatMessage(role="user", content=text)],
+    messages=started["history"],
     chat_id=chat_id, session_id=None, provider_id="claude",
     run_gen=chat_mod.current_run_generation(chat_id), run_token=run_token,
   ))
@@ -819,6 +819,10 @@ def test_branch_brings_screenshots_viewed_images_and_long_thinking(client, auth,
   assert client.get(f"/api/chats/{branch_id}/thinking-trace/think-1", headers=auth).text == "long thought"
 
 
+def _recalled_block(prompt: str) -> str:
+  return prompt[prompt.index("<resumed_context>"):prompt.index("</resumed_context>")]
+
+
 def test_seeded_history_leaves_out_the_current_request(client, auth, db, monkeypatch):
   # The provider receives this turn's message as the request; repeating it
   # inside the recalled history sends it twice.
@@ -829,7 +833,7 @@ def test_seeded_history_leaves_out_the_current_request(client, auth, db, monkeyp
 
   prompt = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "Paris instead")["user_message"]
 
-  block = prompt[prompt.index("<resumed_context>"):prompt.index("</resumed_context>")]
+  block = _recalled_block(prompt)
   assert "Rome or Paris?" in block
   assert "Paris instead" not in block
   assert prompt.count("Paris instead") == 1
@@ -846,3 +850,68 @@ def test_a_long_current_request_does_not_evict_the_seeded_history(client, auth, 
 
   assert "Rome or Paris?" in prompt
   assert prompt.count("Here is my log:") == 1
+
+
+def test_an_unanswered_earlier_message_stays_in_the_seeded_history(client, auth, db, monkeypatch):
+  # Stop before any output saves no reply, so the owner's correction lands
+  # right after the stopped message. Only the correction is this turn's
+  # request; the stopped message is history the agent must still see.
+  source_id = _chat(client, auth, db, CONVERSATION)
+  branch_id = client.post(
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
+  ).json()["id"]
+  branch = db.query(models.Chat).filter(models.Chat.id == branch_id).one()
+  transcript_rows.append(db, branch, {
+    "role": "user", "content": "STOPPED add tags and colours", "cid": "stopped", "ts": 5,
+  })
+  db.commit()
+
+  prompt = _first_turn_prompt(client, auth, db, monkeypatch, branch_id, "CURRENT only tags please")["user_message"]
+
+  block = _recalled_block(prompt)
+  assert "STOPPED add tags and colours" in block
+  assert "CURRENT only tags please" not in block
+  assert prompt.count("CURRENT only tags please") == 1
+
+
+def test_a_promoted_queued_batch_is_left_out_of_the_seeded_history(client, auth, db, monkeypatch):
+  # A queued batch is stored as separate owner rows but reaches the provider
+  # as one combined request, so none of its rows is recalled history.
+  monkeypatch.setattr("app.providers.ClaudeProvider.check_auth", lambda self, _d: None)
+  monkeypatch.setattr("app.providers.ClaudeProvider.ensure_auth", lambda self, _d: asyncio.sleep(0))
+  captured = {}
+
+  async def _runner(**kwargs):
+    captured.update(kwargs)
+    return {"session_id": "new-session", "cost_usd": 0.0, "error": None}
+
+  monkeypatch.setattr("app.claude_sdk_runner.run_claude_sdk_turn", _runner)
+  source_id = _chat(client, auth, db, CONVERSATION)
+  branch_id = client.post(
+    f"/api/chats/{source_id}/branch", json={"through_id": "a1"}, headers=auth,
+  ).json()["id"]
+  db.query(models.Chat).filter(models.Chat.id == branch_id).one().provider = "claude"
+  db.commit()
+  for index, text in enumerate(("BATCH one", "BATCH two")):
+    get_writer().submit(AppendPending(
+      chat_id=branch_id, run_token="",
+      user_msg={"role": "user", "content": text, "ts": 10 + index, "cid": f"batch-{index}"},
+    )).result(timeout=5)
+  create_broadcast(branch_id)
+  run_token = alloc_run_token()
+  promoted = get_writer().submit(PromotePending(chat_id=branch_id, run_token=run_token)).result(timeout=5)
+  assert [m["content"] for m in transcript_rows.read_all(db, db.get(models.Chat, branch_id))][-2:] == [
+    "BATCH one", "BATCH two",
+  ]
+
+  asyncio.run(chat_mod._run_chat_impl(
+    messages=promoted["history"],
+    chat_id=branch_id, session_id=None, provider_id="claude",
+    run_gen=chat_mod.current_run_generation(branch_id), run_token=run_token,
+  ))
+
+  prompt = captured["user_message"]
+  block = _recalled_block(prompt)
+  assert "Rome or Paris?" in block
+  assert "BATCH" not in block
+  assert prompt.count("BATCH one") == 1 and prompt.count("BATCH two") == 1

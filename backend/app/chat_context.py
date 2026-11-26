@@ -509,19 +509,9 @@ def _latest_compaction_brief(chat_row) -> str | None:
   return None
 
 
-def _before_current_turn(history: list) -> list:
-  """History up to the current turn's trailing owner messages.
-
-  The provider receives those messages as this turn's request, so recalled
-  history that repeated them would send them twice.
-  """
-  end = len(history)
-  while end > 0 and isinstance(history[end - 1], dict) and history[end - 1].get("role") == "user":
-    end -= 1
-  return history[:end]
-
-
-def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
+def _build_resumed_context(
+  chat_row, *, history_rows: int, keep_task: bool = False,
+) -> str | None:
   """Saved-state context for a chat whose provider session cannot be resumed.
 
   When a chat's stored `session_id` no longer has a resumable CLI
@@ -536,6 +526,16 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   ``keep_task`` always keeps the opening request as well: a delegated
   helper's task exists only there, and a helper reseeded without it would
   continue work it cannot see the purpose of.
+
+  ``history_rows`` is how many leading transcript rows came before this
+  turn's request. Every turn's history is the transcript up to its request
+  followed by that one request message, so the caller passes its history's
+  length minus one. The provider receives the request on its own, so the rows
+  that hold it (one owner message, or a queued batch stored as separate rows)
+  stay out of the recalled history. An earlier owner message that was never
+  answered, such as one stopped before any reply, stays in it, and a
+  continuation whose request is not stored in the transcript recalls every
+  row.
   """
   if chat_row is None:
     return None
@@ -544,7 +544,7 @@ def _build_resumed_context(chat_row, *, keep_task: bool = False) -> str | None:
   messages = list(transcript_rows.history(chat_row))
   try:
     handover = build_direct_handover(
-      read_note(get_settings().data_dir, chat_row.id), _before_current_turn(messages),
+      read_note(get_settings().data_dir, chat_row.id), messages[:history_rows],
       keep_opening_request=keep_task,
     )
   except CompactionError:

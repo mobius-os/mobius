@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app import chat as chat_mod
-from app import chat_queue, models, schemas
+from app import chat_queue, models
 from app import schema_migrations as migrations
 from app.broadcast import create_broadcast, remove_broadcast
 from app.chat_writer import StartTurn, get_writer
@@ -111,7 +111,7 @@ async def _run_turn(
     monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
 
   run_token = f"rt-{chat_id}"
-  get_writer().submit(StartTurn(
+  started = get_writer().submit(StartTurn(
     chat_id=chat_id, run_token=run_token,
     user_msg={"role": "user", "content": "Carry on.", "ts": 3, "cid": f"m-{chat_id}"},
     title_source="Carry on.", default_provider=provider_id,
@@ -119,11 +119,7 @@ async def _run_turn(
   create_broadcast(chat_id)
   try:
     await chat_mod._run_chat_impl(
-      messages=[
-        schemas.ChatMessage(role="user", content="Fix the broker polling."),
-        schemas.ChatMessage(role="assistant", content="The broker fix is committed."),
-        schemas.ChatMessage(role="user", content="Carry on."),
-      ] if delegated else [schemas.ChatMessage(role="user", content="Carry on.")],
+      messages=started["history"],
       chat_id=chat_id, session_id=session_id, provider_id=provider_id,
       run_token=run_token,
     )
@@ -148,6 +144,8 @@ async def test_a_retired_session_starts_fresh_with_the_chats_own_history(
   assert "<resumed_context>" in call["user_message"]
   assert "The broker fix is committed." in call["user_message"]
   assert call["user_message"].rstrip().endswith("Carry on.")
+  # The request is sent once, after the history it continues, not inside it.
+  assert call["user_message"].count("Carry on.") == 1
   # Its provider sees a first turn, so it also gets the first-turn context.
   assert "<agent_experience>" in (call.get("system_prompt") or call.get("skill_text") or "")
 
@@ -306,7 +304,7 @@ def test_reseed_drops_leaked_write_frames_from_replies_only(db):
   ])
   db.add(chat)
   db.commit()
-  block = _build_resumed_context(chat)
+  block = _build_resumed_context(chat, history_rows=4)
   replies = block.split("Why do replies show <MOBIUS_WRITE ... />?", 1)[1]
   assert "MOBIUS_WRITE" not in replies and "write-1" not in replies
   assert "Fixed the broker." in replies and "Done." in replies and "Saved." in replies

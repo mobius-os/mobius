@@ -216,14 +216,14 @@ def test_resumed_context_block_round_trips_transcript(db):
     {"role": "assistant", "content": "Done — notes app is live."},
     {"role": "user", "content": "add tags"},
   ])
-  block = _build_resumed_context(row)
+  block = _build_resumed_context(row, history_rows=2)
   assert block is not None
   assert "<resumed_context>" in block and "</resumed_context>" in block
   # Order preserved, oldest-first, with speaker labels.
   i_first = block.index("build me a notes app")
   i_mid = block.index("Done — notes app is live.")
   assert i_first < i_mid
-  # The trailing owner message is this turn's request, sent once as such.
+  # The final row is this turn's request, which the provider receives once.
   assert "add tags" not in block
   assert "USER: build me a notes app" in block
   assert "ASSISTANT: Done" in block
@@ -239,7 +239,7 @@ def test_resumed_context_skips_non_conversation_rows(db):
     {"role": "user", "content": "real question"},
     {"role": "assistant", "content": ""},
   ])
-  block = _build_resumed_context(row)
+  block = _build_resumed_context(row, history_rows=4)
   assert block is not None
   assert "real question" in block
   assert "ignored" not in block
@@ -253,8 +253,8 @@ def test_resumed_context_labels_automatic_continuation_as_product_event(db):
     "kind": "auto_continuation",
     "continuation_reason": "restart",
     "content": "continue",
-  }, {"role": "assistant", "content": "Continued."}])
-  block = _build_resumed_context(row)
+  }])
+  block = _build_resumed_context(row, history_rows=1)
 
   assert "AUTOMATIC CONTINUATION (RESTART): continue" in block
   assert "USER: continue" not in block
@@ -264,8 +264,8 @@ def test_resumed_context_none_when_empty(db):
   """A chat with no usable transcript yields no reseed block."""
   from app.chat_context import _build_resumed_context
 
-  assert _build_resumed_context(_chat_row(db, [])) is None
-  assert _build_resumed_context(None) is None
+  assert _build_resumed_context(_chat_row(db, []), history_rows=0) is None
+  assert _build_resumed_context(None, history_rows=0) is None
 
 
 def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
@@ -282,10 +282,7 @@ def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
     {"role": "user", "content": "COVERED opening request"},
     {"role": "assistant", "content": "COVERED first answer"},
   ]
-  row = _chat_row(db, covered + [
-    {"role": "user", "content": "TAIL follow-up"},
-    {"role": "assistant", "content": "TAIL answer"},
-  ])
+  row = _chat_row(db, covered + [{"role": "user", "content": "TAIL follow-up"}])
   path = note_path(get_settings().data_dir, row.id)
   path.parent.mkdir(parents=True, exist_ok=True)
   path.write_text(apply_checkpoint(
@@ -294,14 +291,14 @@ def test_resumed_context_carries_the_saved_digest_and_only_later_messages(db):
     coverage=checkpoint_coverage(covered, "no-live-run"),
   ), encoding="utf-8")
 
-  block = _build_resumed_context(row)
+  block = _build_resumed_context(row, history_rows=3)
 
   assert "Decision: tags are stored per note." in block
   assert "Building the notes app." in block
   assert "TAIL follow-up" in block
   assert "COVERED first answer" not in block
   # What the digest stands in for stays readable from the originals.
-  assert f"/api/chats/{row.id}?limit=100&before=4" in block
+  assert f"/api/chats/{row.id}?limit=100&before=3" in block
 
 
 def test_resumed_context_truncates_to_budget(db):
@@ -315,8 +312,8 @@ def test_resumed_context_truncates_to_budget(db):
 
   big = "x" * 4000
   msgs = [{"role": "user", "content": f"{i} {big}"} for i in range(40)]
-  msgs.append({"role": "assistant", "content": "MOST_RECENT marker"})
-  block = _build_resumed_context(_chat_row(db, msgs))
+  msgs.append({"role": "user", "content": "MOST_RECENT marker"})
+  block = _build_resumed_context(_chat_row(db, msgs), history_rows=len(msgs))
   assert block is not None
   assert "MOST_RECENT marker" in block
   # The oldest turn was dropped, and the block respects the budget
@@ -337,14 +334,14 @@ def test_a_reseeded_helper_always_keeps_its_task(db):
   msgs += [{"role": "assistant", "content": f"{i} {big}"} for i in range(40)]
   msgs.append({"role": "assistant", "content": "LATEST progress"})
 
-  assert "TASK: audit" not in _build_resumed_context(_chat_row(db, msgs))
-  block = _build_resumed_context(_chat_row(db, msgs), keep_task=True)
+  assert "TASK: audit" not in _build_resumed_context(_chat_row(db, msgs), history_rows=len(msgs))
+  block = _build_resumed_context(_chat_row(db, msgs), history_rows=len(msgs), keep_task=True)
   assert block.index("USER: TASK: audit") < block.index(
     "Earlier messages are omitted here"
   ) < block.index("LATEST progress")
   assert "ASSISTANT: 0 xxxx" not in block
   assert len(block.encode("utf-8")) < HANDOVER_MAX_BYTES + 2000
 
-  short = _build_resumed_context(_chat_row(db, msgs[:1] + msgs[-1:]), keep_task=True)
+  short = _build_resumed_context(_chat_row(db, msgs[:1] + msgs[-1:]), history_rows=2, keep_task=True)
   assert "are omitted here" not in short
   assert short.count("TASK: audit") == 1
