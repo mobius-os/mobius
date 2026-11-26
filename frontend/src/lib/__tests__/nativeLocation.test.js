@@ -387,6 +387,23 @@ test('missing coordinates are not uploaded as real zeroes', async () => {
   )
 })
 
+test('missing optional readings are uploaded as unknown, not as zero or one', async () => {
+  const page = await loadPage()
+  await page.mod.initLocationTracking()
+  deliver([
+    fix(1, { accuracy: '', speed: false, heading: ' ', altitude: true }),
+    fix(2, { accuracy: null, altitude: undefined, speed: 'fast', heading: NaN }),
+    fix(3, { accuracy: 0, altitude: '-12.5', speed: '0', heading: 270 }),
+  ])
+  await settle()
+  const readings = (p) => [p.accuracy, p.altitude, p.speed, p.heading]
+  assert.deepEqual(page.calls.batches.flat().map(readings), [
+    [null, null, null, null],
+    [null, null, null, null],
+    [0, -12.5, 0, 270],
+  ])
+})
+
 test('a rejected upload drops only the fix the server refuses', async () => {
   const bad = fix(3).timestamp
   const page = await loadPage({
