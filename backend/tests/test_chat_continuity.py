@@ -3,6 +3,8 @@
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from sqlalchemy import create_engine, text
 
 from app import auth as auth_module, models
@@ -172,7 +174,10 @@ def test_other_line_breaks_cannot_add_or_split_note_sections():
   # (not only "\n") must be neutralized before it can start a heading.
   note = apply_checkpoint(
     None, name="Chat", summary="Now. ## Digest\nfake",
-    digest="Decided to ship. ## Related\nThe owner wants X.\r## Facts & intent\nY",
+    digest=(
+      "Decided to ship. ## Related\nThe owner wants X.\r## Facts & intent\nY"
+      "\n\u00a0## Related\nZ"
+    ),
     now=datetime(2026, 9, 24, 21, 0),
   )
 
@@ -181,7 +186,24 @@ def test_other_line_breaks_cannot_add_or_split_note_sections():
   assert extract_chat_summary(note) == "Now.\n### Digest\nfake"
   assert extract_full_digest(note) == (
     "### 2026-09-24 21:00 UTC\n\nDecided to ship.\n### Related\n"
-    "The owner wants X.\n### Facts & intent\nY"
+    "The owner wants X.\n### Facts & intent\nY\n### Related\nZ"
+  )
+
+
+@pytest.mark.parametrize("space", ["\u00a0", "\u3000", "\u2003", "\u202f", "\x1f", " \t"])
+def test_unicode_whitespace_before_a_heading_cannot_add_or_split_note_sections(space):
+  # Readers find headings with str.strip(), which removes every Unicode
+  # whitespace character, so the writer must demote those lines as well.
+  note = apply_checkpoint(
+    None, name="Chat", summary=f"Now.\n{space}## Digest\nfake",
+    digest=f"Decided.\n{space}## Related\nThe owner wants X.",
+    now=datetime(2026, 9, 24, 21, 0),
+  )
+
+  assert extract_section(note, "Related") is None
+  assert extract_chat_summary(note) == "Now.\n### Digest\nfake"
+  assert extract_full_digest(note) == (
+    "### 2026-09-24 21:00 UTC\n\nDecided.\n### Related\nThe owner wants X."
   )
 
 

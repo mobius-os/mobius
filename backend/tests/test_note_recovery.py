@@ -95,10 +95,12 @@ def test_uncertain_coverage_never_discards_history(change):
 @pytest.mark.parametrize("entry", [
   "Preserve old files.\r\nDraft only.",
   "Preserve old files. Draft only.",
+  "Keep.\n\u00a0## Related\nPreserve old files.\nDraft only.",
 ])
 def test_digest_line_breaks_keep_verified_coverage_through_disk(tmp_path, entry):
   # The reader rebuilds the digest from str.splitlines() after a text-mode
-  # read, so the bound fingerprint must describe that same text.
+  # read and ends it at any line str.strip() turns into a section heading, so
+  # the bound fingerprint must describe that same text.
   messages = copy.deepcopy(HISTORY)
   path = tmp_path / "index.md"
   write_note(path, apply_checkpoint(
