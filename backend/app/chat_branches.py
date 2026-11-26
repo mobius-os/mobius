@@ -431,13 +431,9 @@ def branch_chat(
     copied = _copy_bare_files(
       source_folder / "uploads", branch_folder / "uploads", [entry["name"] for entry in entries],
     )
-    # A recorded path names the source's file; point it at the branch's copy,
-    # in the same form the upload route records.
-    branch.uploads = [
-      {**copy.deepcopy(entry), "path": str(branch_folder / "uploads" / entry["name"])}
-      if "path" in entry else copy.deepcopy(entry)
-      for entry in entries if entry["name"] in copied
-    ]
+    # A copied record's stored `path` still names the source's file; readers
+    # derive the file from the chat (`upload_lifecycle.upload_file`) instead.
+    branch.uploads = [copy.deepcopy(entry) for entry in entries if entry["name"] in copied]
     # Screenshots and viewed-image snapshots a step shows (chat media).
     _copy_bare_files(
       source_folder / "media", branch_folder / "media",

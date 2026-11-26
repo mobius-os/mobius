@@ -106,9 +106,9 @@ def test_branch_brings_attached_files_and_full_tool_outputs(client, auth, db):
   assert branch.uploads == [{"name": "notes.txt", "claimed": True}]
 
 
-def test_branch_upload_records_point_at_the_branch_copy(client, auth, db):
-  # A real upload records its file's path; the branch's agent is shown that
-  # path, so it must name the branch's own copy, never the source's file.
+def test_branch_agent_file_list_names_the_branch_copy(client, auth, db):
+  # The branch's agent must be shown the branch's own copy of an attached
+  # file, never the source's file its copied upload record still names.
   from app.routes.chats_stream import _content_with_uploads
 
   data_dir = Path(get_settings().data_dir)
@@ -133,7 +133,7 @@ def test_branch_upload_records_point_at_the_branch_copy(client, auth, db):
   db.expire_all()
   branch = db.query(models.Chat).filter(models.Chat.id == branch_id).one()
   copied = data_dir / "chats" / branch_id / "uploads" / "notes.txt"
-  assert branch.uploads == [{**uploaded, "claimed": True, "path": str(copied)}]
+  assert copied.read_bytes() == b"hello"
   assert f"notes.txt → {copied.resolve()}" in _content_with_uploads(branch, "next")
 
 
