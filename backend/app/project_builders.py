@@ -34,6 +34,7 @@ import shutil
 import stat
 import time
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
@@ -85,10 +86,19 @@ def _now_iso() -> str:
 
 
 def slug_artifact_id(name: str) -> str:
-  """Derive a valid artifact id from a display name."""
-  lowered = (name or "").lower()
+  """Derive a valid artifact id from a display name.
+
+  Accents are folded (NFKD, combining marks dropped) so a Latin-script title
+  reads as itself and one visible title gives one id whether it arrived NFC
+  or NFD. ASCII titles keep the ids they always had.
+  """
+  title = unicodedata.normalize("NFC", name or "").lower()
+  folded = "".join(
+    ch for ch in unicodedata.normalize("NFKD", title)
+    if not unicodedata.combining(ch)
+  )
   slug = "".join(
-    ch if (ch.isalnum() or ch in "-_") else "-" for ch in lowered
+    ch if (ch.isalnum() or ch in "-_") else "-" for ch in folded
   ).strip("-_")
   while "--" in slug:
     slug = slug.replace("--", "-")
@@ -96,10 +106,10 @@ def slug_artifact_id(name: str) -> str:
   if slug.isascii():
     return slug
 
-  # Keep existing valid IDs. A localized title that cannot be used as an ID
-  # gets a short ASCII stem plus a stable suffix so distinct titles that
-  # reduce to the same stem do not all register as the same result.
-  suffix = hashlib.sha256(lowered.encode("utf-8")).hexdigest()[:12]
+  # Folding cannot represent every letter (CJK, Đ). Replace what remains with
+  # an ASCII stem plus a stable suffix of the whole title, so distinct titles
+  # that reduce to the same stem do not all register as the same result.
+  suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:12]
   stem = re.sub(r"[^a-z0-9_-]+", "-", slug)[:64 - 1 - len(suffix)].strip("-_")
   return f"{stem or 'artifact'}-{suffix}"
 

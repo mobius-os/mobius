@@ -9,6 +9,7 @@ network in CI.
 
 import asyncio
 import os
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,21 @@ def test_localized_result_titles_get_distinct_valid_ids(client, auth):
     ids.add(artifact_id)
 
   assert project_builders.slug_artifact_id("Annual report!") == "annual-report"
+
+
+def test_accented_titles_fold_to_readable_ids_in_any_normalization():
+  title = "Izvještaj o troškovima"
+  nfc = unicodedata.normalize("NFC", title)
+  nfd = unicodedata.normalize("NFD", title)
+  assert nfc != nfd
+  assert project_builders.slug_artifact_id(nfc) == "izvjestaj-o-troskovima"
+  assert project_builders.slug_artifact_id(nfd) == "izvjestaj-o-troskovima"
+  assert project_builders.slug_artifact_id("Résumé") == "resume"
+  assert project_builders.slug_artifact_id("Report ²") == "report-2"
+  # Letters folding cannot express keep a stable hash suffix instead.
+  unfoldable = project_builders.slug_artifact_id("Đak")
+  assert unfoldable.startswith("ak-")
+  assert project_builders.ARTIFACT_ID_RE.fullmatch(unfoldable)
 
 
 def test_build_missing_source_records_error_not_500(client, auth, db):
