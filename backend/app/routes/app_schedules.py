@@ -109,16 +109,15 @@ def _schedule_from_crontab_text(
     command_path = app_cron.crontab_command_path(line)
     if not command_path.startswith(needle):
       continue
-    # A line whose job script is gone is DEBRIS, not a declaration. Cron
-    # registration is add-only — the scaffold rewrites the line for the path
-    # it installs and leaves every other line alone — so an app that renames
-    # its job leaves the old entry behind forever. Trusting it here let the
-    # dead line win purely because it sorted first, which then (a) reported a
-    # phantom job and cadence on /api/apps/schedules, and (b) failed the
-    # reconciler's own is_file() guard, so the app's REAL schedule was never
-    # re-registered and the whole supervision pass reported a warning.
-    # Skipping debris lets discovery fall through to the durable init-cron.sh
-    # declaration and then the manifest — both of which state real intent.
+    # A line whose job script is gone is DEBRIS, not a declaration. Older
+    # registration was add-only per job filename, so an app that renamed its
+    # job left the old entry behind (registration now replaces the app's
+    # entry, but instances may still carry that debris). Trusting it here let
+    # the dead line win purely because it sorted first, which then (a)
+    # reported a phantom job and cadence on /api/apps/schedules, and (b)
+    # failed the reconciler's own is_file() guard, so the app's REAL schedule
+    # was never re-registered and the whole supervision pass reported a
+    # warning. Skipping debris lets discovery fall through to the next source.
     if not (runtime_dir / Path(command_path).name).is_file():
       continue
     return cron, Path(command_path).name
@@ -126,18 +125,26 @@ def _schedule_from_crontab_text(
 
 
 def _app_schedule(app: models.App, live_crontab: str, runtime_dir: Path) -> tuple[str, str] | None:
+  """The app's current schedule: its durable declaration, then live, then manifest.
+
+  The declaration is written before every live change, so it is never older
+  than a supervised live line. The live crontab can instead hold several
+  supervised lines for one app (a renamed job left by older registration).
+  Preferring whichever sorts first would re-register the stale job, and since
+  registration replaces the app's entry, that would delete the current one.
+  """
   source_dir = Path(app.source_dir)
-  live = _schedule_from_crontab_text(
-    source_dir, live_crontab, runtime_dir, supervised_only=True,
-  )
-  if live is not None:
-    return live
   for replay_dir in _cron_replay_dirs_for_app(app, runtime_dir):
     schedule = _schedule_from_crontab_text(
       source_dir, _read_init_cron_text(replay_dir), runtime_dir,
     )
     if schedule is not None:
       return schedule
+  live = _schedule_from_crontab_text(
+    source_dir, live_crontab, runtime_dir, supervised_only=True,
+  )
+  if live is not None:
+    return live
   return _manifest_schedule(runtime_dir)
 
 

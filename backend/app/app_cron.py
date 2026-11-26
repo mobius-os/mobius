@@ -18,6 +18,11 @@ log = logging.getLogger(__name__)
 
 BAKED_CRON_SCAFFOLD = Path("/app/scripts/init-cron-scaffold.sh")
 _ALLOW_TEST_CRON_ENV = "MOBIUS_ALLOW_TEST_CRON"
+# With this set the scaffold writes only the durable declaration and
+# register_cron installs the live entry itself (replace_managed_schedule).
+# A direct scaffold run leaves it unset and keeps the scaffold's own live write.
+_DECLARE_ONLY_ENV = "MOBIUS_CRON_DECLARE_ONLY"
+_DECLARED_ENTRY = re.compile(r"""^\s*ENTRY=(?:"([^"]+)"|'([^']+)')\s*$""", re.M)
 
 
 class CronDeclarationError(HTTPException):
@@ -190,12 +195,14 @@ def register_cron(
   *,
   scaffold: Path | None = None,
 ) -> None:
-  """Install one durable, supervised app schedule through the scaffold.
+  """Install one durable, supervised app schedule.
 
-  The scaffold atomically records the complete durable declaration before it
-  installs the live crontab entry. A failed durable write therefore cannot
-  change live behavior, while a later live-write failure leaves a declaration
-  that startup reconciliation can retry safely.
+  The scaffold atomically records the complete durable declaration first; for
+  an app id this function then materializes that declaration as the app's one
+  live entry (``replace_managed_schedule``). A failed durable write therefore
+  cannot change live behavior, while a later live-write failure leaves a
+  declaration that startup reconciliation can retry safely. Without an app id
+  the scaffold installs its standalone entry itself.
 
   ``app_id`` is passed to the common job runner as the target application.
   ``timezone`` and ``zone_cron`` form one inseparable wall-clock identity: the
@@ -248,6 +255,7 @@ def register_cron(
   env["MOBIUS_APP_JOB_RUNNER"] = str(runner_script())
   if app_id is not None:
     env["MOBIUS_APP_CRON_STATE_DIR"] = str(schedule_state_dir(app_id))
+    env[_DECLARE_ONLY_ENV] = "1"
   try:
     result = subprocess.run(
       command, capture_output=True, text=True, timeout=30, env=env,
@@ -260,6 +268,32 @@ def register_cron(
     raise CronInfrastructureError(
       500,
       f"Cron registration failed: {result.stderr.strip()[:400]}",
+    )
+  if app_id is not None:
+    _install_declared_entry(schedule_state_dir(app_id) / "init-cron.sh")
+
+
+def _install_declared_entry(init_path: Path) -> None:
+  """Make the just-written declaration the app's one live crontab entry."""
+  try:
+    match = _DECLARED_ENTRY.search(init_path.read_text())
+  except OSError:
+    match = None
+  entry = (match.group(1) or match.group(2)) if match else ""
+  if not crontab_command_path(entry):
+    raise CronInfrastructureError(
+      500, "Cron registration wrote no schedule declaration.",
+    )
+  current = read_crontab()
+  if current is None:
+    raise CronInfrastructureError(
+      500, "Cron registration could not read the live crontab; "
+      "the declaration is kept for the next reconciliation.",
+    )
+  if not write_crontab(replace_managed_schedule(current, entry)):
+    raise CronInfrastructureError(
+      500, "Cron registration could not write the live crontab; "
+      "the declaration is kept for the next reconciliation.",
     )
 
 
@@ -379,18 +413,32 @@ def crontab_command_path(line: str) -> str:
   return tokens[0] if tokens else ""
 
 
-def replace_managed_schedule(current: str, app_id: str, job_path: Path, entry: str) -> str:
-  """Replace this app's supervised schedule, even if its job was renamed."""
+def replace_managed_schedule(current: str, entry: str) -> str:
+  """Return ``current`` with ``entry`` as its app's only managed schedule.
+
+  A line is replaced when it runs the same job, or when it is a supervised
+  line for the same app whose job has a different name (the app changed its
+  job). Every other line, including ones whose arguments merely mention the
+  job path, is kept.
+  """
+  entry_tokens = _crontab_command_tokens(entry)
+  job = crontab_command_path(entry)
+  # The supported runner CLI ends with APP_ID JOB.
+  app_id = entry_tokens[-2] if _supervised_job_path(entry_tokens) else None
   kept = []
   for line in current.splitlines():
     tokens = _crontab_command_tokens(line)
     previous_job = _supervised_job_path(tokens)
-    if previous_job is not None:
-      # The supported runner CLI ends with APP_ID JOB.
-      if tokens[-2] == app_id and Path(previous_job).parent == job_path.parent:
-        continue
-    elif crontab_command_path(line) == str(job_path):
-      # Replace the old direct-invocation form for this exact job.
+    if job and crontab_command_path(line) == job:
+      continue
+    # Match the job's directory as well as the id: an id reused by another
+    # app must never let this app erase that app's schedule.
+    if (
+      app_id is not None
+      and previous_job is not None
+      and tokens[-2] == app_id
+      and Path(previous_job).parent == Path(job).parent
+    ):
       continue
     kept.append(line)
   return "\n".join([*kept, entry]) + "\n"

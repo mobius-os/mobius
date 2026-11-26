@@ -280,16 +280,45 @@ def test_live_write_failure_leaves_complete_durable_retry_point(
   assert f'SCHEDULE_SOURCE="{zone_cron}"' in init_text
 
 
-def test_managed_job_change_replaces_only_this_apps_previous_schedule(tmp_path):
+def test_replace_managed_schedule_matches_app_identity_not_job_filename():
+  runner = "/live/app-job-runner.py"
+  apps = "/data/apps"
+  entry = f"30 10 * * * python3 {runner} --scheduled 57 {apps}/memory/second.sh"
+  replaced = [
+    # The app's previous job under another filename.
+    f"* * * * * python3 {runner} --scheduled --wall-clock Etc/UTC "
+    f"'0 9 * * *' 57 {apps}/memory/first.sh",
+    # The same job under an earlier id, and its legacy direct form.
+    f"0 7 * * * python3 {runner} --scheduled 12 {apps}/memory/second.sh",
+    f"5 7 * * * {apps}/memory/second.sh 57",
+  ]
+  kept = [
+    "MAILTO=\"\"",
+    f"# keep this comment about {apps}/memory/second.sh",
+    f"0 8 * * * {apps}/archive/report.sh --input {apps}/memory/second.sh",
+    # Same id, different app directory: an id reused by another app.
+    f"2 8 * * * python3 {runner} --scheduled 57 {apps}/memory-other/job.sh",
+    f"3 8 * * * {apps}/memory/manual.sh",
+  ]
+  current = "\n".join(replaced[:1] + kept[:2] + replaced[1:] + kept[2:]) + "\n"
+
+  from app.app_cron import replace_managed_schedule
+  assert replace_managed_schedule(current, entry).splitlines() == [*kept, entry]
+
+
+def test_register_cron_replaces_the_apps_previous_job_after_a_rename(
+  tmp_path, monkeypatch,
+):
+  """Changing an app's job leaves one live entry, not the old one beside it."""
+  from app import app_cron
+
   app_base = tmp_path / "apps"
   app_dir = app_base / "memory"
   app_dir.mkdir(parents=True)
   state = tmp_path / "crontab.txt"
-  new_path = app_dir / "second.sh"
   neighbors = [
-    f"# keep this comment about {new_path}",
-    f"0 8 * * * {app_base}/archive/report.sh --input {new_path}",
-    f"2 8 * * * python3 /live/app-job-runner.py --scheduled 58 {app_base}/memory-other/job.sh",
+    f"# keep this comment about {app_dir / 'second.sh'}",
+    f"0 8 * * * {app_base}/archive/report.sh --input {app_dir / 'second.sh'}",
     f"3 8 * * * {app_dir}/manual.sh",
   ]
   state.write_text("\n".join(neighbors) + "\n")
@@ -298,33 +327,28 @@ def test_managed_job_change_replaces_only_this_apps_previous_schedule(tmp_path):
   crontab = fake_bin / "crontab"
   crontab.write_text(
     '#!/bin/sh\n'
+    f'state={state}\n'
     '[ "$1" = "-u" ] && shift 2\n'
     'case "$1" in\n'
-    '  -l) cat "$CRONTAB_STATE" ;;\n'
-    '  -) cat > "$CRONTAB_STATE" ;;\n'
+    '  -l) cat "$state" ;;\n'
+    '  -) cat > "$state" ;;\n'
     '  *) exit 2 ;;\n'
     'esac\n'
   )
   crontab.chmod(0o755)
-  env = {
-    **os.environ,
-    "PATH": f"{fake_bin}:{os.environ['PATH']}",
-    "CRONTAB_STATE": str(state),
-    "MOBIUS_APP_BASE": str(app_base),
-    "MOBIUS_ALLOW_TEST_CRON": "1",
-    "DATA_DIR": str(tmp_path / "data"),
-    "MOBIUS_APP_CRON_STATE_DIR": str(tmp_path / "schedule"),
-    "MOBIUS_APP_JOB_RUNNER": "/live/app-job-runner.py",
-  }
-  script = Path(__file__).parents[1] / "scripts" / "init-cron-scaffold.sh"
-  for args in (
-    ["* * * * *", "first.sh", "57", "Etc/UTC", "0 9 * * *"],
-    ["30 10 * * *", "second.sh", "57"],
-  ):
-    result = subprocess.run([str(script), "memory", *args], env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+  monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+  monkeypatch.setenv("MOBIUS_APP_BASE", str(app_base))
+  monkeypatch.setenv("MOBIUS_ALLOW_TEST_CRON", "1")
 
-  kept = state.read_text().splitlines()
-  assert kept[:-1] == neighbors
-  assert kept[-1].startswith("30 10 * * * ")
-  assert kept[-1].endswith(f"--scheduled 57 {new_path}")
+  app_cron.register_cron(
+    "memory", "* * * * *", app_dir / "first.sh", 57,
+    timezone="Etc/UTC", zone_cron="0 9 * * *",
+  )
+  app_cron.register_cron("memory", "30 10 * * *", app_dir / "second.sh", 57)
+
+  live = state.read_text().splitlines()
+  assert live[:-1] == neighbors
+  assert live[-1].startswith("30 10 * * * ")
+  assert live[-1].endswith(f"--scheduled 57 {app_dir / 'second.sh'}")
+  declared = (app_cron.schedule_state_dir(57) / "init-cron.sh").read_text()
+  assert f'ENTRY="{live[-1]}"' in declared
