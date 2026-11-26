@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.requests import HTTPConnection
 
 from app import access_signal, app_consent, auth, browser_access, connect_outbound, models
-from app.agent_roles import AgentKey, confined_role_for_app
+from app.agent_roles import PROJECT_CLAIM, AgentKey, confined_role_for_app
 from app.app_capabilities import storage_grant
 from app.browser_access import BrowserLineage
 from app.config import get_settings
@@ -264,7 +264,24 @@ def _resolve_owner(
     ).first()
     if live_run is None:
       raise HTTPException(status_code=401, detail="Agent run is no longer active.")
+  if payload.get(PROJECT_CLAIM) is not None:
+    _require_project_grant(payload, db)
   return owner, payload
+
+
+def _require_project_grant(payload: dict, db: Session) -> None:
+  """A confined project room's key works only while the project's access is
+  still its grant: a project that became private, or whose access changed,
+  ends it from the next request (project_agent_access)."""
+  from app import project_agent_access
+  key = AgentKey.from_claims(payload)
+  project = db.get(models.Project, key.project) if key is not None else None
+  if (
+    project is None
+    or project.deleted_at is not None
+    or not key.matches(project_agent_access.role_for(db, project))
+  ):
+    raise HTTPException(status_code=401, detail="This project's agent access has changed.")
 
 
 def resolve_owner_only(token: str, db: Session) -> models.Owner:
@@ -779,7 +796,11 @@ def _generic_principal(owner: models.Owner, payload: dict, db: Session) -> Princ
     via_agent_chat=payload.get("via_agent_chat") if app_id is not None else None,
     browser=BrowserLineage.from_claims(payload),
     app_is_service=app_id is not None and payload.get("service") is True,
-    app_agent=AgentKey.from_claims(payload) if app_id is not None else None,
+    # An app's room key, or a project's (an owner bearer naming its project).
+    app_agent=(
+      AgentKey.from_claims(payload)
+      if app_id is not None or payload.get(PROJECT_CLAIM) is not None else None
+    ),
   )
 
 

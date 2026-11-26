@@ -179,9 +179,9 @@ async def request_approval(
   public_body = body.model_dump(exclude={"work_key", "message"}, exclude_none=True)
   work_key = body.work_key
   if principal.app_agent is not None:
-    # A confined app agent's claim stays inside its own app and chat, so it
-    # can never reserve owner work that another chat is about to do.
-    work_key = f"app:{principal.app_agent.app_id}:chat:{chat_id}:{work_key}"
+    # A confined agent's claim stays inside its own app (or project) and
+    # chat, so it can never reserve owner work another chat is about to do.
+    work_key = f"{principal.app_agent.subject}:chat:{chat_id}:{work_key}"
   return await save_owner_question(chat_id, {
     "questions": [{"id": "approval", "header": "Approval", **public_body}],
     "action_key": work_key,

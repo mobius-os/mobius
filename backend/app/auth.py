@@ -140,6 +140,7 @@ def create_agent_token(
   delegation_chat: str | None = None,
   expires_delta: timedelta = AGENT_RUN_TOKEN_TTL,
   browser: BrowserLineage | None = None,
+  grant: dict[str, Any] | None = None,
 ) -> str:
   """Create the owner bearer used by one ordinary interactive chat agent.
 
@@ -166,6 +167,10 @@ def create_agent_token(
     # calls back into /api/delegations.
     claims["delegation_id"] = delegation_id
     claims["delegation_chat"] = delegation_chat
+  if grant is not None:
+    # A confined project room's grant (agent_roles.AgentKey): the key
+    # allow-list and the Agent Gateway hold this bearer to it.
+    claims.update({k: v for k, v in grant.items() if k not in claims})
   return create_access_token(
     claims,
     expires_delta=expires_delta,

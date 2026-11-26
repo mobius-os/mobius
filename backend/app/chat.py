@@ -5987,14 +5987,14 @@ async def _refuse_delegated_write_replay(
 
 async def _refuse_room_provider(
   bc, chat_id: str, run_token: str | None, run_gen: int | None, db, *,
-  provider_name: str,
+  provider_name: str, subject: str = "This app's",
 ) -> chat_queue.TerminalDisposition:
-  """End a confined app agent's turn on a runtime its room cannot start.
+  """End a confined agent's turn on a runtime its room cannot start.
 
-  Running it unconfined instead would hand the app more than its role.
+  Running it unconfined instead would hand it more than its role.
   """
   error_message = (
-    f"This app's agents run confined, which {provider_name} does not support. "
+    f"{subject} agents run confined, which {provider_name} does not support. "
     "Choose Claude, Codex or Möbius models for this chat."
   )
   bc.publish({"type": "error", "message": error_message})
@@ -6078,13 +6078,23 @@ async def _run_chat_impl_with_db(
   # the ordinary runtime.
   # Every agent an app owns runs at the app's role, its helpers included: a
   # helper's chat belongs to the app that owns the delegation.
-  room_app = room_role = None
+  # A shared project's chats run in the same room (app.project_agent_access).
+  room_app = room_role = room_project = None
   if chat_row is not None and chat_row.created_by_app_id is not None:
     from app.agent_roles import confined_role_for_app, effective_grant, record_run_grant
     room_app = db.get(models.App, chat_row.created_by_app_id)
     room_role = confined_role_for_app(room_app)
     # A change of the app's grant stops this run (stop_runs_outside_grant).
     record_run_grant(chat_id, effective_grant(room_app))
+  elif chat_row is not None and chat_row.project_id is not None and run_policy is None:
+    from app import project_agent_access
+    from app.agent_roles import record_run_grant
+    project = db.get(models.Project, chat_row.project_id)
+    # The project becoming shared or private stops this run (sharing_changed).
+    run_grant = project_agent_access.grant(db, project)
+    record_run_grant(chat_id, run_grant)
+    room_role = project_agent_access.role_for(db, project) if run_grant else None
+    room_project = project if room_role is not None else None
   # A retired session is not resumed: its own history would keep the model
   # following a withdrawn instruction. A top-level chat starts fresh and is
   # reseeded from its transcript, exactly as for a lost session. (A retired
@@ -6400,6 +6410,24 @@ async def _run_chat_impl_with_db(
     agent_token = delegation_execution_token(
       db, run_policy, run_id=run_token,
     )
+  elif room_role is not None and room_project is not None:
+    from app.agent_roles import ROOM_PROVIDERS, AgentKey
+    room_provider = provider_id or DEFAULT_PROVIDER
+    if room_provider not in ROOM_PROVIDERS:
+      return await _refuse_room_provider(
+        bc, chat_id, run_token, run_gen, db, provider_name=provider.name,
+        subject="This project's",
+      )
+    # The owner's run-bound bearer, narrowed to the room by its grant
+    # (agent_roles.AgentKey): a project has no app credential of its own.
+    agent_token = auth.create_agent_token(
+      chat_id,
+      owner.username,
+      owner.token_epoch,
+      run_id=run_token,
+      browser=run_browser,
+      grant=AgentKey.claims_for(room_role, room_provider, project=room_project.id),
+    )
   elif room_role is not None:
     from app import app_consent
     from app.agent_roles import ROOM_PROVIDERS, AgentKey
@@ -6471,8 +6499,10 @@ async def _run_chat_impl_with_db(
     app_room = Room.for_run(
       room_role, chat_dir=chat_folder(settings.data_dir, chat_id),
       scratch=scratch,
-      storage_dir=Path(app_context_env.get("APP_STORAGE_DIR")
-                       or Path(settings.data_dir) / "apps" / str(room_app.id)),
+      # A project's room works on the project's folder.
+      storage_dir=Path(app_context_env["PROJECT_ROOT"]) if room_project is not None
+      else Path(app_context_env.get("APP_STORAGE_DIR")
+                or Path(settings.data_dir) / "apps" / str(room_app.id)),
     )
   # Partner display geometry (sent by the React shell on each turn). CSS
   # width/height preserve framing; pixel ratio preserves physical text/detail
@@ -6577,7 +6607,14 @@ async def _run_chat_impl_with_db(
     compose_system_prompt_off_loop, exact_prompt_for_chat, prompt_for_chat,
   )
   try:
-    if app_room is not None:
+    if app_room is not None and room_project is not None:
+      # Derived every turn too; it carries the project's own context.
+      from app import project_agent_access
+      system_prompt = project_agent_access.system_prompt(
+        room_role, project_name=room_project.name, room=app_room,
+        context=app_context_block, custom=custom_prompt,
+      )
+    elif app_room is not None:
       # Derived from the role every turn, never snapshotted: a role the owner
       # accepts later must not meet an earlier prompt. A helper adds its task
       # framing after the role.

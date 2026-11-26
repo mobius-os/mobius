@@ -3,15 +3,33 @@
 Reads may project a project nested inside the platform repository. Writes are
 stricter: Projects can initialize or commit only when their own root is the
 repository root, so an owner action can never stage unrelated Möbius files.
+
+In a shared project (``untrusted_settings``) the repository's own settings
+are not the owner's: a project agent's room can write ``.git``
+(``project_agent_access``), and Git starts programs its settings name (hooks,
+the file-system monitor, filters, diff and merge drivers). So hooks and the
+monitor are switched off for every command there, and each local command runs
+inside an agent room (``scripts/mobius_fence.py``): the repository writable
+only when the command writes, no network, nothing else of the owner's. Any
+program Git starts there reaches no more than the agent that could have named
+it. A command that talks to GitHub needs the network and the owner's GitHub
+sign-in, so it runs outside, and only after the repository's settings are
+checked to name no program (an agent could change them between the check and
+the command, so the room is the guarantee; this check covers only what the
+owner starts by hand). A host that cannot build rooms checks every command.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import os
 import json
 import re
 import selectors
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -36,6 +54,117 @@ class GitProjectError(RuntimeError):
   """An owner-actionable repository error safe to surface at the route."""
 
 
+_untrusted = contextvars.ContextVar("project_git_untrusted", default=False)
+# Switched off for every command in an untrusted repository; they would
+# otherwise run on a plain status read.
+_INERT_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+# Repository settings that name a program Git may start.
+# Repository settings that name a program Git may start, or that would send
+# the owner's GitHub sign-in somewhere else (a proxy, a rewritten address).
+_RUNS_PROGRAM = re.compile(
+  r"^(?:filter\.|diff\.external$|diff\.[^.]+\.(?:textconv|command)$"
+  r"|merge\.[^.]+\.driver$|include\.|includeif\.|credential\.|gpg\.|pager\."
+  r"|protocol\.|uploadpack\.|http\.|url\."
+  r"|remote\.[^.]+\.(?:uploadpack|receivepack|proxy)$"
+  r"|core\.(?:sshcommand|askpass|gitproxy|pager|editor|alternaterefscommand)$)",
+  re.IGNORECASE,
+)
+
+
+@contextlib.contextmanager
+def untrusted_settings(untrusted: bool):
+  """Within this block, treat the repository's own settings as untrusted
+  when ``untrusted`` (a shared project): see the module docstring."""
+  token = _untrusted.set(untrusted)
+  try:
+    yield
+  finally:
+    _untrusted.reset(token)
+
+
+# Commands that talk to the remote, and so cannot run in a room.
+_NETWORK_COMMANDS = frozenset({"fetch", "push", "pull", "ls-remote"})
+
+
+def _git(cwd: Path, *args: str, writes: bool = False) -> list[str]:
+  """The command line for one Möbius Git command in ``cwd`` (``writes``:
+  it changes the repository)."""
+  if not _untrusted.get():
+    return ["git", "-C", str(cwd), *args]
+  command = ["git", "-C", str(cwd), *_INERT_CONFIG, *args]
+  if args[0] in _NETWORK_COMMANDS or not _rooms_available():
+    _refuse_program_settings(cwd)
+    return command
+  repo = str(cwd.resolve())
+  return [
+    sys.executable, "-I", str(_FENCE), "--home", _room_home(repo),
+    "--rw" if writes else "--ro", repo, "--cwd", repo,
+    *[arg for name in _ROOM_ENV for arg in ("--keep-env", name)],
+    # No settings file in the room's home applies.
+    "--", "env", "GIT_CONFIG_GLOBAL=/dev/null", *command,
+  ]
+
+
+# The settings Möbius's Git commands set, kept inside the room.
+_ROOM_ENV = ("GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT", "LC_ALL")
+
+
+_FENCE = Path(__file__).resolve().parent.parent / "scripts" / "mobius_fence.py"
+
+
+@functools.cache
+def _rooms_available() -> bool:
+  try:
+    answer = subprocess.run(
+      [sys.executable, "-I", str(_FENCE), "--check"],
+      stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=10,
+    )
+    return json.loads(answer.stdout).get("available") is True
+  except (OSError, subprocess.SubprocessError, ValueError):
+    return False
+
+
+def _room_home(repo: str) -> str:
+  """A home of its own for Git in this repository's rooms."""
+  import hashlib
+  import tempfile
+  home = (
+    Path(tempfile.gettempdir()) / "mobius-project-git-room"
+    / hashlib.sha256(repo.encode()).hexdigest()[:16]
+  )
+  home.mkdir(mode=0o700, parents=True, exist_ok=True)
+  return str(home)
+
+
+def _refuse_program_settings(cwd: Path) -> None:
+  # Listing settings starts no program and follows no include. The
+  # repository's own scopes are local and worktree (config.worktree).
+  try:
+    listed = subprocess.run(
+      ["git", "-C", str(cwd), "config", "--no-includes", "--show-scope",
+       "--name-only", "--list"],
+      stdin=subprocess.DEVNULL, capture_output=True, check=False,
+      timeout=_GIT_TIMEOUT_SECONDS,
+    )
+  except (OSError, subprocess.TimeoutExpired) as exc:
+    raise GitProjectError("Git could not read this project's settings.") from exc
+  if listed.returncode != 0:
+    raise GitProjectError("Git could not read this project's settings.")
+  names = sorted({
+    name
+    for scope, _, name in (
+      line.partition("\t") for line in listed.stdout.decode("utf-8", "replace").splitlines()
+    )
+    if scope in ("local", "worktree") and _RUNS_PROGRAM.match(name)
+  })
+  if names:
+    raise GitProjectError(
+      "This shared project's Git settings would start programs ("
+      + ", ".join(names[:5]) + "), so Möbius will not run Git here. Remove them "
+      "from the project's .git/config to continue."
+    )
+
+
 def _safe_git_error(value: str) -> str:
   value = re.sub(r"https://[^/@\s]+@", "https://***@", value)
   return value[:400]
@@ -49,7 +178,7 @@ def _run_git_write(cwd: Path, *args: str, timeout: int = 15) -> str:
   }
   try:
     result = subprocess.run(
-      ["git", "-C", str(cwd), *args],
+      _git(cwd, *args, writes=True),
       stdin=subprocess.DEVNULL,
       capture_output=True,
       env=env,
@@ -91,7 +220,7 @@ def initialize_project(root: Path) -> dict:
   _ensure_commit_identity(root)
   _stage_project(root)
   staged = subprocess.run(
-    ["git", "-C", str(root), "diff", "--cached", "--quiet"],
+    _git(root, "diff", "--cached", "--quiet"),
     stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10,
   )
   if staged.returncode == 1:
@@ -117,7 +246,7 @@ def commit_project(root: Path, message: str, expected_head: str | None = None) -
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   _stage_project(root)
   staged = subprocess.run(
-    ["git", "-C", str(root), "diff", "--cached", "--quiet"],
+    _git(root, "diff", "--cached", "--quiet"),
     stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10,
   )
   if staged.returncode == 0:
@@ -353,7 +482,7 @@ def _run_git(
   }
   try:
     process = subprocess.Popen(
-      ["git", "-C", str(cwd), *args],
+      _git(cwd, *args),
       stdin=subprocess.DEVNULL,
       stdout=subprocess.PIPE,
       stderr=subprocess.DEVNULL,

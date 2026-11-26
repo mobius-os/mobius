@@ -460,6 +460,9 @@ def redeem_handle_invite(body: HandleRedeem, db: Session = Depends(get_db)):
   except BaseException:
     db.rollback()
     raise
+  # The project may have just become shared: the owner's agents lock down.
+  from app import project_agent_access
+  project_agent_access.sharing_changed(str(answer["project"]["id"]))
   return answer
 
 
