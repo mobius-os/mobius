@@ -496,7 +496,7 @@ def test_a_recipe_must_send_a_secret_part(vault):
   vault.put_key("hdr", {"parts": [{"name": "key", "value": SECRET}, {"name": "spare", "value": OTHER_SECRET}],
                         "inject": slots, "grants": GRANTS})
   with pytest.raises(kv.VaultError, match="without any secret part"):
-    vault.put_key("hdr", {"parts": [{"name": "key", "secret": False}]})
+    vault.put_key("hdr", {"parts": [{"name": "key", "value": SECRET, "secret": False}]})
 
 
 def test_with_nothing_secret_redaction_changes_nothing():
@@ -547,6 +547,29 @@ def test_a_label_or_secrecy_change_keeps_the_value(vault):
   assert vault.reveal("pair", ("owner", ""), "region") == "eu-west-1"
   with pytest.raises(kv.VaultError, match="needs a value"):
     vault.put_key("pair", {"parts": [{"name": "nope", "label": "x"}]})
+
+
+def test_a_secret_part_is_never_unsealed_into_text_without_its_value(vault):
+  """Making a part plain without giving its value again would list the stored
+  secret as text to anyone who may edit the key, Agents switch off or not."""
+  vault.put_key("locked", {"value": SECRET, "inject": {"type": "header", "name": "X-Key"},
+                           "grants": {**GRANTS, "agents": False}})
+  with pytest.raises(kv.VaultError, match="becomes plain only with its value") as refused:
+    vault.put_key("locked", {"parts": [{"name": "filler", "value": "agent-filler-value"},
+                                       {"name": "value", "secret": False}],
+                             "inject": {"type": "slots", "slots": [{"type": "header", "name": "X-Filler",
+                                                                     "template": "{filler}"}]}},
+                  actor="agent:c1")
+  assert refused.value.status == 400
+  [key] = vault.list_keys()
+  assert [(p["name"], p["secret"], p.get("text")) for p in key["parts"]] == [("value", True, None)]
+  # Retyping the value makes it plain: nothing sealed is turned into text.
+  vault.put_key("pair", {"parts": BASIC_PARTS, "inject": BASIC, "grants": GRANTS})
+  vault.put_key("pair", {"parts": [{"name": "region", "value": "eu-west-1"},
+                                   {"name": "region2", "value": "us-east-1", "secret": False}]})
+  vault.put_key("pair", {"parts": [{"name": "region", "value": "eu-west-1", "secret": False}]})
+  listed = {p["name"]: p for p in vault.list_keys()[1]["parts"]}
+  assert listed["region"]["secret"] is False and listed["region"]["text"] == "eu-west-1"
 
 
 def test_a_label_cannot_reorder_how_the_card_reads(vault):

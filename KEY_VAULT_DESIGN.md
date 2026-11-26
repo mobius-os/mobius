@@ -428,8 +428,11 @@ each minted token to the key's redaction set.
   (owner and top-level agents unless the Agents switch is off; never helpers
   or apps).
 - Replacing one part keeps the others, so rotating a secret never retypes its
-  id, and a part's label or secrecy can change without its value (an item
-  with no `value`), which counts as no new value. Settings › Keys replaces a
+  id, and a part's label can change, or a plain part become secret, without
+  its value (an item with no `value`), which counts as no new value. A secret
+  part becomes plain only when the same change gives its value again: nothing
+  sealed is ever turned into listed text, so an agent can't use the change to
+  read a key whose Agents switch is off. Settings › Keys replaces a
   part; it still only narrows. A request proposes parts only for a key it
   creates (kept with the request, so a key deleted before the owner answers
   is created from them); parts are otherwise added or removed with
@@ -489,13 +492,18 @@ each minted token to the key's redaction set.
     any bucket the access key can, is refused, and so is a query naming an S3
     configuration sub-resource that changes who may reach a bucket or object
     (`acl`, `policy`, `cors`, `website`, `publicAccessBlock`, `lifecycle`,
-    `versioning`, ...), which a path rule can't tell apart. Signed header
+    `versioning`, ...), which a path rule can't tell apart, as are their
+    header forms on an upload (`x-amz-acl`, `x-amz-grant-*`,
+    `x-amz-website-redirect-location`, `x-amz-object-lock-*`,
+    `x-amz-bypass-governance-retention`). A recipe can't name `sts` or `iam`
+    as its service, since their answers are new credentials. Signed header
     values must be ASCII and the path and query UTF-8.
   - **`jwt_bearer`** `{private_key: <part>, alg: RS256|ES256, claims,
     exchange?}`: the vault signs a short-lived JWT with fixed claims from the
     recipe (`iss`, `sub`, `aud`, `scope`, and `iat`/`exp` it sets itself),
     then either sends it as `Authorization: Bearer` (App Store Connect, a
-    GitHub App's own endpoints) or exchanges it at a fixed token endpoint
+    GitHub App's own endpoints except the installation-token route, which
+    only the `github` exchange reaches) or exchanges it at a fixed token endpoint
     (Google's `oauth2.googleapis.com/token`, GitHub's installation-token
     route) and sends the access token it gets back. For a Google
     service-account JSON pasted whole, the vault reads `client_email` and
@@ -565,9 +573,16 @@ each minted token to the key's redaction set.
 - The model relay sends a key's `value` as a bearer token only for a key
   sent that plainly (`header` or `query`), never one the vault signs or
   builds from parts.
-- A signature or minted token never leaves the vault. A caller can make a site
-  act within the approved sites, as with any key today, but it cannot obtain a
-  credential it could use elsewhere.
+- A signature or minted token never leaves the vault, and the vault never
+  makes a presigned URL. A caller can still make a site act within the
+  approved sites, as with any key today, and that includes any approved
+  endpoint that mints a credential: redaction hides only values the vault
+  knows, so a new credential in an answer reaches the caller whole. The known
+  cases are refused (AWS `sts` and `iam` as a service, a direct GitHub App
+  token on the installation-token route, a Google token sent to
+  `iam.googleapis.com` or `iamcredentials.googleapis.com`), but the rule is
+  the owner's: approving a site that mints credentials hands those
+  credentials out, so approve only the paths a key needs.
 - Body injection widens what a caller can steer only by the declared field.
   A site that stores a request body and shows it later can leak that field,
   just as one that stores headers can leak a header today. The defence is the

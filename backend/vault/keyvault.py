@@ -132,6 +132,16 @@ AWS_UNRESERVED = "-_.~"
 # A caller's own copy source would read from any bucket or key the access key
 # can, outside the paths the grant allows; refused rather than signed.
 AWS_REFUSED_HEADER_PREFIXES = ("x-amz-copy-source",)
+# The header forms of the S3 sub-resources below: set on an upload, they change
+# who may reach the object (a canned ACL, a grant), where reading it leads (a
+# website redirect) or whether it can be removed again (object lock).
+AWS_ACCESS_HEADER_PREFIXES = (
+  "x-amz-acl", "x-amz-grant-", "x-amz-website-redirect-location", "x-amz-object-lock-",
+  "x-amz-bypass-governance-retention",
+)
+# Services whose answers are new credentials (STS session keys, IAM access
+# keys): a borrow could take them away, so a signing key never names them.
+AWS_CREDENTIAL_SERVICES = frozenset({"sts", "iam"})
 # S3 picks a bucket's or object's configuration by query parameter, which a
 # path rule can't tell apart: these change who may reach it or where it goes,
 # so a borrow can't sign them (an owner who needs one uses the key directly).
@@ -150,6 +160,13 @@ JWT_MAX_LIFETIME = 3600
 GOOGLE_TOKEN = ("oauth2.googleapis.com", "/token")
 GOOGLE_AUDIENCE = "https://oauth2.googleapis.com/token"
 GITHUB_API = "api.github.com"
+# Where a GitHub App's JWT buys an installation token (on GitHub or GitHub
+# Enterprise's /api/v3). The exchange recipe does that inside the vault; a
+# token sent as it is never reaches it, or the caller would get the new token.
+GITHUB_TOKEN_PATH_RE = re.compile(r"(?:^|/)installations/[^/]+/access_tokens/?$", re.IGNORECASE)
+# Google's endpoints that turn a service account's token into another
+# credential (an access token, a signed JWT, a new key file).
+GOOGLE_CREDENTIAL_HOSTS = frozenset({"iam.googleapis.com", "iamcredentials.googleapis.com"})
 # GitHub refuses an app JWT that lives longer than ten minutes.
 GITHUB_MAX_LIFETIME = 600
 MAX_TOKEN_ANSWER = 64 * 1024
@@ -392,6 +409,8 @@ def _validate_aws(raw: dict) -> dict:
     if not AWS_NAME_RE.fullmatch(value):
       raise VaultError(400, f"Name the AWS {field}, such as {'eu-central-1' if field == 'region' else 's3'}.")
     recipe[field] = value
+  if recipe["service"] in AWS_CREDENTIAL_SERVICES:
+    raise VaultError(400, f"An AWS key isn't signed for {recipe['service']}: its answers are new credentials.")
   return recipe
 
 
@@ -1359,6 +1378,25 @@ def sign_jwt(inject: dict, private: str, now: float) -> tuple[str, float]:
   return f"{signing_input}.{_b64url(signature)}", float(expires)
 
 
+def mints_credentials(inject: dict, host: str, path: str) -> str | None:
+  """Why a signing key may not reach this destination, or None.
+
+  Redaction hides only what the vault knows, so an answer carrying a fresh
+  credential (a new access key, an installation token) would reach the caller
+  whole. These are the known places a signing key's own authority buys one;
+  any other approved site that mints credentials still hands them out, which
+  is why the owner approves only the paths a key needs.
+  """
+  kind = inject["type"]
+  if kind == "aws_sigv4" and inject["service"] in AWS_CREDENTIAL_SERVICES:
+    return f"An AWS key isn't signed for {inject['service']}: its answers are new credentials."
+  if kind == "jwt_bearer" and host in GOOGLE_CREDENTIAL_HOSTS:
+    return f"A token from this key can't be sent to {host}: it answers with new credentials."
+  if kind == "jwt_bearer" and inject.get("exchange") is None and GITHUB_TOKEN_PATH_RE.search(path):
+    return "An installation token is made inside the vault (exchange github), never handed to a caller."
+  return None
+
+
 def build_upstream_request(
   *, method: str, host: str, raw_path: str, raw_query: str,
   caller_headers: list[tuple[str, str]], loan: Loan, body: bytes | None = None,
@@ -1419,6 +1457,9 @@ def _aws_signed(method, host, raw_path, raw_query, headers, body, inject, values
   for name, value in headers:
     if name.lower().startswith(AWS_REFUSED_HEADER_PREFIXES):
       raise VaultError(400, f"A signed request can't carry {name}: it reads outside the paths the key may reach.")
+    if name.lower().startswith(AWS_ACCESS_HEADER_PREFIXES):
+      raise VaultError(400, f"Setting {name} through a borrowed key is refused: "
+                       "it changes the object's access or retention.")
     if _aws_signed_header(name) and not value.isascii():
       # The signature covers its bytes as UTF-8 while HTTP carries Latin-1.
       raise VaultError(400, f"The {name} header must be plain ASCII on a signed request.")
@@ -1748,7 +1789,8 @@ class Vault:
 
     ``value`` is the part ``value`` (secret). ``parts`` lists parts to add or
     replace, each ``{name, value, secret?, label?}``; a part the key already
-    has keeps its secrecy and label unless the item names them, and every
+    has keeps its secrecy and label unless the item names them (a secret part
+    becomes plain only with its value given again), and every
     other part stays as it is, so rotating one secret never retypes the rest.
     ``remove_parts`` names parts to drop. Afterwards the key must have at
     least one secret part and every part its recipe sends.
@@ -1834,7 +1876,8 @@ class Vault:
   def _parts_after(self, name: str, existing: dict | None, body: dict) -> tuple[list[dict], bool, list[str]]:
     """The key's parts once ``body`` is applied, whether it changed a value,
     and which new secret values are shorter than ``MIN_SENT_SECRET``. An item
-    without a value changes only an existing part's label or secrecy."""
+    without a value changes only an existing part's label, or makes it
+    secret; nothing sealed is ever turned into text."""
     current = {part["name"]: part for part in (existing or {}).get("parts") or []}
     items = []
     if body.get("value") is not None:
@@ -1856,6 +1899,11 @@ class Vault:
         # A label or secrecy change keeps the value: it isn't a new one.
         if before is None:
           raise VaultError(400, f"Part {meta['name']} needs a value.")
+        if before["secret"] and not meta["secret"]:
+          # Unsealing a stored secret into listed text would let anyone who
+          # may edit the key read it, Agents switch off or not: a part stops
+          # being secret only when the same change gives its value again.
+          raise VaultError(400, f"Part {meta['name']} becomes plain only with its value given again.")
         relabelled.append(meta["name"])
         current[meta["name"]] = (self._seal_part(name, meta, self._open_part(name, before))
                                  if meta["secret"] != before["secret"] else {**before, "label": meta["label"]})
@@ -2471,6 +2519,9 @@ class Vault:
       if reason:
         raise GrantRefusal(403, reason)
       inject = copy.deepcopy(record["inject"])
+      minting = mints_credentials(inject, host, path)
+      if minting:
+        raise VaultError(403, minting)
       used = {part["name"]: part for part in record["parts"] if part["name"] in recipe_parts(inject)}
       values = {part: self._open_part(name, stored) for part, stored in used.items()}
       if inject["type"] == "header":

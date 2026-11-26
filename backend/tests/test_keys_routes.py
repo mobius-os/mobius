@@ -2214,6 +2214,37 @@ def test_an_agent_replacing_a_part_tells_the_owner(client, auth, db, vault, push
   assert client.get("/api/keys/pair/value?part=account", headers=auth).json()["value"] == "AC-fake-route-account"
 
 
+def test_an_agent_cannot_unseal_a_key_whose_agents_switch_is_off(client, auth, db, vault, pushes):
+  """Turning the Agents switch off keeps a value from agents: an agent can't
+  flip the secret part to plain (with a filler secret of its own to keep the
+  key valid) and then read it from the list."""
+  saved = client.put("/api/keys/locked", headers=auth, json={
+    "value": DUMMY, "inject": {"type": "header", "name": "Authorization", "prefix": "Bearer "},
+    "grants": {"apps": [], "agents": False, "sites": [SITE]},
+  })
+  assert saved.status_code == 200, saved.text
+  assert client.get("/api/keys/locked/value", headers=_agent_auth(db)).status_code == 403
+  unsealed = client.put("/api/keys/locked", headers=_agent_auth(db), json={
+    "parts": [{"name": "filler", "value": "agent-filler-value"}, {"name": "value", "secret": False}],
+    "inject": {"type": "slots", "slots": [{"type": "header", "name": "X-Filler", "template": "{filler}"}]},
+  })
+  assert unsealed.status_code == 400
+  assert "becomes plain only with its value" in unsealed.text
+  assert DUMMY not in client.get("/api/keys", headers=auth).text
+  assert pushes == []
+
+
+def test_a_part_made_plain_without_its_value_is_refused_for_the_owner_too(client, auth, db, vault):
+  client.put("/api/keys/pair", headers=auth, json={
+    "parts": PAIR_PARTS, "inject": BASIC, "grants": {"apps": [], "agents": True, "sites": []},
+  })
+  client.put("/api/keys/pair", headers=auth, json={"parts": [{"name": "pin", "value": "dummy-pin-0001"}]})
+  refused = client.put("/api/keys/pair", headers=auth, json={"parts": [{"name": "pin", "secret": False}]})
+  assert refused.status_code == 400
+  [listed] = client.get("/api/keys", headers=auth).json()["keys"]
+  assert {part["name"]: part["secret"] for part in listed["parts"]}["pin"] is True
+
+
 def test_an_agent_asks_for_a_key_of_several_parts_and_the_owner_pastes_each(client, auth, db, vault):
   # The request_key card route relays exactly this ask (owner_approvals.KeyRequest).
   vault.request_for_agents({

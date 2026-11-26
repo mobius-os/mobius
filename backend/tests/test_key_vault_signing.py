@@ -436,6 +436,70 @@ def test_a_copy_source_cannot_read_outside_the_grant():
     _aws_build(headers=[("x-amz-copy-source-range", "bytes=0-9")])
 
 
+@pytest.mark.parametrize("header, value", [
+  ("x-amz-acl", "public-read"), ("X-Amz-Grant-Full-Control", 'id="attacker"'), ("x-amz-grant-read", "uri=all"),
+  ("X-Amz-Website-Redirect-Location", "https://elsewhere.example/"), ("x-amz-object-lock-mode", "COMPLIANCE"),
+  ("x-amz-object-lock-retain-until-date", "2099-01-01T00:00:00Z"), ("x-amz-bypass-governance-retention", "true"),
+])
+def test_s3_access_headers_are_never_signed_for_a_borrow(header, value):
+  """The header forms of the refused sub-resources: an upload the grant allows
+  must not make the object public, grant it away, redirect it or lock it."""
+  with pytest.raises(kv.VaultError, match="access or retention"):
+    _aws_build(headers=[(header, value)])
+  request, _ = _aws_build(headers=[("X-Amz-Meta-Colour", "blue"), ("x-amz-server-side-encryption", "AES256")])
+  assert "x-amz-server-side-encryption" in dict(request.headers)["Authorization"]
+
+
+@pytest.mark.parametrize("service", ["sts", "iam"])
+def test_a_signing_key_is_never_set_up_for_a_service_that_answers_with_credentials(service):
+  with pytest.raises(kv.VaultError, match="new credentials"):
+    kv.validate_inject({"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
+                        "region": "us-east-1", "service": service})
+
+
+def _granted(vault, name, inject, value, host):
+  site = {"host": host, "methods": ["GET", "POST"], "paths": ["/*"]}
+  vault.put_key(name, {"value": value, "inject": inject, "grants": {"apps": [], "agents": True, "sites": [site]}})
+
+
+@pytest.mark.parametrize("host, path", [
+  ("api.github.com", "/app/installations/42/access_tokens"),
+  ("api.github.com", "/App/Installations/42/Access_Tokens/"),
+  ("github.example.com", "/api/v3/app/installations/42/access_tokens"),
+])
+def test_a_direct_app_token_never_buys_an_installation_token_for_the_caller(vault, host, path):
+  """Redaction hides only what the vault knows: a fresh installation token
+  in GitHub's answer would reach the caller whole."""
+  _granted(vault, "gh-app", {"type": "jwt_bearer", "private_key": "value", "claims": {"iss": "Iv1.client"}},
+           _pem(RSA_KEY), host)
+  with pytest.raises(kv.VaultError, match="made inside the vault") as refused:
+    vault.authorize("gh-app", ("agent", "c1"), "POST", host, path)
+  assert refused.value.status == 403
+  # The app's other endpoints still take the token directly.
+  assert vault.authorize("gh-app", ("agent", "c1"), "GET", host, "/app").inject["type"] == "jwt_bearer"
+
+
+@pytest.mark.parametrize("host", ["iamcredentials.googleapis.com", "iam.googleapis.com"])
+def test_a_google_token_never_reaches_the_endpoints_that_mint_other_credentials(vault, host):
+  account = json.dumps({"client_email": "bot@example.iam.gserviceaccount.com", "private_key": _pem(RSA_KEY)})
+  _granted(vault, "gcp", {"type": "jwt_bearer", "private_key": "value", "claims": {"scope": "s"},
+                          "exchange": {"kind": "google"}}, account, host)
+  with pytest.raises(kv.VaultError, match="new credentials"):
+    vault.authorize("gcp", ("agent", "c1"), "POST", host, "/v1/projects/-/serviceAccounts/bot:generateAccessToken")
+
+
+def test_a_stored_signing_key_for_sts_is_refused_when_borrowed(vault):
+  """A key saved before sts was refused at set-up is still never signed for it."""
+  site = {"host": "sts.amazonaws.com", "methods": ["POST"], "paths": ["/*"]}
+  vault.put_key("aws", {"parts": [{"name": "id", "value": AWS_ID, "secret": False}, {"name": "secret", "value": AWS_SECRET}],
+                        "inject": {"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
+                                   "region": "us-east-1", "service": "s3"},
+                        "grants": {"apps": [], "agents": True, "sites": [site]}})
+  vault._records["aws"]["inject"]["service"] = "sts"
+  with pytest.raises(kv.VaultError, match="new credentials"):
+    vault.authorize("aws", ("agent", "c1"), "POST", "sts.amazonaws.com", "/")
+
+
 def test_a_signed_header_must_be_ascii_and_the_query_utf8():
   with pytest.raises(kv.VaultError, match="plain ASCII"):
     _aws_build(headers=[("X-Amz-Meta-Name", "caf\xe9")])
