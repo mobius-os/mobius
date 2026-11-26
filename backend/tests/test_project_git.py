@@ -358,6 +358,12 @@ def test_nested_artifacts_folders_are_reviewable_source(client, auth, db):
     diff = client.get(f"/api/projects/{project['id']}/git/diff?path={relative}", headers=auth).json()
     assert diff['status'] == 'modified'
     assert (diff['additions'], diff['deletions']) == (1, 1)
+  # The single-file diff path must apply the same boundary as the status list.
+  root_output = client.get(
+    f"/api/projects/{project['id']}/git/diff?path=artifacts/site/index.html", headers=auth,
+  ).json()
+  assert root_output['status'] == 'clean'
+  assert project_git.project_file_diff(root, root / 'artifacts/site/index.html')['status'] == 'clean'
 
   def state():
     return project_git.applied_source_status(root, accepted, project_git.project_status(root))['state']
@@ -367,6 +373,30 @@ def test_nested_artifacts_folders_are_reviewable_source(client, auth, db):
   # Only the root build-output folder differs now, and it stays out of review.
   assert project_git.project_status(root)['changes'] == []
   assert state() == 'current'
+
+
+def test_review_commit_and_file_tree_reserve_the_same_root_artifacts_folder(client, auth, db):
+  project = client.post('/api/projects', headers=auth, json={'name': 'Agree', 'template_id': 'blank'}).json()
+  root = _project_root(db, project)
+  _git(root, 'init', '-b', 'main')
+  _git(root, 'commit', '--allow-empty', '-m', 'Start')
+  head = project_git.project_status(root)['head']
+  for relative in ('src/artifacts/config.js', 'artifacts/site/index.html'):
+    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+    (root / relative).write_text('v1\n')
+
+  reviewed = {row['path'] for row in project_git.project_status(root)['changes']}
+  tree = client.get(f"/api/projects/{project['id']}/files?recursive=true", headers=auth).json()
+  listed = {entry['path'] for entry in tree['entries']}
+  committed = client.post(
+    f"/api/projects/{project['id']}/git/commit", headers=auth,
+    json={'message': 'Add source', 'expected_head': head},
+  )
+  assert committed.status_code == 200, committed.text
+  staged = set(_git(root, 'show', '--name-only', '--pretty=format:', 'HEAD').split())
+
+  assert 'src/artifacts/config.js' in reviewed & listed & staged
+  assert not any(path.startswith('artifacts/') for path in reviewed | listed | staged)
 
 
 def test_status_line_counts_and_unified_patches_include_new_deleted_and_binary_files(tmp_path):

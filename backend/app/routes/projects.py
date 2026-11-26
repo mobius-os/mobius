@@ -2321,13 +2321,14 @@ def list_project_files(
     raise HTTPException(400, "Path is not a directory.")
 
   # `artifacts/` at the root is managed build output surfaced above the source
-  # tree, not a second editable copy of the same result.
+  # tree, not a second editable copy of the same result. Git review hides the
+  # same folder, so the tree and the change list agree on what is source.
   return workspace_files.list_entries(
     root, directory,
     path=path,
     recursive=recursive,
     hidden_dirs=workspace_files.GIT_METADATA_NAMES,
-    hidden_root_dirs=frozenset({"artifacts"}),
+    hidden_root_dirs=project_git.PROJECT_VISIBILITY.hidden_root_dirs,
   )
 
 

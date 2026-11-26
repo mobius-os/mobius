@@ -110,6 +110,7 @@ log = logging.getLogger("mobius.apps")
 _APP_SOURCE_HIDDEN_DIRS = frozenset({
   ".git", ".build", "__pycache__", "dist", "node_modules",
 })
+_APP_SOURCE_VISIBILITY = project_git.SourceVisibility(hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
 
 
 def _require_nondelegated_control(
@@ -362,9 +363,7 @@ def get_app_source_git_status(
   db: Session = Depends(get_db),
 ):
   _app, root = _app_source_root(db, app_id)
-  return project_git.project_status(
-    root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS, hidden_root_dirs=frozenset(),
-  )
+  return project_git.project_status(root, visibility=_APP_SOURCE_VISIBILITY)
 
 
 @router.get("/{app_id}/source/git/diff")
@@ -379,12 +378,13 @@ def get_app_source_git_diff(
   if not target.is_file():
     relative = target.relative_to(root).as_posix()
     deleted = any(row["path"] == relative and row["status"] == "deleted"
-                  for row in project_git.project_status(root)["changes"])
+                  for row in project_git.project_status(
+                    root, visibility=_APP_SOURCE_VISIBILITY,
+                  )["changes"])
     if not deleted:
       raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
-    root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
-    hidden_root_dirs=frozenset(),
+    root, target, visibility=_APP_SOURCE_VISIBILITY,
   )
 
 
