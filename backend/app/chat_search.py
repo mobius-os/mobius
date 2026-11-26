@@ -20,6 +20,7 @@ from sqlalchemy import text as sql
 from sqlalchemy.orm import Session
 
 from app import chat_visibility
+from app.chat_message_content import strip_upload_augmentation
 
 # Private-use sentinels around snippet matches. The API converts them to a
 # JSON-friendly form; they can never collide with real transcript text.
@@ -139,7 +140,12 @@ def _visible_rows(rows):
       visible[chat_id] = _in_owner_drawer(settings, app_id)
     if visible[chat_id]:
       chat_id, seq, ts, role, raw, *rest = row[:8]
-      yield (chat_id, seq, ts, role, bytes(raw).decode("utf-8", "replace"), *rest)
+      text = bytes(raw).decode("utf-8", "replace")
+      if role == "user":
+        # The index still holds the hidden upload manifest; never match or
+        # show it. A chat matched only there gets no spans and is dropped.
+        text = strip_upload_augmentation(text)
+      yield (chat_id, seq, ts, role, text, *rest)
 
 
 def _iso_timestamp(stored: str) -> str | None:
