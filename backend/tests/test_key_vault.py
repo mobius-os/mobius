@@ -1076,9 +1076,7 @@ class _Slow(BaseHTTPRequestHandler):
     self.send_header("Content-Type", "text/event-stream")
     self.send_header("Transfer-Encoding", "chunked")
     self.end_headers()
-    # Followed by more than redaction's fixed tail, so the event itself goes out.
-    padding = b": " + b"." * kv.secret_echoes(DUMMY).longest + b"\n\n"
-    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n" + padding
+    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n"
     self.wfile.write(b"%x\r\n%s\r\n" % (len(first), first))
     self.wfile.flush()
     type(self).release.wait(20)
@@ -1100,10 +1098,9 @@ def test_answers_stream_back_as_they_arrive_with_the_key_hidden(vault):
                          headers={"X-Vault-Caller": "agent:c1"}) as response:
         pieces = response.iter_bytes()
         first = next(pieces)
-        # The first event arrived while the site is still holding the rest.
+        # The whole first event arrived while the site is still holding the rest.
         assert not _Slow.release.is_set()
-        assert first.startswith(b"data: first Bearer " + kv.REDACTED + b"\n\n")
-        assert DUMMY.encode() not in first
+        assert first == b"data: first Bearer " + kv.REDACTED + b"\n\n"
         _Slow.release.set()
         rest = b"".join(pieces)
       assert b"data: last" in first + rest and DUMMY.encode() not in first + rest
@@ -1253,6 +1250,86 @@ def test_redaction_holds_back_the_same_tail_whether_or_not_it_begins_the_key():
     assert redactor.feed(b"") == b""
     # ... and the tail itself with the next piece or at the end.
     assert redactor.finish() == b"x" * (hold - len(tail)) + tail
+
+
+EVENT = b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n\n'
+
+
+def test_a_stream_event_goes_out_at_its_newline_not_with_the_next_one():
+  redactor = kv.StreamRedactor(kv.secret_echoes(DUMMY))
+  assert redactor.feed(EVENT[:30]) == b"event: message\n"
+  assert redactor.feed(EVENT[30:]) == EVENT[len(b"event: message\n"):]
+  assert redactor.pending == b"" and redactor.finish() == b""
+
+
+def _echo_forms(key):
+  import base64
+  import urllib.parse
+  units = key.encode("utf-16-be")
+  return {
+    "raw": key.encode(),
+    "json-unicode": "".join(f"\\u{int.from_bytes(units[i:i + 2], 'big'):04x}"
+                            for i in range(0, len(units), 2)).encode(),
+    "percent": urllib.parse.quote(key, safe="").encode(),
+    "html": "".join(f"&#{ord(ch)};" for ch in key).encode(),
+    "hex": key.encode().hex().encode(),
+    "utf-16-le": key.encode("utf-16-le"),
+    "base64": base64.b64encode(key.encode()),
+  }
+
+
+@pytest.mark.parametrize("form", _echo_forms(DUMMY))
+def test_an_echo_split_across_pieces_with_no_newline_is_still_redacted(form):
+  echoes = kv.secret_echoes(DUMMY)
+  echo = _echo_forms(DUMMY)[form]
+  body = b"id: 1\ndata: " + echo + b" more"
+  for split in range(len(b"id: 1\ndata: ") + 1, len(body) - len(b" more")):
+    redactor = kv.StreamRedactor(echoes)
+    first = redactor.feed(body[:split])
+    assert first.startswith(b"id: 1\n")
+    out = first + redactor.feed(body[split:]) + redactor.finish()
+    assert out == kv.redact(body, echoes) and kv.REDACTED in out
+
+
+@pytest.mark.parametrize("form", _echo_forms(DUMMY))
+def test_an_echo_right_before_a_newline_is_redacted_and_released(form):
+  echoes = kv.secret_echoes(DUMMY)
+  body = b"data: " + _echo_forms(DUMMY)[form] + b"\n\n"
+  for split in range(len(body)):
+    redactor = kv.StreamRedactor(echoes)
+    out = redactor.feed(body[:split]) + redactor.feed(body[split:])
+    assert out == kv.redact(body, echoes) and out.endswith(b"\n\n") and redactor.pending == b""
+    assert kv.REDACTED in out
+
+
+def test_only_a_newline_itself_escapes_to_a_newline_byte():
+  """Why releasing at a newline is safe: no per-character form adds one."""
+  # Beyond the BMP every form is UTF-8 lead and continuation bytes or ASCII escapes.
+  for code in [*range(0x10000), *range(0x10000, 0x110000, 0x3FF)]:
+    if not 0xD800 <= code <= 0xDFFF:
+      forms = kv._char_echoes(chr(code))
+      assert any(b"\n" in form for form in forms) == (code == 0x0A), hex(code)
+
+
+@pytest.mark.parametrize("key, spans", [
+  (DUMMY, False),
+  ("".join(map(chr, range(1, 0x80))).replace("\n", ""), False),  # all of ASCII but a newline
+  ("fake-é€😀-key-0123", False),
+  ("-----BEGIN KEY-----\nMIIfake0123456789\n-----END KEY-----", True),
+  ("fake-\u010a-key-0123", True),     # UTF-16 0x01 0x0A
+  ("fake-\u0a05-key-0123", True),     # UTF-16 0x0A 0x05
+  ("fake-\U0001f00a-key-0123", True),  # a surrogate half ending in 0x0A
+])
+def test_a_key_whose_echo_can_hold_a_newline_keeps_the_whole_tail(key, spans):
+  echoes = kv.secret_echoes(key)
+  forms = [*_echo_forms(key).values(), key.encode("utf-16-be")]
+  assert echoes.spans_lines == spans == any(b"\n" in form for form in forms)
+  for echo in forms:
+    body = b"data: " + echo + b"\n\n"
+    for split in range(1, len(body)):
+      redactor = kv.StreamRedactor(echoes)
+      out = redactor.feed(body[:split]) + redactor.feed(body[split:]) + redactor.finish()
+      assert out == kv.redact(body, echoes) and kv.REDACTED in out
 
 
 KEY_WITH_PUNCTUATION = "sk-Ab+c/d&e<f>g=h1234567890"
