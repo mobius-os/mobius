@@ -174,13 +174,19 @@ def test_anonymous_writes_stay_strictly_under_the_write_prefix(client, auth):
   assert _publish(client, auth, app["id"]).status_code == 200
   bearer = {"Authorization": f"Bearer {_public_token(client, app['slug'])}"}
 
-  at_prefix = client.put(
-    "/api/public-storage/public/submissions",
-    content=b"x", headers={**bearer, "Content-Type": "text/plain"},
-  )
-  assert at_prefix.status_code == 403
-  assert client.delete(
-    "/api/public-storage/public/submissions", headers=bearer,
+  # A trailing or doubled slash canonicalizes onto the prefix node too.
+  for at_prefix in ("public/submissions", "public/submissions/", "public/submissions//"):
+    assert client.put(
+      f"/api/public-storage/{at_prefix}",
+      content=b"x", headers={**bearer, "Content-Type": "text/plain"},
+    ).status_code == 403, at_prefix
+    assert client.delete(
+      f"/api/public-storage/{at_prefix}", headers=bearer,
+    ).status_code == 403, at_prefix
+  # An empty segment deeper down is refused for the same reason.
+  assert client.put(
+    "/api/public-storage/public/submissions//b0.json",
+    json={"name": "Sam"}, headers=bearer,
   ).status_code == 403
   assert client.put(
     "/api/public-storage/public/submissions/b1.json",
