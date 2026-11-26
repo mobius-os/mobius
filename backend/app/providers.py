@@ -1732,16 +1732,18 @@ GEMINI_DECLARATION: dict[str, Any] = {
   "secret_name": GEMINI_KEY_NAME,
   "protocol": "gemini",
   "default_model": "gemini-3.5-flash",
+  # Effort levels and defaults are each model's thinking levels as Google's
+  # Gemini API documents them (https://ai.google.dev/gemini-api/docs/thinking).
   "models": [
     {"id": model_id, "label": label, "context_window": 1_048_576,
-     "effort_levels": ["low", "medium", "high"], "input_modalities": ["text", "image"]}
-    for model_id, label in (
-      ("gemini-4-neon", "Gemini 4 Neon"),
-      ("gemini-4-carbon", "Gemini 4 Carbon"),
-      ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
-      ("gemini-3.8-flash", "Gemini 3.8 Flash"),
-      ("gemini-3.5-flash", "Gemini 3.5 Flash"),
-      ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
+     "effort_levels": levels, "default_effort": default, "input_modalities": ["text", "image"]}
+    for model_id, label, levels, default in (
+      ("gemini-4-neon", "Gemini 4 Neon", ["low", "medium", "high", "xhigh"], "high"),
+      ("gemini-4-carbon", "Gemini 4 Carbon", ["low", "medium", "high"], "medium"),
+      ("gemini-4-hydrogen", "Gemini 4 Hydrogen", ["low", "medium", "high", "xhigh"], "high"),
+      ("gemini-3.8-flash", "Gemini 3.8 Flash", ["low", "medium", "high"], "medium"),
+      ("gemini-3.5-flash", "Gemini 3.5 Flash", ["low", "medium", "high"], "medium"),
+      ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", ["minimal", "low", "medium", "high"], "minimal"),
     )
   ],
 }

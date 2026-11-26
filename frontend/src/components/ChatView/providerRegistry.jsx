@@ -120,10 +120,13 @@ export const PROVIDER_INFO = {
     id: 'gemini',
     label: 'Google Gemini',
     Logo: GeminiLogo,
+    // The provider-wide scale; each model offers its own documented subset.
     efforts: [
+      { value: 'minimal', label: 'Minimal' },
       { value: 'low', label: 'Low' },
       { value: 'medium', label: 'Medium' },
       { value: 'high', label: 'High' },
+      { value: 'xhigh', label: 'Extra high' },
     ],
   },
   claude: {

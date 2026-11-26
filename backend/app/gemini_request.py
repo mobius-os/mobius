@@ -21,10 +21,12 @@ from typing import Any
 NAMESPACE_SEPARATOR = "."
 SIGNATURE_MARKER = "gemini_signatures"
 
-# Responses effort vocabulary -> Gemini 3 thinking levels.
+# Responses effort -> Gemini thinking level. A model's declared effort levels
+# are its documented thinking levels, so they pass through unchanged; any other
+# effort is omitted and Gemini applies the model's own default.
 _THINKING_LEVELS = {
   "none": "minimal", "minimal": "minimal", "low": "low", "medium": "medium",
-  "high": "high", "xhigh": "high", "max": "high", "ultra": "high",
+  "high": "high", "xhigh": "xhigh",
 }
 _SYSTEM_ROLES = ("developer", "system")
 

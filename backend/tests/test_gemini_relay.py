@@ -63,7 +63,7 @@ def test_request_moves_leading_developer_text_to_system_instruction():
   ], "reasoning": {"effort": "xhigh"}})
   assert body["systemInstruction"] == {"parts": [{"text": "rules"}]}
   assert body["contents"] == [{"role": "user", "parts": [{"text": "hi"}, {"text": "later"}]}]
-  assert body["generationConfig"]["thinkingConfig"] == {"includeThoughts": True, "thinkingLevel": "high"}
+  assert body["generationConfig"]["thinkingConfig"] == {"includeThoughts": True, "thinkingLevel": "xhigh"}
 
 
 def test_function_and_namespace_tools_become_declarations():
@@ -218,3 +218,17 @@ async def test_disconnecting_gemini_removes_its_saved_key(monkeypatch, tmp_path)
   monkeypatch.setattr(key_vault, "vault_call", vault_call)
   await providers.disconnect_provider(str(tmp_path), "gemini")
   assert calls == [("DELETE", "/keys/gemini", "owner")]
+
+
+def test_each_gemini_model_offers_its_documented_thinking_levels():
+  """Levels and defaults follow Google's per-model thinking documentation;
+  an effort a model lacks is not sent, so Gemini applies its own default."""
+  gemini = providers.PROVIDERS["gemini"]
+  levels = {row["id"]: (row["effort_levels"], row["default_effort"]) for row in gemini.declaration["models"]}
+  assert levels["gemini-4-neon"] == (["low", "medium", "high", "xhigh"], "high")
+  assert levels["gemini-4-hydrogen"] == (["low", "medium", "high", "xhigh"], "high")
+  assert levels["gemini-3.1-flash-lite"] == (["minimal", "low", "medium", "high"], "minimal")
+  assert gemini.resolve_selection("gemini-4-neon", "xhigh") == ("gemini-4-neon", "xhigh")
+  assert gemini.resolve_selection("gemini-4-carbon", "xhigh") == ("gemini-4-carbon", None)
+  assert to_gemini_request({"input": [], "reasoning": {"effort": "max"}})[
+    "generationConfig"]["thinkingConfig"] == {"includeThoughts": True}

@@ -154,7 +154,8 @@ removes a provider from pickers and blocks new turns without deleting chats.
   AI providers › Google Gemini saves the owner's AI Studio key in the vault
   (key `gemini`, kept from agents), the platform fixes its destination to
   Google's Gemini API, and Disconnect deletes the key. Its model list is the
-  platform's declaration in `providers.GEMINI_DECLARATION`.
+  platform's declaration in `providers.GEMINI_DECLARATION`, with each model's
+  documented thinking levels and default as its effort scale.
 - Claude, Codex and Möbius are built in. The Möbius provider keeps the stable
   `mobius` identity for existing chats and offers its service-discovered models
   with no app installed. Both broker and external app connections use the

@@ -75,7 +75,7 @@ test('shared provider metadata preserves each provider-specific effort sequence'
   ])), {
     codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
     claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
-    gemini: ['low', 'medium', 'high'],
+    gemini: ['minimal', 'low', 'medium', 'high', 'xhigh'],
     mobius: ['minimal', 'low', 'medium', 'high', 'max'],
   })
 })
