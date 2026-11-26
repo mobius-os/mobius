@@ -1,5 +1,5 @@
 /* Presentation shared by active handoffs and settled wait history. */
-import { formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
+import { apiDate, formatDateTime, formatTime } from '../../lib/dateTimeFormat.js'
 import { pauseTiming } from './resetTime.js'
 
 export function waitConditionLabel(description) {
@@ -7,19 +7,12 @@ export function waitConditionLabel(description) {
   return String(description || '').trim().replace(/^resume when\b/, 'Resume when')
 }
 
-function apiDate(value) {
-  if (!value) return null
-  const text = String(value)
-  const date = new Date(/[zZ]|[+-]\d\d:\d\d$/.test(text) ? text : `${text}Z`)
-  return Number.isNaN(date.getTime()) ? null : date
-}
-
 function clockLabel(value) {
-  return formatTime(apiDate(value)) || null
+  return formatTime(value) || null
 }
 
 function dateTimeLabel(value) {
-  return formatDateTime(apiDate(value)) || 'not set'
+  return formatDateTime(value) || 'not set'
 }
 
 /**

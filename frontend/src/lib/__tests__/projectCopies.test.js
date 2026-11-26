@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { selectedCopyPaths, projectCopyDestination, readProjectCopyRequest, clearProjectCopyRequest, copyByteLabel, copyDate, projectCopyRequest, readPublicProjectCopy, rememberProjectCopyRequest, consumeProjectCopyRequest } from '../projectCopies.js'
+import { selectedCopyPaths, projectCopyDestination, readProjectCopyRequest, clearProjectCopyRequest, copyByteLabel, projectCopyRequest, readPublicProjectCopy, rememberProjectCopyRequest, consumeProjectCopyRequest } from '../projectCopies.js'
 
 test('copy destination keeps source capability out of query strings and preserves deployment prefix', () => {
   const source = 'https://sender.example/project-copy#secret-token'
@@ -39,10 +39,6 @@ test('copy request uses the existing API prefix once and serializes reviewed sel
     assert.equal(request.url, '/api/project-copies/projects/test/shares')
     assert.deepEqual(JSON.parse(request.options.body), { paths: ['README.md'], digest: 'reviewed' })
   } finally { globalThis.fetch = originalFetch }
-})
-test('copy expiry interprets server naive timestamps as UTC and keeps explicit offsets', () => {
-  assert.equal(copyDate('2026-09-09T12:00:00').toISOString(), '2026-09-09T12:00:00.000Z')
-  assert.equal(copyDate('2026-09-09T12:00:00+01:00').toISOString(), '2026-09-09T11:00:00.000Z')
 })
 
 test('copy-link history presents UTC creation and expiry in the local timezone', async t => {
