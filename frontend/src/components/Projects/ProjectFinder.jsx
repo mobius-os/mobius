@@ -375,8 +375,8 @@ export default function ProjectFinder({
     return DOMPurify.sanitize(String(PROJECT_MARKDOWN.parse(content) || ''))
   }, [content, fileKind, markdownLike])
   const csvRows = useMemo(
-    () => (fileKind === 'text' && csvLike ? parseProjectCsv(content) : []),
-    [content, csvLike, fileKind],
+    () => (fileKind === 'text' && csvLike && !windowed ? parseProjectCsv(content) : []),
+    [content, csvLike, fileKind, windowed],
   )
   const selectedGitChange = useMemo(
     () => gitChanges.find(change => change.path === selected) || null,
@@ -785,16 +785,20 @@ export default function ProjectFinder({
     } finally { setBusy(false) }
   }
 
+  function setCsvRows(rows) {
+    setContent(serializeProjectCsv(rows, { bom: content.startsWith('\uFEFF') }))
+  }
+
   function updateCsv(rowIndex, columnIndex, value) {
-    setContent(serializeProjectCsv(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value)))
+    setCsvRows(updateProjectCsvCell(csvRows, rowIndex, columnIndex, value))
   }
 
   function appendCsvRow() {
-    setContent(serializeProjectCsv(addProjectCsvRow(csvRows)))
+    setCsvRows(addProjectCsvRow(csvRows))
   }
 
   function appendCsvColumn() {
-    setContent(serializeProjectCsv(addProjectCsvColumn(csvRows)))
+    setCsvRows(addProjectCsvColumn(csvRows))
   }
 
   async function downloadFile(target = selected) {
