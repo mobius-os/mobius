@@ -1,6 +1,7 @@
 """Provider-neutral MCP connection registry and broker-boundary tests."""
 
 import asyncio
+import dataclasses
 import json
 import os
 import socket
@@ -1112,7 +1113,8 @@ def test_broker_drops_allowed_response_headers_that_reflect_secrets():
     "cache-control": "private, upstream-secret",
     "x-untrusted": "ignored",
   })
-  headers = connector_routes._broker_response_headers(upstream, snapshot)
+  echoes = connector_routes._broker_secret_echoes(snapshot)
+  headers = connector_routes._broker_response_headers(upstream, echoes)
   assert headers == {"content-type": "application/json"}
 
 
@@ -1141,14 +1143,80 @@ def test_broker_redacts_an_escaped_echo_of_the_key(echo, split):
       for start in range(0, len(body), split):
         yield body[start:start + split]
 
+  echoes = connector_routes._broker_secret_echoes(snapshot)
+
   async def collect():
     return b"".join([
-      chunk async for chunk in connector_routes._redacted_broker_stream(Upstream(), snapshot)
+      chunk async for chunk in connector_routes._redacted_broker_stream(Upstream(), echoes)
     ])
   message = json.loads(asyncio.run(collect()))["error"]["message"]
   assert message == "Invalid API key [redacted]"
   upstream = httpx.Response(200, headers={"mcp-session-id": echo(key), "content-type": "application/json"})
-  assert connector_routes._broker_response_headers(upstream, snapshot) == {"content-type": "application/json"}
+  assert connector_routes._broker_response_headers(upstream, echoes) == {"content-type": "application/json"}
+
+
+def test_broker_builds_the_echo_matcher_once_per_request_off_the_event_loop(monkeypatch):
+  """A long OAuth token takes up to a second to compile into the vault's
+  matcher; building it on the loop would freeze every other request."""
+  import threading
+  from starlette.requests import Request
+
+  key = "sk_live/AbCdEf+GhIjKlMnOp/QrStUv"
+  snapshot = connector_routes._BrokerSnapshot(
+    url="https://remote.example/mcp", auth_header="X-Api-Key", secret=key,
+  )
+  monkeypatch.setattr(connector_routes, "_require_loopback", lambda request: "cap")
+  monkeypatch.setattr(connector_routes, "_snapshot_broker_row",
+                      lambda db, connector_id, capability: snapshot)
+  monkeypatch.setattr(connector_routes, "_broker_lineage_active",
+                      lambda connector_id, snapshot: True)
+  built_on = []
+  build = connector_routes._broker_secret_echoes
+
+  def recording_build(snapshot):
+    built_on.append(threading.current_thread())
+    return build(snapshot)
+
+  monkeypatch.setattr(connector_routes, "_broker_secret_echoes", recording_build)
+
+  class Upstream:
+    headers = {"content-type": "application/json", "mcp-session-id": key.replace("/", "\\/")}
+    status_code = 200
+
+    async def aiter_bytes(self):
+      yield b'{"error":"Invalid API key '
+      yield key.replace("/", "\\/").encode() + b'"}'
+
+    async def aclose(self):
+      pass
+
+  async def fake_open(request, snapshot):
+    return Upstream(), Upstream()
+
+  monkeypatch.setattr(connector_routes, "_open_broker_upstream", fake_open)
+  db = type("Db", (), {"close": lambda self: None})()
+  request = Request({"type": "http", "method": "GET", "path": "/",
+                     "headers": [], "client": ("127.0.0.1", 1234)})
+
+  async def broker():
+    response = await connector_routes.broker_connector(7, request, db)
+    body = b"".join([chunk async for chunk in response.body_iterator])
+    return threading.current_thread(), response, body
+
+  loop_thread, response, body = asyncio.run(broker())
+  assert len(built_on) == 1 and built_on[0] is not loop_thread
+  assert json.loads(body) == {"error": "Invalid API key [redacted]"}
+  assert "mcp-session-id" not in response.headers
+
+
+def test_broker_reuses_the_matcher_of_an_unchanged_key():
+  snapshot = connector_routes._BrokerSnapshot(
+    url="https://remote.example/mcp", auth_header="Authorization", secret="Bearer reused-secret",
+  )
+  first = connector_routes._broker_secret_echoes(snapshot)
+  assert connector_routes._broker_secret_echoes(snapshot) is first
+  rotated = dataclasses.replace(snapshot, secret="Bearer rotated-secret")
+  assert connector_routes._broker_secret_echoes(rotated) is not first
 
 
 def test_broker_revalidates_pins_and_streams_each_mcp_method(

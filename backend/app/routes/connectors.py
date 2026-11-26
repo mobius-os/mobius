@@ -351,10 +351,11 @@ def _broker_request_headers(
   return headers
 
 
-def _broker_secret_patterns(snapshot: _BrokerSnapshot):
+def _broker_secret_echoes(snapshot: _BrokerSnapshot):
   """The key vault's matcher for every echo of the connection credential,
   however the service escaped it (JSON ``\\/`` and ``\\u`` escapes, percent
-  encoding, HTML entities, base64), or None when the request sends no secret."""
+  encoding, HTML entities, base64), or None when the request sends no secret.
+  Slow for a long token: call it off the event loop, once per request."""
   if not snapshot.secret:
     return None
   submitted = snapshot.secret
@@ -363,15 +364,14 @@ def _broker_secret_patterns(snapshot: _BrokerSnapshot):
     core.bare_secret(snapshot.auth_header, submitted),
     *core.auth_headers(snapshot.auth_header, submitted).values(),
   }
-  return key_vault.secret_echoes(*sorted(value for value in values if value))
+  return key_vault.secret_echoes(*(value for value in values if value))
 
 
 def _broker_response_headers(
   upstream: httpx.Response,
-  snapshot: _BrokerSnapshot,
+  echoes,
 ) -> dict[str, str]:
   """Forward only transport headers whose values cannot reflect a secret."""
-  echoes = _broker_secret_patterns(snapshot)
   return {
     name: value
     for name, value in upstream.headers.items()
@@ -382,37 +382,19 @@ def _broker_response_headers(
 
 async def _redacted_broker_stream(
   upstream: httpx.Response,
-  snapshot: _BrokerSnapshot,
+  echoes,
 ):
   """Stream MCP bytes without leaking a reflected connection credential."""
-  echoes = _broker_secret_patterns(snapshot)
   if echoes is None:
     async for chunk in upstream.aiter_bytes():
       yield chunk
     return
-
-  pending = b""
-  # Any echo starting before the held-back tail fits in what has arrived.
-  keep = max(echoes.longest - 1, 0)
-  replacement = b"[redacted]"
+  redactor = key_vault.stream_redactor(echoes, b"[redacted]")
   async for chunk in upstream.aiter_bytes():
-    pending += chunk
-    scan_before = len(pending) - keep
-    if scan_before <= 0:
-      continue
-    output, position = [], 0
-    for match in echoes.pattern.finditer(pending):
-      if match.start() >= scan_before:
-        break
-      output += [pending[position:match.start()], replacement]
-      position = match.end()
-    end = max(position, scan_before)
-    output.append(pending[position:end])
-    pending = pending[end:]
-    if any(output):
-      yield b"".join(output)
-  if pending:
-    yield echoes.pattern.sub(replacement, pending)
+    if out := redactor.feed(chunk):
+      yield out
+  if out := redactor.finish():
+    yield out
 
 
 async def _open_broker_upstream(
@@ -570,12 +552,13 @@ async def broker_connector(
   )
   if not await asyncio.to_thread(_broker_lineage_active, connector_id, snapshot):
     raise HTTPException(status_code=401, detail="MCP broker capability rejected.")
+  echoes = await asyncio.to_thread(_broker_secret_echoes, snapshot)
   client, upstream = await _open_broker_upstream(request, snapshot)
 
   async def stream():
     try:
       async with aclosing(_until_broker_revoked(
-        _redacted_broker_stream(upstream, snapshot), connector_id, snapshot,
+        _redacted_broker_stream(upstream, echoes), connector_id, snapshot,
       )) as chunks:
         async for chunk in chunks:
           yield chunk
@@ -585,7 +568,7 @@ async def broker_connector(
       await upstream.aclose()
       await client.aclose()
 
-  headers = _broker_response_headers(upstream, snapshot)
+  headers = _broker_response_headers(upstream, echoes)
   return StreamingResponse(
     stream(),
     status_code=upstream.status_code,
