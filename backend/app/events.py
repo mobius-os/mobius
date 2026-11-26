@@ -863,7 +863,14 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       # arrive with an EMPTY payload when the provider omits its re-aggregated
       # copy (Codex's aggregatedOutput is optional). An empty completed payload
       # is not evidence that the output was empty — never erase what streamed.
-      if event.get("content", ""):
+      # A marked delta is the next piece of a running command's output: append
+      # it, keeping a bounded tail until the completed item replaces it with the
+      # (separately reduced and stashed) full text. Every other output replaces.
+      if event.get("output_delta") is True:
+        if event.get("content", ""):
+          combined = (blk.get("output") or "") + event["content"]
+          blk["output"] = combined[-TOOL_OUTPUT_INLINE_THRESHOLD:]
+      elif event.get("content", ""):
         blk["output"] = event.get("content", "")
       # A tool_output the sink reduced (contract rule 6) carries a bounded
       # excerpt as `content` plus the metadata below; carry it onto the block

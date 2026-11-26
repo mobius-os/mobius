@@ -1362,3 +1362,51 @@ test('viewed_image binds a snapshot only to its exact finished view', () => {
   // Catch-up replay of the same event changes nothing.
   assert.equal(attachViewedImage(next, { tool_use_id: 'view-1', viewed_image_media: name }), next)
 })
+
+// ---------------------------------------------------------------------------
+// tool_output: marked Codex command pieces append; everything else replaces
+// ---------------------------------------------------------------------------
+
+const OUTPUT_PIECES = ['collected 3 items\n', 'test_a PASSED\n', 'test_b FAILED\n']
+
+function deltaEvent(content) {
+  return { type: 'tool_output', content, tool_use_id: 'cmd-1', output_delta: true }
+}
+
+test('marked command output pieces accumulate on the live tool', () => {
+  let items = [toolItem('Bash', { tool_use_id: 'cmd-1' })]
+  for (const piece of OUTPUT_PIECES) {
+    const event = deltaEvent(piece)
+    items = attachToolOutput(items, event.content, event)
+  }
+  assert.equal(items[0].output, OUTPUT_PIECES.join(''))
+})
+
+test('unmarked file-change output still replaces', () => {
+  let items = [toolItem('Edit', { tool_use_id: 'fc-1' })]
+  for (const content of ['Proposed: update a.py', 'Proposed: update a.py', 'Updated a.py']) {
+    items = attachToolOutput(items, content, { tool_use_id: 'fc-1' })
+  }
+  assert.equal(items[0].output, 'Updated a.py')
+})
+
+test('a completion replaces accumulated pieces with the full text', () => {
+  let items = [toolItem('Bash', { tool_use_id: 'cmd-1' })]
+  for (const piece of OUTPUT_PIECES) {
+    items = attachToolOutput(items, piece, deltaEvent(piece))
+  }
+  items = attachToolOutput(items, 'the complete aggregate', {
+    tool_use_id: 'cmd-1', output_complete: true, output_exit_code: 1,
+  })
+  assert.equal(items[0].output, 'the complete aggregate')
+})
+
+test('accumulated command output keeps the same bounded tail as the server', () => {
+  let items = [toolItem('Bash', { tool_use_id: 'cmd-1' })]
+  for (let index = 0; index < 2000; index++) {
+    const piece = `line ${index}\n`
+    items = attachToolOutput(items, piece, deltaEvent(piece))
+  }
+  assert.ok(items[0].output.length <= 4096)
+  assert.ok(items[0].output.endsWith('line 1999\n'))
+})

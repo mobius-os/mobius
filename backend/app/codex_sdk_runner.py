@@ -2397,7 +2397,12 @@ async def _run_codex_sdk_turn(
           sdk["CommandExecutionOutputDeltaNotification"],
         ):
           if payload.delta:
-            event = {"type": "tool_output", "content": payload.delta}
+            # A delta is the next piece of output, not the text so far; the
+            # marker tells the reducers to append it rather than replace.
+            event = {
+              "type": "tool_output", "content": payload.delta,
+              "output_delta": True,
+            }
             _stamp_notification_item_id(event, payload)
             tool_use_id = event.get("tool_use_id")
             if isinstance(tool_use_id, str):
