@@ -251,6 +251,10 @@ def test_web_push_request_fits_the_push_service_limit(db, auth, monkeypatch):
     ("Build finished", "x" * 4000),
     ("Party", "\U0001F389" * 400),
     ("新消息", "你" * 700),
+    # Too long even as UTF-8: the cut is measured in bytes, so a 3-byte CJK
+    # or 4-byte emoji body keeps all that fits rather than being emptied.
+    ("新消息", "你" * 2000),
+    ("Party", "\U0001F389" * 1400),
   ]:
     requests_sent.clear()
     notification_id = notify_owner(
@@ -269,6 +273,8 @@ def test_web_push_request_fits_the_push_service_limit(db, auth, monkeypatch):
     else:
       assert delivered["body"].endswith("…")
       assert body.startswith(delivered["body"][:-1])
+      # Shortened to the budget, less at most one partial character.
+      assert len(requests_sent[0]) >= 4096 - 3, len(requests_sent[0])
     assert delivered["id"] == notification_id
     assert delivered["target"] == target
     assert delivered["tag"] == "agent:chat-size:thread"
