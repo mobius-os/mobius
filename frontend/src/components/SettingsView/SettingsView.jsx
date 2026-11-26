@@ -21,6 +21,7 @@ import {
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
+import GeminiAuth from '../ProviderAuth/GeminiAuth.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
@@ -57,6 +58,7 @@ const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
+  { id: 'gemini', label: 'Google Gemini' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
@@ -300,6 +302,7 @@ export default function SettingsView({
   const providerAvailability = resolveProviderAvailability(providerStatusQuery)
   const configuredProviders = providerAvailability.configuredProviders
   const codexAuthenticated = configuredProviders.has('codex')
+  const geminiAuthenticated = configuredProviders.has('gemini')
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -814,6 +817,9 @@ export default function SettingsView({
   const onCodexAuthDone = useCallback(() => {
     onProviderConnected('codex')
   }, [onProviderConnected])
+  const onGeminiAuthDone = useCallback(() => {
+    onProviderConnected('gemini')
+  }, [onProviderConnected])
 
   async function toggleTheme() {
     if (themeSwitching) return
@@ -1053,6 +1059,10 @@ export default function SettingsView({
     ) : selectedProvider === 'claude' ? (
       <ProviderConnection key={connectionEpoch} provider="claude" name="Claude Code" connected={claudeAuthenticated} onDisconnected={() => onProviderDisconnected('claude')}>
         <ProviderAuth authenticated={claudeAuthenticated} compact onDone={onClaudeAuthDone} />
+      </ProviderConnection>
+    ) : selectedProvider === 'gemini' ? (
+      <ProviderConnection key={connectionEpoch} provider="gemini" name="Google Gemini" connected={geminiAuthenticated} onDisconnected={() => onProviderDisconnected('gemini')}>
+        <GeminiAuth onConnected={onGeminiAuthDone} />
       </ProviderConnection>
     ) : null
     const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null

@@ -1156,6 +1156,8 @@ export const api = {
     }),
     revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
     reveal: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/value`),
+    // Sends one request with the key added by the vault (`host/path?query`).
+    use: (name, destination) => apiFetch(`/keys/use/${encodeURIComponent(name)}/${destination}`),
     approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',
       body: JSON.stringify(body),

@@ -163,15 +163,16 @@
   padding-left: 3px;
 }
 
-.codex-auth__settings-button {
+.pa__external-link {
   display: inline-flex;
   align-items: center;
   justify-self: start;
+  align-self: flex-start;
   gap: 6px;
   text-decoration: none;
 }
 
-.codex-auth__settings-button svg {
+.pa__external-link svg {
   flex-shrink: 0;
 }
 

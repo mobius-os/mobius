@@ -40,6 +40,22 @@ function OpenAILogo() {
 }
 
 
+/** Google Gemini mark — the four-pointed Gemini sparkle. */
+function GeminiLogo() {
+  return (
+    <svg
+      width="18"
+      height="18"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      aria-hidden="true"
+    >
+      <path d="M12 0c.3 6.4 5.6 11.7 12 12-6.4.3-11.7 5.6-12 12-.3-6.4-5.6-11.7-12-12C6.4 11.7 11.7 6.4 12 0Z" />
+    </svg>
+  )
+}
+
+
 /** Möbius provider mark — the same silhouette Android uses for the shell's
  *  monochrome notification badge. CSS masks it with the surrounding semantic
  *  color so it follows the shell's off-white/light-theme ink automatically. */
@@ -100,6 +116,16 @@ export const PROVIDER_INFO = {
       { value: 'xhigh', label: 'Extra high' },
     ],
   },
+  gemini: {
+    id: 'gemini',
+    label: 'Google Gemini',
+    Logo: GeminiLogo,
+    efforts: [
+      { value: 'low', label: 'Low' },
+      { value: 'medium', label: 'Medium' },
+      { value: 'high', label: 'High' },
+    ],
+  },
   claude: {
     id: 'claude',
     label: 'Claude Code',
@@ -121,7 +147,7 @@ export const PROVIDER_INFO = {
 // Keep the app-owned Möbius subscription after the user's connected coding
 // subscriptions. This order is shared by the chat picker and the
 // background-agent defaults so those surfaces cannot drift.
-export const PROVIDER_ORDER = ['codex', 'claude', 'mobius']
+export const PROVIDER_ORDER = ['codex', 'claude', 'gemini', 'mobius']
 
 /** Built-ins keep their familiar order; accepted app providers follow it. */
 export function providerOrderFor(registry) {

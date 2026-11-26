@@ -74,10 +74,14 @@ async def close_model_relay_client() -> None:
 class _RelayResponse(StreamingResponse):
   """Own the upstream through the whole ASGI send, even before its first byte."""
 
-  def __init__(self, upstream: httpx.Response, **kwargs):
+  def __init__(self, upstream: httpx.Response, body: Any = None, **kwargs):
     self.upstream = upstream
     # Decoded bytes: httpx negotiated encoding; its wire length is not ours.
-    super().__init__(upstream.aiter_bytes(), status_code=upstream.status_code, **kwargs)
+    # A translating protocol passes its own body built from the upstream.
+    super().__init__(
+      upstream.aiter_bytes() if body is None else body,
+      status_code=upstream.status_code, **kwargs,
+    )
 
   async def __call__(self, scope, receive, send):
     try:
@@ -265,6 +269,14 @@ async def relay_responses(provider_id: str, request: Request):
   return await _relay(provider_id, request, "responses")
 
 
+# Protocols an engine route serves: the Codex engine speaks Responses to the
+# relay whether the provider takes Responses as is or needs translation.
+_ROUTE_PROTOCOLS = {
+  "anthropic_messages": ("anthropic_messages",),
+  "responses": ("responses", "gemini"),
+}
+
+
 async def _relay(provider_id: str, request: Request, protocol_name: str, suffix: str = ""):
   from app.config import get_settings
   from app.providers import (
@@ -277,11 +289,14 @@ async def _relay(provider_id: str, request: Request, protocol_name: str, suffix:
   data_dir = get_settings().data_dir
   await refresh_app_model_providers(data_dir)
   provider = PROVIDERS.get(provider_id)
-  if not isinstance(provider, AppModelProvider) or provider.protocol != protocol_name:
+  if not isinstance(provider, AppModelProvider) or provider.protocol not in _ROUTE_PROTOCOLS[protocol_name]:
     return protocol.error(404, "not_found_error", "This model connection is not installed.")
   # Bytes: a non-ASCII header is a wrong token, not a server error.
   if not hmac.compare_digest(_presented_token(request).encode(), provider.relay_token().encode()):
     return protocol.error(401, "authentication_error", "Invalid model relay token.")
+  if provider.protocol == "gemini":
+    from app.routes.gemini_relay import relay_gemini
+    return await relay_gemini(provider, request, data_dir)
   # The key's sites must allow the exact endpoint this call reaches.
   credential = await anyio.to_thread.run_sync(functools.partial(
     provider.read_relay_key, data_dir, endpoint=f"{protocol.upstream_path}{suffix}",

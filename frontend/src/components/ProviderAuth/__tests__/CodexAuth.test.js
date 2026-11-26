@@ -42,7 +42,7 @@ test('setup offers one button-styled settings link with an external-link indicat
   const links = [...render().matchAll(/<a\b([^>]*)>(.*?)<\/a>/gs)]
   assert.equal(links.length, 1)
   const [, attributes, contents] = links[0]
-  assert.match(attributes, /class="pa__btn pa__btn--sm codex-auth__settings-button"/)
+  assert.match(attributes, /class="pa__btn pa__btn--sm pa__external-link"/)
   assert.match(attributes, /target="_blank"/)
   assert.match(attributes, /rel="noopener noreferrer"/)
   assert.match(contents, /<svg[^>]*aria-hidden="true"/)

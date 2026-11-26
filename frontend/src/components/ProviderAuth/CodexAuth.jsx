@@ -215,7 +215,7 @@ export default function CodexAuth({ onConnected, showSetupHint = true }) {
             </li>
           </ol>
           <a
-            className="pa__btn pa__btn--sm codex-auth__settings-button"
+            className="pa__btn pa__btn--sm pa__external-link"
             href={CHATGPT_SECURITY_URL}
             target="_blank"
             rel="noopener noreferrer"

@@ -39,16 +39,17 @@ function renderChatModels(provider) {
   )
 }
 
-test('the provider order lists Codex and Claude before Möbius', () => {
-  assert.deepEqual(PROVIDER_ORDER, ['codex', 'claude', 'mobius'])
+test('the provider order lists Codex, Claude and Gemini before Möbius', () => {
+  assert.deepEqual(PROVIDER_ORDER, ['codex', 'claude', 'gemini', 'mobius'])
+  assert.equal(PROVIDER_INFO.gemini.label, 'Google Gemini')
   assert.equal(PROVIDER_INFO.mobius.label, 'Möbius')
 })
 
 test('accepted app providers extend the same model order and metadata', () => {
-  const order = providerOrderFor({codex: [], claude: [], mobius: [], 'app-12': []})
-  assert.deepEqual(order, ['codex', 'claude', 'mobius', 'app-12'])
+  const order = providerOrderFor({codex: [], claude: [], gemini: [], mobius: [], 'app-12': []})
+  assert.deepEqual(order, ['codex', 'claude', 'gemini', 'mobius', 'app-12'])
   assert.deepEqual(providerOrderFor({
-    providers: { codex: [], claude: [], mobius: [], 'app-12': [] },
+    providers: { codex: [], claude: [], gemini: [], mobius: [], 'app-12': [] },
     defaults: { mobius: 'live' },
     replacements: { mobius: { retired: 'live' } },
   }), order)
@@ -74,6 +75,7 @@ test('shared provider metadata preserves each provider-specific effort sequence'
   ])), {
     codex: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'],
     claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
+    gemini: ['low', 'medium', 'high'],
     mobius: ['minimal', 'low', 'medium', 'high', 'max'],
   })
 })

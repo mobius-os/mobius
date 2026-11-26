@@ -723,7 +723,7 @@ _PKCE_TIMEOUT = 300  # 5 minutes
 _active_pkce: dict | None = None
 # Serialize login/exchange/disconnect so an older sign-in cannot finish after
 # the owner's disconnect and silently restore the connection.
-_provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock()}
+_provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock(), "gemini": asyncio.Lock()}
 
 
 async def _provider_signin_changed(provider_id: str) -> None:
@@ -1729,7 +1729,7 @@ async def provider_disconnect(
     if provider_id == "claude":
       global _active_pkce
       _active_pkce = None
-    else:
+    elif provider_id == "codex":
       proc = _codex_login_procs.get("active")
       if proc and proc.returncode is None:
         proc.kill()

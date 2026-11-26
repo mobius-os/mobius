@@ -1516,10 +1516,11 @@ def remove_legacy_app_engine_homes(data_dir: str | Path, app_ids) -> list[str]:
 class AppModelProvider(BaseProvider):
   """An accepted app's declarative model connection.
 
-  `responses` declarations run on the Codex engine and `anthropic_messages`
-  declarations on the Claude engine. Both talk to the local model relay
-  (`routes/model_relay.py`) with a relay token; the relay holds the real key
-  and repairs request shapes compatible providers reject.
+  `responses` and `gemini` declarations run on the Codex engine and
+  `anthropic_messages` declarations on the Claude engine. All talk to the
+  local model relay (`routes/model_relay.py`) with a relay token; the relay
+  holds the real key, repairs request shapes compatible providers reject, and
+  translates Responses to Google's Gemini API for `gemini`.
   """
 
   def __init__(self, app_id: int, declaration: dict[str, Any], consent_scope: str = ""):
@@ -1529,6 +1530,7 @@ class AppModelProvider(BaseProvider):
     # never mint a credential for a later acceptance of the same declaration.
     self.consent_scope = consent_scope
     self.name = declaration["name"]
+    self.provider_id = f"app-{app_id}"
     self.auth_dir = f"app-{app_id}"
     self.protocol = declaration.get("protocol", "responses")
     self.runtime_kind = "claude_sdk" if self.protocol == "anthropic_messages" else "codex_sdk"
@@ -1553,7 +1555,7 @@ class AppModelProvider(BaseProvider):
     ``endpoint`` is the path under ``base_url`` the relay is about to call
     (the protocol's main endpoint when omitted): the key's sites must allow it.
     """
-    if not provider_enabled(data_dir, f"app-{self.app_id}"):
+    if not provider_enabled(data_dir, self.provider_id):
       return RelayKeyRead(None, f"{self.name} is turned off in its app.")
     # The installation whose accepted declaration this provider serves: a
     # grant given to another installation that had the same id never counts.
@@ -1593,7 +1595,7 @@ class AppModelProvider(BaseProvider):
     return model, (effort if effort in allowed else None)
 
   def relay_token(self) -> str:
-    return model_relay_token(f"app-{self.app_id}", self.consent_scope)
+    return model_relay_token(self.provider_id, self.consent_scope)
 
   def measured_run_accounting(self, cost_usd, usage):
     # The engines price tokens at their own vendor's rates, meaningless for
@@ -1609,7 +1611,7 @@ class AppModelProvider(BaseProvider):
   def _relay_base_url(self) -> str:
     # Direct loopback to the listener: the relay refuses proxied requests.
     from app.config import loopback_listener_url
-    return loopback_listener_url(f"/api/model-relay/app-{self.app_id}")
+    return loopback_listener_url(f"/api/model-relay/{self.provider_id}")
 
   def _runtime_home(self, data_dir: str) -> Path:
     return app_engine_home(data_dir, self.app_id)
@@ -1625,7 +1627,7 @@ class AppModelProvider(BaseProvider):
     return f"MOBIUS_MODEL_RELAY_TOKEN_{self.app_id}"
 
   def codex_config_overrides(self) -> list[str]:
-    provider_id = f"app_{self.app_id}"
+    provider_id = self.provider_id.replace("-", "_")
     key_name = self._relay_token_env
     return [
       f'model_provider={json.dumps(provider_id)}',
@@ -1721,15 +1723,73 @@ class AppModelProvider(BaseProvider):
     return env
 
 
+GEMINI_KEY_NAME = "gemini"
+# Google's Gemini API for AI Studio keys. Consumer subscription sign-in is not
+# a supported credential for third-party agents, so the owner saves a key.
+GEMINI_DECLARATION: dict[str, Any] = {
+  "name": "Google Gemini",
+  "base_url": "https://generativelanguage.googleapis.com/v1beta",
+  "secret_name": GEMINI_KEY_NAME,
+  "protocol": "gemini",
+  "default_model": "gemini-3.5-flash",
+  "models": [
+    {"id": model_id, "label": label, "context_window": 1_048_576,
+     "effort_levels": ["low", "medium", "high"], "input_modalities": ["text", "image"]}
+    for model_id, label in (
+      ("gemini-4-neon", "Gemini 4 Neon"),
+      ("gemini-4-carbon", "Gemini 4 Carbon"),
+      ("gemini-4-hydrogen", "Gemini 4 Hydrogen"),
+      ("gemini-3.8-flash", "Gemini 3.8 Flash"),
+      ("gemini-3.5-flash", "Gemini 3.5 Flash"),
+      ("gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite"),
+    )
+  ],
+}
+
+
+class GeminiProvider(AppModelProvider):
+  """Google Gemini, built in: the owner's key from Settings, the Codex engine.
+
+  It is an app-style relayed provider with a platform-owned declaration: the
+  relay translates the engine's Responses calls to Gemini (protocol
+  ``gemini``). The key is the vault key the owner saved from the Gemini page
+  in Settings; the destination is fixed here, so no app can redirect it.
+  """
+
+  def __init__(self):
+    super().__init__(0, GEMINI_DECLARATION)
+    self.app_id = None
+    self.provider_id = "gemini"
+    self.auth_dir = "gemini"
+
+  def read_relay_key(self, data_dir, *, authorize=True, endpoint=None):
+    if not provider_enabled(data_dir, self.provider_id):
+      return RelayKeyRead(None, "Google Gemini is turned off in Settings.")
+    from app import key_vault
+    key = key_vault.platform_key_sync(GEMINI_KEY_NAME, reveal=authorize, caller="platform:gemini")
+    if key:
+      return RelayKeyRead(key if authorize else None, None)
+    return RelayKeyRead(None, "Connect Google Gemini with your AI Studio key in Settings › AI providers.")
+
+  def _runtime_home(self, data_dir: str) -> Path:
+    return Path(data_dir) / "cli-auth" / "gemini"
+
+  @property
+  def _relay_token_env(self) -> str:
+    return "MOBIUS_MODEL_RELAY_TOKEN_GEMINI"
+
+
 # Registry of available providers, keyed by ID.
 PROVIDERS: dict[str, BaseProvider] = {
   "mobius": MobiusProvider(),
   "claude": ClaudeProvider(),
   "codex": CodexProvider(),
+  "gemini": GeminiProvider(),
 }
 
-DEFAULT_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
-DEFAULT_BACKGROUND_MODELS["mobius"] = PROVIDERS["mobius"].declaration["default_model"]
+for _declared in ("mobius", "gemini"):
+  DEFAULT_MODELS[_declared] = PROVIDERS[_declared].declaration["default_model"]
+  DEFAULT_BACKGROUND_MODELS[_declared] = PROVIDERS[_declared].declaration["default_model"]
 
 PROVIDER_NAMES: frozenset[str] = frozenset(PROVIDERS)
 
@@ -1863,7 +1923,7 @@ def _apply_app_model_declarations(
   # Möbius catalogue. Claude/Codex discovery does not: an id both list is
   # shared by (provider, model), so registration never depends on discovery
   # timing and an app update cannot evict a live provider and orphan its chats.
-  claimed_models = _declared_model_ids(("claude", "codex", "mobius"))
+  claimed_models = _declared_model_ids(("claude", "codex", "mobius", "gemini"))
   for app_id, declaration, consent_scope in declarations:
     # Installed Möbius · You copies still declare the broker transport; the
     # platform's own catalogue is the Möbius provider, so the declaration is
@@ -2483,6 +2543,13 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
         _replace_claude_credentials(path, raw)
   elif provider_id == "codex":
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
+  elif provider_id == "gemini":
+    from app import key_vault
+    try:
+      await key_vault.vault_call("DELETE", f"/keys/{GEMINI_KEY_NAME}", caller="owner")
+    except key_vault.VaultRefused as exc:
+      if exc.status != 404:
+        raise OSError("The key vault did not remove the Gemini key.") from exc
   else:
     raise ValueError("This provider's connection is managed elsewhere")
 

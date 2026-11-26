@@ -30,6 +30,7 @@ import os
 import re
 import sys
 import tempfile
+import fnmatch
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
@@ -322,6 +323,8 @@ def grant_widening(before: dict | None, grants) -> GrantWidening:
 PROVIDER_ENDPOINTS: dict[str, tuple[str, ...]] = {
   "responses": ("/responses",),
   "anthropic_messages": ("/v1/messages", "/v1/messages/count_tokens"),
+  # The model is part of a Gemini path; the relay calls one declared model.
+  "gemini": ("/models/*:streamGenerateContent",),
 }
 
 
@@ -373,17 +376,32 @@ def model_provider_key_in(
   endpoint = endpoint if endpoint is not None else next(iter(endpoints), None)
   key = resolve_key_in(keys, app_id, install, name)
   site = provider_site(base_url, protocol)
-  if key is None or site is None or endpoint not in endpoints:
+  path = _provider_call_path(base_url, endpoint, endpoints)
+  if key is None or site is None or path is None:
     return None
   record = next(k for k in keys if k["name"] == key)
   grant = _grant_of(record, app_id, install)
   if record.get("multiline") or grant.get("paused"):
     return None
-  allowed = _vault_rules().site_allows(
-    grant["sites"], site["host"], "POST",
-    site["paths"][endpoints.index(endpoint)],
-  ) is None
+  allowed = _vault_rules().site_allows(grant["sites"], site["host"], "POST", path) is None
   return key if allowed else None
+
+
+def _provider_call_path(base_url: str, endpoint: str | None, endpoints: tuple[str, ...]) -> str | None:
+  """The concrete path a relay call reaches, if the protocol allows it.
+
+  ``endpoint`` must match one of the protocol's endpoint patterns, and the
+  resulting path meets the same rules a use through the vault does, so a
+  model id cannot step outside the declared base path.
+  """
+  if endpoint is None or not any(fnmatch.fnmatchcase(endpoint, e) for e in endpoints):
+    return None
+  path = urllib.parse.urlsplit(str(base_url or "")).path.rstrip("/") + endpoint
+  rules = _vault_rules()
+  try:
+    return rules.normalized_request_path(path)
+  except rules.VaultError:
+    return None
 
 
 def model_provider_key_sync(
@@ -396,6 +414,24 @@ def model_provider_key_sync(
   except (VaultUnavailable, VaultRefused):
     return None
   return model_provider_key_in(keys, app_id, install, name, base_url, protocol, endpoint)
+
+
+def platform_key_sync(name: str, *, reveal: bool, caller: str) -> str | None:
+  """A built-in provider's key, saved by the owner under ``name``.
+
+  The platform fixes where a built-in provider sends it, so only presence is
+  checked; with ``reveal`` the value is read (and logged) as ``caller``.
+  """
+  try:
+    keys = vault_call_sync("GET", "/keys")["keys"]
+    record = next((k for k in keys if k["name"] == name), None)
+    if record is None or record.get("multiline"):
+      return None
+    if not reveal:
+      return name
+    return vault_call_sync("GET", f"/keys/{name}/value", caller=caller)["value"]
+  except (VaultUnavailable, VaultRefused):
+    return None
 
 
 def reveal_model_provider_key(
