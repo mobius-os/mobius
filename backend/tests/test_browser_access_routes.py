@@ -599,6 +599,24 @@ def test_browser_guest_cannot_create_public_links_that_outlive_the_grant(https, 
   assert https.delete("/api/apps/999/publish", headers=guest).status_code == 403
 
 
+def test_browser_guest_app_token_cannot_publish_a_site_that_outlives_the_grant(https, auth, db):
+  # The app frame a guest opens carries the guest's lineage; publishing through
+  # it must be refused like the guest's own bearer, not treated as the app's.
+  _, token, _ = invite(https)
+  app = models.App(name="Example", slug="example", source_dir=get_settings().data_dir + "/example")
+  db.add(app); db.commit()
+  site = Path(get_settings().data_dir) / "apps" / str(app.id) / "build" / "site"
+  site.mkdir(parents=True)
+  (site / "index.html").write_text("<h1>hi</h1>")
+  minted = https.post("/api/auth/app-token", json={"app_id": app.id},
+    headers={"Authorization": "Bearer " + token})
+  assert minted.status_code == 200, minted.text
+  frame = {"Authorization": "Bearer " + minted.json()["token"]}
+  assert https.post(f"/api/apps/{app.id}/publish", json={}, headers=frame).status_code == 403
+  assert https.delete(f"/api/apps/{app.id}/publish", headers=frame).status_code == 403
+  assert not (site.parent / "publish-token.txt").exists()
+
+
 def test_existing_shared_app_owner_keeps_resource_confined_administration(db):
   from app.deps import SharedAppPrincipal
   from app.routes.shared_apps import _require_membership_administration
