@@ -611,15 +611,24 @@ def project_file_diff(
       "binary": False,
       "truncated": False,
     }
-  relative = target.resolve().relative_to(context.root).as_posix()
-  status_row = next(
-    (
-      row for row in project_status(root, hidden_dirs=hidden_dirs)["changes"]
-      if row["path"] == relative
-    ),
-    None,
-  )
-  if status_row is None:
+  repo_path = _context_path(context, target)
+  relative = _project_relative(context, repo_path, hidden_dirs)
+  pathspec = f":(literal){repo_path}"
+  status = None
+  status_truncated = False
+  if relative is not None:
+    code, output, status_truncated = _run_git(
+      context.repo, "status", "--porcelain=v1", "-z", "--untracked-files=all",
+      "--no-renames", "--", pathspec,
+    )
+    if code == 0:
+      for record in output.split(b"\0")[:-1]:
+        if record[3:] == os.fsencode(repo_path):
+          status = _status_name(record[:2].decode("ascii"))
+          break
+    else:
+      status_truncated = True
+  if status is None:
     return {
       "available": True,
       "status": "clean",
@@ -627,9 +636,8 @@ def project_file_diff(
       "deletions": 0,
       "changed_lines": [],
       "binary": False,
-      "truncated": False,
+      "truncated": status_truncated,
     }
-  status = status_row["status"]
   if status == "untracked":
     diff = _untracked_diff(target, status)
     lines = diff.pop("patch_lines", [])
@@ -641,7 +649,7 @@ def project_file_diff(
   code, output, truncated = _run_git(
     context.repo,
     "diff", "--no-ext-diff", "--no-color", "--unified=3", "HEAD",
-    "--", _context_path(context, target),
+    "--", pathspec,
     limit=_DIFF_OUTPUT_MAX,
   )
   if code != 0:
