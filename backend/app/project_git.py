@@ -176,18 +176,43 @@ def connect_github_remote(root: Path, repository: str) -> dict:
   return project_remote_status(root)
 
 
-def _remote_tracking_ref(context: _GitContext, branch: str) -> str | None:
+def _branch_upstream(context: _GitContext, branch: str) -> tuple[str | None, str | None]:
+  """Return ``(comparison ref, push branch)`` from the branch's upstream config.
+
+  The push branch is the branch on ``origin`` that Push updates. Git's own
+  upstream config names it (``branch.<b>.remote`` and ``branch.<b>.merge``);
+  never reverse-map it from a tracking-ref name, which a local branch or a
+  custom fetch refspec can imitate. An upstream on another remote, a local
+  branch, or a remote Git cannot resolve has no GitHub destination: its push
+  branch is ``None`` and Push refuses rather than guess one.
+  """
   code, output, _truncated = _run_git(
-    context.repo, "rev-parse", "--symbolic-full-name",
-    "@{upstream}", limit=1024,
+    context.repo, "for-each-ref",
+    "--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)%00%(upstream:short)",
+    f"refs/heads/{branch}", limit=4096,
   )
-  if code == 0 and output.strip():
-    return output.decode("utf-8", "replace").strip().removeprefix("refs/remotes/")
-  candidate = f"refs/remotes/origin/{branch}"
+  fields = output.decode("utf-8", "replace").rstrip("\n").split("\0") if code == 0 else []
+  remote, remote_ref, tracking_ref, tracking = (fields + ["", "", "", ""])[:4]
+  if not remote:
+    code, _output, _truncated = _run_git(
+      context.repo, "config", "--get", f"branch.{branch}.merge", limit=1024,
+    )
+    if code == 0:
+      return None, None
+    tracking_ref, tracking = f"refs/remotes/origin/{branch}", f"origin/{branch}"
+    push_branch: str | None = branch
+  elif remote == "origin" and remote_ref.startswith("refs/heads/"):
+    push_branch = remote_ref.removeprefix("refs/heads/")
+  else:
+    push_branch = None
+  # A configured upstream that has not been fetched yet still names the push
+  # branch; there is just nothing local to compare with until the next fetch.
+  if not tracking_ref or not tracking:
+    return None, push_branch
   code, _output, _truncated = _run_git(
-    context.repo, "show-ref", "--verify", "--quiet", candidate, limit=128,
+    context.repo, "show-ref", "--verify", "--quiet", tracking_ref, limit=128,
   )
-  return f"origin/{branch}" if code == 0 else None
+  return (tracking if code == 0 else None), push_branch
 
 
 def _revision_count(context: _GitContext, revision: str) -> int:
@@ -216,6 +241,7 @@ def project_remote_status(root: Path) -> dict:
       "branch": None,
       "head": None,
       "upstream": None,
+      "push_branch": None,
       "ahead": 0,
       "behind": 0,
       "diverged": False,
@@ -231,7 +257,7 @@ def project_remote_status(root: Path) -> dict:
     _github_repository(output.decode("utf-8", "replace"))
     if code == 0 else None
   )
-  upstream = _remote_tracking_ref(context, branch) if branch else None
+  upstream, push_branch = _branch_upstream(context, branch) if branch else (None, None)
   ahead = 0
   behind = 0
   commits: list[dict[str, str]] = []
@@ -268,6 +294,7 @@ def project_remote_status(root: Path) -> dict:
     "branch": branch,
     "head": head,
     "upstream": upstream,
+    "push_branch": push_branch,
     "ahead": ahead,
     "behind": behind,
     "diverged": ahead > 0 and behind > 0,
@@ -308,8 +335,17 @@ def pull_project(root: Path, expected_head: str | None = None) -> dict:
   return project_remote_status(root)
 
 
-def push_project(root: Path, expected_head: str | None = None) -> dict:
-  """Publish committed work without force-push or implicit local mutation."""
+def push_project(
+  root: Path,
+  expected_head: str | None = None,
+  expected_push_branch: str | None = None,
+) -> dict:
+  """Publish the reviewed commit to the reviewed origin branch.
+
+  ``expected_push_branch`` is the destination the owner confirmed. Push never
+  force-pushes, and it pushes the verified commit rather than the moving branch
+  name, so a commit made after the check cannot ride along.
+  """
   context = _owned_context(root)
   status = project_remote_status(root)
   if status["dirty"]:
@@ -321,23 +357,31 @@ def push_project(root: Path, expected_head: str | None = None) -> dict:
   branch = status["branch"]
   if not branch:
     raise GitProjectError("Switch to a named branch before pushing.")
-  upstream = status["upstream"]
-  if upstream and not upstream.startswith("origin/"):
+  destination = status["push_branch"]
+  if not destination:
     raise GitProjectError("Track a branch on the connected GitHub remote before pushing.")
-  destination = upstream.removeprefix("origin/") if upstream else branch
+  if expected_push_branch is not None and expected_push_branch != destination:
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
+  code, output, _truncated = _run_git(
+    context.repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", limit=128,
+  )
+  commit = output.decode("ascii", "replace").strip() if code == 0 else ""
+  if not commit or not status["head"] or not commit.startswith(status["head"]):
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
   refreshed = project_remote_status(root)
-  if (
-    refreshed["branch"] != branch
-    or refreshed["head"] != status["head"]
-    or refreshed["upstream"] not in (upstream, f"origin/{destination}")
-  ):
+  reviewed = (branch, status["head"], destination)
+  if (refreshed["branch"], refreshed["head"], refreshed["push_branch"]) != reviewed:
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   if refreshed["behind"]:
     raise GitProjectError("GitHub has newer commits. Pull and review them before pushing.")
-  refspec = f"refs/heads/{branch}:refs/heads/{destination}"
-  args = ("push", "origin") if refreshed["upstream"] else ("push", "--set-upstream", "origin")
-  _run_git_write(context.repo, *args, refspec, timeout=60)
+  _run_git_write(
+    context.repo, "push", "origin", f"{commit}:refs/heads/{destination}", timeout=60,
+  )
+  # A commit refspec cannot carry --set-upstream; record the same destination
+  # so the next status compares with the branch that was just updated.
+  _run_git_write(context.repo, "config", f"branch.{branch}.remote", "origin")
+  _run_git_write(context.repo, "config", f"branch.{branch}.merge", f"refs/heads/{destination}")
   return project_remote_status(root)
 
 

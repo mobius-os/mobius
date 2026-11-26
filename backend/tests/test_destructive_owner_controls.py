@@ -376,7 +376,7 @@ def test_project_push_does_not_reach_git_for_delegated_bearer(
   monkeypatch.setattr(
     project_routes.project_git,
     "push_project",
-    lambda _root, expected: pushed.append(expected) or {"head": "pushed"},
+    lambda _root, expected, _expected_push_branch: pushed.append(expected) or {"head": "pushed"},
   )
 
   delegated = client.post(
