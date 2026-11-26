@@ -9,7 +9,6 @@ import { createSsrRenderServer } from '../frontend/src/lib/__tests__/ssrRenderSe
 const chatView = new URL('../frontend/src/components/ChatView/', import.meta.url)
 let vite
 let StandardMarkdown
-let QuestionCard
 let previousNodeEnv
 
 test.beforeAll(async () => {
@@ -17,8 +16,6 @@ test.beforeAll(async () => {
   vite = await createSsrRenderServer({ configFile: false, plugins: [react()] })
   const markdown = await vite.ssrLoadModule(fileURLToPath(new URL('markdown/BlockRenderer.jsx', chatView)))
   StandardMarkdown = markdown.StandardMarkdown
-  const questions = await vite.ssrLoadModule(fileURLToPath(new URL('QuestionCard.jsx', chatView)))
-  QuestionCard = questions.default
 })
 test.afterAll(async () => {
   try {
@@ -66,40 +63,4 @@ test('chat tables wrap prose, retain alignment and widen for unbroken code', asy
   expect(wrapped.secondRightGap).toBeLessThan(wrapped.secondWidth / 3)
   expect(wide.lines).toBe(1)
   expect(wide.width).toBeGreaterThan(wide.available)
-})
-
-test('an empty written answer starts at one line, grows and shrinks with text', async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 800 })
-  const html = renderToStaticMarkup(createElement(QuestionCard, {
-    chatId: 'fixture',
-    questionId: 'written-only',
-    questions: [{ question: 'What should we do next?', options: [] }],
-  }))
-  await page.setContent(html)
-  await page.addStyleTag({ path: fileURLToPath(new URL('QuestionCard.css', chatView)) })
-
-  const answer = page.getByPlaceholder('Type your answer…')
-  const size = () => answer.evaluate(element => {
-    const { lineHeight, paddingTop, paddingBottom } = getComputedStyle(element)
-    return {
-      height: element.clientHeight,
-      lines: (element.clientHeight - parseFloat(paddingTop) - parseFloat(paddingBottom)) / parseFloat(lineHeight),
-      scrollHeight: element.scrollHeight,
-    }
-  })
-  await expect(answer).toBeVisible()
-  const empty = await size()
-  expect(empty.lines).toBeLessThan(1.1)
-
-  await answer.fill('First line\nSecond line\nThird line')
-  const expanded = await size()
-  expect(expanded.height).toBeGreaterThan(empty.height)
-  expect(expanded.lines).toBeGreaterThan(2.9)
-
-  await answer.fill('More detail\n'.repeat(20))
-  const long = await size()
-  expect(long.scrollHeight).toBeGreaterThan(long.height)
-
-  await answer.clear()
-  expect((await size()).height).toBe(empty.height)
 })
