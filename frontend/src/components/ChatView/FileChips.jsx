@@ -2,7 +2,7 @@ import { useRef, useState, useEffect } from 'react'
 import ImageLightbox from './markdown/ImageLightbox.jsx'
 import ChatPanePortal from './ChatPanePortal.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
-import { BASE } from '../../api/client.js'
+import { BASE, chatPath } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import { markAttachmentThumbFit } from './attachmentThumbFit.js'
 
@@ -82,7 +82,7 @@ export default function FileChips({ files, onRemove, chatId, disabled = false })
     const isImage = !!chip.objectUrl || chip.mime_type?.startsWith('image/')
     const previewSrc = chip.objectUrl || (
       isImage && currentTokenState.param
-        ? `${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(chip.name)}${currentTokenState.param}`
+        ? `${BASE}/api${chatPath(chatId)}/uploads/${encodeURIComponent(chip.name)}${currentTokenState.param}`
         : ''
     )
     return {

@@ -1,7 +1,7 @@
 /* ChatSummaryViewer shows the chat name, replaceable chat summary, and append-only full digest. */
 
 import { useEffect, useRef, useState } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, chatPath } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
 
@@ -24,7 +24,7 @@ export default function ChatSummaryViewer({ chatId, onClose }) {
     const controller = new AbortController()
     async function load() {
       try {
-        const response = await apiFetch(`/chats/${chatId}/agent-context`, {
+        const response = await apiFetch(`${chatPath(chatId)}/agent-context`, {
           signal: controller.signal,
         })
         if (!response.ok) throw new Error(`Request failed (${response.status})`)

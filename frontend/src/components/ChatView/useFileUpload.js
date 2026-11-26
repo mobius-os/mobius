@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { getAuthHeaders, BASE } from '../../api/client.js'
+import { getAuthHeaders, BASE, chatPath } from '../../api/client.js'
 
 /**
  * Hook encapsulating file upload state and API calls for chat attachments.
@@ -68,7 +68,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     // The server deletes only drafts no sent message or answer has claimed,
     // so a stale chip or late cleanup can never delete a file in use.
     if (!file?.name) return
-    fetch(`${BASE}/api/chats/${chatId}/uploads/${encodeURIComponent(file.name)}`, {
+    fetch(`${BASE}/api${chatPath(chatId)}/uploads/${encodeURIComponent(file.name)}`, {
       method: 'DELETE', headers: getAuthHeaders(),
     }).catch(() => {})
   }, [chatId])
@@ -95,7 +95,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     if (uploadLimitRef.current?.chatId !== chatId) {
       uploadLimitRef.current = {
         chatId,
-        promise: fetch(`${BASE}/api/chats/${chatId}/upload-limits`, {
+        promise: fetch(`${BASE}/api${chatPath(chatId)}/upload-limits`, {
           headers: getAuthHeaders(),
         }).then(async res => {
           if (!res.ok) throw new Error('Could not check upload limit. Try again.')
@@ -134,7 +134,7 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
         // Content-Type header is sent here (apiFetch also leaves FormData alone).
         const fd = new FormData()
         fd.append('files', fileList[i])
-        const res = await fetch(`${BASE}/api/chats/${chatId}/uploads`, {
+        const res = await fetch(`${BASE}/api${chatPath(chatId)}/uploads`, {
           method: 'POST',
           headers: getAuthHeaders(),
           body: fd,

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { advanceChatRunSignal, chatRunSignalDelta, EMPTY_CHAT_RUN_SIGNAL } from '../../../lib/chatRunSignal.js'
 import { chatDetailCacheValue, shouldRefetchTranscriptForRuntime } from '../../../lib/chatDetailCache.js'
+import { chatPath } from '../../../api/client.js'
 import {
   canResumeGoal, goalStatusLabel, compactGoalObjective, draftGoalObjective,
   goalMessageObjectiveFromText, goalPresentationFromRuntime, goalTaskDisplayStatus,
@@ -281,7 +282,7 @@ test('draftGoalObjective keeps the goal visual open while typing the objective',
 test('the goal rail confirms and clears directly, sourced domain-neutrally', () => {
   assert.match(
     chatView,
-    /handleClearGoal\s*=\s*useCallback\(async \(item\)[\s\S]*?apiFetch\(`\/chats\/\$\{chatId\}\/goal`[\s\S]*?method:\s*'DELETE'[\s\S]*?goal_id:\s*goalId/,
+    /handleClearGoal\s*=\s*useCallback\(async \(item\)[\s\S]*?apiFetch\(`\$\{chatPath\(chatId\)\}\/goal`[\s\S]*?method:\s*'DELETE'[\s\S]*?goal_id:\s*goalId/,
     'the confirmed clear must call the exact-id lifecycle route directly',
   )
   assert.doesNotMatch(
@@ -430,7 +431,7 @@ function runtimeRefreshHarness(owner, server) {
     parkedQuestionHydrationRef: { current: null }, fetchGenRef: owner.state.fetchGenRef,
     localStartRequestRef: owner.state.localStartRequestRef, isStreamingRef: owner.state.isStreamingRef,
     sendingRef: owner.state.sendingRef, chatId: owner.state.chatId, CHAT_FETCH_TIMEOUT_MS: 1,
-    apiFetch: async () => ({ json: async () => server.runtime() }), jsonOrThrow: res => res.json(),
+    apiFetch: async () => ({ json: async () => server.runtime() }), jsonOrThrow: res => res.json(), chatPath,
     sharedRuntimeRead: (_chatId, read) => read(), inspectRuntimeSnapshot: () => ({ adopt: true, settled: null }),
     shouldAdoptRuntimeAssistantOwner: () => false, shouldRecoverSettledRuntime: () => false,
     shouldRetireSettledRunMarker: () => false, shouldRefetchTranscriptForRuntime,

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { renderHook } from '../hooks/__tests__/react-hook-shim.mjs'
 import useAppIntentNavigation from '../../Shell/useAppIntentNavigation.js'
 
@@ -118,4 +118,32 @@ test('shell resolves raw deep-link app targets through the intent rail', () => {
   assert.match(pane, /onInternalNav=\{onInternalNav\}/)
   assert.match(pane, /const target = app\?\.id \?\? app\?\.slug \?\? app/)
   assert.match(pane, /openAppWithIntent\(target, intent, \(\) => true, \{ paneId \}\)/)
+})
+
+// Chat ids reach requests from links, app frames and restored storage. A raw
+// `/chats/${id}` lets a `../` id climb to another authenticated /api route, so
+// every chat request path encodes its id (through chatPath or inline).
+test('chat request paths never interpolate a raw chat id', () => {
+  const srcRoot = new URL('../../../', import.meta.url)
+  const files = []
+  const walk = dir => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.name === '__tests__' || entry.name === 'node_modules') continue
+      const child = new URL(entry.name + (entry.isDirectory() ? '/' : ''), dir)
+      if (entry.isDirectory()) walk(child)
+      else if (/\.(m?js|jsx)$/.test(entry.name)) files.push(child)
+    }
+  }
+  walk(srcRoot)
+  const raw = /\/chats\/\$\{(?!encodeURIComponent\()/g
+  const offenders = []
+  for (const file of files) {
+    const source = readFileSync(file, 'utf8')
+    if (raw.test(source)) offenders.push(file.pathname.slice(srcRoot.pathname.length))
+    raw.lastIndex = 0
+  }
+  assert.ok(files.length > 100, 'the scan reaches the shell source')
+  assert.match(read('../../../api/client.js'), /export function chatPath\(/)
+  assert.deepEqual(offenders, [],
+    `build these chat paths with chatPath() from api/client.js: ${offenders.join(', ')}`)
 })

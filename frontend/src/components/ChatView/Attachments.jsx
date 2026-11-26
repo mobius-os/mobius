@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { FileDocument } from '@openai/apps-sdk-ui/components/Icon'
-import { BASE } from '../../api/client.js'
+import { BASE, chatPath } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import ImagePreviewButton from './ImagePreviewButton.jsx'
 import DocumentAttachment from './DocumentAttachment.jsx'
@@ -79,7 +79,7 @@ export default function Attachments({ attachments, chatId, mediaDimensions }) {
             <AttachImage
               key={i}
               src={tokenParam
-                ? `${BASE}/api/chats/${chatId}/${
+                ? `${BASE}/api${chatPath(chatId)}/${
                   img.kind === 'generated' ? 'generated-files' : 'uploads'
                 }/${encodeURIComponent(img.name)}${tokenParam}${
                   img.kind === 'generated' ? '&preview=true' : ''

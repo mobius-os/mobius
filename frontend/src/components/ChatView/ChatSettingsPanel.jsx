@@ -67,7 +67,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, chatPath } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import { catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
@@ -250,7 +250,7 @@ export default function ChatSettingsPanel({
     setLocalError('')
     const operation = settingsSaveTailRef.current.then(async () => {
       try {
-        const res = await apiFetch(`/chats/${chatId}`, {
+        const res = await apiFetch(chatPath(chatId), {
           method: 'PATCH',
           body: JSON.stringify(body),
         })
@@ -298,7 +298,7 @@ export default function ChatSettingsPanel({
       // the source chat state the handoff follows. Wait for that routine write
       // even if + was closed/reopened while it settled.
       await settingsSaveTailRef.current
-      const res = await apiFetch(`/chats/${chatId}/provider-switch`, {
+      const res = await apiFetch(`${chatPath(chatId)}/provider-switch`, {
         method: 'POST',
         body: JSON.stringify(providerSwitchPayload({
           provider: nextProvider,

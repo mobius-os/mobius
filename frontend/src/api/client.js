@@ -896,6 +896,15 @@ export async function probeDeletion(path) {
   }
 }
 
+/** The API path of one chat, with its id kept to a single path segment.
+ * Chat ids reach the shell from links, app frames and restored storage; a raw
+ * `../` id would otherwise climb to another authenticated /api route. Build
+ * every `/chats/<id>` request with this (or `encodeURIComponent`); the
+ * chat-path guard in internalNavigation.test.js refuses raw interpolation. */
+export function chatPath(chatId, suffix = '') {
+  return `/chats/${encodeURIComponent(chatId)}${suffix}`
+}
+
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.
@@ -1072,7 +1081,7 @@ export const api = {
       if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
-        `/chats/${encodeURIComponent(chatId)}${query ? `?${query}` : ''}`,
+        chatPath(chatId, query ? `?${query}` : ''),
         { signal, timeoutMs },
       )
     },
@@ -1086,12 +1095,12 @@ export const api = {
         { signal },
       )
     },
-    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${encodeURIComponent(chatId)}`, {
+    update: (chatId, payload) => listAffectingMutation('chats', chatPath(chatId), {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
     setPinned: (chatId, pinned, options) => pinnedResourceMutation(
-      'chats', `/chats/${encodeURIComponent(chatId)}`, pinned, options,
+      'chats', chatPath(chatId), pinned, options,
     ),
     markFailureSeen: (chatId, activityVersion) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
@@ -1113,10 +1122,10 @@ export const api = {
       'chats', `/chats/${encodeURIComponent(chatId)}/unarchive`, { method: 'POST' },
     ),
     remove: (chatId) => listAffectingMutation(
-      'chats', `/chats/${encodeURIComponent(chatId)}`, { method: 'DELETE' },
+      'chats', chatPath(chatId), { method: 'DELETE' },
     ),
     recover: (chatId, payload) => listAffectingMutation(
-      'chats', `/chats/${encodeURIComponent(chatId)}/recover`, {
+      'chats', chatPath(chatId, '/recover'), {
         method: 'POST',
         body: payload ? JSON.stringify(payload) : undefined,
       },
