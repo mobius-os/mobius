@@ -1,6 +1,5 @@
 """Agent self-scheduling: helper (enqueue/list_due/cap/cancel) + endpoint."""
 
-import asyncio
 import json
 from pathlib import Path
 
@@ -317,49 +316,142 @@ def test_dispatch_retires_reminder_for_deleted_chat(client, auth, monkeypatch):
   assert r.json()["fired"] == 0
   assert self_reminders.list_pending("ghost-chat") == []
 
-@pytest.mark.asyncio
-async def test_overlapping_dispatches_only_send_one_checkin(db, chat, monkeypatch):
+
+# --- Endpoint: duplicate check-ins (real send path) --------------------
+
+
+@pytest.fixture
+def started_runs(monkeypatch):
+  """Records every agent turn the send path starts, without running one.
+
+  The send itself stays real: a fresh send to an idle chat spawns run_chat,
+  a send behind other work schedules a continuation.
+  """
+  from app import chat as chat_mod
+  from app.routes import chats_stream
+  starts = []
+
+  async def run_chat(messages, **kwargs):
+    starts.append(kwargs)
+
+  def schedule(**kwargs):
+    starts.append(kwargs)
+    return True
+
+  monkeypatch.setattr(chats_stream, "run_chat", run_chat)
+  monkeypatch.setattr(chat_mod, "run_chat", run_chat)
+  monkeypatch.setattr(chats_stream, "_schedule_continuation", schedule)
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", schedule)
+  return starts
+
+
+@pytest.fixture
+def send_statuses(monkeypatch):
+  """Observes what the real send path answered for each check-in."""
   from app.routes import self_reminders as route
+  real_send = route._send_checkin
+  statuses = []
 
-  _enable_dispatch()
-  self_reminders.enqueue(chat.id, "due now", due_at=1, now=0)
-  entered = asyncio.Event()
-  release = asyncio.Event()
-  sent = []
+  async def observe(**kwargs):
+    response = await real_send(**kwargs)
+    payload = (
+      json.loads(response.body) if hasattr(response, "body") else response
+    )
+    statuses.append(payload["status"])
+    return response
 
-  async def send(**kwargs):
-    sent.append(kwargs["body"].cid)
-    if len(sent) == 1:
-      entered.set()
-      await release.wait()
-
-  monkeypatch.setattr(route, "_send_checkin", send)
-  first = asyncio.create_task(route.dispatch_due(db=db))
-  try:
-    await asyncio.wait_for(entered.wait(), timeout=2)
-    second = await route.dispatch_due(db=db)
-  finally:
-    release.set()
-    first_result = await first
-  assert [first_result["fired"], second["fired"]] == [1, 0]
-  assert len(sent) == 1
+  monkeypatch.setattr(route, "_send_checkin", observe)
+  return statuses
 
 
-def test_dispatch_retry_uses_same_durable_message_identity(client, auth, chat, monkeypatch):
+def _hidden_checkins(db, chat, reminder_id):
+  from app import models, transcript_rows
+  db.expire_all()
+  stored = db.get(models.Chat, chat.id)
+  seq = transcript_rows.client_message_seq(
+    db, stored, f"self-reminder:{reminder_id}",
+  )
+  return [] if seq is None else [seq]
+
+
+def test_retry_after_a_lost_settle_does_not_post_the_checkin_twice(
+  client, auth, db, chat, started_runs, send_statuses, monkeypatch,
+):
+  """The check-in is delivered but marking it done fails; the next tick
+  retries it. The real send path recognises the reminder's cid and
+  acknowledges a duplicate, so the agent is woken exactly once."""
   _enable_dispatch()
   reminder = self_reminders.enqueue(chat.id, "due now", due_at=1, now=0)
-  attempts = []
+  real_mark_done = self_reminders.mark_done
+  settle_attempts = []
 
-  async def send(**kwargs):
-    attempts.append(kwargs["body"].cid)
-    if len(attempts) == 1:
-      raise OSError("send acknowledgement lost")
+  def lose_first_settle(reminder_id):
+    settle_attempts.append(reminder_id)
+    if len(settle_attempts) == 1:
+      raise OSError("store write lost")
+    return real_mark_done(reminder_id)
+
+  monkeypatch.setattr(self_reminders, "mark_done", lose_first_settle)
+
+  first = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert first.status_code == 200, first.text
+  assert first.json()["fired"] == 0
+  assert [r["id"] for r in self_reminders.list_pending(chat.id)] == [
+    reminder["id"],
+  ]
+
+  second = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert second.status_code == 200, second.text
+  assert second.json()["fired"] == 1
+  assert send_statuses[0] != "duplicate"
+  assert send_statuses[1] == "duplicate"
+  assert len(started_runs) == 1
+  assert len(_hidden_checkins(db, chat, reminder["id"])) == 1
+  assert self_reminders.list_pending(chat.id) == []
+
+
+def test_dispatch_from_a_stale_snapshot_acknowledges_the_delivered_checkin(
+  client, auth, db, chat, started_runs, send_statuses, monkeypatch,
+):
+  """An overlapping dispatch read the reminder before the first one marked
+  it done. Its send is a duplicate and its settle finds the reminder
+  already done; neither posts again nor fails the dispatch."""
+  _enable_dispatch()
+  reminder = self_reminders.enqueue(chat.id, "due now", due_at=1, now=0)
+  stale_snapshot = self_reminders.list_due()
+
+  assert client.post(
+    "/api/self-reminders/dispatch", headers=auth,
+  ).json()["fired"] == 1
+
+  monkeypatch.setattr(self_reminders, "list_due", lambda: stale_snapshot)
+  overlap = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert overlap.status_code == 200, overlap.text
+  assert overlap.json()["fired"] == 0
+  assert send_statuses[1] == "duplicate"
+  assert len(started_runs) == 1
+  assert len(_hidden_checkins(db, chat, reminder["id"])) == 1
+
+
+def test_reminder_cancelled_during_its_send_does_not_fail_the_dispatch(
+  client, auth, chat, monkeypatch,
+):
+  """The agent cancels a reminder while its check-in is in flight. That
+  reminder is already settled; the dispatch still returns and fires the
+  rest of its snapshot."""
+  _enable_dispatch()
+  raced = self_reminders.enqueue(chat.id, "cancelled mid-send", due_at=1, now=0)
+  self_reminders.enqueue(chat.id, "next in line", due_at=2, now=0)
+  sent = []
+
+  async def send(*, body, chat_id, principal, db):
+    sent.append(body.cid)
+    if body.cid == f"self-reminder:{raced['id']}":
+      self_reminders.cancel(raced["id"])
 
   monkeypatch.setattr("app.routes.self_reminders._send_checkin", send)
-  first = client.post("/api/self-reminders/dispatch", headers=auth)
-  assert first.json()["fired"] == 0
-  assert [row["id"] for row in self_reminders.list_pending(chat.id)] == [reminder["id"]]
-  second = client.post("/api/self-reminders/dispatch", headers=auth)
-  assert second.json()["fired"] == 1
-  assert attempts[0] and attempts[0] == attempts[1]
+  r = client.post("/api/self-reminders/dispatch", headers=auth)
+  assert r.status_code == 200, r.text
+  assert [rec["note"] for rec in r.json()["reminders"]] == ["next in line"]
+  assert len(sent) == 2
   assert self_reminders.list_pending(chat.id) == []

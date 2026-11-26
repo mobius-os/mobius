@@ -21,7 +21,6 @@ dispatcher calls /dispatch with the service token.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -39,7 +38,6 @@ from app.resource_access import get_active_chat_or_404
 router = APIRouter(prefix="/api/self-reminders", tags=["self-reminders"])
 
 log = logging.getLogger(__name__)
-_dispatch_lock = asyncio.Lock()
 
 
 class EnqueueReminder(BaseModel):
@@ -174,19 +172,13 @@ async def dispatch_due(
   exists (deleted since it was scheduled) is cancelled rather than
   retried forever. mark_done runs only after a successful post, so a
   transient failure leaves the reminder pending for the next tick.
+  Each check-in carries the reminder's id as its message cid, so a retry
+  or an overlapping dispatch is acknowledged as a duplicate, never posted
+  twice, and a reminder another actor already settled is skipped.
   """
   if not self_reminders.is_dispatcher_enabled():
     return {"enabled": False, "fired": 0, "reminders": []}
 
-  # One API worker owns delivery. Do not take a second snapshot of pending
-  # reminders while a send from the first snapshot is still in flight.
-  if _dispatch_lock.locked():
-    return {"enabled": True, "fired": 0, "reminders": []}
-  async with _dispatch_lock:
-    return await _dispatch_pending(db)
-
-
-async def _dispatch_pending(db: Session):
   owner = db.query(models.Owner).first()
   if owner is None:
     # No owner means setup never ran — there is no session to resume
@@ -206,14 +198,16 @@ async def _dispatch_pending(db: Session):
       # The chat was deleted after the reminder was scheduled. There is
       # nothing to resume, so retire the reminder instead of letting the
       # dispatcher trip over it on every tick.
-      self_reminders.cancel(rec["id"])
+      _settle(self_reminders.cancel, rec["id"])
       continue
     principal = Principal(owner=owner, app_id=None)
     body = schemas.SendMessage(
       content=_checkin_prompt(rec["note"]),
       hidden=True,
-      # If delivery was committed before a crash, the ordinary send path can
-      # acknowledge the same durable message instead of sending it again.
+      # The reminder's id is the check-in's durable message identity. A retry
+      # after a lost acknowledgement, or an overlapping dispatch, reaches the
+      # send path's cid check under the per-chat lock and is acknowledged as
+      # a duplicate instead of posting (and running) the check-in twice.
       cid=f"self-reminder:{rec['id']}",
     )
     try:
@@ -233,10 +227,34 @@ async def _dispatch_pending(db: Session):
         chat_id, rec["id"], exc,
       )
       continue
-    self_reminders.mark_done(rec["id"])
-    fired.append(_reminder_out(rec))
+    if _settle(self_reminders.mark_done, rec["id"]):
+      fired.append(_reminder_out(rec))
 
   return {"enabled": True, "fired": len(fired), "reminders": fired}
+
+
+def _settle(transition, reminder_id: str) -> bool:
+  """Moves one reminder to a terminal state; False if this tick didn't.
+
+  The store refuses to re-terminate a reminder, and another actor may get
+  there first: an overlapping dispatch, or the agent cancelling it while its
+  check-in was in flight. Either way the reminder is already settled, so this
+  dispatch moves on to the rest of its snapshot instead of failing. A failed
+  store write leaves it pending; the next tick's retry reuses the same cid,
+  so it is acknowledged as a duplicate rather than delivered twice.
+  """
+  try:
+    transition(reminder_id)
+  except self_reminders.ReminderError as exc:
+    log.info("self-reminder %s already settled: %s", reminder_id, exc)
+    return False
+  except OSError as exc:
+    log.warning(
+      "self-reminder %s could not be settled; retrying next tick: %s",
+      reminder_id, exc,
+    )
+    return False
+  return True
 
 
 def _checkin_prompt(note: str) -> str:
