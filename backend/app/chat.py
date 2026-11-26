@@ -102,6 +102,7 @@ from app.goal_commands import goal_request_for_agent, is_goal_continue
 from app.provider_errors import (
   ProviderErrorKind,
   classify_provider_error,
+  is_quota_limit,
   is_workspace_credits_exhausted,
 )
 from app.continuations import has_runnable_pending, runnable_pending
@@ -4280,12 +4281,7 @@ def _limit_park_fields(
       resets_at = _parse_reset_text(error_text or "", now)
     target = resets_at if resets_at is not None else now + PARK_FALLBACK_DELAY
     target = max(now + _PARK_MIN_DELAY, min(target, now + _PARK_MAX_DELAY))
-    low = (error_text or "").lower()
-    if any(m in low for m in ("usage limit", "usage_limit", "weekly limit",
-                              "session limit", "quota")):
-      reason = "usage_limit"
-    else:
-      reason = "rate_limit"
+    reason = "usage_limit" if is_quota_limit(error_text) else "rate_limit"
     return LimitParkTiming(target, reason, resets_at)
   except Exception:
     _get_logger().warning(
