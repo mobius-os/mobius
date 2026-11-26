@@ -368,3 +368,87 @@ def test_clearing_app_data_keeps_its_wall_clock_schedule(
   assert warnings == []
   assert "--wall-clock Europe/Belgrade" in live, live
   assert app_cron.read_schedule_choice(scheduled_app.id) == choice
+
+
+def test_an_app_cannot_replace_or_delete_its_owner_schedule_through_storage(
+  client, auth, db, scheduled_app, tmp_path, monkeypatch,
+):
+  """The schedule declaration is the owner's: the app's own storage token
+  must not reach it, or the app could swap the owner's time for its cadence."""
+  from app import auth as auth_mod
+  _fake_crontab(tmp_path, monkeypatch)
+  monkeypatch.setenv(
+    "MOBIUS_APP_BASE", str(Path(get_settings().data_dir) / "apps"),
+  )
+  saved = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "0 5 * * *", "job": "fetch.sh",
+          "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert saved.status_code == 200, saved.text
+  state = app_cron.schedule_state_dir(scheduled_app.id)
+  declared = (state / "init-cron.sh").read_bytes()
+  choice = app_cron.read_schedule_choice(scheduled_app.id)
+  owner = db.query(models.Owner).one()
+  app_auth = {"Authorization": "Bearer " + auth_mod.create_app_token(
+    scheduled_app.id, owner.username, owner.token_epoch,
+    scheduled_app.token_nonce,
+  )}
+  base = f"/api/storage/apps/{scheduled_app.id}"
+
+  refused = [
+    client.get(f"{base}/schedule/init-cron.sh", headers=app_auth),
+    client.get(
+      f"/api/storage/apps-list/{scheduled_app.id}/schedule", headers=app_auth,
+    ),
+    client.put(
+      f"{base}/./schedule/init-cron.sh",
+      content=b"ENTRY='* * * * * fetch.sh'\n",
+      headers={**app_auth, "Content-Type": "text/plain"},
+    ),
+    client.delete(f"{base}/schedule/init-cron.sh", headers=app_auth),
+    client.delete(f"{base}/folder/schedule", headers=app_auth),
+    client.post(
+      f"{base}/move", json={"from": "schedule", "to": "moved"},
+      headers=app_auth,
+    ),
+  ]
+  assert [r.status_code for r in refused] == [403] * len(refused)
+  assert (state / "init-cron.sh").read_bytes() == declared
+  assert app_cron.read_schedule_choice(scheduled_app.id) == choice
+
+  # A planted file cannot be moved into the folder either.
+  planted = client.put(
+    f"{base}/schedule-notes.txt", content=b"mine",
+    headers={**app_auth, "Content-Type": "text/plain"},
+  )
+  assert planted.status_code == 204, planted.text
+  moved_in = client.post(
+    f"{base}/move",
+    json={"from": "schedule-notes.txt", "to": "schedule/init-cron.sh"},
+    headers=app_auth,
+  )
+  assert moved_in.status_code == 403
+  assert (state / "init-cron.sh").read_bytes() == declared
+
+  # The owner keeps full access to the app's data tree.
+  owner_read = client.get(f"{base}/schedule/init-cron.sh", headers=auth)
+  assert owner_read.status_code == 200
+
+
+def test_wall_clock_gate_is_read_the_way_cron_runs_the_line():
+  """Only the runner's own --wall-clock flag makes a gate; a comment or an
+  unsupervised command naming it never does."""
+  runner = "python3 /app/scripts/app-job-runner.py --scheduled"
+  gate = (
+    f"* * * * * {runner} --wall-clock Europe/Belgrade "
+    "0\\ 5\\ \\*\\ \\*\\ \\* 7 /data/apps/memory/fetch.sh"
+  )
+  assert app_cron.is_wall_clock_gate(gate)
+  assert not app_cron.is_wall_clock_gate(
+    f"* * * * * {runner} 7 /data/apps/memory/fetch.sh # --wall-clock",
+  )
+  assert not app_cron.is_wall_clock_gate(
+    "* * * * * /data/apps/memory/fetch.sh --wall-clock Europe/Belgrade",
+  )

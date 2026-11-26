@@ -163,9 +163,8 @@ def _has_live_wall_clock_gate(source_dir: Path, live_crontab: str) -> bool:
   """Whether a live supervised entry for this app is a ``--wall-clock`` gate."""
   needle = f"{str(source_dir).rstrip('/')}/"
   return any(
-    app_cron.is_supervised_crontab_entry(line)
+    app_cron.is_wall_clock_gate(line)
     and app_cron.crontab_command_path(line).startswith(needle)
-    and "--wall-clock" in line.split()
     for line in live_crontab.splitlines()
   )
 
