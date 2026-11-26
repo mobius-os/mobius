@@ -136,6 +136,41 @@ def test_artifact_crud_validates_and_confines(client, auth):
   ).status_code == 404
 
 
+def test_build_selection_reuses_only_the_same_source_and_builder(client, auth):
+  project = _make_project(client, auth)
+  url = f"/api/projects/{project['id']}/artifacts"
+  sources = ("Q1 summary.html", "Q1-summary.html")
+  for source in sources:
+    _write_file(client, auth, project, source, "<h1>Report</h1>")
+
+  def register(source, builder="website", **options):
+    return client.post(url, headers=auth, json={
+      "name": "Q1 summary", "source": source, "builder": builder,
+      "id": "q1-summary", **options,
+    })
+
+  # Reuse an existing result without invalidating its links.
+  first = register(sources[0])
+  assert first.status_code == 201, first.text
+  again = register(sources[0], reuse_source=True)
+  assert again.status_code == 200, again.text
+  assert again.json()["id"] == first.json()["id"]
+
+  second = register(sources[1], reuse_source=True)
+  assert second.status_code == 201, second.text
+  assert second.json()["id"] != first.json()["id"]
+  assert second.json()["source"] == sources[1]
+  assert register(sources[1], reuse_source=True).json()["id"] == second.json()["id"]
+
+  different_builder = register(sources[0], builder="app", reuse_source=True)
+  assert different_builder.status_code == 201, different_builder.text
+  assert different_builder.json()["id"] not in (first.json()["id"], second.json()["id"])
+  assert register(sources[0], builder="app", reuse_source=True).json()["id"] == different_builder.json()["id"]
+
+  # Explicit registration without the build-selection flag stays strict.
+  assert register(sources[1]).status_code == 409
+
+
 def test_creation_open_recency_is_navigation_state(client, auth, db):
   project = _make_project(client, auth)
   _write_file(client, auth, project, "index.html", "<h1>Hi</h1>")
