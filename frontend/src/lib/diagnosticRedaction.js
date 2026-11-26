@@ -7,7 +7,19 @@ const SECRET_QUERY_VALUE = /([?&](?:access_token|auth|authorization|code|key|pas
 // line, exactly like COOKIE_VALUE below. The key itself may be quoted.
 const AUTHORIZATION_VALUE = /\b(authorization["']?\s*[:=]\s*)("(?:\\.|[^"\\\r\n])*"|'(?:\\.|[^'\\\r\n])*'|[^\r\n]+)/gi
 const COOKIE_VALUE = /\b((?:set-)?cookie\s*[:=]\s*)[^\r\n]+/gi
-const SECRET_ASSIGNMENT = /(["']?)\b((?:[a-z0-9]+[_-])*(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|signing[_-]?key|token|password|passwd|pwd|secret))\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&#]+)/gi
+// A secret-bearing name: any short prefix (STRIPE_, stripe-, or camelCase
+// stripe) before a secret stem. The stem must be followed by the assignment, so
+// primary_key, max_tokens and secretary stay untouched. The name starts where an
+// identifier starts and its prefix is bounded, so each character is scanned a
+// bounded number of times; a nested quantifier, or a start at every hyphen,
+// would rescan long hyphenated runs. The server's retention boundary uses the
+// same names: SECRET_NAME_PATTERN in backend/app/chat_log_redaction.py, and a
+// backend test keeps the two identical.
+const SECRET_NAMES = String.raw`(?<![a-z0-9_-])[a-z0-9_-]{0,64}?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token|auth[_-]?token|private[_-]?key|secret[_-]?key|signing[_-]?key|token|password|passwd|pwd|secret)`
+const SECRET_ASSIGNMENT = new RegExp(
+  String.raw`(["']?)(${SECRET_NAMES})\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|[^\s,;&#]+)`,
+  'gi',
+)
 const JWT_VALUE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g
 const PRIVATE_KEY_BLOCK = /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/g
 const PROVIDER_TOKEN = /\b(?:A(?:KIA|SIA)[0-9A-Z]{16}|github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|glpat-[A-Za-z0-9_-]{20,}|npm_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{10,}|sk-[A-Za-z0-9_-]{20,}|AIza[A-Za-z0-9_-]{20,})\b/g

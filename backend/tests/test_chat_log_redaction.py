@@ -5,6 +5,11 @@ DB / auth in the loop, so a redaction regression surfaces here even if
 the route layer is fine.
 """
 
+import re
+from pathlib import Path
+
+import pytest
+
 from app import chat_log_redaction as r
 
 
@@ -129,6 +134,41 @@ def test_scrub_secrets_catches_jwt_key_and_bearer_shapes():
 def test_scrub_secrets_leaves_ordinary_prose_untouched():
   prose = "Buy milk, eggs, and bread on the way home tonight."
   assert r.scrub_secrets(prose) == prose
+
+
+@pytest.mark.parametrize(("text", "expected"), [
+  ("SECRET_KEY=hunter2-value", "SECRET_KEY=[redacted]"),
+  ("STRIPE_SECRET_KEY=whsec-hunter2", "STRIPE_SECRET_KEY=[redacted]"),
+  ('{"secret_key": "hunter2-value", "ok": 1}', '{"secret_key": "[redacted]", "ok": 1}'),
+  ("SIGNING_KEY=hunter2-value", "SIGNING_KEY=[redacted]"),
+  ("stripe-secret-key: hunter2", "stripe-secret-key: [redacted]"),
+  ('{"stripeSecretKey":"hunter2-value"}', '{"stripeSecretKey":"[redacted]"}'),
+  ('{"webhookSecret":"hunter2-value"}', '{"webhookSecret":"[redacted]"}'),
+  ('{"jwtSecret":"hunter2-value"}', '{"jwtSecret":"[redacted]"}'),
+  ('{"githubToken":"hunter2-value"}', '{"githubToken":"[redacted]"}'),
+  ('{"sessionToken":"hunter2-value"}', '{"sessionToken":"[redacted]"}'),
+  ("password: hunter2", "password: [redacted]"),
+])
+def test_scrub_secrets_redacts_prefixed_and_quoted_secret_names(text, expected):
+  assert r.scrub_secrets(text) == expected
+
+
+def test_scrub_secrets_keeps_ordinary_key_names():
+  text = (
+    "Each child in a list should have a unique key prop; primary_key=id; "
+    "sort_key=name; cache_key=user; idempotency_key=retry; max_tokens=100; "
+    "input_tokens=20; monkey=banana; secretary=Ann; the tokens= field"
+  )
+  assert r.scrub_secrets(text) == text
+
+
+def test_server_and_diagnostic_redactors_share_one_secret_name_list():
+  diagnostic = (
+    Path(__file__).parents[2] / "frontend" / "src" / "lib" / "diagnosticRedaction.js"
+  ).read_text()
+  names = re.search(r"^const SECRET_NAMES = String\.raw`([^`]+)`$", diagnostic, re.M)
+  assert names, "diagnosticRedaction.js must keep SECRET_NAMES as one String.raw literal"
+  assert names[1] == r.SECRET_NAME_PATTERN
 
 
 def test_redact_messages_caps_length_and_takes_newest_slice():

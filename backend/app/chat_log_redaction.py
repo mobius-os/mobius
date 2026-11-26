@@ -40,7 +40,7 @@ caps + pagination bound how much survives per response.
 from __future__ import annotations
 
 import re
-from typing import NamedTuple
+from typing import Callable, NamedTuple
 
 from app.continuations import (
   SIDE_QUESTION_LABEL,
@@ -78,13 +78,43 @@ def _join_text_parts(parts: list[str]) -> str:
   return out
 
 
+# A secret-bearing assignment name: any short prefix (STRIPE_, stripe-, or a
+# camelCase stripe) before a secret stem. The stem must be followed by the
+# assignment, so primary_key, max_tokens and secretary stay untouched. The name
+# starts where an identifier starts and its prefix is bounded, so each
+# character is scanned a bounded number of times; a nested quantifier, or a
+# start at every hyphen, would rescan long hyphenated runs. The browser's
+# diagnostic redactor uses the same names (SECRET_NAMES in
+# frontend/src/lib/diagnosticRedaction.js), and test_chat_log_redaction keeps
+# the two identical so a new name lands in both.
+SECRET_NAME_PATTERN = (
+  r"(?<![a-z0-9_-])[a-z0-9_-]{0,64}?(?:access[_-]?key[_-]?id|secret[_-]?access[_-]?key"
+  r"|api[_-]?key|client[_-]?secret|access[_-]?token|refresh[_-]?token"
+  r"|auth[_-]?token|private[_-]?key|secret[_-]?key|signing[_-]?key"
+  r"|token|password|passwd|pwd|secret)"
+)
+
+# key=value / key: value, with the key optionally quoted as in JSON. A quoted
+# value ends at its closing quote so neighbouring JSON fields survive; an
+# unquoted value runs to the next whitespace.
+_SECRET_ASSIGNMENT = re.compile(
+  rf"""(?i)(["']?)({SECRET_NAME_PATTERN})\1(\s*[:=]\s*)("[^"\r\n]*"|'[^'\r\n]*'|\S+)"""
+)
+
+
+def _redact_assignment(match: re.Match[str]) -> str:
+  quote, name, separator, value = match.groups()
+  value_quote = value[0] if value[0] in "\"'" else ""
+  return f"{quote}{name}{quote}{separator}{value_quote}[redacted]{value_quote}"
+
+
 # Secret-scrub patterns. These catch SHAPES, not a fixed key list, so a
 # new provider's token format is covered as long as it rhymes with one
 # of these. Ordered longest/most-specific first so e.g. a JWT isn't
 # half-eaten by the generic long-token rule. The replacement keeps the
 # label so a reader knows something was removed (observability) without
 # leaking the value.
-_SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
+_SECRET_PATTERNS: list[tuple[re.Pattern[str], str | Callable[[re.Match[str]], str]]] = [
   # JWTs: three base64url segments separated by dots. The Möbius owner
   # token itself is one of these — the single most important thing to
   # never echo back to an app.
@@ -99,8 +129,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
   (re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._-]{12,}"),
    r"\1 [redacted-token]"),
   # key=value / key: value assignments whose key names a secret.
-  (re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd|pwd)\b\s*[:=]\s*\S+"),
-   r"\1=[redacted]"),
+  (_SECRET_ASSIGNMENT, _redact_assignment),
   # Generic high-entropy long token: 32+ chars of base64url/hex with no
   # whitespace. Last so the labelled rules above win on overlap. Bounded
   # length keeps it from eating an entire pasted paragraph that happens

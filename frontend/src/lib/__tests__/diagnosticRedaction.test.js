@@ -66,7 +66,18 @@ test('diagnostic redaction removes secret_key-style assignments', () => {
   )
 })
 
+test('diagnostic redaction removes camelCase-prefixed secret names', () => {
+  for (const name of ['stripeSecretKey', 'webhookSecret', 'jwtSecret', 'githubToken', 'sessionToken']) {
+    assert.equal(
+      redactDiagnosticText(`{"${name}":"hunter2-value"}`),
+      `{"${name}":"[redacted]"}`,
+    )
+  }
+})
+
 test('diagnostic redaction keeps ordinary key names', () => {
-  const diagnostic = 'Each child in a list should have a unique key prop; primary_key=id; sort_key=name; monkey=banana'
+  const diagnostic = 'Each child in a list should have a unique key prop; primary_key=id; sort_key=name; ' +
+    'cache_key=user; idempotency_key=retry; max_tokens=100; input_tokens=20; monkey=banana; secretary=Ann; ' +
+    'the tokens= field'
   assert.equal(redactDiagnosticText(diagnostic), diagnostic)
 })
