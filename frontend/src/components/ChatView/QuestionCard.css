@@ -353,14 +353,6 @@
   box-sizing: border-box;
 }
 
-/* A question with no choices is answered only by typing, often with pasted
-   output, so its box opens with room for a few lines. The box under a list of
-   choices stays one line. The pixel value is for browsers without `lh`. */
-.qcard__answer-row--typed .qcard__input {
-  min-height: 96px;
-  min-height: calc(4lh + 20px);
-}
-
 /* The composer carries the keyboard focus ring; don't draw a second one
    around its textarea under the global textarea:focus-visible rule. */
 .qcard__input:focus-visible {

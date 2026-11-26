@@ -414,8 +414,18 @@ test('a question card fills the reply column whatever its text, open or answered
   assert.doesNotMatch(css, /\.qcard\s*\{[^}]*(?:max-width|640px)/, 'no cap narrower than the reply text')
 })
 
-test('a typed-only question opens with room for several lines; the box under choices stays one line', () => {
-  assert.match(component, /qcard__answer-row\$\{hasOptions \? '' : ' qcard__answer-row--typed'\}/)
-  assert.match(css, /\.qcard__answer-row--typed \.qcard__input\s*\{\s*min-height:\s*96px;\s*min-height:\s*calc\(4lh \+ 20px\);/,
-    'a pixel height first, for browsers without the lh unit')
+test('a typed-only question opens one line tall, the same as the box under choices', () => {
+  // The box grows with its answer (see the browser layout spec), so an empty
+  // box need not reserve room; #2209 opened typed-only boxes four lines tall.
+  const render = options => renderToStaticMarkup(createElement(QuestionCard, {
+    chatId: 'height', questionId: `height-${options.length}`,
+    questions: [{ question: 'What next?', options }],
+  }))
+  for (const html of [render([]), render([{ id: 'a', label: 'Yes' }, { id: 'b', label: 'No' }])]) {
+    assert.match(html, /class="qcard__answer-row"/)
+    assert.match(html, /<textarea[^>]*class="qcard__input"[^>]*rows="1"|<textarea[^>]*rows="1"[^>]*class="qcard__input"/)
+  }
+  assert.doesNotMatch(component, /qcard__answer-row--typed/)
+  assert.doesNotMatch(css, /qcard__answer-row--typed/)
+  assert.match(css, /\.qcard__input\s*\{[^}]*min-height:\s*38px;/, 'one line plus padding')
 })
