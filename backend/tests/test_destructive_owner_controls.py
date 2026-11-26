@@ -138,6 +138,7 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
     ("DELETE", "/api/shared-apps/missing/invites/missing", None, None),
     ("PATCH", "/api/shared-apps/missing/members/missing", {"role": "viewer"}, None),
     ("DELETE", "/api/shared-apps/missing/members/missing", None, None),
+    ("DELETE", "/api/shared-apps/missing", None, None),
     ("DELETE", "/api/projects/missing", None, None),
     ("POST", "/api/projects/missing/git/push", {"confirmed": True}, None),
     ("POST", "/api/apps/999/publish", {}, None),

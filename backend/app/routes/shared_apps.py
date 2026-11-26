@@ -21,7 +21,7 @@ from app.config import get_settings
 from app.database import get_db
 from app.deps import (
   SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site,
-  require_nondelegated_owner_control,
+  require_installation_owner_control,
 )
 from app.path_utils import validate_path_within_base
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
@@ -83,11 +83,9 @@ class SharedAppMemberUpdate(BaseModel):
 
 def _require_membership_administration(principal: SharedAppPrincipal) -> None:
   # Existing shared-app owners keep their resource-confined member powers.
-  # Browser guests cannot create independent access that escapes their grant.
-  if principal.browser is not None:
-    raise HTTPException(403, "Only the installation owner can change shared access.")
-  # Delegated helpers are refused here as they are for project invites.
-  require_nondelegated_owner_control(principal)
+  # Browser guests and delegated helpers cannot create or revoke independent
+  # access; this is the same gate project invites use, so the two cannot drift.
+  require_installation_owner_control(principal)
 
 
 def _invite_hash(secret: str) -> str:
