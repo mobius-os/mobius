@@ -50,13 +50,16 @@ test('the draft previews the GitHub mark only for GitHub links, never for text i
     'https://github.com/owner/repo',
     '<https://github.com/owner/repo>',
     '[label](https://github.com/owner/repo)',
+    'https://www.github.com/owner/repo',
+    'https://gist.github.com/owner/0123abcd',
     'https://github.com.example.com/owner/repo',
+    'https://notgithub.com/owner/repo',
     'https://github.com@example.com/owner/repo',
     '`https://github.com/owner/repo`',
   ]
   const text = sources.join('\n')
   const marks = presentation(text).filter(span => span.widget)
-  assert.deepEqual(marks.map(mark => text.slice(mark.from).split('\n')[0]), sources.slice(0, 3))
+  assert.deepEqual(marks.map(mark => text.slice(mark.from).split('\n')[0]), sources.slice(0, 5))
   assert.ok(presentation(text).some(span => span.class === 'cm-md-link' && span.from === 0))
   assert.equal(presentation(sources[0], 5).filter(span => span.widget).length, 0)
 })

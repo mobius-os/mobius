@@ -26,7 +26,10 @@ function isGithubUrl(source) {
   if (!/^https?:\/\//i.test(source)) return false
   try {
     const url = new URL(source)
-    return url.hostname === 'github.com' && !url.username && !url.password
+    // GitHub's own subdomains (www., gist.) are GitHub too; a host that only
+    // starts with "github.com." is not.
+    const host = url.hostname
+    return (host === 'github.com' || host.endsWith('.github.com')) && !url.username && !url.password
   } catch {
     return false
   }
