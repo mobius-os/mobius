@@ -2592,7 +2592,7 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   elif provider_id == "gemini":
     from app import gemini_google_cloud, key_vault
-    gemini_google_cloud.forget(data_dir)
+    await gemini_google_cloud.forget(data_dir)
     for name, _ in GEMINI_CONNECTIONS.values():
       try:
         await key_vault.vault_call("DELETE", f"/keys/{name}", caller="owner")

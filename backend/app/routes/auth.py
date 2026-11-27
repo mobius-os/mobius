@@ -1762,7 +1762,7 @@ async def gemini_google_cloud_project(
   data_dir = get_settings().data_dir
   async with _provider_login_locks["gemini"]:
     try:
-      gemini_google_cloud.choose_project(data_dir, body.project)
+      await gemini_google_cloud.choose_project(data_dir, body.project)
     except gemini_google_cloud.GoogleCloudSignInError as exc:
       raise HTTPException(400, str(exc)) from exc
     for name, _ in GEMINI_CONNECTIONS.values():
@@ -1779,7 +1779,7 @@ async def gemini_google_cloud_forget(
   """Remove the Google Cloud sign-in when the owner switches to a key."""
   from app import gemini_google_cloud
   async with _provider_login_locks["gemini"]:
-    gemini_google_cloud.forget(get_settings().data_dir)
+    await gemini_google_cloud.forget(get_settings().data_dir)
     await _provider_signin_changed("gemini")
   return {"ok": True}
 

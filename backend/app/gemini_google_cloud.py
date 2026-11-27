@@ -9,7 +9,9 @@ Requests reach Gemini on that project's Agent Platform with a Bearer token.
 
 The grant is one small file: the project and the sealed access and refresh
 tokens. Tokens are refreshed here, before they expire, with the same refresh
-call the connectors use.
+call the connectors use. A new sign-in waits as ``pending`` until the owner
+picks a project, so signing in again never drops a working connection. A
+grant Möbius stops using is revoked at Google.
 """
 
 from __future__ import annotations
@@ -89,20 +91,26 @@ async def accept_code(data_dir: str, code: str, state: str) -> list[dict]:
   if not tokens.get("refresh_token"):
     raise GoogleCloudSignInError("Google did not grant lasting access. Start the sign-in again.")
   with _lock:
-    _write(data_dir, {"project": None, **_sealed(tokens, {})})
+    record = _read(data_dir)
+    replaced = record.get("pending")
+    _write(data_dir, {**record, "pending": _sealed(tokens, {})})
+  await _revoke(replaced)
   return await oauth.list_google_projects(str(tokens["access_token"]))
 
 
-def choose_project(data_dir: str, project_id: str) -> None:
-  """Finish the sign-in by naming the project Gemini bills to."""
+async def choose_project(data_dir: str, project_id: str) -> None:
+  """Finish the sign-in: the pending grant replaces any earlier one, which is revoked."""
   project_id = project_id.strip()
   if not oauth.valid_gcloud_project_id(project_id):
     raise GoogleCloudSignInError("Choose a Google Cloud project, such as my-project-123.")
   with _lock:
     record = _read(data_dir)
-    if not record.get("refresh"):
+    pending = record.get("pending")
+    if not pending:
       raise GoogleCloudSignInError("The sign-in expired. Start it again.")
-    _write(data_dir, {**record, "project": project_id})
+    _write(data_dir, {"project": project_id, **pending})
+  if record.get("refresh") != pending.get("refresh"):
+    await _revoke(record)
 
 
 def project(data_dir: str) -> str | None:
@@ -154,7 +162,25 @@ def _refreshed(data_dir: str, record: dict[str, Any]) -> str:
   return str(tokens["access_token"])
 
 
-def forget(data_dir: str) -> None:
-  """Remove the sign-in; other Gemini keys are untouched."""
+async def forget(data_dir: str) -> None:
+  """Remove the sign-in and revoke it at Google; other Gemini keys are untouched."""
   with _lock:
+    record = _read(data_dir)
     _grant_file(data_dir).unlink(missing_ok=True)
+  await _revoke(record)
+  await _revoke(record.get("pending"))
+
+
+async def _revoke(grant: dict[str, Any] | None) -> None:
+  """Best-effort revoke of a sealed grant at Google; revoking the refresh token ends the grant."""
+  sealed = (grant or {}).get("refresh")
+  if not sealed:
+    return
+  try:
+    token = core.decrypt_oauth(sealed)
+    await oauth.oauth_json_request(
+      "POST", oauth.gcloud_discovery(_TOKEN_RESOURCE).revocation_endpoint,
+      form={"token": token}, timeout_seconds=10.0,
+    )
+  except core.ConnectorError:
+    return

@@ -16,12 +16,14 @@ PROJECTS = [{"project_id": "my-proj-123", "name": "My project"}]
 
 
 def _sign_in(monkeypatch, data_dir, tokens=None):
+  tokens = tokens or {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600}
+
   async def exchange(client_id, client_secret, code, verifier):
     assert code == "4/abc" and verifier
-    return tokens or {"access_token": "access-1", "refresh_token": "refresh-1", "expires_in": 3600}
+    return tokens
 
   async def projects(access):
-    assert access == "access-1"
+    assert access == tokens["access_token"]
     return PROJECTS
 
   monkeypatch.setattr(oauth, "gcloud_exchange_code", exchange)
@@ -45,7 +47,7 @@ def test_a_code_lists_projects_and_the_chosen_project_connects(tmp_path, monkeyp
   stored = (tmp_path / "cli-auth" / "gemini" / "google-cloud.json").read_text()
   assert "refresh-1" not in stored and "access-1" not in stored, "tokens are sealed"
 
-  cloud.choose_project(data_dir, "my-proj-123")
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
   monkeypatch.setattr(providers, "provider_enabled", lambda *_: True)
   gemini = providers.PROVIDERS["gemini"]
   assert gemini.connection_kind(data_dir) == "google_cloud"
@@ -60,7 +62,7 @@ def test_a_sign_in_from_another_flow_or_without_lasting_access_is_refused(tmp_pa
   with pytest.raises(cloud.GoogleCloudSignInError, match="lasting access"):
     _sign_in(monkeypatch, str(tmp_path), {"access_token": "access-1"})
   with pytest.raises(cloud.GoogleCloudSignInError, match="project"):
-    cloud.choose_project(str(tmp_path), "Not A Project")
+    asyncio.run(cloud.choose_project(str(tmp_path), "Not A Project"))
 
 
 def _expire(tmp_path):
@@ -72,7 +74,7 @@ def _expire(tmp_path):
 def test_an_expiring_token_is_refreshed_and_kept(tmp_path, monkeypatch):
   data_dir = str(tmp_path)
   _sign_in(monkeypatch, data_dir)
-  cloud.choose_project(data_dir, "my-proj-123")
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
   _expire(tmp_path)
 
   async def refresh(discovery, client_id, client_secret, refresh_token):
@@ -88,7 +90,7 @@ def test_an_expiring_token_is_refreshed_and_kept(tmp_path, monkeypatch):
 def test_a_revoked_sign_in_disconnects_but_a_network_blip_keeps_the_last_token(tmp_path, monkeypatch):
   data_dir = str(tmp_path)
   _sign_in(monkeypatch, data_dir)
-  cloud.choose_project(data_dir, "my-proj-123")
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
   _expire(tmp_path)
 
   async def unreachable(*_):
@@ -102,4 +104,55 @@ def test_a_revoked_sign_in_disconnects_but_a_network_blip_keeps_the_last_token(t
 
   monkeypatch.setattr(oauth, "refresh_tokens", revoked)
   assert cloud.access_token(data_dir) is None
+  assert cloud.project(data_dir) is None
+
+
+def _revocations(monkeypatch):
+  revoked = []
+
+  async def request(method, url, **kwargs):
+    assert url == "https://oauth2.googleapis.com/revoke"
+    revoked.append(kwargs["form"]["token"])
+    return 200, {}, {}
+
+  monkeypatch.setattr(oauth, "oauth_json_request", request)
+  return revoked
+
+
+def test_signing_in_again_keeps_gemini_connected_until_the_new_project_is_chosen(tmp_path, monkeypatch):
+  data_dir = str(tmp_path)
+  revoked = _revocations(monkeypatch)
+  _sign_in(monkeypatch, data_dir)
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
+
+  _sign_in(monkeypatch, data_dir, {"access_token": "access-9", "refresh_token": "refresh-9", "expires_in": 3600})
+  assert cloud.project(data_dir) == "my-proj-123", "the working sign-in stays until a project is chosen"
+  assert cloud.access_token(data_dir) == "access-1"
+  assert revoked == []
+
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
+  assert cloud.access_token(data_dir) == "access-9"
+  assert revoked == ["refresh-1"], "the replaced grant is revoked at Google"
+
+
+def test_disconnecting_revokes_the_grant_at_google(tmp_path, monkeypatch):
+  data_dir = str(tmp_path)
+  revoked = _revocations(monkeypatch)
+  _sign_in(monkeypatch, data_dir)
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
+  asyncio.run(cloud.forget(data_dir))
+  assert cloud.project(data_dir) is None
+  assert revoked == ["refresh-1"]
+
+
+def test_a_failed_revoke_still_disconnects(tmp_path, monkeypatch):
+  data_dir = str(tmp_path)
+  _sign_in(monkeypatch, data_dir)
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123"))
+
+  async def unreachable(*_args, **_kwargs):
+    raise core.ConnectorError("down", transient=True)
+
+  monkeypatch.setattr(oauth, "oauth_json_request", unreachable)
+  asyncio.run(cloud.forget(data_dir))
   assert cloud.project(data_dir) is None
