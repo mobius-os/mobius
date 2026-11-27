@@ -369,7 +369,12 @@ manifest, layered by how always-on they are:
   `pip-compile --generate-hashes` lock (list it in `source_files`) and declare
   `"python": {"lock": "requirements.lock"}`. Apply or install then builds the
   app's own environment on `/data` from wheels only. It checks the environment
-  by running the service's setup code, which is your code, unsandboxed. The
+  by running the service's setup code, which is your code; a Store install
+  runs it before the owner approves the app. On a host that can build agent
+  rooms the check has no network, the source and environment are read-only,
+  and only `APP_STORAGE_DIR` is writable, so module-level setup must not
+  connect anywhere or write next to its source; a `PermissionError` on Apply
+  means it tried. The
   service and every job then run with the environment first on `PATH`, and a
   `#!/usr/bin/env python3` job uses its interpreter. If a package fails to
   build, the Apply fails and names it. After a platform update that changes

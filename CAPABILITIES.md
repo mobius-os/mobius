@@ -457,20 +457,25 @@ where the key combines the interpreter/ABI and the lock's SHA-256. The build
 installs hash-checked wheels only, so no package build code runs. pip reads no
 configuration file and inherits only index, certificate, and proxy settings,
 and URL credentials are removed from any diagnostics returned. The build then
-runs `pip check` and a smoke run. The smoke run executes the service entry's
-module-level setup (everything but its `__main__` block), or else a Python
-job's top-level imports. It is the app's own code running as the backend user
-with no sandbox, like the service itself, given inert `APP_*` values and
-throwaway storage. Each build step runs in its own process group, killed when
-the step ends or after its time limit (60 s for the smoke run). That cleanup
-is best effort, since a process that calls `setsid` leaves the group, but a
-build never waits past its limits. A matching environment is reused. A build
-failure fails the Apply or install with pip's diagnostics, which name the
-package, and the previous revision stays live. A Store install or update
-builds from the fetched package before its database transaction, so it
-smoke-tests the fetched service. If the owner's local edits merge into that
-update, the merged service is not what was tested. A merge that changes the
-lock is refused rather than built inside the transaction.
+runs `pip check` and a smoke run. Both pip steps start the interpreter
+isolated (`-I`), so a `pip` package in the app's source cannot replace pip,
+and `pip check`, whose interpreter start runs any `.pth` lines the locked
+wheels installed, runs in an agent room where the host can build one. The
+smoke run executes the service entry's module-level setup (everything but its
+`__main__` block), or else a Python job's top-level imports. A Store install
+or update runs it before the owner has approved the app, so on a host that can
+build agent rooms it runs inside one: no network, the source and environment
+read-only, inert `APP_*` values and throwaway storage. A host that cannot
+build rooms runs it as the backend user. Each build step runs in its own
+process group, killed when the step ends or after its time limit (60 s for the
+smoke run). That cleanup is best effort, since a process that calls `setsid`
+leaves the group, but a build never waits past its limits. A matching
+environment is reused. A build failure fails the Apply or install with pip's
+diagnostics, which name the package, and the previous revision stays live. A
+Store install or update builds from the fetched package before its database
+transaction, so it smoke-tests the fetched service. If the owner's local edits
+merge into that update, the merged service is not what was tested. A merge
+that changes the lock is refused rather than built inside the transaction.
 
 The declaring revision's service, preload host, and every job run with the
 environment's `bin` first on `PATH`, so a spawned `python3` is the app's too.

@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import socket
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -45,11 +47,13 @@ def _manifest(**extra) -> dict:
 
 
 
-def _tiny_wheel(directory: Path, name: str = "tinypkg", version: str = "1.0") -> Path:
+def _tiny_wheel(directory: Path, name: str = "tinypkg", version: str = "1.0",
+                extra: dict[str, bytes] | None = None) -> Path:
   """A pure-Python wheel with a console script, installable from a local dir."""
   directory.mkdir(parents=True, exist_ok=True)
   info = f"{name}-{version}.dist-info"
   files = {
+    **(extra or {}),
     f"{name}/__init__.py": b"VALUE = 42\n\ndef main():\n  print('tiny', VALUE)\n",
     f"{info}/METADATA": f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n".encode(),
     f"{info}/WHEEL": b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
@@ -525,6 +529,164 @@ def test_build_smoke_runs_the_service_setup_and_names_a_missing_import(
   root = _runtime_tree(tmp_path / "rev", lock=lock, service=b"import tinypkg\nimport notlocked\n")
   with pytest.raises(app_python_env.PythonEnvBuildError, match="notlocked"):
     app_python_env.prepare_env(tmp_path, 7, root)
+
+
+_needs_rooms = pytest.mark.skipif(
+  not app_python_env._rooms_available(), reason="this host cannot build agent rooms",
+)
+
+
+def _smoke_runs(monkeypatch) -> list[list[str]]:
+  actual_run = app_python_env._run
+  runs = []
+
+  def observe(command, **kwargs):
+    if kwargs["step"].startswith("Starting the app's"):
+      runs.append(command)
+    return actual_run(command, **kwargs)
+
+  monkeypatch.setattr(app_python_env, "_run", observe)
+  return runs
+
+
+@_needs_rooms
+def test_app_code_checked_before_approval_cannot_read_the_owners_files(
+  monkeypatch, tmp_path,
+):
+  """A Store install checks the app's code before the owner approves it, so
+  that check must not hand the code the server's own power."""
+  _fake_builds(monkeypatch)
+  secret = tmp_path / "owner-secret"
+  secret.write_text("not for apps")
+  root = _runtime_tree(
+    tmp_path / "rev", lock="a==1\n", service=f"open({str(secret)!r}).read()\n".encode(),
+  )
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="PermissionError"):
+    app_python_env.prepare_env(tmp_path, 7, root)
+
+
+@_needs_rooms
+def test_app_code_checked_before_approval_reaches_no_network(monkeypatch, tmp_path):
+  _fake_builds(monkeypatch)
+  with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    port = listener.getsockname()[1]
+    service = f"import socket\nsocket.create_connection(('127.0.0.1', {port}), 5)\n"
+    root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=service.encode())
+    with pytest.raises(app_python_env.PythonEnvBuildError, match="PermissionError"):
+      app_python_env.prepare_env(tmp_path, 7, root)
+
+
+def test_app_code_exiting_like_an_unbuildable_room_is_never_rerun_unconfined(
+  monkeypatch, tmp_path,
+):
+  """The room's own "could not build" status is one the app can exit with too;
+  whether to confine is decided before any app code runs, never after."""
+  _fake_builds(monkeypatch)
+  monkeypatch.setattr(app_python_env, "_rooms_available", lambda: True)
+  runs = _smoke_runs(monkeypatch)
+  root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=b"raise SystemExit(125)\n")
+  with pytest.raises(app_python_env.PythonEnvBuildError):
+    app_python_env.prepare_env(tmp_path, 7, root)
+  assert len(runs) == 1
+  assert runs[0][2].endswith("mobius_fence.py")
+
+
+def test_a_host_without_rooms_still_checks_the_app_before_publishing(
+  monkeypatch, tmp_path,
+):
+  _fake_builds(monkeypatch)
+  monkeypatch.setattr(app_python_env, "_rooms_available", lambda: False)
+  runs = _smoke_runs(monkeypatch)
+  root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=b"import notlocked\n")
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="notlocked"):
+    app_python_env.prepare_env(tmp_path, 7, root)
+  assert not any(part.endswith("mobius_fence.py") for part in runs[0])
+
+
+def test_a_pip_shipped_in_the_app_source_cannot_stand_in_for_pip(monkeypatch, tmp_path):
+  """The install runs from the app's source folder before the owner approves
+  the app; a top-level `pip` package there must not run instead of pip."""
+  wheels = tmp_path / "wheels"
+  _offline_index(monkeypatch, wheels)
+  escaped = tmp_path / "escaped"
+  root = _runtime_tree(tmp_path / "rev", lock=_lock_for(_tiny_wheel(wheels)))
+  (root / "pip").mkdir()
+  (root / "pip" / "__init__.py").write_text("")
+  (root / "pip" / "__main__.py").write_text(
+    f"import pathlib\npathlib.Path({str(escaped)!r}).write_text('ran')\n",
+  )
+  staged = app_python_env.prepare_env(tmp_path, 7, root)
+  assert (staged.root / "bin" / "tinypkg-cli").is_file()
+  assert not escaped.exists()
+
+
+@_needs_rooms
+def test_a_locked_wheels_startup_hook_never_runs_outside_a_room(monkeypatch, tmp_path):
+  """Every interpreter start in the new env runs the `.pth` lines its wheels
+  installed, so `pip check` is confined like the smoke run."""
+  wheels = tmp_path / "wheels"
+  _offline_index(monkeypatch, wheels)
+  escaped = tmp_path / "escaped"
+  hook = f"import pathlib; pathlib.Path({str(escaped)!r}).write_text('ran')\n"
+  wheel = _tiny_wheel(wheels, extra={"tinypkg-hook.pth": hook.encode()})
+  root = _runtime_tree(tmp_path / "rev", lock=_lock_for(wheel))
+  staged = app_python_env.prepare_env(tmp_path, 7, root)
+  assert (staged.root / "bin" / "tinypkg-cli").is_file()
+  assert not escaped.exists()
+
+
+@pytest.fixture
+def fresh_room_answer(monkeypatch):
+  """Ask the host again, and restore the real cached answer afterwards."""
+  app_python_env._rooms_available.cache_clear()
+  answers = []
+
+  def answer(command, **kwargs):
+    reply = answers.pop(0)
+    if isinstance(reply, BaseException):
+      raise reply
+    return subprocess.CompletedProcess(command, 0, stdout=reply, stderr="")
+
+  monkeypatch.setattr(app_python_env.subprocess, "run", answer)
+  yield answers
+  app_python_env._rooms_available.cache_clear()
+
+
+@pytest.mark.parametrize("failure", [
+  "timeout", "not json", '{"reasons": []}',
+])
+def test_a_room_check_that_cannot_run_fails_closed_and_is_asked_again(
+  fresh_room_answer, failure,
+):
+  """Only the host's own answer means "no rooms"; one transient failure must
+  not switch confinement off until the next restart."""
+  fresh_room_answer.extend([
+    subprocess.TimeoutExpired("fence", 120) if failure == "timeout" else failure,
+    '{"available": true}',
+  ])
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="confine"):
+    app_python_env._rooms_available()
+  assert app_python_env._rooms_available() is True
+  assert app_python_env._rooms_available() is True and not fresh_room_answer
+
+
+def test_a_host_that_answers_no_rooms_is_remembered(fresh_room_answer):
+  fresh_room_answer.append('{"available": false, "reasons": ["no landlock"]}')
+  assert app_python_env._rooms_available() is False
+  assert app_python_env._rooms_available() is False
+
+
+def test_a_build_whose_room_check_fails_publishes_nothing(
+  fresh_room_answer, monkeypatch, tmp_path,
+):
+  _fake_builds(monkeypatch)
+  fresh_room_answer.append("garbled")
+  root = _runtime_tree(tmp_path / "rev", lock="a==1\n", service=b"x = 1\n")
+  with pytest.raises(app_python_env.PythonEnvBuildError, match="confine"):
+    app_python_env.prepare_env(tmp_path, 7, root)
+  assert not any(app_python_env._builds(tmp_path).iterdir())
 
 
 @pytest.mark.parametrize("reused", [False, True], ids=["new-env", "reused-env"])
