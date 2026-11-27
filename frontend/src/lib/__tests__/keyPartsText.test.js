@@ -8,6 +8,7 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 const vite = await createSsrRenderServer()
 const {
   approvalBody, newKeyParts, partsFilled, keyParts, partLabel, sentAs, requestWording, tokenClaims, plainPartsNote,
+  signedRequestLimit,
 } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -87,4 +88,10 @@ test('a card that would mint a token shows every claim, so an act-as-user sub is
 test('parts that are not secret are named before the owner pastes into them', () => {
   assert.equal(plainPartsNote(PARTS), "Account SID isn't secret: shown as typed and not hidden from answers. Paste only what is meant to be seen there.")
   assert.equal(plainPartsNote([PARTS[1]]), null)
+})
+
+test('a card for a storage key says its own access policy is what limits a signed request', () => {
+  assert.match(signedRequestLimit({ type: 'aws_sigv4', service: 's3', region: 'auto' }), /key's own policy decides what a signed request may do/)
+  assert.equal(signedRequestLimit(BASIC), null)
+  assert.equal(signedRequestLimit(null), null)
 })

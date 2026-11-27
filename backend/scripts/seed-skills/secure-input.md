@@ -79,10 +79,12 @@ lowercase letters, digits and `_`) and add `--part NAME` for each
 `Token {id}:{secret}`, query parameters, or JSON or form body fields). Ask for
 such a key with `request_key`'s `parts` and a matching `inject`. Read one part
 with `?part=NAME`. For services that sign requests or mint tokens, the vault
-does it and the secret never leaves: AWS-style storage (S3, R2, B2) and AWS
-APIs use an `aws_sigv4` recipe; a Google service account (its JSON file as one
-part, with `claims.scope`), a GitHub App (its PEM, `claims.iss` and an
-installation id) or a direct signed token use `jwt_bearer`. Pass the recipe
+does it and the secret never leaves: S3-compatible storage (S3, R2, B2, MinIO;
+service `s3`, the only AWS service the vault signs for) uses an `aws_sigv4`
+recipe, and the access key's own policy is what limits a signed request; a
+Google service account (its JSON file as one part, with `claims.scope`), a
+GitHub App (its PEM, `claims.iss` and an installation id) or a direct signed
+token use `jwt_bearer`. Pass the recipe
 to `store-key.py` with `--recipe JSON`; when asking with `request_key`
 instead, mark a key-file part `multiline` in its `parts`. Secret parts sent by
 these recipes are at least eight characters. It never replaces a key

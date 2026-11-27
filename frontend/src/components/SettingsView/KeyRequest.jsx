@@ -5,7 +5,8 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
 import {
-  approvalBody, newKeyParts, partLabel, partsFilled, plainPartsNote, requestWording, sentAs, siteLine, tokenClaims,
+  approvalBody, newKeyParts, partLabel, partsFilled, plainPartsNote, requestWording, sentAs, signedRequestLimit, siteLine,
+  tokenClaims,
 } from '../../lib/keysSettingsText.js'
 import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import './settingsButtons.css'
@@ -55,6 +56,7 @@ export function useKeyAnswer(request, names) {
  */
 export function KeyRequestBody({ request, words, note = true }) {
   const sites = request.sites || []
+  const signedLimit = signedRequestLimit(words.slot || request.key_inject)
   return (
     <>
       {request.reason && (
@@ -64,6 +66,7 @@ export function KeyRequestBody({ request, words, note = true }) {
       )}
       {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
       {note && <p className="settings-keys__muted">{words.note}</p>}
+      {signedLimit && <p className="settings-keys__muted">{signedLimit}</p>}
       <details className="settings-keys__details">
         <summary>Details</summary>
         <ul className="settings-keys__details-list">

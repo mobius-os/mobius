@@ -139,9 +139,12 @@ AWS_ACCESS_HEADER_PREFIXES = (
   "x-amz-acl", "x-amz-grant-", "x-amz-website-redirect-location", "x-amz-object-lock-",
   "x-amz-bypass-governance-retention",
 )
-# Services whose answers are new credentials (STS session keys, IAM access
-# keys): a borrow could take them away, so a signing key never names them.
-AWS_CREDENTIAL_SERVICES = frozenset({"sts", "iam"})
+# The one service the vault signs for: S3 and the stores speaking its API
+# (R2, B2, MinIO, Wasabi, Spaces), where the path names the bucket and object
+# a site rule can narrow. Other AWS APIs name the operation in X-Amz-Target or
+# Action= on POST /, so no rule could keep a borrow from, say, minting an ECR
+# registry password; only the access key's own policy could.
+AWS_SIGNED_SERVICE = "s3"
 # S3 picks a bucket's or object's configuration by query parameter, which a
 # path rule can't tell apart: these change who may reach it or where it goes,
 # so a borrow can't sign them (an owner who needs one uses the key directly).
@@ -391,7 +394,11 @@ def validate_inject(raw) -> dict:
   if kind == "jwt_bearer":
     return _validate_jwt(raw)
   raise VaultError(400, "A key is sent in a header or a query parameter, as basic, in slots, "
-                   "signed for AWS (aws_sigv4), or as a token from a private key (jwt_bearer).")
+                   "signed for S3-compatible storage (aws_sigv4), or as a token from a private key (jwt_bearer).")
+
+
+_AWS_S3_ONLY = ("The vault signs only for S3-compatible storage (service s3): other AWS APIs choose "
+                "the operation where a site rule can't limit it.")
 
 
 def _validate_aws(raw: dict) -> dict:
@@ -409,8 +416,8 @@ def _validate_aws(raw: dict) -> dict:
     if not AWS_NAME_RE.fullmatch(value):
       raise VaultError(400, f"Name the AWS {field}, such as {'eu-central-1' if field == 'region' else 's3'}.")
     recipe[field] = value
-  if recipe["service"] in AWS_CREDENTIAL_SERVICES:
-    raise VaultError(400, f"An AWS key isn't signed for {recipe['service']}: its answers are new credentials.")
+  if recipe["service"] != AWS_SIGNED_SERVICE:
+    raise VaultError(400, _AWS_S3_ONLY)
   return recipe
 
 
@@ -1378,18 +1385,19 @@ def sign_jwt(inject: dict, private: str, now: float) -> tuple[str, float]:
   return f"{signing_input}.{_b64url(signature)}", float(expires)
 
 
-def mints_credentials(inject: dict, host: str, path: str) -> str | None:
+def signing_refusal(inject: dict, host: str, path: str) -> str | None:
   """Why a signing key may not reach this destination, or None.
 
-  Redaction hides only what the vault knows, so an answer carrying a fresh
-  credential (a new access key, an installation token) would reach the caller
-  whole. These are the known places a signing key's own authority buys one;
-  any other approved site that mints credentials still hands them out, which
-  is why the owner approves only the paths a key needs.
+  An AWS key signs only for S3 (a key stored before that rule is refused
+  here). Redaction hides only what the vault knows, so an answer carrying a
+  fresh credential (an access token, an installation token) would reach the
+  caller whole: these are the known places a token key's own authority buys
+  one. Any other approved site that mints credentials still hands them out,
+  which is why the owner approves only the paths a key needs.
   """
   kind = inject["type"]
-  if kind == "aws_sigv4" and inject["service"] in AWS_CREDENTIAL_SERVICES:
-    return f"An AWS key isn't signed for {inject['service']}: its answers are new credentials."
+  if kind == "aws_sigv4" and inject["service"] != AWS_SIGNED_SERVICE:
+    return _AWS_S3_ONLY
   if kind == "jwt_bearer" and host in GOOGLE_CREDENTIAL_HOSTS:
     return f"A token from this key can't be sent to {host}: it answers with new credentials."
   if kind == "jwt_bearer" and inject.get("exchange") is None and GITHUB_TOKEN_PATH_RE.search(path):
@@ -2519,9 +2527,9 @@ class Vault:
       if reason:
         raise GrantRefusal(403, reason)
       inject = copy.deepcopy(record["inject"])
-      minting = mints_credentials(inject, host, path)
-      if minting:
-        raise VaultError(403, minting)
+      refusal = signing_refusal(inject, host, path)
+      if refusal:
+        raise VaultError(403, refusal)
       used = {part["name"]: part for part in record["parts"] if part["name"] in recipe_parts(inject)}
       values = {part: self._open_part(name, stored) for part, stored in used.items()}
       if inject["type"] == "header":

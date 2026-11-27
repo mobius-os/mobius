@@ -143,6 +143,17 @@ export function tokenClaims(inject) {
   return [...claims, ...(inject.key_id ? [`key id ${inject.key_id}`] : []), exchange].join(' · ')
 }
 
+/**
+ * What really limits a request the vault signs with an AWS access key: the
+ * sites limit which buckets and objects it reaches, but what it may do there
+ * is whatever the key's own policy allows. Null for any other recipe.
+ */
+export function signedRequestLimit(inject) {
+  if (inject?.type !== 'aws_sigv4') return null
+  return "Signed with your storage access key: the sites above limit which buckets it reaches, but the key's own "
+    + 'policy decides what a signed request may do there. Give that key only the buckets and actions this needs.'
+}
+
 /** What the paste step says about parts that aren't secret. */
 export function plainPartsNote(parts) {
   const plain = (parts || []).filter(part => !part.secret).map(partLabel)

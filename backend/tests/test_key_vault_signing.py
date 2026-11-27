@@ -418,7 +418,7 @@ def _aws_build(raw_query="", headers=(), service="s3", raw_path="/bucket/key"):
 ])
 def test_a_borrow_cannot_turn_the_signature_into_a_presigned_url(query):
   with pytest.raises(kv.VaultError, match="the vault signs it") as refused:
-    _aws_build(query, service="execute-api")
+    _aws_build(query)
   assert refused.value.status == 400
 
 
@@ -450,11 +450,15 @@ def test_s3_access_headers_are_never_signed_for_a_borrow(header, value):
   assert "x-amz-server-side-encryption" in dict(request.headers)["Authorization"]
 
 
-@pytest.mark.parametrize("service", ["sts", "iam"])
-def test_a_signing_key_is_never_set_up_for_a_service_that_answers_with_credentials(service):
-  with pytest.raises(kv.VaultError, match="new credentials"):
+@pytest.mark.parametrize("service", ["ecr", "codeartifact", "dynamodb", "secretsmanager", "sts", "iam", "execute-api"])
+def test_an_aws_key_is_signed_only_for_s3_compatible_storage(service):
+  """Other AWS APIs choose the operation in X-Amz-Target or Action= on POST /,
+  where no site rule can tell listing images from minting a registry password."""
+  with pytest.raises(kv.VaultError, match="only for S3-compatible storage"):
     kv.validate_inject({"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
                         "region": "us-east-1", "service": service})
+  assert kv.validate_inject({"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
+                             "region": "auto", "service": "s3"})["service"] == "s3"
 
 
 def _granted(vault, name, inject, value, host):
@@ -488,16 +492,18 @@ def test_a_google_token_never_reaches_the_endpoints_that_mint_other_credentials(
     vault.authorize("gcp", ("agent", "c1"), "POST", host, "/v1/projects/-/serviceAccounts/bot:generateAccessToken")
 
 
-def test_a_stored_signing_key_for_sts_is_refused_when_borrowed(vault):
-  """A key saved before sts was refused at set-up is still never signed for it."""
-  site = {"host": "sts.amazonaws.com", "methods": ["POST"], "paths": ["/*"]}
+@pytest.mark.parametrize("service, host", [("ecr", "api.ecr.us-east-1.amazonaws.com"), ("sts", "sts.amazonaws.com")])
+def test_a_stored_aws_key_for_another_service_is_refused_when_borrowed(vault, service, host):
+  """A key saved before signing was limited to S3 is never signed for another service."""
+  site = {"host": host, "methods": ["POST"], "paths": ["/*"]}
   vault.put_key("aws", {"parts": [{"name": "id", "value": AWS_ID, "secret": False}, {"name": "secret", "value": AWS_SECRET}],
                         "inject": {"type": "aws_sigv4", "access_key_id": "id", "secret_access_key": "secret",
                                    "region": "us-east-1", "service": "s3"},
                         "grants": {"apps": [], "agents": True, "sites": [site]}})
-  vault._records["aws"]["inject"]["service"] = "sts"
-  with pytest.raises(kv.VaultError, match="new credentials"):
-    vault.authorize("aws", ("agent", "c1"), "POST", "sts.amazonaws.com", "/")
+  vault._records["aws"]["inject"]["service"] = service
+  with pytest.raises(kv.VaultError, match="only for S3-compatible storage") as refused:
+    vault.authorize("aws", ("agent", "c1"), "POST", host, "/")
+  assert refused.value.status == 403
 
 
 def test_a_signed_header_must_be_ascii_and_the_query_utf8():

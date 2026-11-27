@@ -382,7 +382,7 @@ key. Many services need more than that:
 | Username and password (Basic) | Twilio SID:token, Atlassian email:token, Mailgun, OAuth `client_secret_basic` | Only if the owner pastes base64 of `user:pass` and the slot has a `Basic ` prefix. |
 | Two secrets in two places | Trello key and token, Discogs consumer key and secret | Impossible: one key per borrow. |
 | Secret in the body | Plaid `client_id`/`secret`, OAuth `client_secret_post` | Impossible: only headers and query parameters. |
-| A signature over the request | AWS SigV4 and every S3-compatible store, exchange HMACs, OAuth 1.0a | Impossible: the vault adds a fixed value. |
+| A signature over the request | AWS SigV4 for S3 and every S3-compatible store, other AWS APIs, exchange HMACs, OAuth 1.0a | Impossible: the vault adds a fixed value. |
 | A private key that mints short-lived tokens | Google service accounts, GitHub Apps, App Store Connect | Stored and readable, never sent (multiline). |
 | A refresh token | OAuth 2 APIs | Impossible: values never change by themselves. |
 
@@ -475,16 +475,25 @@ each minted token to the key's redaction set.
 - **Signers**, in the vault itself, checked against published test vectors
   or by verifying what they sign:
   - **`aws_sigv4`** `{access_key_id: <part>, secret_access_key: <part>,
-    session_token?: <part>, region, service}`: the vault signs last, over the
+    session_token?: <part>, region, service: s3}`, for S3-compatible storage
+    only: the vault signs last, over the
     request it is about to send (the pinned host, the method, the path and
     query it checked, `x-amz-date`, `x-amz-content-sha256` of the buffered
     body, and every caller `x-amz-*` header). The caller can't send its own
     `Authorization`, `X-Amz-Date`, `X-Amz-Security-Token` or
     `X-Amz-Content-Sha256`. Each path segment is encoded the AWS way and sent
-    as signed; every service but `s3` signs it encoded once more, and the
-    query is sent sorted, exactly as signed. The payload hash is sent as a
-    header only for `s3`, which requires it. This covers S3,
-    R2, B2, Wasabi, MinIO and Spaces with one module. The vault never
+    as signed, and the query is sent sorted, exactly as signed, with the
+    payload hash as a header, which S3 requires. This covers S3, R2, B2,
+    Wasabi, MinIO and Spaces with one module. The service is always `s3`: in
+    S3 the path names the bucket and object, which a site rule can narrow,
+    while other AWS APIs put the operation in `X-Amz-Target` or `Action=` on
+    `POST /`, where no rule can tell reading a table from deleting it or
+    listing images from minting a registry password (ECR, CodeArtifact). A
+    key stored with another service is refused when borrowed. Even for S3 the
+    sites limit only which buckets and objects a request reaches: what it may
+    do there is whatever the access key's own policy allows, so the owner
+    gives that key only the buckets and actions it needs, and the approval
+    card says so. The vault never
     produces presigned URLs: a presigned URL is a portable credential, so a
     caller's own `X-Amz-*` query parameter is refused, and the signature
     (valid for that exact request for a while, and echoed by S3 errors) is
@@ -495,9 +504,8 @@ each minted token to the key's redaction set.
     `versioning`, ...), which a path rule can't tell apart, as are their
     header forms on an upload (`x-amz-acl`, `x-amz-grant-*`,
     `x-amz-website-redirect-location`, `x-amz-object-lock-*`,
-    `x-amz-bypass-governance-retention`). A recipe can't name `sts` or `iam`
-    as its service, since their answers are new credentials. Signed header
-    values must be ASCII and the path and query UTF-8.
+    `x-amz-bypass-governance-retention`). Signed header values must be ASCII
+    and the path and query UTF-8.
   - **`jwt_bearer`** `{private_key: <part>, alg: RS256|ES256, claims,
     exchange?}`: the vault signs a short-lived JWT with fixed claims from the
     recipe (`iss`, `sub`, `aud`, `scope`, and `iat`/`exp` it sets itself),
@@ -578,11 +586,12 @@ each minted token to the key's redaction set.
   approved sites, as with any key today, and that includes any approved
   endpoint that mints a credential: redaction hides only values the vault
   knows, so a new credential in an answer reaches the caller whole. The known
-  cases are refused (AWS `sts` and `iam` as a service, a direct GitHub App
-  token on the installation-token route, a Google token sent to
+  cases are refused (any AWS service but S3, a direct GitHub App token on the
+  installation-token route, a Google token sent to
   `iam.googleapis.com` or `iamcredentials.googleapis.com`), but the rule is
   the owner's: approving a site that mints credentials hands those
-  credentials out, so approve only the paths a key needs.
+  credentials out, so approve only the paths a key needs. For a signed S3
+  request the access key's own policy is the real limit on what it may do.
 - Body injection widens what a caller can steer only by the declared field.
   A site that stores a request body and shows it later can leak that field,
   just as one that stores headers can leak a header today. The defence is the
