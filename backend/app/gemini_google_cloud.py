@@ -98,9 +98,10 @@ async def accept_code(data_dir: str, code: str, state: str) -> list[dict]:
   return await oauth.list_google_projects(str(tokens["access_token"]))
 
 
-async def choose_project(data_dir: str, project_id: str) -> None:
+async def choose_project(data_dir: str, project_id: str, name: str | None = None) -> None:
   """Finish the sign-in: the pending grant replaces any earlier one, which is revoked."""
   project_id = project_id.strip()
+  label = (name or "").strip()[:200] or project_id
   if not oauth.valid_gcloud_project_id(project_id):
     raise GoogleCloudSignInError("Choose a Google Cloud project, such as my-project-123.")
   with _lock:
@@ -108,7 +109,7 @@ async def choose_project(data_dir: str, project_id: str) -> None:
     pending = record.get("pending")
     if not pending:
       raise GoogleCloudSignInError("The sign-in expired. Start it again.")
-    _write(data_dir, {"project": project_id, **pending})
+    _write(data_dir, {"project": project_id, "project_name": label, **pending})
   if record.get("refresh") != pending.get("refresh"):
     await _revoke(record)
 
@@ -120,6 +121,15 @@ def project(data_dir: str) -> str | None:
   if record.get("refresh") and isinstance(value, str) and oauth.valid_gcloud_project_id(value):
     return value
   return None
+
+
+def project_label(data_dir: str) -> dict[str, str] | None:
+  """The connected project's id and display name, for Settings."""
+  project_id = project(data_dir)
+  if project_id is None:
+    return None
+  name = _read(data_dir).get("project_name")
+  return {"id": project_id, "name": name if isinstance(name, str) and name else project_id}
 
 
 def endpoint_root(project_id: str) -> str:

@@ -976,9 +976,9 @@ export const api = {
           method: 'POST',
           body: JSON.stringify({ code, state }),
         }),
-        project: (project) => apiFetch('/auth/provider/gemini/google-cloud/project', {
+        project: (project, name) => apiFetch('/auth/provider/gemini/google-cloud/project', {
           method: 'POST',
-          body: JSON.stringify({ project }),
+          body: JSON.stringify({ project, name }),
         }),
         forget: () => apiFetch('/auth/provider/gemini/google-cloud', { method: 'DELETE' }),
       },

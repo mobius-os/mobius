@@ -928,6 +928,9 @@ async def providers_status(
       connection = await run_in_threadpool(provider.connection_kind, data_dir)
       if connection is not None:
         out[pid]["connection"] = connection
+      if connection == "google_cloud":
+        from app import gemini_google_cloud
+        out[pid]["project"] = gemini_google_cloud.project_label(data_dir)
     if pid == "mobius" and error is None and is_owner_caller:
       try:
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
@@ -1725,6 +1728,7 @@ class GoogleCloudSignInCode(BaseModel):
 
 class GoogleCloudSignInProject(BaseModel):
   project: str = Field(min_length=1, max_length=64)
+  name: str | None = Field(default=None, max_length=200)
 
 
 @router.post("/provider/gemini/google-cloud/start", dependencies=[Depends(reject_cross_site)])
@@ -1762,7 +1766,7 @@ async def gemini_google_cloud_project(
   data_dir = get_settings().data_dir
   async with _provider_login_locks["gemini"]:
     try:
-      await gemini_google_cloud.choose_project(data_dir, body.project)
+      await gemini_google_cloud.choose_project(data_dir, body.project, body.name)
     except gemini_google_cloud.GoogleCloudSignInError as exc:
       raise HTTPException(400, str(exc)) from exc
     for name, _ in GEMINI_CONNECTIONS.values():

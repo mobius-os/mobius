@@ -70,13 +70,40 @@ async function connectWith(connection, value) {
   ])
 }
 
-/** The Google Cloud sign-in row; GoogleCloudSignIn runs it. */
-export const GOOGLE_CLOUD = {
-  id: 'google_cloud', label: 'Google Cloud sign-in',
-  detail: 'Sign in with Google · billed to your Cloud project (Agent Platform)',
+const METHOD_LABELS = {
+  ai_studio: 'AI Studio key',
+  agent_platform: 'Agent Platform key',
+  google_cloud: 'Google Cloud sign-in',
+}
+const OUTLINE = 'settings__btn settings__btn--sm settings__btn--outline'
+const PRIMARY = 'settings__btn settings__btn--sm'
+const DANGER = 'settings__btn settings__btn--sm settings__btn--danger'
+
+/** The Connection box's label and value rows for a connected Gemini, as Claude's shows its version. */
+export function geminiConnectionDetails(status) {
+  const kind = status?.authenticated ? status.connection : null
+  if (!METHOD_LABELS[kind]) return []
+  const rows = [{ label: 'Connected with', value: METHOD_LABELS[kind] }]
+  if (kind !== 'google_cloud') return [...rows, { label: 'Key', value: 'Saved in Settings › Keys' }]
+  if (!status.project) return rows
+  const { id, name } = status.project
+  return [...rows, {
+    label: 'Project',
+    value: (
+      <span className="gemini-connection__project">
+        {name !== id && <span>{name}</span>}
+        <span className="gemini-connection__project-id">{id}</span>
+      </span>
+    ),
+  }]
 }
 
-function KeyForm({ connection, onConnected }) {
+const DISCONNECT_COPY = {
+  google_cloud: 'Möbius’s access is also removed from your Google account; your Cloud project and billing don’t change.',
+  key: 'The saved key is deleted from this Möbius; it keeps working in Google’s console until you delete it there.',
+}
+
+function KeyForm({ connection, switching, onConnected, onCancel }) {
   const queryClient = useQueryClient()
   const [value, setValue] = useState('')
   const [saving, setSaving] = useState(false)
@@ -103,10 +130,6 @@ function KeyForm({ connection, onConnected }) {
 
   return (
     <form className="pa__form gemini-connection__form" onSubmit={submit}>
-      <a className="pa__btn pa__btn--sm pa__external-link" href={connection.link} target="_blank" rel="noopener noreferrer">
-        {connection.linkLabel}
-        <ExternalLink width={14} height={14} aria-hidden="true" focusable="false" />
-      </a>
       <label className="pa__field">
         <span className="pa__input-label">{connection.label.replace('key', 'API key')}</span>
         <input
@@ -114,99 +137,138 @@ function KeyForm({ connection, onConnected }) {
           value={value} onChange={(event) => setValue(event.target.value)} disabled={saving}
         />
       </label>
-      <button type="submit" className="pa__btn" disabled={saving || !value.trim()}>
-        {saving ? 'Checking key…' : 'Save and connect'}
-      </button>
+      <p className="pa__muted">
+        {switching ? 'When Google accepts the key, it replaces the current connection. ' : ''}
+        <a className="pa__external-link" href={connection.link} target="_blank" rel="noopener noreferrer">
+          {connection.linkLabel}
+          <ExternalLink width={12} height={12} aria-hidden="true" focusable="false" />
+        </a>
+      </p>
+      <div className="provider-connection__actions">
+        <button type="submit" className={PRIMARY} disabled={saving || !value.trim()}>
+          {saving ? 'Checking key…' : switching ? 'Save and switch' : 'Save and connect'}
+        </button>
+        <button type="button" className={OUTLINE} disabled={saving} onClick={onCancel}>Cancel</button>
+      </div>
       {error && <p className="pa__error" role="alert">{error}</p>}
     </form>
   )
 }
 
-function rowAction(connection, connected, active) {
-  if (connected) return connection.id === GOOGLE_CLOUD.id ? 'Sign in again' : 'Reconnect'
-  if (active) return 'Use instead'
-  return connection.id === GOOGLE_CLOUD.id ? 'Sign in' : 'Connect'
-}
-
-function ConnectionRow({ connection, connected, active, open, onToggle, onDisconnect, children }) {
+/** One other way to connect: a row with its button, opening its form in place. */
+function MethodRow({ title, detail, action, open, onOpen, children }) {
   return (
     <div className="gemini-connection__row">
       <div className="gemini-connection__head">
         <div>
-          <span className="gemini-connection__label">
-            {connection.label}
-            {connected && <span className="pa__success gemini-connection__state">Connected</span>}
-          </span>
-          <span className="pa__muted gemini-connection__detail">{connection.detail}</span>
+          <span className="gemini-connection__label">{title}</span>
+          <span className="pa__muted gemini-connection__detail">{detail}</span>
         </div>
-        <div className="provider-connection__actions">
-          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" aria-expanded={open} onClick={onToggle}>
-            {rowAction(connection, connected, active)}
-          </button>
-          {connected && (
-            <button type="button" className="settings__btn settings__btn--sm settings__btn--danger" onClick={onDisconnect}>
-              Disconnect…
-            </button>
-          )}
-        </div>
+        {!open && <button type="button" className={OUTLINE} onClick={onOpen}>{action}</button>}
       </div>
       {open && children}
     </div>
   )
 }
 
-/**
- * Google allows no subscription sign-in for third-party agents, so Gemini
- * connects with a key (AI Studio or Agent Platform) or a Google Cloud sign-in
- * through Google's gcloud. One is in use at a time and the row in use says so.
- */
-export default function GeminiConnection({ active, onConnected, onDisconnected }) {
-  const [open, setOpen] = useState(null)
-  const [confirming, setConfirming] = useState(false)
-  const { disconnect, busy, error } = useProviderDisconnect('gemini', onDisconnected)
-
-  const connected = (connection) => connection.id === active
+/** The ways to connect other than ``active``; keys open their form, Google its sign-in. */
+function OtherMethods({ active, open, setOpen, done }) {
+  const verb = active ? 'Switch' : 'Add key'
   return (
-    <div className="gemini-connection">
-      {!active && (
-        <p className="pa__muted">
-          Connect with an API key or sign in to Google Cloud. A Google AI Pro or Ultra subscription
-          sign-in isn’t allowed for third-party apps; its monthly Cloud credits can pay for either.
-        </p>
+    <>
+      {active && active !== 'google_cloud' && (
+        <MethodRow
+          title="Sign in with Google" detail="Billed to a Google Cloud project you choose"
+          action="Switch" open={open === 'google_cloud'} onOpen={() => setOpen('google_cloud')}
+        >
+          <GoogleCloudSignIn onConnected={done} onCancel={() => setOpen(null)} />
+        </MethodRow>
       )}
-      {[...GEMINI_CONNECTIONS, GOOGLE_CLOUD].map(connection => {
-        const done = () => { setOpen(null); onConnected?.() }
-        return (
-          <ConnectionRow
-            key={connection.id}
-            connection={connection}
-            connected={connected(connection)}
-            active={Boolean(active)}
-            open={open === connection.id}
-            onToggle={() => setOpen(open === connection.id ? null : connection.id)}
-            onDisconnect={() => setConfirming(true)}
-          >
-            {connection.id === GOOGLE_CLOUD.id
-              ? <GoogleCloudSignIn onConnected={done} />
-              : <KeyForm connection={connection} onConnected={done} />}
-          </ConnectionRow>
-        )
-      })}
-      {confirming && (
-        <div className="provider-connection" aria-busy={busy}>
-          <p>Disconnect Google Gemini from this Möbius? Its saved key is removed.</p>
-          <div className="provider-connection__actions">
-            <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>
-            <button
-              type="button" className="settings__btn settings__btn--sm settings__btn--danger" disabled={busy}
-              onClick={async () => { if (await disconnect()) setConfirming(false) }}
-            >
-              {busy ? 'Disconnecting…' : 'Disconnect'}
-            </button>
-          </div>
-          {error && <p className="pa__error" role="alert">{error}</p>}
-        </div>
-      )}
+      {GEMINI_CONNECTIONS.filter(connection => connection.id !== active).map(connection => (
+        <MethodRow
+          key={connection.id} title={`Use an ${connection.label}`} detail={connection.detail}
+          action={verb} open={open === connection.id} onOpen={() => setOpen(connection.id)}
+        >
+          <KeyForm connection={connection} switching={Boolean(active)} onConnected={done} onCancel={() => setOpen(null)} />
+        </MethodRow>
+      ))}
+    </>
+  )
+}
+
+function DisconnectConfirm({ active, onCancel, onDisconnected }) {
+  const { disconnect, busy, error } = useProviderDisconnect('gemini', onDisconnected)
+  return (
+    <div className="provider-connection" aria-busy={busy}>
+      <p>Disconnect Google Gemini from this Möbius?</p>
+      <p className="pa__muted">
+        Your chats and settings stay. New Gemini tasks will need a connection.{' '}
+        {DISCONNECT_COPY[active === 'google_cloud' ? 'google_cloud' : 'key']}
+      </p>
+      <div className="provider-connection__actions">
+        <button type="button" className={OUTLINE} disabled={busy} onClick={onCancel}>Cancel</button>
+        <button type="button" className={DANGER} disabled={busy} onClick={disconnect}>
+          {busy ? 'Disconnecting…' : 'Disconnect'}
+        </button>
+      </div>
+      {error && <p className="pa__error" role="alert">{error}</p>}
     </div>
   )
+}
+
+function Reconnect({ active, done, onCancel }) {
+  if (active === 'google_cloud') return <GoogleCloudSignIn onConnected={done} onCancel={onCancel} />
+  const connection = GEMINI_CONNECTIONS.find(row => row.id === active)
+  return <KeyForm connection={connection} onConnected={done} onCancel={onCancel} />
+}
+
+function Connected({ active, onConnected, onDisconnected }) {
+  const [view, setView] = useState('manage')
+  const [open, setOpen] = useState(null)
+  const done = () => { setView('manage'); setOpen(null); onConnected?.() }
+  if (view === 'reconnect') return <Reconnect active={active} done={done} onCancel={() => setView('manage')} />
+  if (view === 'disconnect') {
+    return <DisconnectConfirm active={active} onCancel={() => setView('manage')} onDisconnected={onDisconnected} />
+  }
+  return (
+    <div className="gemini-connection">
+      <div className="provider-connection__actions">
+        <button type="button" className={OUTLINE} onClick={() => setView('reconnect')}>Reconnect</button>
+        <button type="button" className={DANGER} onClick={() => setView('disconnect')}>Disconnect…</button>
+      </div>
+      <button
+        type="button" className="gemini-connection__fold" aria-expanded={view === 'others'}
+        onClick={() => setView(view === 'others' ? 'manage' : 'others')}
+      >
+        <span>Other ways to connect</span>
+        <svg className="gemini-connection__chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {view === 'others' && <OtherMethods active={active} open={open} setOpen={setOpen} done={done} />}
+    </div>
+  )
+}
+
+function NotConnected({ onConnected }) {
+  const [open, setOpen] = useState(null)
+  const done = () => { setOpen(null); onConnected?.() }
+  return (
+    <div className="gemini-connection">
+      <GoogleCloudSignIn onConnected={done} />
+      <OtherMethods active={null} open={open} setOpen={setOpen} done={done} />
+    </div>
+  )
+}
+
+/**
+ * Gemini's Connection box, laid out like Claude's and Codex's. Google allows
+ * no subscription sign-in for third-party agents, so the main way in is a
+ * Google Cloud sign-in, with an AI Studio or Agent Platform key as the
+ * alternatives. Once connected, the box shows Reconnect and Disconnect… and
+ * folds the other ways to connect away.
+ */
+export default function GeminiConnection({ active, onConnected, onDisconnected }) {
+  if (!active) return <NotConnected onConnected={onConnected} />
+  return <Connected key={active} active={active} onConnected={onConnected} onDisconnected={onDisconnected} />
 }

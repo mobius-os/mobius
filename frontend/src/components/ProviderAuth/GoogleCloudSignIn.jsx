@@ -14,6 +14,8 @@ async function failureMessage(response, fallback) {
 }
 
 const START_FAILED = 'Could not start Google’s sign-in.'
+const OUTLINE = 'settings__btn settings__btn--sm settings__btn--outline'
+const PRIMARY = 'settings__btn settings__btn--sm'
 
 /** What the Sign in button shows for each state of the prepared link. */
 export const SIGN_IN_BUTTON = {
@@ -61,7 +63,30 @@ export function signInState(url) {
   }
 }
 
-function CodeStep({ link, onProjects }) {
+function StepIcon({ state, number }) {
+  return (
+    <span className={`gemini-step__n gemini-step__n--${state}`} aria-hidden="true">
+      {state === 'done'
+        ? <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 6.2 5 8.6 9.6 3.6" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        : number}
+    </span>
+  )
+}
+
+/** One numbered step of the sign-in, Codex-style: done, now or still to come. */
+function Step({ state, number, title, children }) {
+  return (
+    <li className={`gemini-step gemini-step--${state}`} aria-current={state === 'now' ? 'step' : undefined}>
+      <StepIcon state={state} number={number} />
+      <div className="gemini-step__body">
+        <span className="gemini-step__title">{title}</span>
+        {children}
+      </div>
+    </li>
+  )
+}
+
+function CodeStep({ link, onProjects, onCancel }) {
   const [code, setCode] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -81,34 +106,62 @@ function CodeStep({ link, onProjects }) {
   }
 
   return (
-    <form className="pa__form gemini-connection__form" onSubmit={submit}>
-      <p className="pa__muted">
-        Approve in the Google tab, then paste the code Google shows.{' '}
-        <a href={link} target="_blank" rel="noopener noreferrer">Tab didn’t open?</a>
-      </p>
-      <label className="pa__field">
-        <span className="pa__input-label">Verification code from Google</span>
-        <input className="pa__input" autoComplete="off" spellCheck={false} value={code} onChange={(event) => setCode(event.target.value)} disabled={busy} />
-      </label>
-      <button type="submit" className="pa__btn" disabled={busy || !code.trim()}>
-        {busy ? 'Checking code…' : 'Continue'}
-      </button>
-      {error && <p className="pa__error" role="alert">{error}</p>}
-    </form>
+    <ol className="gemini-steps">
+      <Step state="done" number={1} title="Approve in Google">
+        <span className="pa__muted">
+          Google’s page opened in a new tab. <a href={link} target="_blank" rel="noopener noreferrer">Open it again</a>
+        </span>
+      </Step>
+      <Step state="now" number={2} title="Paste the code Google shows">
+        <form className="gemini-step__form" onSubmit={submit}>
+          <input
+            className="pa__input" aria-label="Code from Google" autoComplete="off" spellCheck={false}
+            value={code} onChange={(event) => setCode(event.target.value)} disabled={busy}
+          />
+          <div className="provider-connection__actions">
+            <button type="submit" className={PRIMARY} disabled={busy || !code.trim()}>{busy ? 'Checking code…' : 'Continue'}</button>
+            <button type="button" className={OUTLINE} disabled={busy} onClick={onCancel}>Cancel</button>
+          </div>
+          {error && <p className="pa__error" role="alert">{error}</p>}
+        </form>
+      </Step>
+      <Step state="todo" number={3} title="Choose a project" />
+    </ol>
   )
 }
 
-function ProjectStep({ projects, onConnected }) {
+function ProjectChoice({ projects, project, setProject, disabled }) {
+  return (
+    <div className="gemini-projects" role="radiogroup" aria-label="Google Cloud project">
+      {projects.map(row => (
+        <label key={row.project_id} className={`gemini-project${row.project_id === project ? ' gemini-project--on' : ''}`}>
+          <input
+            type="radio" name="gemini-project" value={row.project_id} disabled={disabled}
+            checked={row.project_id === project} onChange={() => setProject(row.project_id)}
+          />
+          <span>
+            <span className="gemini-project__name">{row.name}</span>
+            {row.name !== row.project_id && <span className="gemini-project__id">{row.project_id}</span>}
+          </span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
+function ProjectStep({ projects, onConnected, onCancel }) {
   const queryClient = useQueryClient()
+  const [typing, setTyping] = useState(projects.length === 0)
   const [project, setProject] = useState(projects[0]?.project_id || '')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const chosen = projects.find(row => row.project_id === project.trim())
 
   async function submit(event) {
     event.preventDefault()
     setBusy(true)
     setError('')
-    const response = await api.auth.provider.geminiGoogleCloud.project(project.trim()).catch(() => null)
+    const response = await api.auth.provider.geminiGoogleCloud.project(project.trim(), chosen?.name).catch(() => null)
     setBusy(false)
     if (!response?.ok) {
       setError(response ? await failureMessage(response, 'Could not finish the sign-in.') : 'Could not finish the sign-in.')
@@ -120,39 +173,56 @@ function ProjectStep({ projects, onConnected }) {
   }
 
   return (
-    <form className="pa__form gemini-connection__form" onSubmit={submit}>
-      <p className="pa__muted">Signed in. Choose the Google Cloud project Gemini bills to.</p>
-      <label className="pa__field">
-        <span className="pa__input-label">Google Cloud project</span>
-        {projects.length > 0 ? (
-          <select className="pa__input" value={project} onChange={(event) => setProject(event.target.value)} disabled={busy}>
-            {projects.map(row => (
-              <option key={row.project_id} value={row.project_id}>
-                {row.name === row.project_id ? row.project_id : `${row.name} (${row.project_id})`}
-              </option>
-            ))}
-          </select>
-        ) : (
-          <input className="pa__input" autoComplete="off" spellCheck={false} placeholder="my-project-123" value={project} onChange={(event) => setProject(event.target.value)} disabled={busy} />
-        )}
-      </label>
-      <button type="submit" className="pa__btn" disabled={busy || !project.trim()}>
-        {busy ? 'Connecting…' : 'Connect'}
-      </button>
-      {error && <p className="pa__error" role="alert">{error}</p>}
-    </form>
+    <ol className="gemini-steps">
+      <Step state="done" number={1} title="Signed in to Google" />
+      <Step state="now" number={3} title="Choose the project Gemini bills to">
+        <form className="gemini-step__form" onSubmit={submit}>
+          {typing ? (
+            <input
+              className="pa__input" aria-label="Google Cloud project ID" autoComplete="off" spellCheck={false}
+              placeholder="my-project-123" value={project} onChange={(event) => setProject(event.target.value)} disabled={busy}
+            />
+          ) : <ProjectChoice projects={projects} project={project} setProject={setProject} disabled={busy} />}
+          <span className="pa__muted">
+            The project needs billing and the Agent Platform API turned on.
+            {projects.length > 0 && (
+              <>
+                {' '}
+                <button type="button" className="gemini-connection__link" onClick={() => setTyping(!typing)}>
+                  {typing ? 'Choose from your projects' : 'Type a project ID instead'}
+                </button>
+              </>
+            )}
+          </span>
+          <div className="provider-connection__actions">
+            <button type="submit" className={PRIMARY} disabled={busy || !project.trim()}>{busy ? 'Connecting…' : 'Connect'}</button>
+            <button type="button" className={OUTLINE} disabled={busy} onClick={onCancel}>Cancel</button>
+          </div>
+          {error && <p className="pa__error" role="alert">{error}</p>}
+        </form>
+      </Step>
+    </ol>
   )
 }
 
 /**
  * The Google Cloud sign-in: the connectors' Google-account sign-in (the Cloud
  * SDK's public client and Google's code page), so Möbius ships no gcloud and
- * needs no Google app of its own. Link, pasted code, then the project.
+ * needs no Google app of its own. Sign in with Google, paste the code, then
+ * choose the project. ``onCancel`` returns to the caller; without it, Cancel
+ * starts over.
  */
-export default function GoogleCloudSignIn({ onConnected }) {
+export default function GoogleCloudSignIn({ onConnected, onCancel }) {
   const [link, setLink] = useState('')
   const [projects, setProjects] = useState(null)
   const [prepared, prepare] = usePreparedSignInLink(Boolean(link))
+
+  function cancel() {
+    setLink('')
+    setProjects(null)
+    if (onCancel) onCancel()
+    else void prepare()
+  }
 
   function openSignIn() {
     if (prepared.status === 'failed') {
@@ -163,17 +233,18 @@ export default function GoogleCloudSignIn({ onConnected }) {
     setLink(prepared.url)
   }
 
-  if (projects) return <ProjectStep projects={projects} onConnected={onConnected} />
-  if (link) return <CodeStep link={link} onProjects={setProjects} />
+  if (projects) return <ProjectStep projects={projects} onConnected={onConnected} onCancel={cancel} />
+  if (link) return <CodeStep link={link} onProjects={setProjects} onCancel={cancel} />
   const button = SIGN_IN_BUTTON[prepared.status]
   return (
-    <div className="pa__form gemini-connection__form">
-      <p className="pa__muted">Google’s sign-in opens in a new tab. When you approve, Google shows a code to paste here.</p>
-      <button type="button" className="pa__btn pa__btn--with-spinner" disabled={button.busy} aria-busy={button.busy} onClick={openSignIn}>
+    <div className="gemini-signin">
+      <button type="button" className="pa__btn pa__btn--with-spinner gemini-signin__button" disabled={button.busy} aria-busy={button.busy} onClick={openSignIn}>
         {button.busy && <progress className="pa__spinner" aria-hidden="true" />}
         {button.label}
       </button>
+      <span className="pa__muted">Billed to a Google Cloud project you choose. Google AI Pro and Ultra include monthly Cloud credits.</span>
       {prepared.error && <p className="pa__error" role="alert">{prepared.error}</p>}
+      {onCancel && <div><button type="button" className={OUTLINE} onClick={onCancel}>Cancel</button></div>}
     </div>
   )
 }

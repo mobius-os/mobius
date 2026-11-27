@@ -156,3 +156,11 @@ def test_a_failed_revoke_still_disconnects(tmp_path, monkeypatch):
   monkeypatch.setattr(oauth, "oauth_json_request", unreachable)
   asyncio.run(cloud.forget(data_dir))
   assert cloud.project(data_dir) is None
+
+
+def test_the_chosen_projects_name_is_kept_for_settings(tmp_path, monkeypatch):
+  data_dir = str(tmp_path)
+  _sign_in(monkeypatch, data_dir)
+  asyncio.run(cloud.choose_project(data_dir, "my-proj-123", "My project"))
+  assert cloud.project_label(data_dir) == {"id": "my-proj-123", "name": "My project"}
+  assert cloud.project_label(str(tmp_path / "other")) is None

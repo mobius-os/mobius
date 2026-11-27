@@ -21,7 +21,7 @@ import {
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
-import GeminiConnection from '../ProviderAuth/GeminiConnection.jsx'
+import GeminiConnection, { geminiConnectionDetails } from '../ProviderAuth/GeminiConnection.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
@@ -1102,7 +1102,9 @@ export default function SettingsView({
           ) : null}
           connection={connection}
           signInNotice={signInNoticeFor(selectedProvider)}
-          connectionDetails={configured && version ? [{ label: 'Version', value: version }] : []}
+          connectionDetails={selectedProvider === 'gemini'
+            ? geminiConnectionDetails(providerStatusQuery.data?.gemini)
+            : configured && version ? [{ label: 'Version', value: version }] : []}
           chatModelsRef={(node) => setSetupFocusRef('chat-models', node)}
           chatModelsAttention={attentionSection === 'chat-models'}
         />

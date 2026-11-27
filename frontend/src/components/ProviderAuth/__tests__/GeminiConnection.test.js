@@ -1,4 +1,4 @@
-/* Gemini connects with an AI Studio or Agent Platform key; the row in use says Connected. */
+/* Gemini's Connection box: Sign in with Google or a key, then Claude-style Reconnect and Disconnect…. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createElement } from 'react'
@@ -17,21 +17,18 @@ function render(props = {}) {
 
 const text = html => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 
-test('not connected: both ways are offered, with why there is no subscription sign-in', () => {
+test('not connected: Sign in with Google leads, the two keys are alternatives', () => {
   const html = text(render())
-  assert.match(html, /AI Studio key Google AI Studio Connect/)
-  assert.match(html, /Agent Platform key Google Cloud project · Gemini Enterprise Agent Platform Connect/)
-  assert.match(html, /AI Pro or Ultra subscription sign-in isn’t allowed for third-party apps/)
-  assert.match(html, /Google Cloud sign-in Sign in with Google · billed to your Cloud project \(Agent Platform\) Sign in/)
-  assert.doesNotMatch(html, /Connected|Disconnect/)
+  assert.match(html, /Sign in with Google Billed to a Google Cloud project you choose/)
+  assert.match(html, /Use an AI Studio key Google AI Studio Add key/)
+  assert.match(html, /Use an Agent Platform key Google Cloud project · Gemini Enterprise Agent Platform Add key/)
+  assert.doesNotMatch(html, /Connected|Disconnect|Reconnect/)
 })
 
-test('connected: the row in use says so and the other offers a switch', () => {
+test('connected: Reconnect and Disconnect… sit together, other ways fold away', () => {
   const html = text(render({ active: 'agent_platform' }))
-  assert.match(html, /Agent Platform key Connected .* Reconnect Disconnect…/)
-  assert.match(html, /AI Studio key Google AI Studio Use instead/)
-  assert.match(html, /Google Cloud sign-in .* Use instead/)
-  assert.doesNotMatch(html, /AI Studio key Connected/)
+  assert.match(html, /Reconnect Disconnect… Other ways to connect/)
+  assert.doesNotMatch(html, /Use an AI Studio key|Add key|Switch/, 'the other ways stay folded until opened')
 })
 
 test('each key is kept from agents and allowed only on its own Gemini endpoints', () => {
@@ -48,10 +45,19 @@ test('each key is kept from agents and allowed only on its own Gemini endpoints'
   assert.deepEqual(GEMINI_CONNECTIONS.map(c => c.key), ['gemini', 'gemini-agent-platform'])
 })
 
-test('signed in to Google Cloud: that row is in use, both keys offer a switch', () => {
-  const html = text(render({ active: 'google_cloud' }))
-  assert.match(html, /Google Cloud sign-in Connected .* Sign in again Disconnect…/)
-  assert.equal((html.match(/Use instead/g) || []).length, 2)
+test('the Connection box names the way in use and, for a sign-in, its project', async () => {
+  const { geminiConnectionDetails } = await import('../GeminiConnection.jsx')
+  assert.deepEqual(geminiConnectionDetails({ authenticated: false, connection: 'ai_studio' }), [])
+  assert.deepEqual(geminiConnectionDetails({ authenticated: true, connection: 'ai_studio' }), [
+    { label: 'Connected with', value: 'AI Studio key' },
+    { label: 'Key', value: 'Saved in Settings › Keys' },
+  ])
+  const rows = geminiConnectionDetails({
+    authenticated: true, connection: 'google_cloud', project: { id: 'proj-123456', name: 'My First Project' },
+  })
+  assert.deepEqual(rows.map(row => row.label), ['Connected with', 'Project'])
+  assert.equal(rows[0].value, 'Google Cloud sign-in')
+  assert.match(text(renderToStaticMarkup(rows[1].value)), /My First Project proj-123456/)
 })
 
 test('Google Cloud sign-in: the button spins until Google’s link is ready, then opens it', async () => {
