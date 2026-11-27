@@ -48,9 +48,19 @@ def cron_mutation_blocked_in_test_runtime() -> bool:
   )
 
 
+# Top-level folder of an app's data tree that holds its schedule declaration.
+# The storage routes refuse app principals here (routes/storage.py
+# ``_reject_app_schedule_state``): an app must not be able to read, replace or
+# delete the owner's schedule through its own storage.
+SCHEDULE_STATE_DIRNAME = "schedule"
+
+
 def schedule_state_dir(app_id: int) -> Path:
   """Owner schedule declarations live with app data, not editable source."""
-  return Path(get_settings().data_dir) / "apps" / str(int(app_id)) / "schedule"
+  return (
+    Path(get_settings().data_dir) / "apps" / str(int(app_id))
+    / SCHEDULE_STATE_DIRNAME
+  )
 
 
 _SCHEDULE_CHOICE_FILE = "choice.json"
@@ -136,6 +146,28 @@ def schedule_choice_rollback(app_id: int):
           "Could not roll back schedule file %s for app %s", path.name, app_id,
         )
     raise
+
+
+@contextmanager
+def preserved_schedule_declaration(app_id: int):
+  """Keep the durable schedule files across a wipe of the app's data tree.
+
+  They live under ``/data/apps/<id>/schedule``; clearing app data keeps cron,
+  and without them reconciliation loses the schedule's timezone identity.
+  """
+  saved = []
+  for name in (_SCHEDULE_CHOICE_FILE, "init-cron.sh"):
+    path = schedule_state_dir(app_id) / name
+    try:
+      saved.append((path, path.read_bytes(), path.stat().st_mode & 0o7777))
+    except FileNotFoundError:
+      continue
+  try:
+    yield
+  finally:
+    for path, data, mode in saved:
+      path.parent.mkdir(parents=True, exist_ok=True)
+      _restore_schedule_file(path, data, mode)
 
 
 def read_schedule_choice(app_id: int) -> ScheduleChoice | None:
@@ -364,6 +396,13 @@ def _supervised_job_path(tokens: list[str]) -> str | None:
 def is_supervised_crontab_entry(line: str) -> bool:
   """Whether cron actually invokes the platform app-job runner."""
   return _supervised_job_path(_crontab_command_tokens(line)) is not None
+
+
+def is_wall_clock_gate(line: str) -> bool:
+  """Whether cron invokes the app-job runner as an every-minute ``--wall-clock``
+  gate, whose crontab cadence is not the app's real schedule."""
+  tokens = _crontab_command_tokens(line)
+  return _supervised_job_path(tokens) is not None and "--wall-clock" in tokens
 
 
 def crontab_command_path(line: str) -> str:
