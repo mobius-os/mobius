@@ -397,26 +397,36 @@ def _build(build: Path, runtime_root: Path, manifest: dict, lock: Path, relative
     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
     "PIP_NO_INPUT": "1",
   })
+  # `-I` keeps the app's source folder (the working directory) off
+  # `sys.path`, so a `pip` package shipped in it cannot stand in for pip.
   _run(
     [
-      python, "-m", "pip", "install",
+      python, "-I", "-m", "pip", "install",
       "--require-hashes", "--no-deps", "--only-binary=:all:",
       "-r", str(lock),
     ],
     step=f"Installing `{relative}` (wheels only, hash-checked)",
     timeout=INSTALL_TIMEOUT_SECONDS, env=pip_env, cwd=str(runtime_root),
   )
-  _run(
-    [python, "-m", "pip", "check"],
-    step=f"`pip check` of `{relative}` (the lock must be complete)",
-    timeout=CHECK_TIMEOUT_SECONDS, env=pip_env,
-  )
+  # Starting the env's interpreter runs any `.pth` lines the locked wheels
+  # installed, so the check runs in a room like the smoke run. It needs no
+  # network and no source.
+  command = [python, "-I", "-m", "pip", "check"]
+  with tempfile.TemporaryDirectory(prefix="mobius-env-check-") as home:
+    if _rooms_available():
+      command = _in_room(command, home=home, read_only=[build], keep=_PIP_CHECK_ROOM_ENV)
+    _run(
+      command,
+      step=f"`pip check` of `{relative}` (the lock must be complete)",
+      timeout=CHECK_TIMEOUT_SECONDS, env=pip_env,
+    )
 
 
-# Settings the smoke run passes into a room beyond the fence's own basics.
+# Settings each check passes into its room beyond the fence's own basics.
 _SMOKE_ROOM_ENV = (
   "VIRTUAL_ENV", "APP_ID", "APP_SLUG", "APP_TOKEN", "APP_STORAGE_DIR", "API_BASE_URL",
 )
+_PIP_CHECK_ROOM_ENV = ("PIP_CONFIG_FILE", "PIP_DISABLE_PIP_VERSION_CHECK", "PIP_NO_INPUT")
 
 
 @functools.cache
@@ -425,25 +435,40 @@ def _rooms_available() -> bool:
 
   A room that cannot be built exits 125, but so can the app code inside one,
   so that status can never be the reason to run the code again unconfined.
+  Only the host's own answer means "no rooms": a check that cannot run
+  raises, which fails the build closed and is not cached, so one transient
+  failure cannot switch confinement off until the next restart.
   """
   try:
     answer = subprocess.run(
       [sys.executable, "-I", str(FENCE_SCRIPT), "--check"],
       capture_output=True, text=True, timeout=CHECK_TIMEOUT_SECONDS, check=True,
     )
-    return json.loads(answer.stdout).get("available") is True
-  except (OSError, subprocess.SubprocessError, ValueError):
-    return False
+    available = json.loads(answer.stdout).get("available")
+  except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+    raise PythonEnvBuildError(
+      f"Could not check whether this host can confine the app's code: {exc}",
+    ) from exc
+  if not isinstance(available, bool):
+    raise PythonEnvBuildError(
+      "Could not check whether this host can confine the app's code: "
+      f"unexpected answer {answer.stdout.strip()!r}",
+    )
+  return available
 
 
-def _in_room(command: list[str], *, storage: str, env: Path, runtime_root: Path) -> list[str]:
-  """``command`` run inside a room: its storage writable; its env and source
-  read-only; no doors, so it reaches no network."""
-  room = [
-    sys.executable, "-I", str(FENCE_SCRIPT), "--home", storage,
-    "--ro", str(env), "--ro", str(runtime_root), "--cwd", str(runtime_root),
-  ]
-  for name in _SMOKE_ROOM_ENV:
+def _in_room(
+  command: list[str], *, home: str, read_only: list[Path], keep: tuple[str, ...],
+  cwd: Path | None = None,
+) -> list[str]:
+  """``command`` run inside a room: only ``home`` writable; ``read_only``
+  readable; no doors, so it reaches no network."""
+  room = [sys.executable, "-I", str(FENCE_SCRIPT), "--home", home]
+  for path in read_only:
+    room += ["--ro", str(path)]
+  if cwd is not None:
+    room += ["--cwd", str(cwd)]
+  for name in keep:
     room += ["--keep-env", name]
   return [*room, "--", *command]
 
@@ -461,7 +486,10 @@ def _smoke(env: Path, runtime_root: Path, manifest: dict, relative: str) -> None
       })
       command = [python, "-c", _SMOKE_PROGRAM, kind, str(path)]
       if _rooms_available():
-        command = _in_room(command, storage=storage, env=env, runtime_root=runtime_root)
+        command = _in_room(
+          command, home=storage, read_only=[env, runtime_root], keep=_SMOKE_ROOM_ENV,
+          cwd=runtime_root,
+        )
       _run(
         command,
         step=f"Starting the app's {kind} `{path.name}` with `{relative}`",
