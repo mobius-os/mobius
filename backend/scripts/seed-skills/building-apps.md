@@ -1951,13 +1951,13 @@ as a compatibility promise (`true` only for `owned`), but its historical
 `false` folded all other outcomes together. New code should use `outcome`.
 
 The runtime can also give every owned `nav.open` level an edge swipe, but
-Möbius turns it on for no device yet, so keep a visible Back for nested views. Where a host
-turns it on, a swipe right from the app's left edge does exactly what system
-Back does for the newest level, so it runs that level's `onBack`. It stays off
-while a modal dialog is open (`<dialog open>`, or `role="dialog"` with
-`aria-modal="true"`) and beside a pane divider, and a nested iframe inside the
-app never receives it. Do not build your own edge-swipe Back: where the system
-already has one, one swipe would go back twice.
+Möbius turns it on for no device yet, so keep a visible Back for nested views.
+Where a host turns it on, a swipe right from the app's left edge does exactly
+what system Back does for the newest level, so it runs that level's `onBack`.
+It stays off while a modal dialog is open (`<dialog open>`, or `role="dialog"`
+with `aria-modal="true"`) and beside a pane divider, and a nested iframe inside
+the app never receives it. Do not build your own edge-swipe Back: where the
+system already has one, one swipe would go back twice.
 
 ### Android back-preview — host-mediated back protocol
 
