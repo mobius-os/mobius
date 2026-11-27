@@ -38,7 +38,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
-from app import workspace_files
+from app import project_git, workspace_files
 from app.project_templates import linked_app_id
 from app.terminal_output import strip_terminal_noise
 from app.timeutil import now_naive_utc
@@ -255,7 +255,7 @@ def source_fingerprint(root: Path) -> str | None:
     dirnames[:] = sorted(
       name for name in dirnames
       if name not in workspace_files.GIT_METADATA_NAMES
-      and not (base == root and name == "artifacts")
+      and not (base == root and name in project_git.PROJECT_VISIBILITY.hidden_root_dirs)
     )
     for name in sorted(filenames):
       path = base / name

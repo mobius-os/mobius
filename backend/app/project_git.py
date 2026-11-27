@@ -32,6 +32,31 @@ _GITHUB_REPOSITORY_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class SourceVisibility:
+  """Which workspace paths Git review treats as non-source.
+
+  ``hidden_dirs`` hide a folder name at any depth; ``hidden_root_dirs`` hide it
+  only directly under the workspace root, matching ``workspace_files.list_entries``.
+  """
+
+  hidden_dirs: frozenset[str] = frozenset()
+  hidden_root_dirs: frozenset[str] = frozenset()
+
+  def hides(self, relative: PurePosixPath) -> bool:
+    parts = relative.parts
+    return bool(parts) and (
+      parts[0] in self.hidden_root_dirs
+      or any(part in self.hidden_dirs for part in parts)
+    )
+
+
+# The one project-root folder of managed build output. Review, commit staging,
+# the file tree and build fingerprints all reserve exactly this folder, so a
+# nested `src/artifacts/` is ordinary, reviewable source.
+PROJECT_VISIBILITY = SourceVisibility(hidden_root_dirs=frozenset({"artifacts"}))
+
+
 class GitProjectError(RuntimeError):
   """An owner-actionable repository error safe to surface at the route."""
 
@@ -66,7 +91,8 @@ def _run_git_write(cwd: Path, *args: str, timeout: int = 15) -> str:
 
 
 def _stage_project(root: Path) -> None:
-  _run_git_write(root, "add", "-A", "--", ".", ":(exclude)artifacts")
+  excluded = (f":(exclude){name}" for name in sorted(PROJECT_VISIBILITY.hidden_root_dirs))
+  _run_git_write(root, "add", "-A", "--", ".", *excluded)
 
 
 def _ensure_commit_identity(root: Path) -> None:
@@ -491,7 +517,8 @@ def _context_path(context: _GitContext, path: Path) -> str:
 def _project_relative(
   context: _GitContext,
   repo_path: str,
-  hidden_dirs: frozenset[str],
+  *,
+  visibility: SourceVisibility,
 ) -> str | None:
   value = PurePosixPath(repo_path)
   if context.scope == ".":
@@ -502,7 +529,7 @@ def _project_relative(
     except ValueError:
       return None
   path = relative.as_posix()
-  if not path or path == "." or any(part in hidden_dirs for part in relative.parts):
+  if not path or path == "." or visibility.hides(relative):
     return None
   return path
 
@@ -534,7 +561,7 @@ def _branch_and_head(context: _GitContext) -> tuple[str | None, str | None]:
 def project_status(
   root: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
 ) -> dict:
   """Return repository identity and working changes confined to ``root``."""
   context = _discover(root)
@@ -573,7 +600,7 @@ def project_status(
       continue
     record = raw.decode("utf-8", "replace")
     code_value = record[:2]
-    path = _project_relative(context, record[3:], hidden_dirs)
+    path = _project_relative(context, record[3:], visibility=visibility)
     if path is None:
       continue
     status = _status_name(code_value)
@@ -588,7 +615,7 @@ def project_status(
       truncated = True
   changes.sort(key=lambda row: row["path"].lower())
   branch, head = _branch_and_head(context)
-  line_stats = _status_line_stats(context, changes, hidden_dirs)
+  line_stats = _status_line_stats(context, changes, visibility=visibility)
   return {
     "line_stats": line_stats,
     "available": True,
@@ -648,7 +675,7 @@ def project_file_diff(
   root: Path,
   target: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
 ) -> dict:
   """Return compact line annotations for one confined Project file."""
   context = _discover(root)
@@ -663,7 +690,7 @@ def project_file_diff(
       "truncated": False,
     }
   repo_path = _context_path(context, target)
-  relative = _project_relative(context, repo_path, hidden_dirs)
+  relative = _project_relative(context, repo_path, visibility=visibility)
   pathspec = f":(literal){repo_path}"
   status = None
   status_truncated = False
@@ -745,7 +772,13 @@ def project_file_diff(
   }
 
 
-def applied_source_status(root: Path, accepted_commit: str | None, status: dict) -> dict:
+def applied_source_status(
+  root: Path,
+  accepted_commit: str | None,
+  status: dict,
+  *,
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
+) -> dict:
   """Compare saved source with the accepted build, not merely with local HEAD.
 
   A local commit is not a deployment. Unknown baselines and bounded read failures
@@ -764,7 +797,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   )
   if code != 0 or truncated:
     return unknown
-  changed = any(_project_relative(context, path.decode("utf-8", "replace"), frozenset({"artifacts"}))
+  changed = any(_project_relative(context, path.decode("utf-8", "replace"), visibility=visibility)
                 for path in output.split(b"\0") if path)
   # Git diff omits new, untracked source files. The existing bounded status read
   # already includes them and applies the Project's source visibility boundary.
@@ -772,7 +805,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   return {"state": "pending" if changed or added else "current"}
 
 
-def _status_line_stats(context, changes, hidden_dirs) -> dict:
+def _status_line_stats(context, changes, *, visibility: SourceVisibility) -> dict:
   """One bounded numstat read plus a shared read budget for untracked text."""
   code, output, truncated = _run_git(
     context.repo, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "HEAD", "--", context.scope,
@@ -782,7 +815,7 @@ def _status_line_stats(context, changes, hidden_dirs) -> dict:
     fields = record.split(b"\t", 2)
     if len(fields) != 3:
       continue
-    path = _project_relative(context, fields[2].decode("utf-8", "replace"), hidden_dirs)
+    path = _project_relative(context, fields[2].decode("utf-8", "replace"), visibility=visibility)
     if path is None:
       continue
     binary = fields[0] == b"-"
