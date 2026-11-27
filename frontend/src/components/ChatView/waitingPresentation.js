@@ -138,6 +138,14 @@ const RESUME_BLOCKERS = {
   resume_failed: ['follow-up needs attention', 'The follow-up could not start successfully; resume this chat to inspect the saved result'],
 }
 
+/** A restart that is offered on a card but that the owner has not asked for.
+ * Its monitor is armed, yet nothing is under way: the next step is theirs. */
+export function restartOnlyOffered(wait) {
+  return wait?.kind === 'platform_activation'
+    && wait.restart_requested === false
+    && !wait.delivery_pending
+}
+
 export function waitPresentation(wait, now = Date.now()) {
   const activation = wait.kind === 'platform_activation'
   const cadence = cadenceLabel(wait)
@@ -172,6 +180,21 @@ export function waitPresentation(wait, now = Date.now()) {
       timeoutLabel: 'Next step',
       timeout: wakeUp,
       usage: 'No model tokens while blocked · one turn when the result is delivered',
+    }
+  }
+
+  if (restartOnlyOffered(wait)) {
+    // Nothing is being waited on yet: say whose move it is, not a check time.
+    return {
+      command,
+      condition: waitConditionLabel(wait.description) || 'Restart Möbius',
+      owner: 'You',
+      summary: 'press Restart now on the card',
+      checker: 'Starts when you press Restart now',
+      activity: 'Not started',
+      timeoutLabel: 'Wake-up',
+      timeout: 'A later ready restart wakes this chat; the offer has no time limit',
+      usage: 'No model tokens until the restart',
     }
   }
 

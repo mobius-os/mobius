@@ -1,8 +1,11 @@
-"""Recognize the bounded receipts whose tool results end a turn.
+"""Recognize the bounded receipts that tool results carry.
 
-A saved owner card and a helper's recorded question are the two turn-ending
-results. Each receipt only names an id; the run's sink decides whether this
-exact turn produced it.
+Two results end a turn: a helper's recorded question and the key vault's
+saved key card (`request_key`). Each receipt only names an id; the run's sink
+decides whether this exact turn produced it. Owner-input requests never end a
+turn (they are shown after it ends). History from earlier releases keeps the
+receipts of other saved cards, which transcript projection still recognizes
+(`owner_card_receipt_id`) to fold the card-saving tool.
 """
 
 import json
@@ -20,7 +23,7 @@ def owner_card_receipt_id(content: object) -> str | None:
 
 
 def turn_end_receipt_id(content: object) -> str | None:
-  """Return the id of a saved-card or recorded-question turn_end receipt, if any."""
+  """Return the id of a key-card or recorded-question turn_end receipt, if any."""
   return _find_receipt(content, lambda value: _card_id(value) or _recorded_turn_end_id(value))
 
 

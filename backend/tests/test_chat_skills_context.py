@@ -199,7 +199,7 @@ def test_side_questions_preserve_work_and_unanswered_decisions():
   core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
 
   assert "A side question is additive" in core
-  assert "continue already-authorized steps, or bring back the unresolved decision through a saved card" in core
+  assert "continue already-authorized steps, or bring back the unresolved decision through an owner request" in core
   assert "not choosing or declining it" in core
   assert "do not revive unrelated or explicitly held work" in core
   assert "Keep the unresolved next step in the chat note" in core
@@ -209,7 +209,7 @@ def test_next_step_choices_are_material_bounded_and_can_end_plainly():
   repo = Path(__file__).resolve().parents[2]
   core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
 
-  assert "offer one saved choice" in core
+  assert "offer one choice as an owner request" in core
   assert "concrete, materially useful continuation" in core
   assert "include a finish-here, keep-local, or defer option" in core
   assert "Use an existing decision surface instead of duplicating it" in core
@@ -218,17 +218,91 @@ def test_next_step_choices_are_material_bounded_and_can_end_plainly():
   assert "no meaningful decision remains, finish declaratively" in core
 
 
-def test_required_owner_cards_keep_terminal_and_decline_claim_boundaries():
+def test_owner_requests_never_end_the_turn_and_keep_decline_claim_boundaries():
+  """Asking is recorded on a durable list and never stops the agent's work;
+  the list, not memory, says what is open, and nothing on it is consent."""
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+  asking = core.split("## Asking the partner", 1)[1].split("**Claim convergent work once.**", 1)[0]
+
+  assert "**Asking never stops your work.**" in asking
+  assert "Record each missing decision as an owner request with `owner_input` the moment you know it" in asking
+  assert "in `blocks` the Goal tasks or work that wait on it" in asking
+  assert "keep doing every piece of work that does not depend on the answer" in asking
+  assert "When your turn ends by itself, whatever is still open is shown as its last item" in asking
+  # Every kind is an entry of one card that never holds the chat.
+  assert ("one card, whose entries the partner settles each on its own, that never "
+          "holds the chat") in asking
+  assert "alone on its own card" not in asking
+  assert "**A request is never an answer, consent, or approval.** Do not act on what it blocks" in asking
+  assert "An unanswered, preselected, or revised request grants nothing" in asking
+  assert "never ask again what is already open" in asking
+  assert "never ask twice for the same exact action" in asking
+  assert ("When the partner settles something in a message, resolve or withdraw it "
+          "and say so") in asking
+  assert "An approval, restart or secret is settled only on the card, never by you" in asking
+  assert "**Not now** choice that resumes the chat, not `on_answer: \"close\"`" in asking
+  assert "release the approval's work claim with `finish_agent_work(..., release=true)`" in asking
+  # The removed card tools and their turn-ending mechanics stay gone.
+  for retired in ("request_question", "request_approval", "request_restart",
+                  "request_secret", "last action of the turn", "card's `message`",
+                  "saved receipt", "**no further text or tools**"):
+    assert retired not in core, retired
+
+
+def test_core_never_ends_a_live_turn_with_a_prose_only_question():
   repo = Path(__file__).resolve().parents[2]
   core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
 
-  assert "`request_question` for 1–10 ordinary questions" in core
-  assert "`request_approval` for permission" in core
-  assert "`request_restart` for a platform restart" in core
-  assert "Each is the **last action of the turn**" in core
-  assert "put your closing message in the card's `message`" in core
-  assert "**Not now** choice that resumes the chat, not `on_answer: \"close\"`" in core
-  assert "release the approval's work claim with `finish_agent_work(..., release=true)`" in core
+  assert "**Never end a live turn asking the owner to respond in prose.**" in core
+  assert "If work needs their answer — even to an informal question — record a request" in core
+  assert "take a confident default or finish declaratively" in core
+
+
+def test_seed_skills_describe_every_request_as_an_entry_of_one_non_barring_card():
+  """Approvals, restarts and secrets are entries of the one request card,
+  settled on their own; only an earlier release's barring cards hold a chat
+  or cannot be followed."""
+  seeds = Path(__file__).resolve().parents[2] / "backend" / "scripts" / "seed-skills"
+
+  def read(name):
+    return " ".join((seeds / name).read_text(encoding="utf-8").split())
+
+  secure, waiting = read("secure-input.md"), read("waiting.md")
+  planning, maintenance = read("goal-planning.md"), read("platform-maintenance.md")
+  development = read("mobius-development.md")
+
+  assert "shows the request as a sealed entry of the one card that holds every open request" in secure
+  assert "That card never holds the chat: the owner submits or cancels this entry on its own" in secure
+  assert "`<request-id>` is the request's `id` from the open list, accepted once a card shows it" in secure
+  assert "`open_request_card_id`, the one card that shows every open request, approvals included" in waiting
+  assert "`pending_question_id` for a barring card an older chat still shows" in waiting
+  assert ("A barring Restart or sealed secure-input card saved by an earlier release cannot be "
+          "followed") in waiting
+  assert "A barring Restart or sealed-input card from an earlier release is not followable" in planning
+  assert "the one card that shows every open request does not hold the chat" in maintenance
+  assert ("Only a barring card saved by an earlier release (an old chat's approval, Restart, "
+          "secure-input or question card) still holds the chat") in maintenance
+  assert "may settle any of its entries (question, approval, restart or sealed input)" in development
+  assert "**Restart entries.** A restart request's card entry is bound" in development
+  for text in (secure, waiting, planning, maintenance, development):
+    assert "alone on its own" not in text and "holds the chat until" not in text
+  assert "Restart cards and sealed secure-input cards cannot be followed" not in waiting
+  assert "`pending_question_id` for an approval card" not in waiting
+
+
+def test_background_runs_may_record_requests_but_never_wait_on_a_card():
+  repo = Path(__file__).resolve().parents[2]
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
+  secure = " ".join((
+    repo / "backend" / "scripts" / "seed-skills" / "secure-input.md"
+  ).read_text(encoding="utf-8").split())
+
+  assert "Background and scheduled runs may record requests, shown when the run ends, but never wait on a card" in core
+  assert "helpers ask their parent with `ask_parent` instead" in core
+  assert "never open cards" not in core
+  assert "may record a secret request, shown when the run ends, but never waits on it" in secure
+  assert "must not open a live card" not in secure
 
 
 def test_goal_routing_rechecks_phase_transitions_and_prefers_platform_tool():
@@ -284,9 +358,9 @@ def test_goal_outcome_survives_milestones():
     repo / "backend" / "scripts" / "seed-skills" / "goal-planning.md"
   ).read_text(encoding="utf-8").split())
 
-  assert "answered card, contribution or restart is not completion" in core
+  assert "answered request, contribution or restart is not completion" in core
   assert "keep milestones as tasks in the same open Goal" in core
-  assert "Record each blocking question on its task and ask related ones" in core
+  assert "Record each blocking question with `owner_input`, naming its task in `blocks`" in core
   assert "reconcile the owner's original request against the checklist" in planning
   assert "low disk can sweep idle scratch sooner" in core
   assert "still there after the answer" not in core
@@ -307,12 +381,19 @@ def test_goal_responsibility_requires_truthful_outcome_or_real_handoff():
 
   assert "**Never leave an invisible wait.**" in core
   assert "until a truthful outcome or real handoff" in core_normalized
-  assert "save an answerable card whose answer continues the work" in core_normalized
+  assert "record an answerable request whose answer continues the work" in core_normalized
   assert "seek an actionable owner decision before declaring **Cannot complete**" in core_normalized
   assert "A prose promise or paused Goal is not a handoff" in core_normalized
   assert "bounded execution recovery never overrides Stop or owner approval" in core_normalized
   assert "### Responsibility, handoffs and outcomes" in planning
   assert "Its answer resumes the same work" in planning_normalized
+  # A blocked branch asks at once and the rest of the Goal keeps moving.
+  assert "a request holds only the tasks named in its `blocks`" in planning_normalized
+  assert "do not hold questions back until nothing else can proceed" in planning_normalized
+  assert ("A task named there cannot be completed while its request is open, and the Goal "
+          "cannot be completed while any request is open") in planning_normalized
+  assert "Otherwise record an owner request with `owner_input`" in waiting_normalized
+  assert "clarifying-question tool" not in waiting_normalized
   assert "A temporary approval gate or outage is not capitulation" in planning_normalized
   assert "Stop, owner holds, and arbitrary crashes never grant automatic continuation" in planning_normalized
   # The retired rule demanded one owning interaction at every Goal turn end.
@@ -328,9 +409,9 @@ def test_core_question_fallback_shows_the_minimal_valid_shape():
   repo = Path(__file__).resolve().parents[2]
   core = (repo / "skill" / "core.md").read_text(encoding="utf-8")
 
-  assert "call request_question --args-json" in core
-  assert """'{"message":"...","questions":""" in core
-  assert '[{"question":"...","options":[' in core
+  assert "call owner_input --args-json" in core
+  assert """'{"op":"add","key":"...","prompt":"...",""" in core
+  assert '"options":[{"label":"...","description":"..."}]}' in core
   assert "<question array>" not in core
 
 
@@ -346,7 +427,7 @@ def test_core_requires_one_claim_for_convergent_cross_chat_work():
   assert "Claims coordinate agents; they never grant the owner's authority" in core
   # An approval-gated action costs one call: the approval key is the claim,
   # and the owner's Goal lifecycle settles it without a trailing finish.
-  assert "`request_approval` with that key is the claim" in core
+  assert "an `owner_input` approval with that key is the claim" in core
   assert "Claims settle with their owner" in core
 
 
@@ -446,9 +527,12 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
     repo / "backend" / "scripts" / "seed-skills" / "mobius-development.md"
   ).read_text(encoding="utf-8").split())
   assert "any authenticated participant that can read" in normalized_core
+  # A secret entry has its own submit endpoint, not the card's.
+  assert "may settle each entry through its own endpoint" in normalized_core
+  assert "through that card's endpoint" not in normalized_core
   assert "Card access is deliberately uniform" in development
   assert "do not add a second card-answer role or token hierarchy" in development
-  assert "An explicit partner request may create the card" in normalized_core
+  assert "An explicit partner request may record a restart request" in normalized_core
   assert "platform-owned dispatch" in normalized_core
   assert "agents never issue or replay the shell command" in normalized_core
   assert "## Choose the smallest activation action" in maintenance
@@ -473,14 +557,15 @@ def test_owner_policy_and_card_access_stay_simple_and_explicit():
   assert "For a constitution-only change, default to leaving it pending" in (
     normalized_maintenance
   )
-  assert "Its receipt confirms only that the card was saved" in normalized_maintenance
-  assert "end the turn with no further text or tools" in (
+  assert "recording it does not end your turn" in normalized_maintenance
+  assert "Recording the request is not consent: never restart on your own" in (
     normalized_maintenance
   )
+  assert "request_restart" not in maintenance
   assert "Any authenticated participant that can read the card may answer it" in (
     normalized_maintenance
   )
-  assert "Do not use `request_approval`" in normalized_maintenance
+  assert "Do not use an approval request (`kind: \"approval\"`)" in normalized_maintenance
   assert "unavailable for tens of seconds" in normalized_maintenance
   assert "separate card-answer role" not in core + maintenance
 
@@ -502,33 +587,38 @@ def test_owner_can_approve_scoped_access_to_protected_local_state():
   assert "Never read or write `/data/cli-auth/`" not in core
 
 
-def test_saved_secure_input_is_a_terminal_agent_action():
+def test_secure_input_is_a_sealed_request_that_never_ends_the_turn():
   repo = Path(__file__).resolve().parents[2]
   guidance = (
     repo / "backend" / "scripts" / "seed-skills" / "secure-input.md"
   ).read_text(encoding="utf-8")
   normalized = " ".join(guidance.split())
+  core = " ".join((repo / "skill" / "core.md").read_text(encoding="utf-8").split())
 
   assert (
-    "The card is the final action of the turn, exactly like Möbius's saved "
-    "Q&A and approval cards."
+    "Recording it does **not** end your turn, wait for an answer, or receive "
+    "values"
   ) in normalized
-  assert (
-    "On a confirmed receipt, end the turn with **no further text or tools**."
-  ) in normalized
+  assert "never continue as if values were provided" in normalized
+  assert "an agent can never resolve a secret request itself" in normalized
+  assert "Never ask for one in chat" in normalized
+  assert "request_secret" not in guidance
+  assert "final action of the turn" not in normalized
+  # Credentials never pass through the chat or the model.
+  assert "record a secret request (read `secure-input`) so it never enters the transcript or the LLM API" in core
+  assert 'never say "paste it here"' in core
 
 
-def test_owner_input_card_request_is_not_parallelized_with_other_tools():
+def test_recording_an_owner_request_is_an_ordinary_tool_call():
+  """Recording a request no longer ends the turn, so the old rule that a card
+  request must be the turn's lone final call is retired with it."""
   repo = Path(__file__).resolve().parents[2]
   core = " ".join((repo / "skill" / "core.md").read_text(
     encoding="utf-8",
   ).split())
 
-  assert (
-    "Never batch or parallelize a card request with any other tool call: "
-    "await every other call first, then request the card alone as the final "
-    "call of the turn."
-  ) in core
+  assert "Never batch or parallelize a card request" not in core
+  assert "Owner-input cards remain separate and last" not in core
 
 
 def test_owned_app_skill_summaries_expose_complete_initial_read_sets():
@@ -690,7 +780,8 @@ def test_notifications_skill_leaves_card_notifications_to_the_platform():
     repo / "backend" / "scripts" / "seed-skills" / "notifications.md"
   ).read_text()
 
-  assert "## Saved owner-input cards notify for you" in notifications
+  assert "## Owner-input cards notify for you" in notifications
+  assert "request_question" not in notifications
   assert "Do not call\n`notify_owner` for a card" in notifications
   assert "you fire the push yourself" not in notifications
   assert "firing the push yourself" not in notifications
@@ -805,7 +896,7 @@ def test_core_prompt_states_the_runtime_facts_a_replaced_provider_prompt_gave():
     "**Your reply text is the conversation.**",
     "Thinking is folded away and is not a reply",
     "**End every turn with a closing message:**",
-    "put the closing message in the card's `message`, which is shown above the card",
+    "Open requests are shown on a card after it, so it also says what each one decides",
     "A denied tool call means the partner or a Möbius guard declined it",
     "System reminders and hook output come from Möbius",
     "**Report outcomes faithfully.**",

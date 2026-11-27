@@ -277,6 +277,16 @@ class Chat(Base):
   # hides that it is still open. Every read surface — including the lightweight
   # /runtime poll that never loads the transcript — trusts this column.
   pending_question_id = Column(String(64), nullable=True, default=None)
+  # The open-request list card (owner_input_requests) the owner may answer, or
+  # NULL. Shown but never barring: unlike `pending_question_id`, no admission
+  # or recovery guard reads it, so other work keeps running around the card.
+  # Set by QuestionCommit for an `input_requests` card (replacing, and thereby
+  # superseding, the previous one) and cleared when that card is answered, a
+  # turn ends with nothing open, a barring card takes over, or the transcript
+  # is replaced. Waiting projections read the list card from the request rows
+  # instead (`owner_input_requests.shown_request_card`), so a card with
+  # nothing open never reads as waiting.
+  open_request_card_id = Column(String(64), nullable=True, default=None)
   # Rows marked `held` (a Stop kept them) wait for the owner's next send and
   # are not runnable: test `continuations.has_runnable_pending` when the
   # question is "is work waiting to run", not whether this list is empty.
@@ -1878,6 +1888,47 @@ class SavedDecisionCard(Base):
   summary = Column(Text, nullable=False)
   outcome_json = Column(JSON, nullable=True)
   resolved_at = Column(DateTime, nullable=True)
+
+
+class OwnerInputRequest(Base):
+  """One thing an agent needs from the owner, independent of any card.
+
+  The row is the authority for what is being asked; a published card block is
+  the record of what the owner was shown. See OWNER_INPUT_REQUESTS_DESIGN.md.
+  Never holds secret values.
+  """
+
+  __tablename__ = "owner_input_requests"
+  __table_args__ = (
+    # An agent-chosen key names one open request per chat, so a retried or
+    # re-derived ask updates it instead of duplicating it.
+    Index("uq_owner_input_requests_open_key", "chat_id", "key", unique=True,
+          sqlite_where=text("status = 'open'"),
+          postgresql_where=text("status = 'open'")),
+    Index("ix_owner_input_requests_chat_status", "chat_id", "status"),
+  )
+
+  id = Column(String(64), primary_key=True)
+  chat_id = Column(String(64), ForeignKey("chats.id", ondelete="CASCADE"), nullable=False)
+  goal_id = Column(String(64), nullable=True)
+  created_by_run_id = Column(String(64), nullable=True)
+  key = Column(String(80), nullable=False)
+  # Bumps on every material edit; an answer names the revision it was given
+  # against so it can never apply to a changed request.
+  revision = Column(Integer, nullable=False, default=1)
+  spec_json = Column(JSON, nullable=False)
+  blocks_json = Column(JSON, nullable=False, default=dict)
+  # open | answered | withdrawn | superseded
+  status = Column(String(16), nullable=False, default="open")
+  answer_json = Column(JSON, nullable=True)
+  answered_revision = Column(Integer, nullable=True)
+  answered_by = Column(String(32), nullable=True)
+  answered_at = Column(DateTime, nullable=True)
+  outcome_json = Column(JSON, nullable=True)
+  published_revision = Column(Integer, nullable=True)
+  published_question_id = Column(String(64), nullable=True)
+  created_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  updated_at = Column(DateTime, nullable=False, default=now_naive_utc)
 
 
 class GoalDependency(Base):

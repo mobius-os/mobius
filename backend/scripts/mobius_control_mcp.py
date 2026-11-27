@@ -46,27 +46,16 @@ UPDATE_GOAL_TASKS_TOOL = "update_goal_tasks"
 DECLARE_WAIT_TOOL = "declare_wait"
 WAIT_FOR_DECISION_TOOL = "wait_for_decision"
 CANCEL_WAIT_TOOL = "cancel_wait"
-REQUEST_APPROVAL_TOOL = "request_approval"
-REQUEST_QUESTION_TOOL = "request_question"
-REQUEST_RESTART_TOOL = "request_restart"
 REQUEST_KEY_TOOL = "request_key"
-_CARD_ENDS_TURN = (
-  "This tool call ends the turn: nothing after the card reaches the owner "
-  "until they reply."
-)
-SAVED_CARD_TERMINAL_INSTRUCTION = (
-  f"{_CARD_ENDS_TURN} Put your closing message in `message`: what you did, "
-  "where things stand, what it decides."
-)
-SECRET_CARD_TERMINAL_INSTRUCTION = (
-  f"{_CARD_ENDS_TURN} Just before this call, write your closing message: "
-  "what you did, where things stand, what it decides."
-)
-CARD_MESSAGE_PROPERTY = {
+# The key vault's card is the one owner card saved mid-turn: it ends the turn,
+# so it carries the turn's closing message. Everything else the owner is asked
+# goes through owner_input, which never ends a turn.
+KEY_CARD_MESSAGE_PROPERTY = {
   "type": "string", "maxLength": 20000,
   "description": (
     "Markdown closing message of the turn, shown to the owner above the "
-    "card. Any text before this call is at most a one-sentence lead-in."
+    "key card when one is saved. Any text before this call is at most a "
+    "one-sentence lead-in."
   ),
 }
 LIST_AGENT_PEERS_TOOL = "list_agent_peers"
@@ -78,7 +67,7 @@ READ_WORK_CLAIM_TOOL = "read_work_claim"
 CHECKPOINT_CHAT_TOOL = "checkpoint_chat"
 NOTIFY_OWNER_TOOL = "notify_owner"
 OPEN_ITEM_TOOL = "open_item"
-REQUEST_SECRET_TOOL = "request_secret"
+OWNER_INPUT_TOOL = "owner_input"
 LIST_APPS_TOOL = "list_apps"
 APPLY_APP_TOOL = "apply_app"
 SCREENSHOT_TOOL = "screenshot"
@@ -110,14 +99,14 @@ UPDATE_GOAL_DESCRIPTION = (
   "completed with a result, and the next task running), a new id adds a task. "
   "next_action records the exact next step. complete records only the verified "
   "original outcome. If unreachable, first ask the owner an actionable question; "
-  "a temporary owner action or approval keeps the Goal open with its saved card. "
+  "a temporary owner action or approval keeps the Goal open with its open owner_input request. "
   "defer means a deliberate manual hold: no automatic continuation until a "
   "later owner request. Waiting for an event is not a hold: keep the Goal open "
-  "and register its exact handoff (request_restart for this chat's activation, "
-  "a saved owner card, a peer dependency, declare_wait, or a helper result). "
-  "Finish independent authorized work first. Use defer only on the owner's "
-  "choice to pause the remaining work; resolve existing helpers, cards and "
-  "Waits first. It preserves "
+  "and register its exact handoff (an owner_input request, including kind "
+  "restart for this chat's activation, a peer dependency, declare_wait, or a "
+  "helper result). Finish independent authorized work first. Use defer only on "
+  "the owner's choice to pause the remaining work; resolve existing helpers, "
+  "owner requests and Waits first. It preserves "
   "the original Goal and releases its claims without claiming success or failure. "
   "Only a genuinely unreachable outcome uses cannot_complete with reason, "
   "efforts/partial results, and unmet_outcome; cancel means the owner called it "
@@ -147,7 +136,8 @@ DECLARE_WAIT_DESCRIPTION = (
   "across server restarts. Await ordinary commands and helpers in-turn; a "
   "delegated child returns a future condition to its parent instead. Never "
   "poll for an approval or owner action. Use wait_for_decision for another "
-  "chat's saved card, or save your own question card. Something must actually be advancing the condition: "
+  "chat's saved card, or record an owner_input request in your own. "
+  "Something must actually be advancing the condition: "
   "internal work needs an acknowledged durable executor first. Give exactly "
   "one of github_checks, command or delay_secs. Prefer github_checks for a "
   "published pull request at an exact head: it follows the checks GitHub "
@@ -235,8 +225,6 @@ def _helper_module(filename: str, module_name: str) -> ModuleType:
 
 _GOALS = _helper_module("goal_promote.py", "mobius_goal_promote")
 _WAITS = _helper_module("chat_wait.py", "mobius_chat_wait")
-_APPROVALS = _helper_module("owner_approval.py", "mobius_owner_approval")
-_SECURE_INPUT = _helper_module("secure-input.py", "mobius_secure_input")
 # Which tools each authority level gets is one policy, shared with provider
 # approval and readiness checks; platform_tools.py is stdlib-only.
 _PLATFORM_TOOLS = _helper_module("../app/platform_tools.py", "mobius_platform_tools")
@@ -722,46 +710,47 @@ def _call_read_goal(arguments: dict[str, Any]) -> dict | str:
   return payload
 
 
-def _call_request_approval(arguments: dict[str, Any]) -> dict:
-  if not {"question", "options", "work_key"}.issubset(arguments) or not set(arguments).issubset(
-    {"question", "options", "work_key", "message"}
-  ):
-    raise ValueError(
-      "request_approval needs question, options, and work_key, and may take message"
-    )
-  try:
-    return _APPROVALS.request_approval(**arguments)
-  except SystemExit as exc:
-    raise RuntimeError(str(exc)) from exc
-
-
-def _call_request_question(arguments: dict[str, Any]) -> dict:
-  if "questions" not in arguments or not set(arguments).issubset({"questions", "message"}):
-    raise ValueError("request_question needs questions and may take message")
-  try:
-    return _APPROVALS.request_question(**arguments)
-  except SystemExit as exc:
-    raise RuntimeError(str(exc)) from exc
+def _call_owner_input(arguments: dict[str, Any]) -> dict:
+  """Edit this chat's owner-input request list; the result is the open list."""
+  chat_id = os.environ.get("CHAT_ID") or ""
+  if not chat_id:
+    raise RuntimeError("owner_input needs the current agent-run environment")
+  return _agent_api_json(
+    "POST", f"/api/chats/{quote(chat_id, safe='')}/input-requests", arguments,
+  )
 
 
 def _call_request_key(arguments: dict[str, Any]) -> dict:
+  """Ask the vault for a key; a card is saved only when the owner must answer."""
   if not {"key", "reason"}.issubset(arguments) or not set(arguments).issubset(
     {"key", "reason", "sites", "inject", "parts", "message"}
   ):
     raise ValueError("request_key needs key and reason, and may take sites, inject, parts and message")
+  chat_id = os.environ.get("CHAT_ID") or ""
+  if not chat_id:
+    raise RuntimeError("request_key needs the current agent-run environment")
   try:
-    return _APPROVALS.request_key(**arguments)
-  except SystemExit as exc:
-    raise RuntimeError(str(exc)) from exc
-
-
-def _call_request_restart(arguments: dict[str, Any]) -> dict:
-  if not set(arguments).issubset({"message"}):
-    raise ValueError("request_restart takes only message")
-  try:
-    return _APPROVALS.request_restart(**arguments)
-  except SystemExit as exc:
-    raise RuntimeError(str(exc)) from exc
+    payload = _agent_api_json(
+      "POST", f"/api/chats/{quote(chat_id, safe='')}/key-request",
+      {"sites": [], **arguments}, timeout=35,
+    )
+  except TransportFailure as exc:
+    # The card may have been saved before the answer was lost; the identical
+    # request returns that card's receipt instead of saving a second one.
+    raise RuntimeError(
+      f"{exc}. No key was granted. The key card may already be saved: retry "
+      "this exact request to recover its receipt."
+    ) from exc
+  if isinstance(payload, dict) and payload.get("state") == "answered_without_card":
+    # The vault answered at once: no card was saved and the turn continues.
+    return payload
+  if (not isinstance(payload, dict)
+      or payload.get("state") not in {"waiting_for_owner", "answered"}
+      or not isinstance(payload.get("question_id"), str)
+      or not payload["question_id"]
+      or not isinstance(payload.get("next_action"), str)):
+    raise RuntimeError("Invalid key card receipt; no key was granted.")
+  return payload
 
 
 def _optional_int(arguments: dict[str, Any], name: str) -> int | None:
@@ -1440,40 +1429,6 @@ def _open_settings(arguments: dict[str, Any]) -> str:
   )
 
 
-def _call_request_secret(arguments: dict[str, Any]) -> dict:
-  secure = _SECURE_INPUT
-  if arguments.get("preset") == "owner_credentials":
-    if set(arguments) != {"preset"}:
-      raise ValueError("the owner_credentials preset takes no other arguments")
-    spec, command, action = (
-      secure.OWNER_CREDENTIALS_SPEC, secure._owner_credentials_consumer(),
-      "owner-credentials",
-    )
-    cwd = None
-  else:
-    if "preset" in arguments:
-      raise ValueError("preset must be owner_credentials")
-    _require_args(
-      REQUEST_SECRET_TOOL, arguments,
-      {"title", "description", "fields", "command", "cwd"},
-      ("title", "fields", "command"),
-    )
-    command = arguments["command"]
-    if not isinstance(command, list) or not all(isinstance(part, str) for part in command):
-      raise ValueError("command must be an argv list of strings")
-    spec = {
-      "mode": "sealed",
-      "title": arguments["title"],
-      "description": arguments.get("description", ""),
-      "fields": arguments["fields"],
-    }
-    action = "run"
-    cwd = arguments.get("cwd") or "/data"
-    if not cwd.startswith("/"):
-      raise ValueError("cwd must be an absolute path")
-  return secure._request_saved(spec, command, action, cwd=cwd)
-
-
 def _call_list_apps(arguments: dict[str, Any]) -> list[dict[str, Any]]:
   filters = {"id", "slug", "name", "source_dir", "chat_id"}
   _require_args(LIST_APPS_TOOL, arguments, {*filters, "with_source_dir"})
@@ -1765,52 +1720,150 @@ _TOOL_DEFINITIONS = {
       "additionalProperties": False,
     },
   },
-  REQUEST_APPROVAL_TOOL: {
-    "name": REQUEST_APPROVAL_TOOL,
+  OWNER_INPUT_TOOL: {
+    "name": OWNER_INPUT_TOOL,
     "description": (
-      "Ask the owner to approve an action; for restart use request_restart. "
-      "This is an application decision, not a "
-      "tool-permission escalation. Saves an answerable card; returns a "
-      "receipt, NOT an answer or permission. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "The answer resumes the chat without timeout. Explain its impact "
-      "and include a decline/defer choice. work_key also claims the exact "
-      "action, so do not call claim_agent_work first. If another chat already "
-      "owns or completed that key, no card is saved, your turn continues, and "
-      "the result is held_by_peer or completed: do not duplicate. "
-      "A held_by_peer Goal follows only if the response confirms "
-      "its dependency was created; otherwise do not promise a wake. "
-      "Identical retries within a turn reuse the same card. Never "
-      "request secrets here. Background agents leave approvals pending for a "
-      "live chat instead."
+      "Record, revise or withdraw something you need from the owner, without "
+      "ending your turn and without interrupting them. Use it the moment a "
+      "decision is missing, then keep doing every piece of work that does not "
+      "depend on it. Whatever is still open when your turn ends is shown to "
+      "the owner on one card; they may answer some and leave others, and "
+      "unanswered requests stay open. op add records a request under a short "
+      "stable key (adding an existing open key revises it, so a retry never "
+      "duplicates); update changes the fields you pass on the request named "
+      "by key or id; resolve records an answer you now have without the card, "
+      "with source owner_message when the owner answered it in an ordinary "
+      "message, or found when you established it yourself (in code, a "
+      "document, a result), and a reason naming the evidence; withdraw closes "
+      "one that no longer matters, with a reason; list reads the current "
+      "state. When the owner writes instead of answering, resolve what their "
+      "message answers with their words as evidence, withdraw what no longer "
+      "matters and update what changed. Never resolve a request by guessing, "
+      "and tell the owner in your reply what you resolved or withdrew and why. "
+      "Every result, like the <open_owner_requests> block at the start of each "
+      "turn, is the complete open list: trust it over your memory and never "
+      "ask again what is already open. A refused call records nothing. "
+      "Recording a request is never an answer or permission: do not act on "
+      "the work it blocks. State in blocks which Goal tasks or work wait on "
+      "it. Give each option everything needed to choose; set multiple when "
+      "several options may be picked together. "
+      "kind (default question) also asks for what only the owner can grant, "
+      "the same way and without ending your turn: approval (prompt, 2-3 "
+      "options including a decline or defer choice, and work_key, the exact "
+      "action; the key is claimed when you add it, so do not call "
+      "claim_agent_work first, and if another chat owns or completed it "
+      "nothing is recorded and the result is held_by_peer or completed: do "
+      "not duplicate), restart (no other fields: the platform derives the "
+      "exact restart when the owner is shown it, and pressing Restart now is "
+      "handled by the platform; never issue a restart command yourself. "
+      "Record this chat's own restart request even when another chat has "
+      "one, never a peer handoff instead: it registers this chat's "
+      "continuation, not a second restart executor; one later ready restart "
+      "resumes every still-registered chat, and the platform admits one "
+      "restart per worker), or "
+      "secret (title, fields, and the consumer command and cwd you prepared, "
+      "or preset owner_credentials: submitted values go once, as one JSON "
+      "object on stdin, to that consumer, never to you, the transcript or "
+      "this list; the consumer gets a minimal environment, must not log or "
+      "persist them, and its output is discarded). Every open request, of "
+      "every kind, is shown on the same one card, which never holds the "
+      "chat; these three are settled only on the card, never by you: "
+      "resolve is refused for them; an approval's work_key "
+      "and a secret's consumer never change (withdraw and add a new one, "
+      "releasing an approval's claim yourself with finish_agent_work)."
     ),
     "inputSchema": {
       "type": "object",
       "properties": {
-        "question": {"type": "string", "minLength": 1, "maxLength": 2000},
-        "work_key": {
-          "type": "string", "minLength": 3, "maxLength": 256,
+        "op": {"type": "string", "enum": ["add", "update", "withdraw", "resolve", "list"]},
+        "kind": {"type": "string", "enum": ["question", "approval", "restart", "secret"]},
+        "key": {
+          "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
+          "description": "Short stable name for this request, e.g. deploy-target.",
+        },
+        "id": {"type": "string", "maxLength": 64},
+        "header": {"type": "string", "maxLength": 80},
+        "prompt": {
+          "type": "string", "maxLength": 300,
           "description": (
-            "Canonical lowercase identity of the exact action. It is claimed "
-            "atomically: the first chat to request it owns the sole card."
+            "One short question in the owner's terms: a single sentence. "
+            "Background goes in context, the full account in your reply text."
+          ),
+        },
+        "context": {
+          "type": "string", "maxLength": 1000,
+          "description": (
+            "Only what the owner needs in order to decide, in a few sentences "
+            "(question and approval requests). Omit it when the question "
+            "stands on its own."
           ),
         },
         "options": {
-          "type": "array", "minItems": 2, "maxItems": 3,
+          "type": "array", "maxItems": 8,
+          "description": "Omit for a free-text answer.",
           "items": {
             "type": "object",
             "properties": {
               "label": {"type": "string", "minLength": 1, "maxLength": 100},
               "description": {"type": "string", "minLength": 1, "maxLength": 500},
-              "on_answer": {"type": "string", "enum": ["resume", "close"],
-                "description": "Default resume. Explicit close saves this choice without an agent reply."},
+              "on_answer": {"type": "string", "enum": ["resume", "close"]},
             },
             "required": ["label", "description"], "additionalProperties": False,
           },
         },
-        "message": CARD_MESSAGE_PROPERTY,
+        "multiple": {"type": "boolean"},
+        "blocks": {
+          "type": "object",
+          "properties": {
+            "tasks": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
+            "work": {"type": "string", "maxLength": 500},
+          },
+          "additionalProperties": False,
+        },
+        "work_key": {
+          "type": "string", "minLength": 3, "maxLength": 256,
+          "description": (
+            "approval: canonical lowercase identity of the exact action, "
+            "claimed atomically when the request is added."
+          ),
+        },
+        # Limits match secure_inputs.validate_request_spec, which rejects more.
+        "title": {"type": "string", "minLength": 1, "maxLength": 80},
+        "description": {"type": "string", "maxLength": 240},
+        "fields": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "description": "secret: the sealed inputs; labels only, never values.",
+          "items": {
+            "type": "object", "additionalProperties": False,
+            "required": ["name", "type", "label"],
+            "properties": {
+              "name": {"type": "string"},
+              "type": {"type": "string", "enum": ["text", "password"]},
+              "label": {"type": "string", "maxLength": 80},
+              "autocomplete": {"type": "string"},
+            },
+          },
+        },
+        "command": {
+          "type": "array", "items": {"type": "string"}, "minItems": 1,
+          "description": (
+            "secret: consumer argv, e.g. "
+            "[\"python3\", \"/data/apps/x/store_key.py\"]."
+          ),
+        },
+        "cwd": {
+          "type": "string",
+          "description": "secret: absolute consumer working directory; default /data.",
+        },
+        "preset": {"type": "string", "enum": ["owner_credentials"]},
+        "reason": {"type": "string", "maxLength": 500},
+        "answer": {
+          "type": "string", "maxLength": 2000,
+          "description": "With resolve: the answer, in the owner's own words when they gave it.",
+        },
+        "source": {"type": "string", "enum": ["owner_message", "found"]},
       },
-      "required": ["question", "options", "work_key"], "additionalProperties": False,
+      "required": ["op"], "additionalProperties": False,
     },
   },
   REQUEST_KEY_TOOL: {
@@ -1827,7 +1880,9 @@ _TOOL_DEFINITIONS = {
       "waiting_chat_id names, if that chat still shows one); tell the owner "
       "and ask again after they answer it. Otherwise it "
       "saves a key card in this chat and returns a receipt, NOT an answer. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
+      "Saving the card ends this turn, the one owner card that does (ask "
+      "everything else with owner_input): put your closing message in "
+      "`message`. "
       "The owner answers on the card (and pastes a new key there, never into "
       "chat); the answer resumes you as Allow or Not now. Only the owner's own "
       "answer widens where a key goes. Delegated helpers ask their parent."
@@ -1933,78 +1988,9 @@ _TOOL_DEFINITIONS = {
             "required": ["name"], "additionalProperties": False,
           },
         },
-        "message": CARD_MESSAGE_PROPERTY,
+        "message": KEY_CARD_MESSAGE_PROPERTY,
       },
       "required": ["key", "reason"], "additionalProperties": False,
-    },
-  },
-  REQUEST_RESTART_TOOL: {
-    "name": REQUEST_RESTART_TOOL,
-    "description": (
-      "Ask the owner to restart Möbius so the exact current committed, tested "
-      "restart-loadable platform changes can be loaded. The platform derives "
-      "and binds the action; this tool accepts no caller-supplied command or "
-      "source identity. Use it only after the platform-maintenance activation "
-      "preflight. It saves a card with Restart now and a written-response path "
-      "and returns a receipt, NOT approval. Create this chat's own card even "
-      "when another chat has one: each card registers its own visible decision "
-      "and continuation. One later ready restart resumes every still-registered "
-      "chat for its own verification; the platform admits one restart per worker. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "Choosing Restart now is "
-      "handled by the platform without waking an agent to issue the command."
-    ),
-    "inputSchema": {
-      "type": "object", "properties": {"message": CARD_MESSAGE_PROPERTY},
-      "additionalProperties": False,
-    },
-  },
-  REQUEST_QUESTION_TOOL: {
-    "name": REQUEST_QUESTION_TOOL,
-    "description": (
-      "Ask 1–10 ordinary clarifying questions; prefer a small batch when enough. "
-      "Only the question text is required; card-only ids, headings, and an "
-      "empty options list are supplied when omitted. "
-      "The saved card blocks further work until the owner answers or Stops; "
-      "it returns a receipt, NOT an answer. "
-      f"{SAVED_CARD_TERMINAL_INSTRUCTION} "
-      "Finish useful preparation before this call. "
-      "Do not guess, poll or keep a process waiting. "
-      "Answers normally resume the chat, including after restart; explicit close choices do not. Prefer this "
-      "over provider-native questions in live owner chats. Use request_approval "
-      "for permission; use the sealed secure-input helper for secrets. "
-      "Never use in background or scheduled work."
-    ),
-    "inputSchema": {
-      "type": "object", "additionalProperties": False,
-      "required": ["questions"],
-      "properties": {"questions": {
-        "type": "array", "minItems": 1, "maxItems": 10,
-        "items": {
-          "type": "object", "additionalProperties": False,
-          "required": ["question"],
-          "properties": {
-            "id": {
-              "type": "string", "minLength": 1, "maxLength": 80,
-              "description": "Optional stable question id; defaults by position.",
-            },
-            "header": {
-              "type": "string", "minLength": 1, "maxLength": 80,
-              "description": "Optional short card heading; a neutral heading is supplied by default.",
-            },
-            "question": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "options": {"type": "array", "maxItems": 3, "default": [], "items": {
-              "type": "object", "additionalProperties": False,
-              "required": ["label", "description"],
-              "properties": {
-                "label": {"type": "string", "minLength": 1, "maxLength": 100},
-                "description": {"type": "string", "minLength": 1, "maxLength": 500},
-                "on_answer": {"type": "string", "enum": ["resume", "close"],
-                "description": "Default resume. Explicit close saves this choice without an agent reply."},},
-            }},
-          },
-        },
-      }, "message": CARD_MESSAGE_PROPERTY},
     },
   },
   SCREENSHOT_TOOL: {
@@ -2056,9 +2042,9 @@ _TOOL_DEFINITIONS = {
     "description": (
       "Send the owner a push notification for a meaningful event: a finished "
       "long task, an error that needs them outside a card, or when they asked "
-      "to be told. Not for routine confirmations, and not for a saved "
-      "question, approval, restart or secure-input card: the card sends its "
-      "own notification. target defaults to this chat's "
+      "to be told. Not for routine confirmations, and not for anything "
+      "recorded with owner_input: its card sends its own notification. "
+      "target defaults to this chat's "
       "in-app link; use /shell/?app=ID for an app or /shell/?settings=SECTION "
       "for a Settings section. tag groups pushes about one "
       "thing so a newer one replaces the older. The push is skipped while the "
@@ -2114,47 +2100,6 @@ _TOOL_DEFINITIONS = {
           "description": "App id, chat id, or Settings section id; required for app and chat.",
         },
         "activation": {"type": "string", "enum": ["background", "foreground"]},
-      },
-    },
-  },
-  REQUEST_SECRET_TOOL: {
-    "name": REQUEST_SECRET_TOOL,
-    "description": (
-      "Ask the owner for a password, API key, token, or other secret through a "
-      "sealed card. Submitted values go once, as one JSON object on stdin, to "
-      "the consumer command you prepared; they never reach the AI provider or "
-      "the transcript. The consumer runs from cwd with a minimal environment "
-      "and no agent credentials, must not log or persist the values, and its "
-      "output is discarded. preset owner_credentials asks for the owner's "
-      "sign-in change instead. Returns a receipt, NOT the values. "
-      f"{SECRET_CARD_TERMINAL_INSTRUCTION} "
-      "Never in background work."
-    ),
-    "inputSchema": {
-      "type": "object", "additionalProperties": False,
-      "properties": {
-        "preset": {"type": "string", "enum": ["owner_credentials"]},
-        # Limits match secure_inputs.validate_request_spec, which rejects more.
-        "title": {"type": "string", "minLength": 1, "maxLength": 80},
-        "description": {"type": "string", "maxLength": 240},
-        "fields": {
-          "type": "array", "minItems": 1, "maxItems": 8,
-          "items": {
-            "type": "object", "additionalProperties": False,
-            "required": ["name", "type", "label"],
-            "properties": {
-              "name": {"type": "string"},
-              "type": {"type": "string", "enum": ["text", "password"]},
-              "label": {"type": "string", "maxLength": 80},
-              "autocomplete": {"type": "string"},
-            },
-          },
-        },
-        "command": {
-          "type": "array", "items": {"type": "string"}, "minItems": 1,
-          "description": "Consumer argv, e.g. [\"python3\", \"/data/apps/x/store_key.py\"].",
-        },
-        "cwd": {"type": "string", "description": "Absolute working directory; default /data."},
       },
     },
   },
@@ -2323,7 +2268,7 @@ _TOOL_DEFINITIONS = {
           "description": (
             "Who or what can make the condition true. For internal work, "
             "name only an executor that has acknowledged ownership. If only "
-            "the partner can act, use a question card instead of this tool."
+            "the partner can act, record an owner_input request instead of this tool."
           ),
         },
         "github_checks": {
@@ -2452,7 +2397,7 @@ _TOOL_DEFINITIONS = {
     "name": CLAIM_AGENT_WORK_TOOL,
     "description": (
       "Atomically claim convergent work that needs no owner approval "
-      "(request_approval claims its own work_key). The first chat wins; a "
+      "(an owner_input approval claims its own work_key). The first chat wins; a "
       "later caller gets the owner; a Goal follows that exact acquisition only "
       "when the response confirms a dependency was created. That Goal resumes "
       "when eligible on completion or release, without polling or a peer interrupt. A helper "
@@ -2526,10 +2471,8 @@ _TOOL_HANDLERS = {
   ASK_PARENT_TOOL: _call_ask_parent,
   STOP_AGENT_TOOL: _call_stop_agent,
   LIST_AGENTS_TOOL: _call_list_agents,
-  REQUEST_APPROVAL_TOOL: _call_request_approval,
-  REQUEST_QUESTION_TOOL: _call_request_question,
+  OWNER_INPUT_TOOL: _call_owner_input,
   REQUEST_KEY_TOOL: _call_request_key,
-  REQUEST_RESTART_TOOL: _call_request_restart,
   PROMOTE_GOAL_TOOL: _call_promote_goal,
   UPDATE_GOAL_TOOL: _call_update_goal,
   READ_GOAL_TOOL: _call_read_goal,
@@ -2548,7 +2491,6 @@ _TOOL_HANDLERS = {
   OPEN_PAGE_TOOL: _call_open_page,
   APP_SCREENSHOT_TOOL: _call_app_screenshot,
   OPEN_ITEM_TOOL: _call_open_item,
-  REQUEST_SECRET_TOOL: _call_request_secret,
   LIST_APPS_TOOL: _call_list_apps,
   APPLY_APP_TOOL: _call_apply_app,
   SCREENSHOT_TOOL: _call_screenshot,
@@ -2591,9 +2533,27 @@ _PEER_TOOLS_ABSENT_MESSAGE = (
 )
 
 
+# A session started before these tools were retired still carries instructions
+# that name them. Its call is not run; the refusal says what replaced them.
+_RETIRED_CARD_TOOLS = {
+  "request_question": "question",
+  "request_approval": "approval",
+  "request_restart": "restart",
+  "request_secret": "secret",
+}
+
+
 def _unavailable_tool_message(name: Any) -> str:
   if name in _PLATFORM_TOOLS.PEER_TOOL_NAMES:
     return _PEER_TOOLS_ABSENT_MESSAGE
+  if name in _RETIRED_CARD_TOOLS:
+    return (
+      f"{name} no longer exists and nothing was saved. Record what you need "
+      f"with owner_input (op add, kind {_RETIRED_CARD_TOOLS[name]}) instead. It "
+      "does not end your turn: keep doing the work that does not depend on the "
+      "answer, write your closing message, and end the turn normally; the "
+      "open requests are then shown to the owner on a card."
+    )
   return "Tool is unavailable for this agent run."
 
 

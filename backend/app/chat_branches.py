@@ -69,8 +69,9 @@ def _inert_copy(row):
   """A copied row that offers nothing live in the branch.
 
   Questions, secure inputs and Goal cards are answerable or live only through
-  the chat's own durable state (``pending_question_id``, its runs and Goals),
-  none of which a branch copies. A paused turn's note is the one row-level
+  the chat's own durable state (``pending_question_id``,
+  ``open_request_card_id`` and its request rows, its runs and Goals), none of
+  which a branch copies. A paused turn's note is the one row-level
   action: its Resume would continue a run the branch does not have.
   """
   row = copy.deepcopy(row)

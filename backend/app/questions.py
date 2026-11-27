@@ -30,18 +30,19 @@ dataclass.
 
 Design note — two ways to pause. `AskUserQuestion` above is an IN-TURN wait:
 the turn's process stays alive, suspended on the future, and the wait is lost
-on restart. A saved owner-input card (request_question / request_approval /
-secure-input) is instead a DURABLE wait — the card and `pending_question_id`
-persist, the turn ENDS so the process is released, and the answer route
-resumes a fresh turn (restart-safe). The card is the turn's last act, so the
-agent must say everything before calling it. Claude cuts generation AT the
-card: a PostToolUse hook refuses to continue the agent loop while the receipt
-is still inside the CLI, so no post-card model request is ever made (see
-`ActiveClaudeClient.claim_owner_card_end`). Codex, and a native child agent's
-card, end at the receipt instead — `ChatEventSink.publish` →
+on restart. A saved owner-input card is instead a DURABLE wait — the card and
+its marker persist, the process is released, and the answer route resumes a
+fresh turn (restart-safe). An agent records what it needs with the
+`owner_input` control without ending its turn; the card is published only
+after the turn has ended by itself (`chat._publish_open_owner_requests`), so
+it is terminal by construction. A helper's recorded question to its parent
+does end its turn: Claude cuts generation there with a PostToolUse hook that
+refuses to continue the agent loop while the receipt is still inside the CLI
+(see `ActiveClaudeClient.claim_owner_card_end`). Codex, and a native child
+agent's receipt, end at the receipt instead — `ChatEventSink.publish` →
 `begin_finish_after_owner_card` — which races generation already in flight.
-Anything that does arrive after a card is still recorded and shown: Möbius
-never filters post-card events, so a leak stays visible rather than masked.
+Anything that does arrive after it is still recorded and shown: Möbius never
+filters post-receipt events, so a leak stays visible rather than masked.
 """
 
 from __future__ import annotations
@@ -74,6 +75,10 @@ def accepts_saved_answer(
   continuation request, not a stale race. Position-independent; a later user
   turn (the decision was superseded) is not eligible.
   """
+  if question_id and question_id == chat.open_request_card_id:
+    # A request-list card is answerable exactly while it is the chat's open
+    # list card, including while another turn runs.
+    return True
   open_id = chat.pending_question_id
   if open_id is not None:
     return question_id is None or question_id == open_id
@@ -84,13 +89,48 @@ def accepts_saved_answer(
       continue
     if msg.get("role") != "assistant":
       return False
+    # A request-list card has no tail fallback: once its marker moved on, a
+    # newer card (or nothing) holds those requests, and a branch copy never
+    # owns the source chat's requests.
     return any(
       block.get("type") == "question"
       and block.get("question_id") == question_id
       and not block.get("answers")
+      and not block.get("input_requests")
       for block in (msg.get("blocks") or [])
     )
   return False
+
+
+def owner_waiting_card_id(
+  pending_question_id: str | None,
+  open_request_card_id: str | None,
+  *,
+  running: bool,
+) -> str | None:
+  """The card for which a chat is waiting on its owner, for projections only.
+
+  A barring card (`pending_question_id`) always means waiting. A request-list
+  card never bars a turn, so it means waiting only while no turn runs; pass
+  the card that still shows an open request
+  (`owner_input_requests.shown_request_card`), so a card whose requests were
+  all resolved or withdrawn never reads as waiting. Admission never reads
+  this: its guards read `pending_question_id` alone.
+  """
+  if pending_question_id is not None:
+    return pending_question_id
+  return None if running else open_request_card_id
+
+
+class QuestionNoLongerOpen(Exception):
+  """The exact card an answer names is no longer accepting answers."""
+
+
+class QuestionCardChanged(QuestionNoLongerOpen):
+  """A request on the card changed while the owner was answering; the
+  updated card follows when the agent's turn ends."""
+
+  code = "card_out_of_date"
 
 
 def saved_question(chat, question_id: str | None) -> dict | None:
@@ -142,11 +182,21 @@ def validate_saved_answer(
     if key is None or key in matched:
       raise AnswerConflict("The answer does not match this question card.")
     matched[key] = answer
-  if set(matched) != set(specs):
+  # A request-list card holds independent requests: answering some and
+  # leaving the rest open is a complete submission.
+  if set(matched) != set(specs) and not card.get("input_requests"):
     raise AnswerConflict("The answer does not match this question card.")
+  if card.get("input_requests"):
+    from app.owner_input_requests import EntryNotAnswerable, require_answerable_entries
+    try:
+      require_answerable_entries(card, answers, selections)
+    except EntryNotAnswerable as exc:
+      raise AnswerConflict(str(exc)) from exc
   if not selections:
     return
-  if not set(selections).issubset(specs):
+  # On a request-list card a selection is valid only for a request the
+  # submission also answers.
+  if not set(selections).issubset(matched):
     raise AnswerConflict("The selected options do not belong to this question.")
   for key, selected in selections.items():
     spec = specs[key]
@@ -197,6 +247,11 @@ def typed_replies(card: dict) -> list[tuple[str, str]]:
   options expects typed text, so it is never a typed reply. A client that
   predates option identities sends a pick as its label, and a multi-select
   pick as its labels joined with ", ", so those still count as picks.
+
+  A request-list card has no such clients: every pick names its option, so
+  text without a selection is typed even when it equals a label. Typing
+  "Approve" or "Restart now" grants and restarts nothing, and the agent must
+  not read it as the choice.
   """
   answers = card.get("answers") or {}
   picked = card.get("selected_options") or {}
@@ -209,9 +264,9 @@ def typed_replies(card: dict) -> list[tuple[str, str]]:
         or not isinstance(answer, str) or not answer.strip()):
       continue
     labels = {option.get("label") for option in options}
-    if answer in labels or (
+    if not card.get("input_requests") and (answer in labels or (
       question.get("multiSelect") and set(answer.split(", ")) <= labels
-    ):
+    )):
       continue
     replies.append((prompt, answer))
   return replies
@@ -323,7 +378,9 @@ def open_continuation_question(chat, question_id: str | None) -> dict | None:
   The durable marker is authoritative even while its publishing turn is still
   finishing. Native provider questions retain their existing future contract.
   """
-  if not question_id or chat.pending_question_id != question_id:
+  if not question_id or question_id not in (
+    chat.pending_question_id, chat.open_request_card_id,
+  ):
     return None
   for message in reversed(transcript_rows.history(chat)):
     for block in message.get("blocks") or []:
@@ -338,18 +395,27 @@ def open_continuation_question(chat, question_id: str | None) -> dict | None:
 def require_quiet_close_holds_no_claim(db, chat, question_id: str) -> None:
   """A card that claimed an exact action cannot be closed without a reply.
 
-  ``request_approval`` claims its action under the card's ``action_key``. Only
+  An approval request claims its action under the card's ``action_key`` (on
+  a request-list card, under its entry's). Only
   a reply reaches the agent that can complete or release that claim, so a
   quiet close would strand it with no one left to settle it.
   """
   from app import models
 
   card = saved_question(chat, question_id)
-  action_key = card.get("action_key") if isinstance(card, dict) else None
-  if not isinstance(action_key, str) or not action_key:
+  if not isinstance(card, dict):
+    return
+  # A request-list card names each approval's action on its own entry.
+  action_keys = {
+    key for key in [card.get("action_key")] + [
+      question.get("action_key") for question in card.get("questions") or []
+      if isinstance(question, dict)
+    ] if isinstance(key, str) and key
+  }
+  if not action_keys:
     return
   active_claim = db.query(models.AgentWorkClaim.id).filter(
-    models.AgentWorkClaim.work_key == action_key,
+    models.AgentWorkClaim.work_key.in_(action_keys),
     models.AgentWorkClaim.owner_chat_id == chat.id,
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),

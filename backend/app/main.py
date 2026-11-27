@@ -105,7 +105,9 @@ from app.routes import (
   reviewer_router,
   identity_router,
   credits_router,
-  owner_approvals_router,
+  turn_end_router,
+  key_requests_router,
+  owner_input_requests_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
   channels_router, location_router,
@@ -1185,7 +1187,9 @@ app.include_router(app_agent_router)
 app.include_router(delegations_router)
 app.include_router(chat_waits_router)
 app.include_router(goal_plans_router)
-app.include_router(owner_approvals_router)
+app.include_router(turn_end_router)
+app.include_router(key_requests_router)
+app.include_router(owner_input_requests_router)
 app.include_router(chat_logs_router)
 app.include_router(connectors_router)
 app.include_router(connectors_public_router)

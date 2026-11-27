@@ -29,6 +29,7 @@ from app.database import SessionLocal
 from app.platform_restart import activation_notice, activation_wait_verdict
 from app.routes import chats_stream
 from app.timeutil import now_naive_utc
+from tests import owner_input_fixtures as inputs
 
 
 @pytest.fixture(autouse=True)
@@ -642,12 +643,7 @@ def test_authenticated_agent_from_another_chat_dispatches_restart_once(
   )
   answerer_auth = {"Authorization": f"Bearer {answerer_token}"}
   try:
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert saved.status_code == 200, saved.text
-    qid = saved.json()["question_id"]
+    qid = inputs.save_legacy_restart(sink)
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
       block = list(transcript_rows.history(row))[-1]["blocks"][-1]
@@ -696,24 +692,14 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     expires_delta=timedelta(minutes=5),
   )
   try:
-    # The restart card shares the 20,000-character closing-message limit.
-    over = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={"message": "x" * 20_001},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert over.status_code == 422
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request",
-      json={"message": "The fix is committed and tested." + " " + "y" * 19_967},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert saved.status_code == 200, saved.text
-    qid = saved.json()["question_id"]
+    sink.publish({"type": "text", "content": "The fix is committed and tested."})
+    qid = inputs.save_legacy_restart(sink)
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
-      block = list(transcript_rows.history(row))[-1]["blocks"][-1]
-      assert block["message"] == "The fix is committed and tested." + " " + "y" * 19_967
-      assert len(block["message"]) == 20_000
+      message = list(transcript_rows.history(row))[-1]
+      block = message["blocks"][-1]
+      # The turn's closing text is saved with its card, before it.
+      assert message["blocks"][0]["content"] == "The fix is committed and tested."
       prompt = block["questions"][0]["question"]
       wait_id = block["platform_action"]["wait_id"]
     response = client.post(
@@ -1084,13 +1070,9 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
         headers={"Authorization": f"Bearer {token}"},
       )
       assert promoted.status_code == 200, promoted.text
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
-      headers={"Authorization": f"Bearer {token}"},
-    )
+    inputs.save_legacy_restart(sink)
   finally:
     unregister_active_sink(chat.id, sink)
-  assert saved.status_code == 200, saved.text
   if objective is not None:
     from app import chat as chat_mod
 

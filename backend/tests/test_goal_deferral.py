@@ -244,7 +244,7 @@ def test_normal_not_now_card_answer_can_defer_without_a_second_question_or_recov
   original = approval_run[0].run_token
   promoted = submit(PromoteRunToGoal(chat_id=chat.id, run_token=original, objective="Verify the paid test"))
   goal_id = promoted["goal_id"]
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   _finish(chat, approval_run[0])
   scheduled = []
   monkeypatch.setattr(chats_stream, "_schedule_continuation", lambda **kw: scheduled.append(kw))

@@ -104,6 +104,105 @@
   color: var(--muted);
   margin-bottom: 6px;
 }
+/* Request-list cards: a request whose question changed since the owner's
+   draft was typed carries a quiet "Updated" tag beside its header. */
+.qcard__header:has(.qcard__updated) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.qcard__updated {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 999px;
+  color: var(--accent-text, var(--accent));
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+/* What the owner needs to know to answer; secondary to the prompt. */
+.qcard__context {
+  margin: -2px 0 8px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+  white-space: pre-line;
+}
+/* ── Request-list entries ─────────────────────────────────────────────
+   One card holds every kind. A question and an approval share the card's
+   Submit; a restart and a secret act on their own, so their controls sit
+   inside their own entry and read as a separate, deliberate action. */
+
+/* An approval decides something: its header carries the accent. */
+.qcard__q--approval > .qcard__header {
+  color: var(--accent-text, var(--accent));
+}
+
+/* A secret's header pairs the sealed-input lock with its label. */
+.qcard__entry-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 6px;
+  color: var(--green-text, var(--green));
+  font-size: 12px;
+  font-weight: 600;
+}
+.qcard__entry-lock {
+  margin-top: 4px;
+}
+.qcard__secret-form {
+  margin-top: 4px;
+}
+.qcard__secret-form .secure-card__field input:focus-visible {
+  border-color: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 16%, transparent);
+}
+.qcard__secret-form .secure-card__submit,
+.qcard__secret-form .secure-card__cancel {
+  font-size: 13px;
+  min-height: 38px;
+}
+.qcard__entry-foot {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.qcard__q--secret .secure-card__receipts {
+  margin-top: 2px;
+}
+
+/* What an entry settled on its own: a status, not an error. */
+.qcard__entry-status {
+  margin: 2px 0 8px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+.qcard__entry-outcome {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+.qcard__entry-outcome--failed {
+  color: color-mix(in srgb, var(--danger) 80%, var(--text));
+}
+
+.qcard--grouped .qcard__q .qcard__submit-error,
+.qcard__q .qcard__submit-error {
+  margin: 10px 0 0;
+}
+/* A restart entry's Continue is the legacy Restart card's button, inside its
+   entry: it sends only that entry's press. */
+.qcard--grouped .qcard__submit.qcard__submit--entry,
+.qcard__submit.qcard__submit--entry {
+  width: 100%;
+  margin: 12px 0 0;
+}
 .qcard__text {
   font-size: 14.5px;
   line-height: 1.45;
@@ -419,6 +518,19 @@
   margin: 0 16px 8px;
 }
 
+/* A key card's wait before Submit counts, said in view above the button. */
+.qcard__key-hint {
+  margin-top: 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: center;
+}
+
+.qcard__key-hint + .qcard__submit {
+  margin-top: 8px;
+}
+
 .qcard__submit {
   display: block;
   width: 100%;
@@ -461,22 +573,6 @@
   box-shadow: inset 0 0 0 1px var(--border);
   color: var(--muted);
 }
-.qcard__submit-hint {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  text-align: center;
-}
-.qcard__submit-hint + .qcard__submit {
-  margin-top: 8px;
-}
-.qcard--grouped .qcard__submit-hint {
-  margin: 0 16px 8px;
-}
-.qcard--grouped .qcard__submit-hint + .qcard__submit {
-  margin-top: 0;
-}
 .qcard__q--missing .qcard__hint {
   color: var(--accent-text, var(--accent));
   font-weight: 600;
@@ -505,8 +601,7 @@
     margin-inline: 14px;
   }
 
-  .qcard--grouped .qcard__submit-error,
-  .qcard--grouped .qcard__submit-hint {
+  .qcard--grouped .qcard__submit-error {
     margin-inline: 14px;
   }
 }
@@ -543,3 +638,28 @@
   color: var(--muted);
 }
 .qcard .settings-keys__paste { margin-top: 8px; }
+
+/* A restart entry's Continue must not read as the card's shared Submit when
+   it is the last entry: a rule closes the entry above the shared button. */
+.qcard--grouped .qcard__q--restart:last-child:not(:only-child) {
+  margin-bottom: 16px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border-light, var(--border));
+}
+
+/* A list card's refusal follows its Submit (see QuestionCard). */
+.qcard__submit + .qcard__submit-error--after {
+  margin-top: 8px;
+}
+.qcard--grouped .qcard__submit + .qcard__submit-error--after {
+  margin: -8px 16px 16px;
+}
+@media (max-width: 560px) {
+  .qcard--grouped .qcard__submit + .qcard__submit-error--after {
+    margin-inline: 14px;
+  }
+}
+/* A restart entry's status sits in its controls' slot, under its prompt. */
+.qcard__action-status.qcard__entry-settled {
+  margin: 2px 0 0;
+}

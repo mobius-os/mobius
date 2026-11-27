@@ -1,8 +1,10 @@
-"""End a turn at its saved card or recorded question before Codex resumes.
+"""End a turn at its recorded question or key card before Codex resumes.
 
-No transcript is read here. A bounded receipt supplies only an identity; the
-run-bound backend validates that this exact turn produced it. Output remains
-unchanged, and the ordinary receipt path still owns cards not seen by a hook.
+A helper's question to its parent (`ask_parent`) and the key vault's saved
+`request_key` card are the turn-ending results; owner-input requests never
+end a turn. No transcript is read here. A bounded receipt supplies only an
+identity; the run-bound backend validates that this exact turn recorded it. Output remains unchanged, and the ordinary
+receipt path still owns receipts not seen by a hook.
 """
 
 from __future__ import annotations

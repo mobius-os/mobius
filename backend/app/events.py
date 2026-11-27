@@ -559,6 +559,14 @@ def _process_question_event(event: dict, assistant_blocks: list) -> bool:
     # updates. Continuation cards have no provider future to keep alive.
     if event.get("response_mode") == "continuation":
       new_block["response_mode"] = "continuation"
+      # A request-list card: its questions are independent owner-input
+      # requests, so a partial answer is a complete submission.
+      if event.get("input_requests") is True:
+        new_block["input_requests"] = True
+        # Entries settled on their own (a sealed consumer in progress, a
+        # pressed restart), keyed by request id.
+        if isinstance(event.get("request_states"), dict) and event["request_states"]:
+          new_block["request_states"] = copy.deepcopy(event["request_states"])
       if isinstance(event.get("secure_input"), dict):
         new_block["secure_input"] = copy.deepcopy(event["secure_input"])
       # An agent's key ask (app/key_request_cards.py): names the vault request.
@@ -896,7 +904,7 @@ def _process_tool_event(event: dict, assistant_blocks: list) -> bool:
       if isinstance(event.get("peer_message"), dict):
         blk["peer_message"] = event["peer_message"]
       # A successful command/MCP result can be the transport receipt for a
-      # saved owner card. The sink validates that exact relationship before
+      # saved key card. The sink validates that exact relationship before
       # stamping it; preserve the identity on the owning tool so presentation
       # can suppress transport without guessing from tool names or output.
       if isinstance(event.get("owner_card_question_id"), str):
@@ -1072,6 +1080,21 @@ def process_event(event: dict, assistant_blocks: list) -> bool:
   blocks changed and a DB save may be warranted.
   """
   event_type = event.get("type")
+
+  if event_type == "input_request_settled":
+    # One entry of a request-list card settled on its own; the rest of the
+    # card stays open and answerable.
+    for block in assistant_blocks:
+      if (block.get("type") == "question"
+          and block.get("question_id") == event.get("question_id")
+          and isinstance(event.get("request_id"), str)
+          and isinstance(event.get("state"), dict)):
+        block["request_states"] = {
+          **(block.get("request_states") or {}),
+          event["request_id"]: copy.deepcopy(event["state"]),
+        }
+        return True
+    return False
 
   if event_type == "answers_applied":
     for block in assistant_blocks:

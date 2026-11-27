@@ -3,13 +3,17 @@ import { InlineMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { LocalAnswersContext } from './localAnswersContext.js'
+import { RequestEntryActionsContext } from './requestEntryActionsContext.js'
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
   clearQuestionDraft,
+  clearRequestListDrafts,
   questionDraftKey,
   readQuestionDraft,
+  readRequestListDraft,
   writeQuestionDraft,
+  writeRequestListDraft,
 } from './questionDraft.js'
 import { autoGrowTextarea, textareaUsesNativeSizing } from './composerTextareaSizing.js'
 import { placeCaretAtTextEnd } from './composerFocusPolicy.js'
@@ -42,12 +46,38 @@ import { KEY_ALLOW } from './keyRequestCardState.js'
 import { earlyAnswerHint } from '../SettingsView/useKeyAnswerGuard.js'
 import KeyRequestDetails from './KeyRequestDetails.jsx'
 import { KeyPasteField } from '../SettingsView/KeyRequest.jsx'
+import {
+  APPROVAL,
+  QUESTION,
+  RESTART,
+  SECRET,
+  entryKind,
+  entryState,
+  mergedEntryStates,
+  restartPressSelection,
+  sharedAnswerValues,
+  shownEntries,
+} from './requestEntries.js'
+import { RestartEntry, SecretEntry } from './RequestEntries.jsx'
 
 
 const CUSTOM_ANSWER_MAX_HEIGHT = 180
 // The server's bound on one answer's files; checked here so the owner hears
 // it when attaching rather than as a failed submit.
 const MAX_ANSWER_FILES = 20
+
+
+// A refused list-card submission gets fixed copy; server text never reaches
+// the card. The refusal's code says which copy applies.
+function listCardRefusalMessage(error) {
+  const status = Number(error?.status)
+  if (error?.code === 'card_out_of_date') {
+    return 'A question on this card changed while you were answering. The updated card appears when the agent finishes this step.'
+  }
+  if (status === 410) return 'This card was replaced by a newer one. What you entered here is kept there.'
+  if (status === 409) return 'Möbius couldn’t accept these answers as sent. Check your choices and submit again.'
+  return ''
+}
 
 
 function resizeCustomAnswer(textarea) {
@@ -59,6 +89,7 @@ export function CustomAnswerArea({
   answered,
   canSubmit,
   disabled,
+  label,
   placeholder,
   onChange,
   onSubmitShortcut,
@@ -133,8 +164,8 @@ export function CustomAnswerArea({
       data-chat-scroll-region
       data-chat-inline-editor="question-answer"
       id={id}
-      aria-label="Custom answer for:"
-      aria-labelledby={`${id} ${questionTextId}`}
+      aria-label={label || 'Custom answer for:'}
+      aria-labelledby={label ? undefined : `${id} ${questionTextId}`}
       placeholder={answered ? 'No custom answer' : (placeholder || 'Or type your own answer…')}
       autoComplete="off"
       rows={1}
@@ -177,6 +208,15 @@ export default function QuestionCard({
   onPrepareAnswer,
   onCancelAnswer,
   disabled,
+  // A request-list card (block.input_requests): each question is one
+  // independent owner-input request, identified across republication by its
+  // `id`. The owner may answer some and leave the rest open.
+  inputRequests = false,
+  // block.request_states: what a list card's restart and secret entries
+  // settled on their own, keyed by request id.
+  requestStates,
+  // Press Restart now on one entry; defaults to the chat's entry actions.
+  onRestartEntry,
   // Callback ref that publishes this card's node to the "Möbius asked you
   // something — tap to answer" offscreen observer. Set only by the surface
   // rendering the answerable tail question, and only while the card is still
@@ -188,24 +228,39 @@ export default function QuestionCard({
 }) {
   const draftKey = questionDraftKey(chatId, questionId, questions)
   const cardId = useId()
-  const [answers, setAnswers] = useState(
-    () => readQuestionDraft(draftKey).answers,
-  )
-  const [otherTexts, setOtherTexts] = useState(
-    () => readQuestionDraft(draftKey).otherTexts,
-  )
+  // Ordinary cards keep one draft per card. A request-list card keeps one per
+  // request (see readRequestListDraft), so a republished request restores the
+  // owner's half-typed input. Only an answerable list card reads or writes
+  // them: a superseded card must neither echo nor overwrite the draft its
+  // successor now owns, so a card first shown inactive loads them once it
+  // becomes answerable.
+  const requestDraftsLoadedRef = useRef(false)
+  const initialDraftRef = useRef(null)
+  if (initialDraftRef.current === null) {
+    if (!inputRequests) {
+      initialDraftRef.current = { ...readQuestionDraft(draftKey), updated: [] }
+    } else if (!disabled && !answeredMap) {
+      requestDraftsLoadedRef.current = true
+      initialDraftRef.current = readRequestListDraft(chatId, questions)
+    } else {
+      initialDraftRef.current = { answers: {}, otherTexts: {}, files: [], updated: [] }
+    }
+  }
+  const [answers, setAnswers] = useState(() => initialDraftRef.current.answers)
+  const [otherTexts, setOtherTexts] = useState(() => initialDraftRef.current.otherTexts)
+  // Request ids whose question changed since the owner's draft was typed.
+  const [updatedRequests, setUpdatedRequests] = useState(() => initialDraftRef.current.updated)
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(null)
   const [submitError, setSubmitError] = useState('')
   // Set by a tap on Submit while answers are missing: the unanswered
   // questions' hints turn to the accent colour so the gap is easy to find.
   const [showMissing, setShowMissing] = useState(false)
-  const submitHintId = `qcard-submit-hint-${encodeURIComponent(draftKey)}`
   const pointerSelectionRef = useRef(null)
   const preparedSubmissionRef = useRef(null)
   const fileInputRef = useRef(null)
   const initialFilesRef = useRef(null)
-  if (initialFilesRef.current === null) initialFilesRef.current = restoredQuestionFiles(readQuestionDraft(draftKey).files, questions)
+  if (initialFilesRef.current === null) initialFilesRef.current = restoredQuestionFiles(initialDraftRef.current.files, questions)
   const attachTargetRef = useRef(null)
   const { files, addFiles, removeFile, clearFiles, discardFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
   const readyFiles = files.filter(file => file.status === 'done')
@@ -220,6 +275,15 @@ export default function QuestionCard({
   const pendingFiles = files.some(file => file.status === 'uploading')
 
   const localAnswers = useContext(LocalAnswersContext)
+  const entryActions = useContext(RequestEntryActionsContext)
+  // A state this tab saw an entry settle into before the block carries it
+  // (a Restart now or sealed-submit response). The block's own record wins.
+  const [localEntryStates, setLocalEntryStates] = useState({})
+  const states = inputRequests ? mergedEntryStates(requestStates, localEntryStates) : {}
+  const noteEntryState = (requestId, state) => {
+    setLocalEntryStates(prev => ({ ...prev, [requestId]: state }))
+    entryActions?.applyEntryState?.(questionId, requestId, state)
+  }
   const localAnswer = (localAnswers || []).find(record => (
     String(record.chatId) === String(chatId)
     && record.body?.question_id === questionId
@@ -256,6 +320,29 @@ export default function QuestionCard({
   const chosenKeyOption = keyCard
     ? (questions[0]?.options || []).find(option => option.label === answers[questions[0]?.question])?.id
     : null
+  // A list card no longer answerable (submitted, superseded, or copied into a
+  // branch) keeps only the entries answered or settled on it. The others were
+  // never answered here: they come back on the next card.
+  const listClosed = inputRequests && (answered || (disabled && !locallyQueued))
+  const visibleQuestions = inputRequests
+    ? shownEntries(questions, { answers: displayAnswers, states, closed: listClosed })
+    : questions
+  const shownGrouped = visibleQuestions.length > 1
+  // Restart and secret entries settle on their own; questions, approvals and
+  // a written reply to a restart go through the shared Submit. An entry
+  // already settled takes no further part.
+  const settledIds = inputRequests
+    ? questions.filter(q => q.id && entryState(states, q)).map(q => q.id).join('\n')
+    : ''
+  const sharedQuestions = inputRequests
+    ? questions.filter(q => entryKind(q) !== SECRET && !entryState(states, q))
+    : questions
+  const openEntryCount = inputRequests
+    ? questions.filter(q => !entryState(states, q)).length
+    : questions.length
+  const onlyRestartReplies = inputRequests && sharedQuestions.length > 0
+    && sharedQuestions.every(q => entryKind(q) === RESTART)
+  const pressRestart = onRestartEntry || entryActions?.pressRestartEntry
 
   // ChatView is keyed by chat, so switching away remounts this card. Keep an
   // unsubmitted selection in the same per-tab cache as composer drafts; the
@@ -265,6 +352,7 @@ export default function QuestionCard({
   // sources can briefly hand off through a disabled card. Clearing there used
   // to erase the owner's selection precisely when the network returned.
   useEffect(() => {
+    if (inputRequests) return
     if (answered) {
       clearQuestionDraft(draftKey)
       // Files still held here were never sent from this tab. The server keeps
@@ -273,30 +361,86 @@ export default function QuestionCard({
       return
     }
     writeQuestionDraft(draftKey, { answers, otherTexts, files })
-  }, [draftKey, answers, otherTexts, files, answered, discardFiles])
+  }, [inputRequests, draftKey, answers, otherTexts, files, answered, discardFiles])
 
-  const unanswered = unansweredQuestions(questions, answers, otherTexts, readyFiles)
-  const allAnswered = unanswered.length === 0
+  // A list card first shown inactive (e.g. before the open-card marker
+  // arrived) picks up its requests' drafts once it becomes answerable.
+  useEffect(() => {
+    if (!inputRequests || requestDraftsLoadedRef.current || disabled || answered) return
+    requestDraftsLoadedRef.current = true
+    const draft = readRequestListDraft(chatId, questions)
+    setAnswers(prev => ({ ...draft.answers, ...prev }))
+    setOtherTexts(prev => ({ ...draft.otherTexts, ...prev }))
+    setUpdatedRequests(draft.updated)
+  }, [inputRequests, disabled, answered, chatId, questions])
+
+  // Answered requests never reappear, so their drafts are cleared; requests
+  // left open keep theirs for the card that republishes them. A list card
+  // writes only while it is the answerable one.
+  const answeredRequestIds = inputRequests && answered
+    ? questions.filter(q => q.id && displayAnswers[q.question]).map(q => q.id).join('\n')
+    : ''
+  useEffect(() => {
+    if (!inputRequests) return
+    // An entry settled on its own (Restart now, a sealed submission) is never
+    // offered again, so its reply draft goes with it. A secret entry never
+    // has a draft: its values exist only in its form until submitted.
+    const settled = settledIds ? settledIds.split('\n') : []
+    if (answered) {
+      clearRequestListDrafts(chatId, [...(answeredRequestIds ? answeredRequestIds.split('\n') : []), ...settled])
+      if (files.length) discardFiles()
+      return
+    }
+    if (disabled || !requestDraftsLoadedRef.current) return
+    if (settled.length) clearRequestListDrafts(chatId, settled)
+    // A Restart now choice is never kept: a later card must not come back
+    // with the restart already chosen.
+    writeRequestListDraft(
+      chatId,
+      questions.filter(q => entryKind(q) !== SECRET && !settled.includes(q.id)),
+      { answers: sharedAnswerValues(questions, answers), otherTexts, files, updated: updatedRequests },
+    )
+  }, [inputRequests, chatId, questions, answers, otherTexts, files, updatedRequests, answered, answeredRequestIds, settledIds, disabled, discardFiles])
+
+  // What the shared Submit carries: choosing Restart now is not an answer.
+  const sharedAnswers = inputRequests ? sharedAnswerValues(questions, answers) : answers
+  const unanswered = unansweredQuestions(sharedQuestions, sharedAnswers, otherTexts, readyFiles)
+  const answeredCount = sharedQuestions.length - unanswered.length
+  // On a list card "all answered" means nothing open is left behind, so an
+  // open secret or unpressed restart keeps a submission partial.
+  const allAnswered = inputRequests
+    ? answeredCount === openEntryCount
+    : unanswered.length === 0
+  // A request-list card submits whatever is answered; the rest stay open.
+  const enoughAnswered = inputRequests ? answeredCount > 0 : allAnswered
+  const partialSubmit = inputRequests && answeredCount > 0 && !allAnswered
   const selectedOptions = restartCardSelectedOptions(
     platformAction,
     questions,
     answers,
   )
-  const canSubmit = allAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
+  const canSubmit = enoughAnswered && !pendingFiles && (!restartAction || selectedOptions !== null)
     && (!keyCard || ['pending', 'denied', 'allowed', 'gone'].includes(keyCard.state) && keyCard.ready(chosenKeyOption))
   // Incomplete cards stay tappable to reveal the first missing answer. Pending
   // uploads alone still disable submission until their durable IDs arrive.
-  const unansweredLook = !allAnswered && !pendingFiles && !restartAction
+  const unansweredLook = !enoughAnswered && !pendingFiles && !restartAction
     && !selectionLocked
   const needsAnswers = unansweredLook && !disabled && !submitting
-  // Quiet until a tap: the card shows no progress count up front.
-  const submitHint = needsAnswers && showMissing
-    ? 'Answer each question before submitting'
-    : ''
+  // Quiet until a tap: the card shows no progress count up front. A partial
+  // list submission says what it sends in its button (submitLabel).
+  let submitHint = ''
+  if (needsAnswers && showMissing) {
+    submitHint = inputRequests
+      ? 'Answer at least one question to submit'
+      : 'Answer each question before submitting'
+  }
 
   function showFirstUnanswered(questionCard) {
     setShowMissing(true)
-    const index = questions.indexOf(unanswered[0])
+    // A restart has no answer to point at; lead to something answerable.
+    const index = questions.indexOf(
+      unanswered.find(q => entryKind(q) !== RESTART) || unanswered[0],
+    )
     const node = questionCard?.querySelector(`[data-question-index="${index}"]`)
     if (!node) return
     const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
@@ -382,9 +526,19 @@ export default function QuestionCard({
       }
     }
     const resolved = {}
-    const lines = questions.map(q => {
+    // A list card sends only the requests that have an answer; a blank one is
+    // omitted entirely so it stays open rather than being answered with "".
+    // Only questions, approvals and written restart replies take part: a
+    // secret or Restart now never travels through the answers path.
+    const submittedQuestions = inputRequests
+      ? sharedQuestions.filter(q => !unanswered.includes(q))
+      : questions
+    const optionSubmission = questionOptionSubmission(submittedQuestions, sharedAnswers)
+    // `on_answer: "close"` must not end the conversation while requests stay open.
+    if (inputRequests && !allAnswered) optionSubmission.closeOnlySelection = false
+    const lines = submittedQuestions.map(q => {
       const own = readyFiles.filter(file => fileBelongsToQuestion(file.group, q.question, questions.length))
-      const val = resolveQuestionAnswer(answers[q.question], otherTexts[q.question])
+      const val = resolveQuestionAnswer(sharedAnswers[q.question], otherTexts[q.question])
         || (own.length ? `Attached ${own.length} file${own.length === 1 ? '' : 's'}` : '')
       resolved[q.question] = val
       const filesLine = own.length ? `\n  Files: ${own.map(file => file.name).join(', ')}` : ''
@@ -400,7 +554,7 @@ export default function QuestionCard({
         lines.join('\n'),
         resolved,
         questionId,
-        { questionCard, preparedSubmission, attachments: answerAttachments, ...questionOptionSubmission(questions, answers) },
+        { questionCard, preparedSubmission, attachments: answerAttachments, ...optionSubmission },
       )
       // Only settle (and therefore clear the durable per-tab draft) after the
       // answer endpoint confirms that the transcript write committed.
@@ -418,9 +572,13 @@ export default function QuestionCard({
       // Only a 409 explains the answer itself (why it cannot be accepted), so
       // show its detail; every other failure keeps the friendly retry copy so
       // raw backend strings never reach the card.
-      const rejectionDetail = error?.status === 409 && typeof error?.detail === 'string'
-        ? error.detail.trim()
-        : ''
+      // An ordinary card keeps its existing 409 explanation; a list card
+      // shows only fixed copy (listCardRefusalMessage).
+      const rejectionDetail = inputRequests
+        ? listCardRefusalMessage(error)
+        : error?.status === 409 && typeof error?.detail === 'string'
+          ? error.detail.trim()
+          : ''
       setSubmitError(
         !getOnlineSnapshot()
           ? 'You’re offline. Your choice is saved — submit it when you’re back online.'
@@ -432,7 +590,11 @@ export default function QuestionCard({
     }
   }
 
+  // A partial list submission counts what it sends against everything the
+  // card still has open, of every kind: "Submit 1 of 3 answers" on a card
+  // with a question, a secret and a restart says two stay open.
   let submitLabel = writtenRestartAction ? 'Continue' : 'Submit'
+  if (partialSubmit) submitLabel = `Submit ${answeredCount} of ${openEntryCount} answers`
   if (answered) submitLabel = 'Submitted'
   if (submitting) submitLabel = 'Submitting…'
   if (locallyQueued) submitLabel = localAnswer.deliveryOutcome === 'delivered'
@@ -454,15 +616,38 @@ export default function QuestionCard({
     ? sentAttachments.some(file => cardLevel(file.question))
     : files.some(file => cardLevel(file.group))
 
+  // A list card the agent carried on past with nothing answered or settled
+  // is drawn by the reply as an "Asked a question" activity row instead
+  // (askedQuestionsActivity.js); entries left unanswered on a card that kept
+  // answers are not listed.
+  if (inputRequests && listClosed && visibleQuestions.length === 0) return null
+
+  // A list card's title counts what it shows; a card holding more than
+  // questions and approvals counts requests rather than decisions.
+  const sensitiveShown = inputRequests && visibleQuestions.some(q => entryKind(q) === RESTART || entryKind(q) === SECRET)
+  let groupNoun = sensitiveShown ? 'requests' : 'decisions'
+  if (listClosed) groupNoun = answered ? 'answered' : 'settled here'
+  const groupTitle = `${visibleQuestions.length} ${groupNoun}`
+  // A list card says nothing its Submit button does not already say.
+  const groupCopy = inputRequests ? '' : 'Answer each question, then submit them together.'
+  const entryInteractive = !disabled && !selectionLocked
+  // The shared Submit belongs to questions, approvals and restart replies. A
+  // card of only secrets has none, and a restart that would be its only entry
+  // sends its reply with its own Continue, as the legacy Restart card did. A
+  // card closed without answers (superseded) shows no Submit slot.
+  const showsSharedSubmit = !inputRequests || (listClosed
+    ? answered
+    : (sharedQuestions.length > 0 && !onlyRestartReplies) || locallyQueued)
+
   return (
     <div
-      className={`qcard${grouped ? ' qcard--grouped' : ''}${answered ? ' qcard--answered' : ''}`}
+      className={`qcard${shownGrouped ? ' qcard--grouped' : ''}${answered ? ' qcard--answered' : ''}`}
       data-scroll-anchor-key={draftKey}
       data-question-id={questionId}
       tabIndex={-1}
       ref={answered ? null : pendingCardRef}
       aria-disabled={disabled && !answered ? true : undefined}
-      aria-label={grouped ? `${questions.length} decisions` : undefined}
+      aria-label={shownGrouped ? groupTitle : undefined}
     >
       {actionStatusLabel && (
         <div className="qcard__action-status" role="status">
@@ -472,19 +657,83 @@ export default function QuestionCard({
           )}
         </div>
       )}
-      {grouped && (
+      {shownGrouped && (
         <div className="qcard__group-head">
           <div>
-            <div className="qcard__group-title">{questions.length} decisions</div>
-            <div className="qcard__group-copy">
-              Answer each question, then submit them together.
-            </div>
+            <div className="qcard__group-title">{groupTitle}</div>
+            {groupCopy && <div className="qcard__group-copy">{groupCopy}</div>}
           </div>
-          <span className="qcard__group-count">{questions.length}</span>
+          <span className="qcard__group-count">{visibleQuestions.length}</span>
         </div>
       )}
       <div className="qcard__questions">
-        {questions.map((q, qi) => {
+        {visibleQuestions.map(q => {
+        const qi = questions.indexOf(q)
+        const kind = inputRequests ? entryKind(q) : QUESTION
+        const state = inputRequests ? entryState(states, q) : null
+        const missing = showMissing && needsAnswers && unanswered.includes(q)
+        if (kind === SECRET) {
+          return (
+            <div key={q.id ?? qi} className="qcard__q qcard__q--secret" data-question-index={qi}>
+              <SecretEntry
+                chatId={chatId}
+                entry={q}
+                state={state}
+                interactive={entryInteractive}
+                onState={noteEntryState}
+              />
+            </div>
+          )
+        }
+        if (kind === RESTART) {
+          const selection = restartPressSelection(q)
+          const answeredText = displayAnswers[q.question] || ''
+          const restartOption = (q.options || []).find(opt => selection?.[q.id]?.[0] === opt.id)
+          const restartTextId = `${cardId}-q${qi}`
+          return (
+            <div key={q.id ?? qi} className={`qcard__q qcard__q--restart${missing ? ' qcard__q--missing' : ''}`} data-question-index={qi}>
+              <RestartEntry
+                entry={q}
+                state={state}
+                interactive={entryInteractive}
+                textId={restartTextId}
+                chosen={Boolean(restartOption) && answers[q.question] === restartOption.label}
+                onChoose={() => restartOption && selectOption(q.question, restartOption.label)}
+                onPress={pressRestart && selection
+                  ? () => pressRestart({ questionId, requestId: q.id, selectedOptions: selection })
+                  : undefined}
+                onState={noteEntryState}
+                answeredText={answeredText}
+                onInternalNav={onInternalNav}
+                onSubmitReply={onlyRestartReplies
+                  ? questionCard => handleSubmit(questionCard, null)
+                  : undefined}
+                replyReady={canSubmit}
+                replySubmitting={submitting}
+                replyError={onlyRestartReplies && !answered && !locallyQueued ? submitError : ''}
+                reply={(
+                  <div className="qcard__answer-row">
+                    <div className={`qcard__composer${otherTexts[q.question] || answeredText ? ' qcard__composer--active' : ''}`}>
+                      <CustomAnswerArea
+                        answered={selectionLocked}
+                        canSubmit={canSubmit && allAnswered}
+                        disabled={selectionLocked || disabled || submitting}
+                        label={`Reply instead of restarting: ${q.question}`}
+                        placeholder="Or tell me what you’d like to do instead…"
+                        onChange={text => setOtherText(q.question, text)}
+                        onSubmitShortcut={(questionCard) => {
+                          if (canSubmit) handleSubmit(questionCard, null)
+                        }}
+                        value={selectionLocked ? answeredText : (otherTexts[q.question] || '')}
+                      />
+                    </div>
+                  </div>
+                )}
+              />
+            </div>
+          )
+        }
+        const isApproval = kind === APPROVAL
         const selected = answers[q.question]
         const isMulti = q.multiSelect
         const options = q.options || []
@@ -506,12 +755,19 @@ export default function QuestionCard({
 
         const answeredValue = displayAnswers[q.question]
           || (submitted ? resolveQuestionAnswer(answers[q.question], otherTexts[q.question]) : '')
+        // A list card records which option ids were picked, so a label that
+        // itself contains ", " still highlights correctly.
+        const submittedIds = inputRequests && Array.isArray(submittedOptions?.[q.id])
+          ? submittedOptions[q.id]
+          : null
         const answeredArr = selectionLocked && isMulti
-          ? (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : [])
+          ? (submittedIds
+              ? options.filter(o => submittedIds.includes(o.id)).map(o => o.label)
+              : (answeredValue ? answeredValue.split(', ').map(s => s.trim()) : []))
           : []
         const unmatchedAnswers = selectionLocked
           ? (isMulti
-              ? answeredArr.filter(v => !options.some(o => o.label === v))
+              ? (submittedIds ? [] : answeredArr.filter(v => !options.some(o => o.label === v)))
               : (answeredValue && !options.some(o => o.label === answeredValue)
                   ? [answeredValue]
                   : []))
@@ -531,18 +787,36 @@ export default function QuestionCard({
         // Screen-reader names point at the rendered question, not its Markdown.
         const questionTextId = `${cardId}-q${qi}`
         const attachId = `${questionTextId}-attach`
+        const showsUpdated = inputRequests && !selectionLocked
+          && updatedRequests.includes(q.id)
+        // A list card's question carries no title of its own (the agent's
+        // header repeated the prompt); an approval keeps the label that says
+        // it decides something.
+        const headerText = inputRequests ? (isApproval ? 'Approval' : '') : q.header
 
         return (
           <div
-            key={qi}
-            className={`qcard__q${showMissing && needsAnswers && unanswered.includes(q) ? ' qcard__q--missing' : ''}`}
+            key={inputRequests ? (q.id ?? qi) : qi}
+            className={`qcard__q${isApproval ? ' qcard__q--approval' : ''}${missing ? ' qcard__q--missing' : ''}`}
             data-question-index={qi}
           >
-            {q.header && (
-              <div className="qcard__header"><InlineMarkdown text={q.header} /></div>
+            {(headerText || showsUpdated) && (
+              <div className="qcard__header">
+                {headerText && <InlineMarkdown text={headerText} />}
+                {showsUpdated && <span className="qcard__updated">Updated</span>}
+              </div>
             )}
             <div className="qcard__text" id={questionTextId}><StandardMarkdown text={q.question} literalTags onInternalNav={onInternalNav} /></div>
             {keyCard && !answered && <KeyRequestDetails card={keyCard} />}
+            {inputRequests && q.context && (
+              <div className="qcard__context">{q.context}</div>
+            )}
+            {isApproval && selectionLocked && answeredWithOther && (
+              <div className="qcard__entry-status" role="status">
+                Replied instead
+                <span className="qcard__action-detail">Your reply went to the agent as a message. This was neither approved nor declined.</span>
+              </div>
+            )}
             {/* Single- vs multi-select was indistinguishable until you tapped
                 and watched whether a prior pick cleared. Surface it up front:
                 a caption (with a live count for multi) plus a per-option glyph
@@ -553,6 +827,8 @@ export default function QuestionCard({
                   ? platformAction.observation?.observed_at
                     ? 'Restart again, or reply below'
                     : 'Restart now, or reply below'
+                  : isApproval
+                  ? 'Choose one to decide'
                   : isMulti
                   ? `Select all that apply${selectionCount ? ` · ${selectionCount} selected` : ''}`
                   : 'Choose one'}
@@ -564,7 +840,8 @@ export default function QuestionCard({
             {!completedAction && hasOptions && <div
               className="qcard__opts"
               role={isMulti ? 'group' : 'radiogroup'}
-              aria-labelledby={questionTextId}
+              aria-label={isApproval ? `Decision: ${q.question}` : undefined}
+              aria-labelledby={isApproval ? undefined : questionTextId}
             >
               {/* For multi-select answered state, the comma-joined value is
                   parsed above so each chosen option highlights correctly. */}
@@ -639,7 +916,29 @@ export default function QuestionCard({
             {keyCard?.state === 'pending' && keyCard.needsValue && !answered && chosenKeyOption === KEY_ALLOW && (
               <KeyPasteField answer={keyCard.answer} disabled={inactive} />
             )}
-            {(!completedAction || respondedRestartAction)
+            {/* An approval is decided only by one of its options. A reply
+                written instead is sent as a message that neither approves nor
+                declines and leaves the approval open; its accessible name
+                says so. */}
+            {isApproval && ((!selectionLocked && showsAnswerControls) || (selectionLocked && answeredWithOther)) && (
+              <div className="qcard__answer-row">
+                <div className={`qcard__composer${isOtherSelected || answeredWithOther ? ' qcard__composer--active' : ''}`}>
+                  <CustomAnswerArea
+                    answered={selectionLocked}
+                    canSubmit={canSubmit && allAnswered}
+                    disabled={inactive}
+                    label={`Reply instead of deciding: ${q.question}`}
+                    placeholder="Or type a reply…"
+                    onChange={text => setOtherText(q.question, text)}
+                    onSubmitShortcut={(questionCard) => {
+                      if (canSubmit) handleSubmit(questionCard, null)
+                    }}
+                    value={selectionLocked ? writtenAnswer : (otherTexts[q.question] || '')}
+                  />
+                </div>
+              </div>
+            )}
+            {!isApproval && (!completedAction || respondedRestartAction)
               && !keyCard
               && (!restartAction || writtenRestartAction) && (
               <div className="qcard__answer-row">
@@ -663,7 +962,9 @@ export default function QuestionCard({
                   {fileTray(tag => fileBelongsToQuestion(tag, q.question, questions.length), 'Files for this answer')}
                   <CustomAnswerArea
                     answered={selectionLocked}
-                    canSubmit={canSubmit}
+                    // Enter stays a newline until every request is answered,
+                    // so a list card never sends a partial answer by a keystroke.
+                    canSubmit={canSubmit && allAnswered}
                     disabled={inactive}
                     placeholder={writtenRestartAction
                       ? 'Or tell me what you’d like to do instead…'
@@ -700,7 +1001,7 @@ export default function QuestionCard({
             if (!attachLocked) addAnswerFiles(selected, attachTargetRef.current)
           }} />
       )}
-      {!completedAction && showsAnswerControls && (
+      {!completedAction && showsAnswerControls && showsSharedSubmit && (
         <>
           {locallyQueued && (
             <div className="qcard__queue-status" role="status">
@@ -709,14 +1010,15 @@ export default function QuestionCard({
                 : 'Your answer is saved here and will send when Möbius reconnects.'}
             </div>
           )}
-          {submitError && !answered && !locallyQueued && (
+          {submitError && !answered && !locallyQueued && !inputRequests && (
             <div className="qcard__submit-error" role="status">{submitError}</div>
           )}
-          {submitHint && (
-            <div className="qcard__submit-hint" id={submitHintId}>{submitHint}</div>
-          )}
+          {/* The hint a tap on an incomplete Submit asks for is the button's
+              own label, so it appears without moving anything; this copy
+              only announces it. */}
+          <div className="qcard__submit-hint chat__sr-only" role="status">{submitHint}</div>
           {keyCard && keyCard.guard.early !== null && !answered && (
-            <div className="qcard__submit-hint" role="status">{earlyAnswerHint(keyCard.guard.early)}</div>
+            <div className="qcard__key-hint" role="status">{earlyAnswerHint(keyCard.guard.early)}</div>
           )}
           <button
             type="button"
@@ -724,7 +1026,6 @@ export default function QuestionCard({
             // dimmed by :disabled, rather than turning into a dimmed primary.
             className={`qcard__submit${unansweredLook ? ' qcard__submit--incomplete' : ''}`}
             aria-disabled={needsAnswers || (keyCard && !keyCard.guard.active) || undefined}
-            aria-describedby={submitHint ? submitHintId : undefined}
             onPointerDown={(event) => {
               if (needsAnswers) return
               if (event.button !== 0 || event.isPrimary === false) return
@@ -753,8 +1054,13 @@ export default function QuestionCard({
             }}
             disabled={(!canSubmit && !needsAnswers) || disabled || selectionLocked || submitting}
           >
-            {submitLabel}
+            {submitHint || submitLabel}
           </button>
+          {/* A list card's refusal sits under its Submit: the button the owner
+              just pressed stays where it was. */}
+          {submitError && !answered && !locallyQueued && inputRequests && (
+            <div className="qcard__submit-error qcard__submit-error--after" role="status">{submitError}</div>
+          )}
         </>
       )}
     </div>

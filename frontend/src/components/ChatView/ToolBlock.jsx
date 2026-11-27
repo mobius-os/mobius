@@ -33,6 +33,8 @@ import {
 } from '../../lib/selectableTextControl.js'
 import { useStableImageReference, useToolImagePreview } from './useToolImagePreview.js'
 import ToolEditPreview from './ToolEditPreview.jsx'
+import AskedQuestionsActivity from './AskedQuestionsActivity.jsx'
+import { ASKED_QUESTIONS_TOOL } from './askedQuestionsActivity.js'
 import { toolEditPreview } from './toolEditPreview.js'
 
 const EMPTY_GENERATED_FILES = []
@@ -676,6 +678,17 @@ export default function ToolBlock({
       <AppActivityCard
         t={t}
         chatId={chatId}
+        disclosureKey={disclosureKey}
+        onInternalNav={onInternalNav}
+      />
+    )
+  }
+  if (effectiveToolName(t) === ASKED_QUESTIONS_TOOL) {
+    return (
+      <AskedQuestionsActivity
+        t={t}
+        chatId={chatId}
+        compact={compact}
         disclosureKey={disclosureKey}
         onInternalNav={onInternalNav}
       />

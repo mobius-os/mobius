@@ -1850,3 +1850,31 @@ def test_a_missing_plan_task_names_a_few_tasks_and_counts_the_rest(db, monkeypat
   with pytest.raises(goal_plans.GoalPlanError) as refused:
     goal_plans.helper_plan_task(db, "chat", "missing")
   assert "t0009 and 490 more (500 in all)" in str(refused.value)
+
+
+def test_task_waiting_on_an_open_owner_request_cannot_be_completed(client, owner_token, db):
+  from app import owner_input_requests
+
+  _auth, chat_id = _active_goal(client, owner_token, db)
+  assert _update(client, db, chat_id, {"tasks": [
+    {"id": "build", "title": "Build"}, {"id": "deploy", "title": "Deploy"},
+  ]}).status_code == 200
+  owner_input_requests.add_request(
+    db, chat_id=chat_id, run_id="goal-root", goal_id="goal-1", key="release-target",
+    spec={"prompt": "Staging or production?"}, blocks={"tasks": ["deploy"]},
+  )
+
+  independent = _update(client, db, chat_id, {"tasks": [{"id": "build", "status": "completed"}]})
+  blocked = _update(client, db, chat_id, {"tasks": [{"id": "deploy", "status": "completed"}]})
+  closing = _update(client, db, chat_id, {"complete": True})
+
+  assert independent.status_code == 200, independent.text
+  assert blocked.status_code == 422 and "release-target" in blocked.text, blocked.text
+  assert closing.status_code == 422 and "open owner requests" in closing.text, closing.text
+
+  owner_input_requests.withdraw_request(
+    db, chat_id=chat_id, ref="release-target", reason="Owner chose staging in chat.",
+  )
+  assert _update(client, db, chat_id, {
+    "tasks": [{"id": "deploy", "status": "completed"}],
+  }).status_code == 200

@@ -1,4 +1,5 @@
 import { questionAnswerPatch } from './questionSubmission.js'
+import { applyRequestEntryState } from './requestEntries.js'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { getAuthHeaders, getToken, BASE, chatPath } from '../../api/client.js'
 import {
@@ -213,8 +214,14 @@ const KEPT_SOCKET_DEADMAN_MS = 40000
  *   Fired when the steer's transcript split has COMMITTED. The caller seals the
  *   live stream into its own message, drops the queued-tray entry, and renders
  *   the steered message inline.
- * @param {(questionId: string|null) => void} [callbacks.onLiveQuestion]
+ * @param {(questionId: string|null, info: {inputRequests: boolean}) => void} [callbacks.onLiveQuestion]
  *   Fired when the stream shows the currently-live AskUserQuestion card.
+ *   `inputRequests` marks a request-list card, which is shown but never bars
+ *   the composer (chat.open_request_card_id rather than pending_question_id).
+ * @param {(event: {question_id: string, request_id: string, kind: string, state: object}) => void} [callbacks.onInputRequestSettled]
+ *   Fired when one entry of a request-list card settled on its own (Restart
+ *   now pressed, a sealed input consumed or cancelled). The stream items are
+ *   already patched; the caller patches the durable transcript.
  * @param {(questionKey: string) => void} [callbacks.onQuestionResponseStart]
  *   Fired in the same React commit as the first renderable assistant activity
  *   after an answer. The answer patch itself is not response activity.
@@ -265,6 +272,7 @@ export default function useStreamConnection(chatId, {
   onSteeredIntoTurn,
   onSteerDeliveryFailed,
   onLiveQuestion,
+  onInputRequestSettled,
   onQuestionResponseStart,
   onContextUsage,
   onOwnerSendAccepted,
@@ -765,6 +773,8 @@ export default function useStreamConnection(chatId, {
   onSteerDeliveryFailedRef.current = onSteerDeliveryFailed
   const onLiveQuestionRef = useRef(onLiveQuestion)
   onLiveQuestionRef.current = onLiveQuestion
+  const onInputRequestSettledRef = useRef(onInputRequestSettled)
+  onInputRequestSettledRef.current = onInputRequestSettled
   const onContextUsageRef = useRef(onContextUsage)
   onContextUsageRef.current = onContextUsage
   const queuedContinuationRef = useRef(false)
@@ -1264,7 +1274,14 @@ export default function useStreamConnection(chatId, {
           } else if (event.type === 'question') {
             const questions = event.questions || []
             if (questions.length > 0 && questions[0]?.question) {
-              flushBuffer()
+              // A card appears only once the text above it has finished
+              // revealing. Later events wait behind
+              // it in order, as they do behind done.
+              if (isCatchUp) flushBuffer()
+              else {
+                await finishTextReveal()
+                if (!isCurrent()) return
+              }
               // Coalesce by stable identity (question id, falling back
               // to text) AND absorb the pending tool item for the same
               // call. The runner publishes tool_start(AskUserQuestion)
@@ -1284,6 +1301,13 @@ export default function useStreamConnection(chatId, {
               if (event.key_request) incoming.key_request = event.key_request
               if (event.message) incoming.message = event.message
               if (event.question_id) incoming.question_id = event.question_id
+              if (event.input_requests === true) incoming.input_requests = true
+              // What entries settled on their own before this card reached
+              // the stream (a sealed input already being consumed).
+              if (event.input_requests === true && event.request_states
+                  && typeof event.request_states === 'object') {
+                incoming.request_states = event.request_states
+              }
               // Re-arm the replayed event with any answer the user already
               // submitted this turn. After a reconnect wipe upsertQuestionItem
               // has no prior item to carry answers from; this ref does, and it
@@ -1293,7 +1317,9 @@ export default function useStreamConnection(chatId, {
                 questionKey(incoming)
               )
               if (knownReceipt) Object.assign(incoming, knownReceipt)
-              onLiveQuestionRef.current?.(event.question_id || null)
+              onLiveQuestionRef.current?.(event.question_id || null, {
+                inputRequests: incoming.input_requests === true,
+              })
               applyStreamItems(
                 prev => upsertQuestionItem(prev, incoming),
               )
@@ -1337,6 +1363,12 @@ export default function useStreamConnection(chatId, {
                   ? { ...item, secure_input: { ...item.secure_input, status } }
                   : item
             )))
+          } else if (event.type === 'input_request_settled') {
+            // One entry of a request-list card settled on its own; the rest of
+            // the card stays open. Patch the live card here and the durable
+            // transcript through the caller (the card may already be there).
+            applyStreamItems(prev => applyRequestEntryState(prev, event))
+            onInputRequestSettledRef.current?.(event)
           } else if (event.type === 'answers_applied') {
             // The question was answered (by this tab, another tab, or the
             // in-process answer delivery). Patch the in-flight card to
@@ -1666,6 +1698,9 @@ export default function useStreamConnection(chatId, {
       answers = undefined,
       question_id = undefined,
       selected_options = undefined,
+      // Settles one entry of a request-list card (Restart now): no answers,
+      // never a turn start, so the stream is left exactly as it is.
+      entryPress = false,
       continuation = undefined,
       resumeRunId = undefined,
       allowLowStorage = false,
@@ -1687,7 +1722,7 @@ export default function useStreamConnection(chatId, {
     // streamItems before the POST would erase the question card the user just
     // answered. If the backend reports `started` instead, it recovered a
     // restarted question as a fresh hidden continuation and we reset below.
-    const isAnswerSubmission = !!answers
+    const isAnswerSubmission = !!answers || entryPress
     // Resume and an empty Send of the held queue start a turn only if the
     // server accepts one (it may queue them behind other work instead), so
     // the stream is reset on acceptance, not before the POST.
@@ -1709,6 +1744,7 @@ export default function useStreamConnection(chatId, {
     let outboxCid = null
     let outboxRetained = false
     let releaseDispatchHold = () => {}
+    let entryDispatched = false
     try {
       const body = { content: text }
       if (hidden) body.hidden = true
@@ -1757,7 +1793,8 @@ export default function useStreamConnection(chatId, {
       // this same cid, so an acknowledgement lost to sleep/restart is harmless:
       // the backend returns its idempotent duplicate result instead of starting
       // another turn. Steers target one live turn and are never replayable.
-      outboxCid = (cid && !forceSteer && !directSteer) ? cid : null
+      // A Restart now press is never written to the replayable outbox.
+      outboxCid = (cid && !forceSteer && !directSteer && !entryPress) ? cid : null
       const deferToOutbox = deferDelivery || !getDeliveryReadySnapshot()
       // This send will POST its own intent, so own the cid BEFORE it becomes
       // visible in the outbox. Otherwise the shell drain can list it between
@@ -1848,7 +1885,12 @@ export default function useStreamConnection(chatId, {
           clearTimeout(sendTimer)
         }
       }
-      res = await sendWithAmbiguityRecovery({
+      // A Restart now press is sent at most once: no ambiguity retry, no
+      // outbox replay. Once dispatched, any outcome other than an HTTP
+      // refusal is unknown, and the caller reconciles from the server
+      // before another deliberate press is offered.
+      if (entryPress) entryDispatched = true
+      res = entryPress ? await sendOnce() : await sendWithAmbiguityRecovery({
         send: sendOnce,
         verifyReachability: verifyConnectivity,
         reportReachable: reportNetworkReachable,
@@ -1870,7 +1912,10 @@ export default function useStreamConnection(chatId, {
             outboxRetained,
           })
         }
-        throw await chatHttpError(res)
+        const refusal = await chatHttpError(res)
+        // A gateway or server fault may still have committed the press.
+        if (entryPress && res.status >= 500) refusal.outcomeUnknown = true
+        throw refusal
       }
       const data = await res.json()
       responseData = data
@@ -1984,6 +2029,10 @@ export default function useStreamConnection(chatId, {
         setConnectionError(null)
       }
     } catch (err) {
+      if (entryDispatched && err && typeof err === 'object' && !Number(err.status)) {
+        // Timed out, dropped, or unreadable after it left: it may have landed.
+        err.outcomeUnknown = true
+      }
       // A failed or ambiguous POST leaves the record for the shell drain; release
       // ownership before markIntentLocallyQueued asks that drain to take it.
       releaseDispatchHold()
@@ -2191,6 +2240,14 @@ export default function useStreamConnection(chatId, {
     })
   }
 
+  // A Restart now response carries the entry's new state; patch the live card
+  // like the `input_request_settled` event that follows it.
+  const patchRequestEntryState = useCallback((questionId, requestId, state) => {
+    setStreamItems(prev => applyRequestEntryState(prev, {
+      question_id: questionId, request_id: requestId, state,
+    }))
+  }, [setStreamItems])
+
   return {
     streamItems,
     latestItemsRef,
@@ -2206,6 +2263,7 @@ export default function useStreamConnection(chatId, {
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
+    patchRequestEntryState,
     lastReadAtRef,
   }
 }

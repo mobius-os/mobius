@@ -1,5 +1,6 @@
 /* What the foot's handoff stack shows when many helpers and waits are owed: one calm summary line, then rows grouped by who acts next. */
 import { helperPresentation } from './workingHelper.js'
+import { restartOnlyOffered } from './waitingPresentation.js'
 
 // Up to this many rows (helpers plus waits) show as themselves. On a 426px
 // phone that is about 125px above the composer, under 15% of the screen; one
@@ -10,7 +11,8 @@ const OWNER_RESUME_BLOCKERS = new Set(['manual_resume', 'resume_failed', 'owner_
 
 /** A wait whose saved result is held until the owner acts (the "Needs you" card label). */
 export function waitNeedsOwner(wait) {
-  return !!wait?.delivery_pending && OWNER_RESUME_BLOCKERS.has(wait.resume_blocker)
+  return restartOnlyOffered(wait)
+    || (!!wait?.delivery_pending && OWNER_RESUME_BLOCKERS.has(wait.resume_blocker))
 }
 
 /** One helper row's state, in who-acts-next terms. */

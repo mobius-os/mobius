@@ -17,7 +17,6 @@ from app.deps import (
   get_chat_view_principal,
   get_current_owner,
   get_current_owner_for_lifecycle_control,
-  refuse_app_agent,
   require_chat_embed_operation,
   reject_cross_site,
 )
@@ -26,46 +25,36 @@ from app.resource_access import require_active_chat_access
 
 router = APIRouter(prefix="/api/secure-inputs", tags=["secure-inputs"])
 
-
-@router.post("/{chat_id}/saved", dependencies=[Depends(reject_cross_site)])
-async def create_saved_secure_input(
-  chat_id: str, request: Request,
-  principal: Principal = Depends(get_agent_run_principal),
-  db: Session = Depends(get_db),
-):
-  """Save a sealed prompt and pre-authored consumer; acknowledge, never wait."""
-  from app.saved_secure_inputs import validate_consumer_spec
-
-  refuse_app_agent(principal, "ask for a password or key")
-  from app.routes.owner_approvals import save_owner_question
-
-  payload = await _json_object(request)
-  try:
-    title, description, mode, fields = secure_inputs.validate_request_spec(
-      title=payload.get("title"), description=payload.get("description", ""),
-      mode=payload.get("mode", "sealed"), fields=payload.get("fields"),
-    )
-    if mode != "sealed":
-      raise ValueError("Revealing values requires the explicit live reveal flow.")
-    spec = validate_consumer_spec(payload)
-  except ValueError as exc:
-    raise HTTPException(400, detail=str(exc)) from exc
-  finally:
-    payload.clear()
-  card = {
-    "questions": [{"id": "secure_input", "header": "Secure input", "question": title, "options": []}],
-    "secure_input": {"title": title, "description": description, "mode": mode, "fields": fields},
-  }
-  receipt = await save_owner_question(
-    chat_id, card, principal, db, secure_request=spec,
-    identity_payload={"card": card, "consumer": spec},
-  )
-  return {**receipt, "request_id": receipt["question_id"]}
+_NOT_ACCEPTED = (
+  "Could not accept secure input; its execution will not be repeated automatically."
+)
 
 
 def _saved_request(db: Session, chat_id: str, request_id: str):
   row = db.get(models.SavedSecureInput, request_id)
   return row if row is not None and row.chat_id == chat_id else None
+
+
+def _sealed_entry(db: Session, chat: models.Chat, request_id: str):
+  """The open secret request a request-list card shows, and that entry.
+
+  A secret entry is addressed by its request id. It is offered only while the
+  chat's current request-list card shows it; a card republished later shows
+  the same request, with the same receipt, under the same id.
+  """
+  from app import owner_input_requests as requests
+  from app.questions import saved_question
+
+  row = db.get(models.OwnerInputRequest, request_id)
+  if row is None or row.chat_id != chat.id:
+    return None, None, None
+  card_id = chat.open_request_card_id
+  if row.status != "open" or not card_id or row.published_question_id != card_id:
+    return row, None, None
+  entry = requests.card_entry(saved_question(chat, card_id), request_id)
+  if entry is None or requests.entry_kind(entry) != requests.SECRET:
+    return row, None, None
+  return row, card_id, entry
 
 
 @router.get("/{chat_id}/{request_id}/saved-state")
@@ -77,6 +66,11 @@ async def saved_secure_input_state(
   row = _saved_request(db, chat_id, request_id)
   if row is None:
     raise HTTPException(404, detail="Secure input request not found.")
+  request_row, card_id, _entry = _sealed_entry(db, chat, request_id)
+  if request_row is not None:
+    # A secret entry: waiting, in progress or settled, and the card that
+    # offers it now (None while no current card shows it).
+    return {"status": row.status, "outcome": row.outcome, "question_id": card_id}
   if row.status in {"pending", "consuming"} and chat.pending_question_id != request_id:
     return {"status": "cancelled", "outcome": "Secure input was cancelled."}
   return {"status": row.status, "outcome": row.outcome}
@@ -185,6 +179,9 @@ async def submit_secure_input(
     from app.chat import current_run_generation
     from types import SimpleNamespace
     generation = current_run_generation(chat_id)
+    request_row, _card_id, entry = _sealed_entry(db, chat, request_id)
+    if request_row is not None:
+      return await _submit_sealed_entry(request, chat_id, request_id, saved, entry)
     if chat.pending_question_id != request_id:
       if saved.status in {"completed", "failed", "interrupted"}:
         return {"status": saved.status}
@@ -210,7 +207,7 @@ async def submit_secure_input(
       result = await saved_secure_inputs.submit(chat_id, request_id, values, generation)
     except Exception as exc:
       values.clear()
-      raise HTTPException(503, detail="Could not accept secure input; its execution will not be repeated automatically.") from exc
+      raise HTTPException(503, detail=_NOT_ACCEPTED) from exc
     if result["status"] in {"closed", "cancelled"}:
       values.clear()
       raise HTTPException(410, detail="Secure input request is no longer open.")
@@ -244,6 +241,42 @@ async def submit_secure_input(
   return {"status": "filled"}
 
 
+async def _submit_sealed_entry(request: Request, chat_id: str, request_id: str, saved, entry):
+  """Hand one secret entry's values to its consumer, at most once.
+
+  The values are validated against the labels the entry showed and travel
+  only in memory to the consumer; nothing here logs, stores or echoes them.
+  """
+  from app import saved_secure_inputs
+  from types import SimpleNamespace
+
+  if saved.status != "pending":
+    return {"status": saved.status}
+  if entry is None:
+    raise HTTPException(410, detail="Secure input request is no longer open.")
+  payload = await _json_object(request)
+  values_payload = payload.pop("fields", None)
+  payload.clear()
+  try:
+    values = secure_inputs.validate_submitted_values(
+      SimpleNamespace(fields=entry["secure_input"]["fields"]), values_payload)
+  except ValueError as exc:
+    raise HTTPException(400, detail=str(exc)) from exc
+  finally:
+    if isinstance(values_payload, dict):
+      values_payload.clear()
+  try:
+    result = await saved_secure_inputs.submit(
+      chat_id, request_id, values, None, revision=entry.get("request_revision"))
+  except Exception as exc:
+    values.clear()
+    raise HTTPException(503, detail=_NOT_ACCEPTED) from exc
+  if result["status"] in {"closed", "cancelled"}:
+    values.clear()
+    raise HTTPException(410, detail="Secure input request is no longer open.")
+  return result
+
+
 @router.post(
   "/{chat_id}/{request_id}/cancel",
   dependencies=[Depends(reject_cross_site)],
@@ -268,6 +301,15 @@ async def cancel_secure_input(
   if saved is not None:
     from app import saved_secure_inputs
     from app.chat import current_run_generation
+    request_row, _card_id, entry = _sealed_entry(db, chat, request_id)
+    if request_row is not None:
+      # The writer re-checks that the current card still shows the entry.
+      if entry is None or saved.status != "pending":
+        raise HTTPException(409, detail="Secure input request is no longer open.")
+      result = await saved_secure_inputs.finish(chat_id, request_id, "cancelled", "cancelled")
+      if result["status"] != "cancelled":
+        raise HTTPException(409, detail="Secure input request is no longer open.")
+      return {"status": result["status"]}
     if chat.pending_question_id != request_id or saved.status != "pending":
       raise HTTPException(409, detail="Secure input request is no longer open.")
     result = await saved_secure_inputs.finish(

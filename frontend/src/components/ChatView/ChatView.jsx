@@ -1,5 +1,12 @@
 import { trayHelpers } from './goalHelpers.js'
 import { LocalAnswersContext } from './localAnswersContext.js'
+import { RequestEntryActionsContext } from './requestEntryActionsContext.js'
+import {
+  applyRequestEntryStateToMessages,
+  cardMarkersAfterLiveCard,
+  reconcileUnknownPress,
+  restartPressFailureOutcome,
+} from './requestEntries.js'
 import {
   chatCompactingKind,
   compactionNotice,
@@ -777,6 +784,10 @@ export default function ChatView({
   // restores it on reload and names the exact unanswered card that owns the
   // composer barrier.
   const [liveQuestionId, setLiveQuestionId] = useState(() => cached?.pending_question_id ?? null)
+  // The open request-list card (chat.open_request_card_id). It is shown and
+  // answerable but, unlike pending_question_id, never bars the composer or a
+  // turn: the owner may write instead of answering.
+  const [openRequestCardId, setOpenRequestCardId] = useState(() => cached?.open_request_card_id ?? null)
   // Acceptance and response activity may commit in either order. One explicit
   // reducer owns that handshake so neither boundary can move the card alone.
   const [questionFollowHandoff, dispatchQuestionFollowHandoff] = useReducer(
@@ -1537,6 +1548,7 @@ export default function ChatView({
         setActiveAssistantMessageId(data.active_assistant_message_id || null)
       }
       setLiveQuestionId(data.pending_question_id || null)
+      setOpenRequestCardId(data.open_request_card_id || null)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       setServerHandoff(data.handoff || null)
       if (!staleSnapshot) setChatCompacting(chatId, data.compacting || null)
@@ -1553,6 +1565,7 @@ export default function ChatView({
         pending_messages: data.pending_messages || [],
         pending_revision: data.pending_revision,
         pending_question_id: data.pending_question_id || null,
+        open_request_card_id: data.open_request_card_id || null,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: data.active_assistant_message_id || null,
         } : {}),
@@ -1743,6 +1756,7 @@ export default function ChatView({
       setGoalPresentationLocalState(runtimeGoal)
       const pendingQuestionId = runtime.pendingQuestionId
       setLiveQuestionId(pendingQuestionId)
+      setOpenRequestCardId(data.open_request_card_id || null)
       if (Array.isArray(data.waits)) setArmedWaits(data.waits)
       setServerHandoff(data.handoff || null)
       setChatCompacting(chatId, data.compacting || null)
@@ -1759,6 +1773,7 @@ export default function ChatView({
         pending_messages: serverPending,
         pending_revision: data.pending_revision,
         pending_question_id: pendingQuestionId,
+        open_request_card_id: data.open_request_card_id || null,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: runtime.activeAssistantMessageId,
         } : {}),
@@ -1884,6 +1899,7 @@ export default function ChatView({
     disconnect,
     clearStreamItems,
     patchQuestionAnswers,
+    patchRequestEntryState,
     lastReadAtRef: streamLastReadAtRef,
   } = useStreamConnection(chatId, {
     onOwnerSendAccepted: () => { void modelQueries.prefs.invalidate(queryClient) },
@@ -2021,7 +2037,14 @@ export default function ChatView({
       }
       forgetSendIntent({ cidList: consumedCids })
     },
-    onLiveQuestion: setLiveQuestionId,
+    onLiveQuestion: (questionId, info) => {
+      const markers = cardMarkersAfterLiveCard(questionId, info)
+      if ('liveQuestionId' in markers) setLiveQuestionId(markers.liveQuestionId)
+      setOpenRequestCardId(markers.openRequestCardId)
+    },
+    // The live card is already patched; keep the transcript (and so the
+    // cached chat detail) in step for a card that was promoted before it.
+    onInputRequestSettled: event => commitRequestEntryState(event),
     onQuestionResponseStart: handleQuestionResponseStart,
     onContextUsage: setLiveContext,
     onSteeredIntoTurn: ({
@@ -2663,6 +2686,7 @@ export default function ChatView({
       setGoalPresentationLocalState(goalPresentationFromRuntime(runtime))
       hadMessagesRef.current = visibleMessages.length > 0
       setLiveQuestionId(runtime.pending_question_id || null)
+      setOpenRequestCardId(runtime.open_request_card_id || null)
       setArmedWaits(Array.isArray(runtime.waits) ? runtime.waits : [])
       setServerHandoff(runtime.handoff || null)
       setBackgroundHelpers(normalizeBackgroundHelpers(runtime.background_helpers))
@@ -2819,6 +2843,7 @@ export default function ChatView({
           pending_messages: runtime.pending_messages || [],
           pending_revision: runtime.pending_revision,
           pending_question_id: runtime.pending_question_id || null,
+          open_request_card_id: runtime.open_request_card_id || null,
           waits: runtime.waits || [],
           background_helpers: normalizeBackgroundHelpers(
             runtime.background_helpers,
@@ -4140,7 +4165,10 @@ export default function ChatView({
       // drawer recency immediately, instead of waiting for the resumed turn to
       // finish and emit its terminal refresh.
       onOwnerActivityRef.current?.()
-      if (questionId) setLiveQuestionId(prev => prev === questionId ? null : prev)
+      if (questionId) {
+        setLiveQuestionId(prev => prev === questionId ? null : prev)
+        setOpenRequestCardId(prev => prev === questionId ? null : prev)
+      }
       // A composer send may have discovered this hidden question through the
       // backend's 409 guard. Its recovery notice is stale once the answer
       // commits; the preserved draft itself remains untouched.
@@ -4200,6 +4228,58 @@ export default function ChatView({
     pendingQueue.add,
     patchQuestionAnswers,
   ])
+
+  // One entry of a request-list card settled on its own. Leave the transcript
+  // untouched when nothing changes, so its authoritative version survives.
+  const commitRequestEntryState = useCallback((event) => {
+    const next = applyRequestEntryStateToMessages(messagesRef.current, event)
+    if (next !== messagesRef.current) commitMessages(next)
+  }, [messagesRef, commitMessages])
+
+  // Restart now on one entry of the open request-list card. It settles only
+  // that entry: no answers are sent, no turn starts, the rest of the card
+  // stays open, and the press is never queued on this device for later.
+  const pressRestartEntry = useCallback(async ({ questionId, requestId, selectedOptions }) => {
+    // The server checks the press against the current card; nothing is
+    // refused locally.
+    try {
+      const response = await streamSend('Restart now', undefined, {
+        hidden: true,
+        question_id: questionId,
+        selected_options: selectedOptions,
+        entryPress: true,
+      })
+      onOwnerActivityRef.current?.()
+      return response
+    } catch (err) {
+      // Whatever went wrong, the entry says what the server recorded, read
+      // once; nothing resends the press. An earlier press that did land shows
+      // as requested, with no error.
+      const outcome = await restartPressFailureOutcome(err, () => reconcileUnknownPress({
+        questionId,
+        requestId,
+        readDetail: async () => {
+          const res = await apiFetch(`${chatPath(chatId)}?limit=20&compact=1`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+          if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
+          return res.json()
+        },
+      }))
+      if (outcome.state) return { status: outcome.state.status, state: outcome.state, reconciled: true }
+      if (outcome.error.reconciled === 'gone') await fetchMessages({ force: true, authoritative: true })
+      throw outcome.error
+    }
+  }, [chatId, streamSend, fetchMessages])
+
+  // The entry hears its new state from the press (or its sealed submit) and
+  // reports it here: the one place that commits it to the transcript and the
+  // live card.
+  const requestEntryActions = useMemo(() => ({
+    pressRestartEntry,
+    applyEntryState: (questionId, requestId, state) => {
+      commitRequestEntryState({ question_id: questionId, request_id: requestId, state })
+      patchRequestEntryState(questionId, requestId, state)
+    },
+  }), [pressRestartEntry, commitRequestEntryState, patchRequestEntryState])
 
   const {
     preparing: preparingCompaction, compactionProgress,
@@ -5502,9 +5582,13 @@ export default function ChatView({
   // marker instead of the card's block position is what lets a still-open card
   // trailed by parallel output or a terminal error keep blocking the composer.
   // The live-stream branch covers the window before the question_id persists.
-  const pendingStreamQuestion = activeAssistantIsStreaming
+  const liveStreamQuestion = activeAssistantIsStreaming
     ? streamItems.find(it => it.type === 'question' && !it.answers)
     : null
+  // A request-list card is answerable but never bars the composer.
+  const pendingStreamQuestion = liveStreamQuestion?.input_requests
+    ? null
+    : liveStreamQuestion
   const chatDiffEntries = useMemo(() => collectChatDiffs([
     ...messages,
     { role: 'assistant', blocks: streamItems },
@@ -5518,8 +5602,11 @@ export default function ChatView({
   // trusts pendingStreamQuestion. Without it, a freshly-streamed question is
   // un-answerable until the marker lands — the regression that broke the
   // AskUserQuestion / Q&A e2e flows.
+  // A barring card wins over a request-list card; the backend publishes a
+  // list card only when no barring card is open.
   const answerableQuestionId = liveQuestionId
-    || pendingStreamQuestion?.question_id
+    || openRequestCardId
+    || liveStreamQuestion?.question_id
     || null
 
   // A live question parks Codex's JSON-RPC reader inside request_user_input.
@@ -6333,6 +6420,7 @@ export default function ChatView({
             elastic min-height out of the spacer formula at all times. */}
         <AppBlockChatContext.Provider value={appBlockChat}>
         <LocalAnswersContext.Provider value={localAnswerIntents}>
+        <RequestEntryActionsContext.Provider value={requestEntryActions}>
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
@@ -6460,6 +6548,7 @@ export default function ChatView({
           })()}
         </ul>
         </PeerTimelineContext.Provider>
+        </RequestEntryActionsContext.Provider>
         </LocalAnswersContext.Provider>
         </AppBlockChatContext.Provider>
 

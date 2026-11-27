@@ -373,7 +373,7 @@ def continuation_protocol_source(
       "The exact Goal remains open after a clean execution ended without an outcome or durable handoff. "
       "This is one targeted settlement recovery, not permission to redo verified work or shrink the objective. "
       "Read the saved Goal and reconcile its checklist with the original request. Complete only if the original promised outcome is verified, not merely a milestone. "
-      "Otherwise continue necessary authorized work in this run, or save a concrete owner question/approval "
+      "Otherwise continue necessary authorized work in this run, or record a concrete owner question/approval (owner_input) "
       "with instructions and meaningful choices; never re-ask a step the owner declined, which is a "
       "manual hold for update_goal(defer). If unreachable, explain why, efforts and partial results, "
       "and seek actionable owner input before declaring Cannot complete. Use a durable Wait/helper only "

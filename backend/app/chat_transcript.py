@@ -19,6 +19,8 @@ from app.tool_sources import normalize_tool_sources
 
 
 _QUESTION_TOOLS = {"AskUserQuestion", "request_user_input"}
+# The removed restart tool, kept so history recorded before restarts were
+# asked through `owner_input` still folds its transport into the card.
 _RESTART_REQUEST_TOOLS = {
   "mobius_control:request_restart",
   "mcp__mobius_control__request_restart",

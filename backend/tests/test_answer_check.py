@@ -10,11 +10,11 @@ from app import answer_check
 
 
 def _reason(
-  blocks, *, before_card, chat_id="c", media_dir="/m", last=None, message_required=False,
+  blocks, *, before_card, chat_id="c", media_dir="/m", last=None,
 ):
   return answer_check.reason(
     blocks, chat_id=chat_id, media_dir=media_dir, before_card=before_card,
-    last_assistant_message=last, message_required=message_required,
+    last_assistant_message=last,
   )
 
 
@@ -68,23 +68,16 @@ def test_answer_check_lets_a_short_lead_in_to_a_card_through():
   assert _reason(_ANSWER_ONLY_IN_THINKING, before_card=True) is None
 
 
-def test_answer_check_before_a_card_asks_for_its_message_instead_of_reading_thinking():
-  # A question, approval or restart card carries the turn's closing message,
-  # so whether one is there decides; closing reasoning is not read at all.
+def test_key_request_before_card_does_not_require_a_message_or_read_thinking():
+  # The vault may answer the key request at once without a card, so absence
+  # of a closing message cannot hold it. The Stop check still reads thinking.
   closing = _closing_draft_in_thinking()
-  assert _reason(closing, before_card=True, message_required=True, last="Two options below.") is None
-  for blank in (None, "", "   ", 5):
-    reason = _reason(
-      [{"type": "text", "content": "Two options, pick one below."}],
-      before_card=True, message_required=True, last=blank,
-    )
-    assert reason is not None
-    assert reason.startswith("Möbius check before your card is saved.")
-    assert "This card has no message" in reason
-    assert "card's message" in reason
-    assert "brief explanation of the conclusion" not in reason
-  # A secret card has no message field; its closing reasoning is not read either.
   assert _reason(closing, before_card=True) is None
+  for blank in (None, "", "   ", 5):
+    assert _reason(
+      [{"type": "text", "content": "Checking the key."}],
+      before_card=True, last=blank,
+    ) is None
 
 
 def test_answer_check_quotes_what_the_owner_actually_sees():

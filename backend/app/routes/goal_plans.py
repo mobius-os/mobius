@@ -387,18 +387,20 @@ class CompactionBriefRequest(BaseModel):
 
 
 @router.post("/{chat_id}/goal-brief/compaction", dependencies=[Depends(reject_cross_site)])
-async def take_goal_brief_after_compaction(
+async def take_context_after_compaction(
   chat_id: str,
   body: CompactionBriefRequest,
   principal: Principal = Depends(get_agent_run_principal),
   db: Session = Depends(get_db),
 ):
-  """Codex's post-compaction hook: this live turn's fresh brief, once.
+  """Codex's post-compaction hook: this live turn's fresh context, once.
 
-  Codex runs this hook only after it compacts, so the call itself marks the
-  need. Only the run that owns the streaming turn on that exact Codex thread
-  may take it, never a finished or stopping one. Empty context means no Goal
-  or a failed read; the next turn's brief and read_goal then cover it.
+  The context is the Goal brief and, for a top-level turn, the open owner
+  requests (app/compaction_context.py). Codex runs this hook only after it
+  compacts, so the call itself marks the need. Only the run that owns the
+  streaming turn on that exact Codex thread may take it, never a finished or
+  stopping one. Empty context means nothing to restore or a failed read; the
+  next turn's context, read_goal and owner_input list then cover it.
   """
   from app.chat_event_sink import get_active_sink
   from app.runner_registry import RunnerKind, registry
@@ -410,9 +412,9 @@ async def take_goal_brief_after_compaction(
   handle = registry.get_handle(chat_id, RunnerKind.CODEX_SDK)
   if sink is None or sink.run_token != principal.run_id or handle is None:
     raise HTTPException(status_code=409, detail="This run has no live Codex turn.")
-  db.close()  # The brief loads in its own short session; hold no connection.
+  db.close()  # The context loads in its own short session; hold no connection.
   try:
-    context = await handle.goal_brief_after_compaction(body.thread_id)
+    context = await handle.context_after_compaction(body.thread_id)
   except LookupError as exc:
     raise HTTPException(status_code=409, detail=str(exc)) from exc
   return {"context": context}

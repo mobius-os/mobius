@@ -45,10 +45,9 @@ from urllib.parse import parse_qs, urlparse
 from app.platform_tools import (
   APP_SCREENSHOT_TOOL_NAME,
   HELPER_TOOL_NAMES,
-  APPROVAL_TOOL_NAME,
   NOTIFY_OWNER_TOOL_NAME,
   OPEN_PAGE_TOOL_NAME,
-  QUESTION_TOOL_NAME,
+  OWNER_INPUT_TOOL_NAME,
 )
 
 FENCE_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "mobius_fence.py"
@@ -122,13 +121,9 @@ TOOLS: dict[str, Tool] = {
   "ask": Tool(
     "Approvals",
     "Ask you a question or for approval before a key step.",
-    control_tools=(QUESTION_TOOL_NAME, APPROVAL_TOOL_NAME),
-    routes=(
-      ("POST", r"/api/chats/{chat}/question"),
-      ("POST", r"/api/chats/{chat}/approval"),
-      # Codex ends its turn at the saved card through this rendezvous.
-      ("POST", r"/api/chats/{chat}/turn-end"),
-    ),
+    # Requests are shown on one card when the turn ends by itself.
+    control_tools=(OWNER_INPUT_TOOL_NAME,),
+    routes=(("POST", r"/api/chats/{chat}/input-requests"),),
   ),
   "screenshot": Tool(
     "Screenshots",
@@ -585,8 +580,8 @@ class Room:
 
   @property
   def asks_owner(self) -> bool:
-    """Whether the agent may save owner cards, which end its turn."""
-    return QUESTION_TOOL_NAME in self.control_tools
+    """Whether the agent may ask the owner (``owner_input``)."""
+    return OWNER_INPUT_TOOL_NAME in self.control_tools
 
   @property
   def web(self) -> bool:
@@ -747,8 +742,9 @@ def system_prompt(
     )
   if room.asks_owner:
     prompt += (
-      " Before a key step, ask the owner with request_approval or "
-      "request_question: the card ends your turn, and their answer starts the next."
+      " Before a key step, ask the owner with owner_input (a question or an "
+      "approval), then end your turn: the request is shown after your reply, "
+      "and their answer starts the next."
     )
   if app_prompt:
     prompt += "\n\nThe app's own instructions follow.\n\n" + app_prompt.strip()

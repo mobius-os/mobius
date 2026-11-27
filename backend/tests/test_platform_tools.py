@@ -56,8 +56,8 @@ def test_notify_owner_leaves_owner_input_cards_to_their_own_notification():
   control = _control_module()
   description = control._TOOL_DEFINITIONS["notify_owner"]["description"]
   assert "question that needs them" not in description
-  assert "not for a saved question, approval, restart or secure-input card" in description
-  assert "the card sends its own notification" in description
+  assert "not for anything recorded with owner_input" in description
+  assert "its card sends its own notification" in description
   assert "a finished long task" in description
 
 
@@ -564,14 +564,19 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert tools[platform_tools.GOAL_TOOL_NAME]["inputSchema"]["required"] == [
     "objective",
   ]
-  restart = tools[platform_tools.RESTART_TOOL_NAME]
-  assert restart["inputSchema"] == {
-    "type": "object", "properties": {"message": control.CARD_MESSAGE_PROPERTY},
-    "additionalProperties": False,
-  }
-  assert "platform derives" in restart["description"]
-  assert "without waking an agent" in restart["description"]
-  assert "NOT approval" in restart["description"]
+  # Questions, approvals, restarts and secrets are all asked through one
+  # tool that never ends the turn; the four card-saving tools are gone.
+  assert not {
+    "request_question", "request_approval", "request_restart", "request_secret",
+  } & set(tools)
+  owner_input = tools[platform_tools.OWNER_INPUT_TOOL_NAME]
+  assert owner_input["inputSchema"]["properties"]["kind"]["enum"] == [
+    "question", "approval", "restart", "secret",
+  ]
+  assert "platform derives the exact restart" in owner_input["description"]
+  assert "never issue a restart command yourself" in owner_input["description"]
+  assert "never to you" in owner_input["description"]
+  assert "resolve is refused for them" in owner_input["description"]
   wait_schema = tools[platform_tools.WAIT_TOOL_NAME]["inputSchema"]
   assert wait_schema["required"] == ["description"]
   assert set(wait_schema["properties"]) == {
@@ -583,7 +588,7 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
     "deadline_secs",
     "github_checks",
   }
-  assert "question card" in (
+  assert "owner_input request" in (
     wait_schema["properties"]["condition_owner"]["description"]
   )
   assert wait_schema["additionalProperties"] is False
@@ -676,16 +681,16 @@ def test_peer_tool_descriptions_cut_coordination_calls():
   assert "never paste or chunk" in send["description"]
   assert "unreachable" in send["description"]
   assert "never paste" in send["inputSchema"]["properties"]["body"]["description"]
-  approval = tools[control.REQUEST_APPROVAL_TOOL]["description"]
+  approval = tools[control.OWNER_INPUT_TOOL]["description"]
   assert "do not call claim_agent_work first" in approval
-  assert "your turn continues" in approval
+  assert "nothing is recorded and the result is held_by_peer" in approval
   assert "needs no owner approval" in tools[control.CLAIM_AGENT_WORK_TOOL]["description"]
   finish = tools[control.FINISH_AGENT_WORK_TOOL]["description"]
   assert "Usually unnecessary" in finish and "finished_claims" in finish
   spawn = tools[control.SPAWN_AGENT_TOOL]["description"]
   assert "never poll" in spawn and "does not see this" in spawn
   for name in (
-    control.SEND_AGENT_MESSAGE_TOOL, control.REQUEST_APPROVAL_TOOL,
+    control.SEND_AGENT_MESSAGE_TOOL,
     control.CLAIM_AGENT_WORK_TOOL, control.FINISH_AGENT_WORK_TOOL,
     control.LIST_AGENT_PEERS_TOOL, *platform_tools.HELPER_TOOL_NAMES,
   ):
@@ -709,7 +714,7 @@ def test_constitution_routes_each_agent_network_to_its_owner():
   assert "ordinary chat-message API" in core
 
 
-def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
+def test_bookkeeping_batch_guidance_preserves_durability():
   core = (
     Path(__file__).resolve().parents[2] / "skill" / "core.md"
   ).read_text(encoding="utf-8")
@@ -717,7 +722,9 @@ def test_bookkeeping_batch_guidance_preserves_durability_and_card_isolation():
   assert "already-needed tool work in the same model step" in core
   assert "Await every\n  result and handle failures" in core
   assert "never delay a required save just to form a batch" in core
-  assert "Owner-input cards remain separate and last" in core
+  # Recording an owner request no longer ends the turn, so it may be batched
+  # like any other call; the old "separate and last" rule is retired.
+  assert "Owner-input cards remain separate and last" not in core
   assert "measure saved model calls and input/cache tokens" in core
 
 
@@ -739,7 +746,7 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert platform_tools.CANCEL_WAIT_TOOL_NAME not in {
     tool["name"] for tool in listed["result"]["tools"]
   }
-  assert platform_tools.RESTART_TOOL_NAME not in {
+  assert platform_tools.OWNER_INPUT_TOOL_NAME not in {
     tool["name"] for tool in listed["result"]["tools"]
   }
   denied = control._call_tool({
@@ -763,40 +770,28 @@ def test_delegated_control_server_advertises_only_peer_and_ownership_tools(monke
   assert "unavailable" in denied_cancel["content"][0]["text"]
 
 
-def test_request_restart_takes_only_a_closing_message(monkeypatch):
-  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+def test_owner_input_offers_no_restart_identity_and_passes_requests_through(monkeypatch):
+  """A restart request carries only its intent: the platform derives the
+  exact action when the card is shown, so the schema has no command, commit
+  or option identity for it (the route refuses any other field for kind
+  restart). The tool forwards the request as is and never ends the turn."""
   control = _control_module()
-  receipt = {
-    "state": "waiting_for_owner",
-    "question_id": "restart-card-1",
-    "next_action": "End this turn.",
-  }
-  calls = []
-  monkeypatch.setattr(
-    control._APPROVALS,
-    "request_restart",
-    lambda **arguments: calls.append(arguments) or receipt,
-  )
+  schema = control._TOOL_DEFINITIONS["owner_input"]["inputSchema"]
+  assert schema["additionalProperties"] is False
+  assert not {
+    "commit", "source_boot_id", "action_id", "option_id", "restart_option_id", "message",
+  } & set(schema["properties"])
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  sent = _recording_api(monkeypatch, control, reply={"open": [], "next_action": "Keep going."})
 
   response = control._call_tool({
-    "name": platform_tools.RESTART_TOOL_NAME,
-    "arguments": {},
+    "name": platform_tools.OWNER_INPUT_TOOL_NAME,
+    "arguments": {"op": "add", "key": "restart", "kind": "restart"},
   })
-  assert response["isError"] is False
-  assert json.loads(response["content"][0]["text"]) == receipt
-  with_message = control._call_tool({
-    "name": platform_tools.RESTART_TOOL_NAME,
-    "arguments": {"message": "The fix is committed."},
-  })
-  assert with_message["isError"] is False
-  assert calls == [{}, {"message": "The fix is committed."}]
 
-  invalid = control._call_tool({
-    "name": platform_tools.RESTART_TOOL_NAME,
-    "arguments": {"command": "restart"},
-  })
-  assert invalid["isError"] is True
-  assert "takes only message" in invalid["content"][0]["text"]
+  assert response["isError"] is False
+  assert sent == [("POST", "/api/chats/chat-1/input-requests",
+                   {"op": "add", "key": "restart", "kind": "restart"})]
 
 
 def test_control_protocol_returns_tool_success_without_framework_wrapping(
@@ -1128,54 +1123,31 @@ def test_control_stdio_process_survives_tool_errors_and_keeps_serving():
   assert completed.stderr == ""
 
 
-def test_saved_card_option_schema_exposes_explicit_quiet_outcome():
+def test_owner_input_option_schema_exposes_explicit_quiet_outcome():
   control = _control_module()
-  approval = control._TOOL_DEFINITIONS[control.REQUEST_APPROVAL_TOOL]["inputSchema"]
-  question = control._TOOL_DEFINITIONS[control.REQUEST_QUESTION_TOOL]["inputSchema"]
-  for option in (
-    approval["properties"]["options"]["items"],
-    question["properties"]["questions"]["items"]["properties"]["options"]["items"],
-  ):
-    assert option["properties"]["on_answer"]["enum"] == ["resume", "close"]
-    assert "on_answer" not in option["required"]
+  schema = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]["inputSchema"]
+  option = schema["properties"]["options"]["items"]
+  assert option["properties"]["on_answer"]["enum"] == ["resume", "close"]
+  assert "on_answer" not in option["required"]
 
 
-def test_question_tool_requires_only_owner_facing_meaning():
+def test_owner_input_requires_only_the_operation():
   control = _control_module()
-  definition = control._TOOL_DEFINITIONS[control.REQUEST_QUESTION_TOOL]
-  item = definition["inputSchema"]["properties"]["questions"]["items"]
-
-  assert item["required"] == ["question"]
-  assert item["properties"]["options"]["default"] == []
-  assert "supplied when omitted" in definition["description"]
+  definition = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]
+  assert definition["inputSchema"]["required"] == ["op"]
 
 
-def test_saved_card_tools_instruct_the_agent_to_end_at_the_card():
-  """Every exposed saved-card tool carries the same complete instruction, and
-  the closing message travels in the card call itself where the card has one."""
+def test_no_control_tool_ends_the_turn_at_a_card():
+  """Asking the owner never ends a turn: requests are shown when the turn
+  ends by itself, so no tool tells the agent to stop at a card or carries a
+  closing message for one."""
   control = _control_module()
-  instruction = control.SAVED_CARD_TERMINAL_INSTRUCTION.lower()
-  for name in (
-    control.REQUEST_APPROVAL_TOOL,
-    control.REQUEST_QUESTION_TOOL,
-    control.REQUEST_RESTART_TOOL,
-  ):
-    definition = control._TOOL_DEFINITIONS[name]
-    description = definition["description"].lower()
-    assert description.count(instruction) == 1
-    assert "closeout before this call" not in description
-    message = definition["inputSchema"]["properties"]["message"]
-    assert message is control.CARD_MESSAGE_PROPERTY
-    assert "message" not in definition["inputSchema"].get("required", [])
-  assert "put your closing message in `message`" in instruction
-  assert "where things stand" in instruction
-  assert "at most a one-sentence lead-in" in control.CARD_MESSAGE_PROPERTY["description"]
-  # The sealed card has no message field, so its closing message stays prose.
-  secret = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]
-  secret_instruction = control.SECRET_CARD_TERMINAL_INSTRUCTION.lower()
-  assert secret["description"].lower().count(secret_instruction) == 1
-  assert "message" not in secret["inputSchema"]["properties"]
-  assert "before this call, write your closing message" in secret_instruction
+  owner_input = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]
+  assert "without ending your turn" in owner_input["description"]
+  assert "message" not in owner_input["inputSchema"]["properties"]
+  for name, definition in control._TOOL_DEFINITIONS.items():
+    assert "This tool call ends the turn" not in definition["description"], name
+  assert not hasattr(control, "SAVED_CARD_TERMINAL_INSTRUCTION")
 
 
 def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
@@ -1186,7 +1158,7 @@ def test_control_cli_gate_and_unknown_tool(monkeypatch, capsys):
   """
   control = _control_module()
   monkeypatch.delenv("MOBIUS_RUN_TOKEN", raising=False)
-  result = control._call_tool({"name": "request_restart", "arguments": {}})
+  result = control._call_tool({"name": "owner_input", "arguments": {"op": "list"}})
   assert result["isError"] is True
   assert "unavailable" in result["content"][0]["text"]
 
@@ -1203,22 +1175,22 @@ def test_control_cli_usage_errors_and_success(monkeypatch, capsys):
   control = _control_module()
   monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-token")
   assert control._cli_call(["call"]) == 2
-  assert control._cli_call(["call", "request_restart", "--args-json", "{"]) == 2
+  assert control._cli_call(["call", "owner_input", "--args-json", "{"]) == 2
   assert control._cli_call(["call", "unknown_tool", "--args-json", "{}"]) == 1
   monkeypatch.setitem(
     control._TOOL_HANDLERS,
-    "request_restart",
+    "owner_input",
     lambda arguments: {"state": "saved", "arguments": arguments},
   )
   assert control._cli_call([
-    "call", "request_restart", "--args-json", "{}",
+    "call", "owner_input", "--args-json", "{}",
   ]) == 0
   assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
     "state": "saved", "arguments": {},
   }
 
 
-@pytest.mark.parametrize("arguments", [["cal", "request_restart"], ["--help"]])
+@pytest.mark.parametrize("arguments", [["cal", "owner_input"], ["--help"]])
 def test_control_cli_unknown_subcommand_never_enters_stdio_server(arguments):
   script = (
     Path(__file__).resolve().parents[1] / "scripts" / "mobius_control_mcp.py"
@@ -1256,14 +1228,14 @@ def test_control_server_lists_installed_app_tools_beside_its_own(monkeypatch):
     "name": "reflection_log_friction", "description": "Log friction.",
     "inputSchema": {"type": "object"},
   }
-  shadow = {**app_tool, "name": "request_restart"}
+  shadow = {**app_tool, "name": "owner_input"}
   control, _calls = _control_with_app_tools(monkeypatch, [app_tool, shadow])
 
   names = [tool["name"] for tool in control._tools_list_result()["tools"]]
 
   assert names[-1] == "reflection_log_friction"
   # An app can never replace a platform primitive.
-  assert names.count("request_restart") == 1
+  assert names.count("owner_input") == 1
 
 
 def test_control_server_forwards_app_tool_calls_with_the_providers_meta(monkeypatch):
@@ -1382,34 +1354,15 @@ def test_open_item_settings_refuses_a_background_open(monkeypatch):
   assert sent == []
 
 
-def test_request_secret_saves_a_sealed_card_and_never_offers_reveal(monkeypatch):
+def test_owner_input_secret_never_offers_reveal():
+  """A secret request is always sealed: the tool offers no reveal mode (the
+  route refuses one), and its values never pass through it."""
   control = _control_module()
-  saved = []
-  monkeypatch.setattr(control._SECURE_INPUT, "_request_saved", lambda spec, command, action, cwd=None: (
-    saved.append((spec, command, action, cwd)) or {"state": "waiting_for_owner"}
-  ))
-
-  control._call_request_secret({
-    "title": "Connect service",
-    "fields": [{"name": "api_key", "type": "password", "label": "API key"}],
-    "command": ["python3", "/data/apps/x/store.py"],
-  })
-  control._call_request_secret({"preset": "owner_credentials"})
-
-  spec, command, action, cwd = saved[0]
-  assert spec["mode"] == "sealed" and action == "run" and cwd == "/data"
-  assert command == ["python3", "/data/apps/x/store.py"]
-  assert saved[1][2] == "owner-credentials"
-  assert saved[1][0] is control._SECURE_INPUT.OWNER_CREDENTIALS_SPEC
-  schema = control._TOOL_DEFINITIONS[control.REQUEST_SECRET_TOOL]["inputSchema"]
+  schema = control._TOOL_DEFINITIONS["owner_input"]["inputSchema"]
   assert "mode" not in schema["properties"]
-  with pytest.raises(ValueError, match="does not take: mode"):
-    control._call_request_secret({"mode": "reveal", "title": "x"})
-  with pytest.raises(ValueError, match="argv list"):
-    control._call_request_secret({
-      "title": "x", "fields": [{"name": "a", "type": "text", "label": "A"}],
-      "command": "python3 leak.py",
-    })
+  assert "values" not in schema["properties"]
+  assert schema["properties"]["preset"]["enum"] == ["owner_credentials"]
+  assert schema["properties"]["command"]["type"] == "array"
 
 
 def test_list_apps_narrows_by_one_exact_filter(monkeypatch):
@@ -1451,7 +1404,7 @@ def test_helpers_may_build_apps_but_not_reach_the_owner(monkeypatch):
   for name in platform_tools.APP_BUILD_TOOL_NAMES:
     assert name in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
   for name in (
-    control.NOTIFY_OWNER_TOOL, control.OPEN_ITEM_TOOL, control.REQUEST_SECRET_TOOL,
+    control.NOTIFY_OWNER_TOOL, control.OPEN_ITEM_TOOL, control.OWNER_INPUT_TOOL,
   ):
     assert name in platform_tools.OWNER_CONTROL_TOOL_NAMES
     assert name not in platform_tools.DELEGATED_CONTROL_TOOL_NAMES
@@ -1713,20 +1666,40 @@ def test_a_settled_goal_does_not_offer_its_old_next_action(monkeypatch):
     assert ("Next action: Run the probe" in control._call_update_goal({})) is shown
 
 
+def test_owner_input_description_owns_the_open_list_and_closing_procedure():
+  """How to read the open list and close what an owner message settled is
+  the tool's procedure; core.md keeps only the invariants."""
+  control = _control_module()
+  tool = " ".join(control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]["description"].split())
+  assert "the <open_owner_requests> block at the start of each turn" in tool
+  assert "trust it over your memory and never ask again what is already open" in tool
+  assert "adding an existing open key revises it, so a retry never duplicates" in tool
+  assert "A refused call records nothing" in tool
+  assert ("When the owner writes instead of answering, resolve what their message answers "
+          "with their words as evidence, withdraw what no longer matters and update what "
+          "changed") in tool
+  assert "Never resolve a request by guessing" in tool
+  assert "tell the owner in your reply what you resolved or withdrew" in tool
+  assert "these three are settled only on the card, never by you" in tool
+
+
 def test_restart_guidance_registers_each_chat_without_duplicating_the_executor():
   control = _control_module()
-  description = control._TOOL_DEFINITIONS[control.REQUEST_RESTART_TOOL]["description"]
-  assert "Create this chat's own card even when another chat has one" in description
-  assert "One later ready restart resumes every still-registered chat" in description
+  description = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]["description"]
+  assert "Record this chat's own restart request even when another chat has one" in " ".join(description.split())
+  assert "one later ready restart resumes every still-registered chat" in description
   assert "one restart per worker" in description
+  assert "never a peer handoff instead" in description
+  assert "not a second restart executor" in description
   root = Path(__file__).resolve().parents[2]
-  core = (root / "skill/core.md").read_text()
+  core = " ".join((root / "skill/core.md").read_text().split())
   maintenance = (root / "backend/scripts/seed-skills/platform-maintenance.md").read_text()
-  assert "Each chat whose work needs a restart publishes its own Restart card" in core
-  assert "not a second restart executor" in core
-  assert "Do not replace your\n  card with a peer handoff" in core
-  assert "Every chat that still owes activation and verification calls" in maintenance
-  assert "even if another chat already has a Restart card" in maintenance
+  assert "Each chat whose work needs a restart records its own request." in core
+  assert "Every chat that still owes activation and verification records its own" in maintenance
+  assert "restart request, even if another chat already shows one." in maintenance
+  # A restart is an entry of the one card, which never holds the chat.
+  assert "entry of the one card that holds every open request" in maintenance
+  assert "own Restart card" not in maintenance and "holds the chat until" not in maintenance
   assert "not duplicate restart\n   executors" in maintenance
 
 
@@ -1961,6 +1934,30 @@ def test_a_send_keeps_one_send_id_and_bounds_what_it_returns(monkeypatch):
   assert "send_id=" not in str(refused.value)
 
 
+def test_a_lost_key_request_answer_says_how_to_recover_the_saved_card(monkeypatch):
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+
+  def times_out(method, path, payload=None, *, timeout=10):
+    raise control.TransportFailure("coordination request failed: request timed out")
+
+  monkeypatch.setattr(control, "_agent_api_json", times_out)
+  with pytest.raises(RuntimeError) as lost:
+    control._call_request_key({"key": "WEATHER_KEY", "reason": "Fetch the forecast"})
+  message = str(lost.value)
+  assert "request timed out" in message
+  assert "No key was granted" in message
+  assert "retry this exact request to recover its receipt" in message
+
+  def refuses(method, path, payload=None, *, timeout=10):
+    raise RuntimeError("Refused (422): reason must not be blank")
+
+  monkeypatch.setattr(control, "_agent_api_json", refuses)
+  with pytest.raises(RuntimeError) as refused:
+    control._call_request_key({"key": "WEATHER_KEY", "reason": " "})
+  assert "retry" not in str(refused.value)
+
+
 def test_peer_and_claim_tools_carry_no_size_or_count_caps(monkeypatch):
   control = _control_module()
   send = control._TOOL_DEFINITIONS["send_agent_message"]["inputSchema"]["properties"]
@@ -2011,3 +2008,23 @@ def test_helper_uses_service_retirement_mapping_only_for_its_provider(monkeypatc
     'replacements': {'mobius': {'retired': 'active'}},
   })
   assert control._helper_selection({}) == ('mobius', 'active', 'low')
+
+
+@pytest.mark.parametrize("name, kind", [
+  ("request_question", "question"), ("request_approval", "approval"),
+  ("request_restart", "restart"), ("request_secret", "secret"),
+])
+def test_a_retired_card_tool_call_names_its_replacement_and_saves_nothing(monkeypatch, name, kind):
+  """A session whose instructions predate the change is told what to do instead."""
+  control = _control_module()
+  monkeypatch.setenv("CHAT_ID", "chat-1")
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", "run-1")
+  calls = []
+  monkeypatch.setattr(control, "_agent_api_json", lambda *args, **kwargs: calls.append(args))
+
+  result = control._call_tool_as_caller(name, {})
+
+  assert result["isError"] is True
+  text = result["content"][0]["text"]
+  assert "owner_input" in text and f"kind {kind}" in text and "nothing was saved" in text
+  assert calls == []

@@ -55,6 +55,12 @@ export function streamItemToBlock(item, { finalize = true } = {}) {
       ...(item.platform_action ? { platform_action: item.platform_action } : {}),
       ...(item.key_request ? { key_request: item.key_request } : {}),
       ...(item.message ? { message: item.message } : {}),
+      // A list card stays one across promotion; its entry states and option
+      // ids travel with it.
+      ...(item.input_requests === true ? { input_requests: true } : {}),
+      ...(item.request_states ? { request_states: item.request_states } : {}),
+      ...(item.selected_options ? { selected_options: item.selected_options } : {}),
+      ...(item.response_mode ? { response_mode: item.response_mode } : {}),
     }
   }
   if (item.type === 'secure_input') return { ...item }

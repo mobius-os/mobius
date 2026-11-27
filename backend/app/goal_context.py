@@ -106,8 +106,8 @@ def project_goal(goal, task_id=None, *, role="coordinator"):
     payload["outcome_contract"] = (
       "Preserve the original objective. Complete only verified success; if it seems "
       "unreachable, first seek an actionable owner decision. A temporary dependency "
-      "keeps this Goal open with an exact durable handoff: request_restart for this "
-      "chat's activation; a saved card for owner action; wait_for_decision or a "
+      "keeps this Goal open with an exact durable handoff: owner_input restart for this "
+      "chat's activation; owner_input for owner action; wait_for_decision or a "
       "confirmed claim dependency for peers; declare_wait for an external "
       "condition; a helper's result. Finish independent work first. A blocked "
       "task or peer promise is not a handoff. defer records a manual hold on the "

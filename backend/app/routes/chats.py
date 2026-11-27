@@ -45,6 +45,7 @@ from app.chat_visibility import (
 from app.chat_event_sink import active_sink_assistant_message_id
 from app.chat_message_identity import assistant_message_run_id
 from app.run_end_times import run_ended_ts
+from app.owner_input_requests import shown_request_card, shown_request_cards
 from app.chat_activity import chat_activity_page
 from app.chat_waits import (
   outstanding_wait_chat_ids,
@@ -458,7 +459,10 @@ def _project_ref_for_chat(db: Session, chat) -> dict | None:
 def _chat_create_response(chat: models.Chat, db: Session) -> dict:
   detail = _chat_detail_response(chat, db=db)
   return {
-    **_owner_chat_summary(chat, project_ref=_project_ref_for_chat(db, chat)),
+    **_owner_chat_summary(
+      chat, project_ref=_project_ref_for_chat(db, chat),
+      open_request_card_id=detail["open_request_card_id"],
+    ),
     "messages": detail["messages"],
     "detail": detail,
   }
@@ -592,6 +596,7 @@ def _owner_chat_summary(
   transient_owner_input_kind: OwnerInputKind | None = None,
   unseen_failure_version: int | None = None,
   project_ref: dict | None = None,
+  open_request_card_id: str | None = None,
 ) -> dict:
   """Canonical owner-list shape for a Chat or its lightweight projection.
 
@@ -622,6 +627,9 @@ def _owner_chat_summary(
     # shell excludes it from the reload-defer's active-turn test. The durable
     # column is the source of truth (see `_open_question_id_for`).
     "pending_question_id": chat.pending_question_id,
+    # The request-list card the owner may answer. It never locks the composer
+    # or marks a turn parked, which is why it is not `pending_question_id`.
+    "open_request_card_id": open_request_card_id,
     # The shell only needs to know which non-secret interaction is waiting.
     # Questions win if a transient interaction somehow overlaps because their
     # durable id also governs answer routing and restart recovery.
@@ -1021,6 +1029,7 @@ def _chat_detail_response(
     "active_goal_objective": active_goal_objective,
     "goal": goal,
     "pending_question_id": _open_question_id_for(chat),
+    "open_request_card_id": shown_request_card(db, chat.id),
     "session_id": chat.session_id if expose_session else None,
     "provider": provider,
     "created_by_app_id": chat.created_by_app_id,
@@ -1058,7 +1067,9 @@ def _chat_detail_response(
     ),
   }
   response["handoff"] = project_handoff(
-    owner_input=bool(response["pending_question_id"]) or chat.id in secure_inputs.pending_chat_ids(),
+    owner_input=bool(questions.owner_waiting_card_id(
+      response["pending_question_id"], response["open_request_card_id"], running=running,
+    )) or chat.id in secure_inputs.pending_chat_ids(),
     running=running,
     waits=response["waits"],
     helper_count=response["background_helpers"]["count"],
@@ -1179,11 +1190,18 @@ def list_chats(
       "shell_chat_list_first_response",
       chat_count=len(chats),
     )
+  # Read from the request rows, as every projection does; this also keeps
+  # every drawer column on one covering index (see
+  # test_chat_list_projects_summaries_without_hydrating_transcripts).
+  request_cards = shown_request_cards(db, [chat.id for chat in chats])
   dependency_goals = presented_dependency_goals(db, (chat.id for chat in chats))
   deferred_goals = presented_deferred_goals(db, (chat.id for chat in chats))
   result = []
   for chat in chats:
-    owner_kind = "question" if chat.pending_question_id is not None else (
+    row_running = chat.id in durable_running or is_chat_running(chat.id)
+    owner_kind = "question" if questions.owner_waiting_card_id(
+      chat.pending_question_id, request_cards.get(chat.id), running=row_running,
+    ) is not None else (
       "secure_input" if chat.id in secure_input_chats else None
     )
     waits = [serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)] \
@@ -1204,6 +1222,7 @@ def list_chats(
       handoff=handoff,
       transient_owner_input_kind=owner_kind,
       unseen_failure_version=unseen_failures.get(chat.id),
+      open_request_card_id=request_cards.get(chat.id),
       project_ref=(
         {
           "id": chat.project_ref_id,
@@ -2191,6 +2210,7 @@ def get_chat_runtime(
     "pending_messages": list(chat.pending_messages or []),
     "pending_revision": chat.pending_revision,
     "pending_question_id": _open_question_id_for(chat),
+    "open_request_card_id": shown_request_card(db, chat.id),
     "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
     "waits": [
       serialize_wait(row, db=db) for row in outstanding_waits_for_chat(db, chat.id)
@@ -2201,7 +2221,9 @@ def get_chat_runtime(
     ),
   }
   response["handoff"] = project_handoff(
-    owner_input=bool(response["pending_question_id"]) or chat.id in secure_inputs.pending_chat_ids(),
+    owner_input=bool(questions.owner_waiting_card_id(
+      response["pending_question_id"], response["open_request_card_id"], running=running,
+    )) or chat.id in secure_inputs.pending_chat_ids(),
     running=running, waits=response["waits"],
     helper_count=response["background_helpers"]["count"],
     park=continuation_handoff_for_chat(db, chat.id),
@@ -3712,7 +3734,8 @@ def _app_chat_sort_ts(chat: models.Chat) -> float:
   return ts.timestamp()
 
 
-def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
+def _app_chat_summary(chat: models.Chat, usage: dict, request_card_id: str | None) -> dict:
+  running = is_chat_running(chat.id)
   return {
     "id": chat.id,
     "title": chat.title,
@@ -3730,9 +3753,12 @@ def _app_chat_summary(chat: models.Chat, usage: dict) -> dict:
     # Identity lets companions replace stale status controls; it exposes no
     # card contents or answers and grants no additional card access.
     "pending_question_id": chat.pending_question_id,
-    "awaiting_owner": bool(chat.pending_question_id),
+    "awaiting_owner": questions.owner_waiting_card_id(
+      chat.pending_question_id, request_card_id,
+      running=running,
+    ) is not None,
     # An agent turn is live now; an app shows this rather than guessing.
-    "running": is_chat_running(chat.id),
+    "running": running,
     "provider": chat.provider or "claude",
     "scope": chat_scope(chat),
     "scope_label": _app_chat_scope_label(chat),
@@ -3817,8 +3843,9 @@ def list_app_chats(
     "coverage": {"runs": 0, "runs_with_usage": 0},
     "totals": dict.fromkeys(CHAT_TOKEN_FIELDS),
   }
+  request_cards = shown_request_cards(db, [chat.id for chat in chats])
   return [
-    _app_chat_summary(chat, usage_by_chat.get(chat.id, empty_usage))
+    _app_chat_summary(chat, usage_by_chat.get(chat.id, empty_usage), request_cards.get(chat.id))
     for chat in chats
   ]
 

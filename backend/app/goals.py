@@ -1,7 +1,6 @@
 """Goal intent and attempt admission. No provider state or transcript inference."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from datetime import UTC, datetime
 from sqlalchemy import or_, update
@@ -326,68 +325,6 @@ def turn_goal_brief(db, chat_id, run_id, *, delegated):
   return helper_goal_brief(db, chat_id) if delegated else resume_context(db, run_id)
 
 
-class CompactionBriefRefresh:
-  """Carry one fresh Goal brief across provider-native context compaction.
-
-  Turn starts already carry the brief. Within a turn, a provider that compacts
-  its context marks this stale, and the next supported provider boundary
-  (Claude PostToolUse context or Codex SessionStart compact context, whose
-  arrival is itself the compaction signal) takes the current brief once. Nothing is
-  stored in the transcript and no model call is added. The loader opens its
-  own short session: provider turns run after the request session is released.
-
-  Delivery is exactly once per need: concurrent boundaries (parallel tool
-  results) serialize, a failed load keeps the need for the next boundary, and
-  a compaction during an in-flight load is a new need, never absorbed by it.
-  """
-
-  def __init__(self, load, pointer="read_goal re-reads it"):
-    self._load = load
-    self._pointer = pointer
-    self._marked = 0
-    self._delivered = 0
-    self._lock = asyncio.Lock()
-
-  @property
-  def stale(self):
-    return self._marked > self._delivered
-
-  def mark_compacted(self):
-    self._marked += 1
-
-  async def take(self):
-    if not self.stale:
-      return ""
-    async with self._lock:
-      need = self._marked
-      if need <= self._delivered:
-        return ""
-      try:
-        brief = await asyncio.to_thread(self._load)  # unsettled: read-only (loads the Goal brief)
-      except Exception:
-        log.warning("Goal brief refresh failed; retrying at the next boundary",
-                    exc_info=True)
-        return ""
-      # An empty brief is a successful load: the Goal ended, nothing to restore.
-      self._delivered = max(self._delivered, need)
-    if not brief:
-      return ""
-    # The re-read pointer leads so a provider that clips hook context still
-    # tells the agent where the full brief is.
-    return f"Context was compacted; current Goal brief follows ({self._pointer}).\n" + brief
-
-
-def compaction_brief_refresh(chat_id, run_id, *, delegated):
-  def load():
-    from app.database import SessionLocal
-    with SessionLocal() as db:
-      return turn_goal_brief(db, chat_id, run_id, delegated=delegated)
-  # A helper re-reads its brief with read_goal; a coordinator's overview is
-  # update_goal with no arguments (read_goal there only expands a task).
-  return CompactionBriefRefresh(load, "read_goal re-reads it" if delegated else
-                                "update_goal with no arguments shows the plan")
-
-
 async def settle_after_goal_completion(chat_id: str) -> None:
   """Finish what a committed terminal Goal outcome leaves for other owners.
 
@@ -589,6 +526,13 @@ def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     raise GoalPlanConflict("Goal is not open")
   values = {"revision": expected_revision + 1}
   consumed_waits = 0
+  from app.owner_input_requests import RequestError, require_tasks_not_waiting_on_owner
+  try:
+    require_tasks_not_waiting_on_owner(
+      db, goal.chat_id, tasks or [], completing_goal=status == "completed",
+    )
+  except RequestError as exc:
+    raise GoalPlanError(str(exc)) from exc
   if tasks is not None:
     document = staged_task_edits(goal, tasks)
     if status is None and defer is None and next_action is None and checkpoint is None:

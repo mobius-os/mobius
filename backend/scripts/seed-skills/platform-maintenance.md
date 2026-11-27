@@ -111,7 +111,7 @@ ready boot.
 2. Map every path through the table above. Do not propose an unnecessary
    restart for routine activation or substitute one for hot reload, app apply,
    shell rebuild, live dependency install, or container rebuild. An explicit
-   partner request may still create a Restart card without pending changes.
+   partner request may still record a restart request without pending changes.
 3. Batch every restart-requiring edit, test it, and commit it before asking.
    Do not restart between iterations or request a speculative restart.
    A restart loads the whole working tree, not only your commits: check
@@ -172,11 +172,22 @@ API route matched or routing had not run yet. Read it before reproducing a
 reported slowdown.
 
 Exercising owner-input cards programmatically (for a test, never to answer for
-the owner): while a card is open, posting a chat message returns 409
-`pending_question_open` — that is the designed gate, not a bug. The two-step is
-to answer the card at `POST /api/chats/<id>/question-answers` with its
-`question_id`, which records the answer but does **not** resume the paused
-turn, and then `POST` a chat message to start the next turn.
+the owner): the one card that shows every open request does not hold the chat.
+A chat message is never held by it, `question-answers` refuses it, and each
+entry settles on its own: question and approval answers are a chat message
+carrying `answers` or `selected_options` and the card's `question_id`; a
+**Restart now** press is such a message carrying only that entry's
+`selected_options`; a secret entry's values go only to its secure-input submit
+endpoint. Only a barring card saved by an earlier release (an old chat's
+approval, Restart, secure-input or question card) still holds the chat: posting a chat
+message then returns 409 `pending_question_open`, the designed gate. Each such
+card has its own way through: an approval or question card is answered at
+`POST /api/chats/<id>/question-answers` with its `question_id`, which records
+the answer but does **not** resume the paused turn, followed by a chat message
+to start the next turn; a Restart card takes its **Restart now** action or a
+written reply as a chat message carrying the card's `question_id`; a
+secure-input card is settled only through its secure-input submit or cancel
+endpoint, never with a plain answer.
 
 ---
 
@@ -211,46 +222,53 @@ because `/data/platform` is the persistent served clone. The baked
 3. Run the activation preflight. For routine activation, ask only when the
    settled backend change is not live; an explicit partner request may create
    the card without a pending change. Explain that the restart interrupts active
-   turns and may make service unavailable for tens of seconds, then call
-   `request_restart` as the final action.
+   turns and may make service unavailable for tens of seconds, then record
+   `owner_input` with `op: "add"`, `kind: "restart"` and a key.
 
-   `request_restart` takes no action arguments. The platform derives the exact
-   committed, restart-loadable source and saves its own card with one exact
-   **Restart now** action plus a written-response path. Its receipt confirms
-   only that the card was saved: end the turn with no further text or tools.
+   A restart request takes no other arguments, and recording it does not end
+   your turn: finish your closing message (what is inactive and why only a
+   restart loads it) and end normally. When the turn ends, the platform derives
+   the exact committed, restart-loadable source and shows the request as an
+   entry of the one card that holds every open request, with one exact
+   **Restart now** action plus a written-response path. The card never holds
+   the chat; the entry stays open until it is answered.
+   Recording the request is not consent: never restart on your own, and never
+   resolve the request yourself.
    Any authenticated participant that can read the card may answer it, just as
    with ordinary Q&A. A **Restart now** selection is dispatched by the platform;
    the answering agent never issues or replays a shell command. A written
-   response continues the conversation without restarting. Do not use
-   `request_approval` or Codex's
+   response continues the conversation without restarting. Do not use an
+   approval request (`kind: "approval"`) or Codex's
    `request_user_input` for platform restart permission.
 
-   Every chat that still owes activation and verification calls
-   `request_restart` itself, even if another chat already has a Restart card.
-   Each card saves that chat's visible owner decision and post-restart
+   Every chat that still owes activation and verification records its own
+   restart request, even if another chat already shows one.
+   Each request saves that chat's visible owner decision and post-restart
    continuation. These are separate chat handoffs, not duplicate restart
-   executors: selecting any card requests one platform-owned restart, and a
-   later ready boot resumes every still-registered chat independently. Each
-   agent then verifies its own changes before completing its Goal. Do not
+   executors: pressing any card's **Restart now** requests one platform-owned
+   restart, and a later ready boot resumes every still-registered chat
+   independently. Each agent then verifies its own changes before completing
+   its Goal. Do not
    substitute a peer note, shared work claim, or monitor of the owner's
-   decision for your own card. Stop or a written response cancels only that
+   decision for your own request. Stop or a written response cancels only that
    chat's activation wait; unrelated owner-input and recovery holds still apply.
 
-   If the tool is absent, the same saved-card operation is available through:
+   If the tool is absent, the same request is available through:
 
    ```bash
-   python3 /data/platform/backend/scripts/mobius_control_mcp.py call request_restart
+   python3 /data/platform/backend/scripts/mobius_control_mcp.py call owner_input --args-json '{"op":"add","kind":"restart","key":"restart"}'
    ```
 
-   A failed save is not a waiting card and not consent. Retry only the
-   identical request to recover its receipt. If the running backend predates
-   this operation, ask plainly and leave activation pending; never fabricate
-   a card or park a process waiting for an answer.
+   A refused request records nothing and is not consent; retrying the
+   identical request is safe. If the running backend predates this operation,
+   ask plainly and leave activation pending; never fabricate a card or park a
+   process waiting for an answer.
 
    Never replay a restart after a lost response or uncertain outcome; that
    needs a fresh, specific selection. After the restart, the chat resumes on
-   its own: verify that your changes loaded. A scheduled/background agent
-   cannot open a live card, but may answer an existing one it can access.
+   its own: verify that your changes loaded. A scheduled or background run may
+   record a restart request but never waits on it, and may answer an existing
+   card it can access.
 4. If the edited tree fails to import, the baked shell stays available. Refresh
    and repair `/data/platform` there, or use external Recovery (see
    `platform-reference`) if the interface itself is unavailable.

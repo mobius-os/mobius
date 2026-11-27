@@ -618,42 +618,62 @@ def test_filled_values_expire_without_another_request(monkeypatch):
   asyncio.run(scenario())
 
 
-def test_sealed_helper_saves_and_exits_without_waiting_or_receiving_values(monkeypatch, capsys):
+def test_sealed_helper_records_and_exits_without_waiting_or_receiving_values(monkeypatch, capsys):
   spec = importlib.util.spec_from_file_location("secure_input_helper", Path(__file__).resolve().parents[1] / "scripts/secure-input.py")
   helper = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(helper)
   monkeypatch.setenv("API_BASE_URL", "http://local.test")
   monkeypatch.setenv("AGENT_TOKEN", "test-token")
   monkeypatch.setenv("CHAT_ID", "patient-chat")
-  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--title", "Private connection",
-    "--field", "password:password:Password", "--", "consumer"])
+  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--key", "private-connection",
+    "--title", "Private connection", "--field", "password:password:Password", "--", "consumer"])
   calls = []
-  receipt = {"state": "waiting_for_owner", "question_id": "saved-1", "next_action": "End now"}
+  listed = {"open": [{"key": "private-connection", "kind": "secret"}], "next_action": "Keep working."}
   def post(url, payload, token=None, **kwargs):
     calls.append((url, payload))
-    return 200, receipt
+    return 200, listed
   monkeypatch.setattr(helper, "_post", post)
   assert helper.main() == 0
-  assert json.loads(capsys.readouterr().out) == receipt
-  assert len(calls) == 1 and calls[0][0].endswith("/patient-chat/saved")
+  assert json.loads(capsys.readouterr().out) == listed
+  # One request recorded on the list, never a wait for the owner or values.
+  assert len(calls) == 1 and calls[0][0].endswith("/patient-chat/input-requests")
+  assert calls[0][1]["op"] == "add" and calls[0][1]["kind"] == "secret"
   assert calls[0][1]["command"] == ["consumer"]
   assert "environment" not in calls[0][1]
   assert "capability" not in calls[0][1]
+
+
+def test_sealed_helper_derives_a_stable_key_from_the_title(monkeypatch, capsys):
+  spec = importlib.util.spec_from_file_location("secure_input_helper", Path(__file__).resolve().parents[1] / "scripts/secure-input.py")
+  helper = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helper)
+  monkeypatch.setenv("API_BASE_URL", "http://local.test")
+  monkeypatch.setenv("AGENT_TOKEN", "test-token")
+  monkeypatch.setenv("CHAT_ID", "patient-chat")
+  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--title", "Private Connection!",
+    "--field", "password:password:Password", "--", "consumer"])
+  calls = []
+  monkeypatch.setattr(helper, "_post", lambda url, payload, token=None, **kw: (
+    calls.append(payload) or (200, {"open": []})))
+  assert helper.main() == 0
+  assert helper.main() == 0
+  # Repeating the documented command revises one request, never adds another.
+  assert [call["key"] for call in calls] == ["secret-private-connection"] * 2
 
 
 def test_sealed_helper_failed_save_does_not_echo_server_or_exception_data(monkeypatch, capsys):
   spec = importlib.util.spec_from_file_location("secure_input_helper", Path(__file__).resolve().parents[1] / "scripts/secure-input.py")
   helper = importlib.util.module_from_spec(spec)
   spec.loader.exec_module(helper)
-  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--title", "Private connection",
-    "--field", "password:password:Password", "--", "consumer"])
+  monkeypatch.setattr(sys, "argv", ["secure-input.py", "run", "--key", "private-connection",
+    "--title", "Private connection", "--field", "password:password:Password", "--", "consumer"])
   def fail(*args):
     raise RuntimeError("private-untrusted-error-canary")
-  monkeypatch.setattr(helper, "_request_saved", fail)
+  monkeypatch.setattr(helper, "_record_secret_request", fail)
   assert helper.main() == 1
   output = capsys.readouterr().out
   assert "private-untrusted-error-canary" not in output
-  assert "save was not confirmed" in output
+  assert "was not confirmed" in output
 
 
 def test_owner_credentials_consumer_changes_login_without_printing_values(

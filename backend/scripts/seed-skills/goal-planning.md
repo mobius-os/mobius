@@ -99,11 +99,18 @@ A blocked task or a promise to resume is not registration. `update_goal(defer)`
 means a manual hold with **no automatic continuation** until a later owner
 request; do not use it to mean “continue after this dependency is ready.”
 
-- **Platform restart:** use `request_restart` as `platform-maintenance.md`
-  describes; do not substitute a generic question or hold.
+- **Owner decision:** a request holds only the tasks named in its `blocks`;
+  keep working the other branches, and do not hold questions back until
+  nothing else can proceed. A task named there cannot be completed while its
+  request is open, and the Goal cannot be completed while any request is open.
+  The answer resumes the same Goal. An answer covering only some requests
+  leaves the rest open; keep going with what it unblocked.
+- **Platform restart:** record `owner_input` with `kind: "restart"` as
+  `platform-maintenance.md` describes; do not substitute a generic question or
+  hold.
 - **Owner action:** give concrete instructions, explain the dependency, then
-  save a question or approval card as your last action. Its answer resumes
-  the same work. For a task the owner must perform elsewhere, choices such as
+  record a question or approval request naming the work it blocks. Its answer
+  resumes the same work. For a task the owner must perform elsewhere, choices such as
   **Done — verify and continue** and **I need help** make it actionable. A
   `blocked` task only records the gate; it is not a handoff. Do not offer
   `on_answer: "close"` for routine Goal blockers: that explicit no-reply choice
@@ -117,8 +124,9 @@ request; do not use it to mean “continue after this dependency is ready.”
   already-saved Q&A or approval. This is a real handoff for your exact open
   Goal, not polling owner action. Never duplicate the card, poll its transcript,
   or ask its agent to interrupt you. Results are facts, not transferred approval;
-  held Goals keep them without reopening. Restart and sealed-input cards are
-  not followable. Helpers report the dependency upward.
+  held Goals keep them without reopening. A barring Restart or sealed-input
+  card from an earlier release is not followable. Helpers report the
+  dependency upward.
 - **Another chat's claimed work:** if `claim_agent_work` or an approval attempt
   returns `held_by_peer`, follow that exact claim only when the response confirms
   this Goal's dependency was created. Then the owning chat's completion or
@@ -135,8 +143,8 @@ request; do not use it to mean “continue after this dependency is ready.”
   and end normally, without asking again.
   This records **On hold**, preserves the original outcome and checklist, and
   releases this Goal's claims without calling them completed. It does not stop
-  your reply or require another question. Resolve existing helpers, questions
-  and undelivered Waits before holding; do not abandon a real handoff. A later
+  your reply or require another question. Resolve existing helpers, open owner
+  requests and undelivered Waits before holding; do not abandon a real handoff. A later
   explicit owner continuation resumes the same Goal. Never use deferral to
   conceal a crash, claim completion, or decide on the owner's behalf to stop.
 - **Completed:** verify the original promised outcome: reconcile the owner's
@@ -147,7 +155,7 @@ request; do not use it to mean “continue after this dependency is ready.”
   edits if needed.
 - **Cannot complete:** when the original outcome is genuinely unreachable,
   explain the obstacle, what you tried, partial results and what is missing.
-  First seek an actionable owner choice on a saved card—access, a feasible
+  First seek an actionable owner choice as an owner request—access, a feasible
   alternative, accepting the limitation, or calling off the work. Keep the
   Goal open while that decision is outstanding. A temporary approval gate or
   outage is not capitulation. After that choice, record `cannot_complete:
@@ -162,8 +170,8 @@ saved. No outcome closes while helpers are active; non-success outcomes retain
 explicit unmet-task reasons rather than converting them to green. A settled
 checklist alone does not close the Goal.
 
-A clean execution accidentally ending without an outcome, card, registered
-wake, or explicit hold gets one targeted settlement continuation in the
+A clean execution accidentally ending without an outcome, open owner request,
+registered wake, or explicit hold gets one targeted settlement continuation in the
 existing runner. It must not redo verified work, invent questions, narrow
 scope, or burn unlimited turns. If that pass also fails to hand off or settle,
 a visible technical recovery failure preserves the Goal; it is not **Cannot

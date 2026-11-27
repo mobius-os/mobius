@@ -182,8 +182,8 @@ class FakeAnthropic:
     if any("_card_" in tid for tid in results):
       return [{"type": "text", "text": "CARD-DONE"}]
     if any("_checkpoint_" in tid for tid in results):
-      return [self._tool("card", "mcp__mobius_control__request_question",
-                         {"question": "Ready?"})]
+      return [self._tool("card", "mcp__mobius_control__request_key",
+                         {"key": "weather"})]
     if any("_work_" in tid for tid in results):
       return [self._tool("checkpoint", "mcp__mobius_control__checkpoint_chat",
                          {"note": "saved"})]
@@ -700,9 +700,9 @@ async def test_pretooluse_matcher_of_exact_mcp_names_reaches_only_those_tools(
     ran.append("checkpoint_chat")
     return {"content": [{"type": "text", "text": "saved"}]}
 
-  @tool("request_question", "Ask the owner.", {"question": str})
-  async def request_question(args):
-    ran.append("request_question")
+  @tool("request_key", "Ask the owner for a key.", {"key": str})
+  async def request_key(args):
+    ran.append("request_key")
     return {"content": [{"type": "text", "text": "asked"}]}
 
   async def before_card(data, tool_use_id, context):
@@ -720,7 +720,7 @@ async def test_pretooluse_matcher_of_exact_mcp_names_reaches_only_those_tools(
     env={k: os.environ[k] for k in os.environ},
     strict_mcp_config=True, setting_sources=None,
     mcp_servers={"mobius_control": create_sdk_mcp_server(
-      "mobius_control", tools=[checkpoint_chat, request_question],
+      "mobius_control", tools=[checkpoint_chat, request_key],
     )},
     permission_mode="default", can_use_tool=allow_all,
     disallowed_tools=["Workflow"], cli_path=str(CLI),
@@ -744,7 +744,7 @@ async def test_pretooluse_matcher_of_exact_mcp_names_reaches_only_those_tools(
 
   # Neither Bash nor a control tool sharing the card's server prefix reaches
   # the hook; the card does, and its deny keeps the card tool from running.
-  assert hooked == ["mcp__mobius_control__request_question"]
+  assert hooked == ["mcp__mobius_control__request_key"]
   assert ran == ["checkpoint_chat"]
   card = next(text for tid, text in results.items() if "_card_" in tid)
   assert "PROBE-CARD-DENIED" in card

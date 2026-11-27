@@ -1,4 +1,12 @@
-"""Owner approval travels through real saved cards and the ordinary answer queue."""
+"""Owner approval travels through real saved cards and the ordinary answer queue.
+
+An approval is recorded with `owner_input` (kind approval) without ending the
+turn, which claims its exact action; the turn's end shows it as an entry of
+the request-list card. Tests that save a card directly cover barring Approval
+cards saved by earlier releases. A helper's recorded question is the one
+result that still ends a turn, so the turn-end rendezvous contracts are
+exercised with its receipt.
+"""
 from sqlalchemy.orm import object_session
 from app import transcript_rows
 from app.chat_writer import create_chat
@@ -13,13 +21,14 @@ from app import auth as auth_mod, chat as chat_mod, models, questions
 from app.broadcast import create_broadcast
 from app.chat_event_sink import (
   ChatEventSink,
-  _owner_card_receipt_id,
   register_active_sink,
   unregister_active_sink,
 )
 from app.chat_writer import AnswerQuestion, Barrier, FinishRun, StartTurn, get_writer
 from app.database import SessionLocal
+from app.owner_card_receipts import owner_card_receipt_id as _owner_card_receipt_id
 from app.routes import chats_stream
+from tests import owner_input_fixtures as inputs
 
 
 PROMPT = {
@@ -63,9 +72,25 @@ def _row(chat_id):
     return row.pending_question_id, list(transcript_rows.history(row)), row.pending_messages
 
 
-def _ask(client, chat, approval_run, prompt=None):
-  return client.post(f"/api/chats/{chat.id}/approval", json=prompt or PROMPT,
-                     headers=approval_run[1])
+def _list_card_id(chat_id):
+  get_writer().submit(Barrier()).result(timeout=5)
+  with SessionLocal() as db:
+    return db.get(models.Chat, chat_id).open_request_card_id
+
+
+def _record(client, chat, approval_run, prompt=None, key="approval"):
+  return inputs.add(client, chat.id, approval_run[1], key,
+                    **inputs.approval_body(prompt or PROMPT))
+
+
+def _ask(approval_run, prompt=None):
+  """Save a barring Approval card, as chats keep from earlier releases; its id.
+
+  The run stays running, as between the card commit and the turn's terminal
+  transition; `_finish` then completes the turn. The request-list entry form
+  is covered in test_owner_input_mixed_card.py.
+  """
+  return inputs.save_legacy_approval(approval_run[0], prompt or PROMPT)
 
 
 def _answer(client, chat, auth, qid):
@@ -96,17 +121,11 @@ def test_answering_retained_card_does_not_orphan_newer_question(chat, db):
 
 
 def _finish(chat, sink):
-  async def finish():
-    with SessionLocal() as db:
-      return await chat_mod._complete_turn(
-        bc=sink.bc, sink=sink, db=db, chat_id=chat.id, run_gen=None,
-        provider_id="claude", cost_usd=0, close_browser=False,
-      )
-  return asyncio.run(finish())
+  return inputs.finish_turn(sink)
 
 
 class _FakeCardHandle:
-  """A registered runner handle that records card-finish requests."""
+  """A registered runner handle that records turn-finish requests."""
 
   def __init__(self, chat_id):
     from app.runner_registry import RunnerKind
@@ -128,6 +147,14 @@ class _FakeCardHandle:
     return True
 
 
+def _turn_end_receipt(sink) -> tuple[str, str]:
+  """A helper question's recorded turn-ending receipt, as ask_parent prints it."""
+  receipt_id = sink.record_turn_end()
+  return receipt_id, json.dumps({"state": "turn_end", "turn_end_id": receipt_id})
+
+
+# ---- Receipt recognition (history keeps saved-card receipts) ----------------
+
 def test_owner_card_receipt_detection_handles_provider_result_shapes():
   receipt = {
     "state": "waiting_for_owner", "question_id": "saved-1",
@@ -145,8 +172,6 @@ def test_owner_card_receipt_detection_handles_provider_result_shapes():
     "content": [{"type": "text", "text": json.dumps(receipt)}],
     "isError": True,
   }) is None
-  # The Claude CLI's Bash tool_response, which the card-end hook reads when the
-  # turn saved its card through the mobius_control_mcp.py call / secure-input fallback.
   assert _owner_card_receipt_id({
     "stdout": json.dumps(receipt), "stderr": "", "interrupted": False,
   }) == "saved-1"
@@ -168,6 +193,30 @@ def test_owner_card_receipt_traverses_wrapper_with_structured_state():
   }) == "saved-2"
 
 
+def test_a_saved_card_receipt_ends_a_turn_only_for_this_turns_key_card(approval_run):
+  """A recorded helper question and this turn's key card end a turn; any
+  other card-shaped receipt (an old one re-printed by a tool, a request-list
+  card, an earlier release's card) never does."""
+  from app.owner_card_receipts import turn_end_receipt_id
+
+  sink = approval_run[0]
+  card_receipt = json.dumps({
+    "state": "waiting_for_owner", "question_id": "saved-1", "next_action": "End",
+  })
+  assert turn_end_receipt_id(card_receipt) == "saved-1"
+  assert sink.ends_turn("saved-1") is False
+  sink.assistant_blocks.append({
+    "type": "question", "question_id": "saved-1", "response_mode": "continuation",
+    "questions": [], "input_requests": True,
+  })
+  assert sink.ends_turn("saved-1") is False
+  sink.assistant_blocks[-1] = {
+    "type": "question", "question_id": "saved-1", "response_mode": "continuation",
+    "questions": [], "key_request": {"id": "req-1", "key": "weather"},
+  }
+  assert sink.ends_turn("saved-1") is True
+
+
 def test_studio_status_output_does_not_crash_chat(approval_run):
   sink, _headers = approval_run
   content = json.dumps({"assistant": {"name": "Fixture bot"}, "state": {"draft": {}}})
@@ -183,17 +232,16 @@ def test_studio_status_output_does_not_crash_chat(approval_run):
   assert "owner_card_question_id" not in block
 
 
-def test_continuation_card_save_does_not_interrupt_its_own_receipt(
-  client, chat, approval_run,
-):
-  """The save request must return before a separate post-receipt cut."""
+# ---- The turn-end rendezvous, for a recorded helper question ----------------
+
+def test_recording_a_turn_end_receipt_does_not_interrupt_its_own_result(chat, approval_run):
+  """Recording returns before a separate post-receipt cut."""
   from app.runner_registry import registry
   handle = _FakeCardHandle(chat.id)
   registry.register(handle)
   try:
-    res = _ask(client, chat, approval_run)
-    assert res.status_code == 200, res.text
-    assert res.json()["state"] == "waiting_for_owner"
+    receipt_id, _text = _turn_end_receipt(approval_run[0])
+    assert approval_run[0].ends_turn(receipt_id)
     assert handle.finishes == 0
   finally:
     registry.unregister(chat.id, handle.kind)
@@ -231,15 +279,14 @@ def test_codex_post_tool_rendezvous_waits_for_interrupt_ack(
   handle = HookHandle()
   registry.register(handle)
   try:
-    saved = _ask(client, chat, approval_run)
-    qid = saved.json()["question_id"]
-    assert handle.finishes == 0  # Save must never cancel its own result.
+    receipt_id, _text = _turn_end_receipt(approval_run[0])
+    assert handle.finishes == 0  # Recording must never cancel its own result.
     url = f"/api/chats/{chat.id}/turn-end"
     headers = approval_run[1]
-    wrong = client.post(url, json={"receipt_id": "old-card"}, headers=headers)
+    wrong = client.post(url, json={"receipt_id": "old-receipt"}, headers=headers)
     assert wrong.status_code == 409
     assert handle.finishes == 0
-    ended = client.post(url, json={"receipt_id": qid}, headers=headers)
+    ended = client.post(url, json={"receipt_id": receipt_id}, headers=headers)
     if failed:
       assert ended.status_code == 503
       assert handle.acknowledged is False
@@ -247,22 +294,22 @@ def test_codex_post_tool_rendezvous_waits_for_interrupt_ack(
       assert ended.status_code == 200
       assert ended.json() == {"ended": True}
       assert handle.acknowledged is True
-      assert client.post(url, json={"receipt_id": qid}, headers=headers).status_code == 200
+      assert client.post(url, json={"receipt_id": receipt_id}, headers=headers).status_code == 200
       assert handle.finishes == 1
-    assert _row(chat.id)[0] == qid
   finally:
     registry.unregister(chat.id, handle.kind)
 
 
-def test_card_end_rejects_browser_other_chat_and_stale_run(client, chat, approval_run, auth, db):
+def test_turn_end_rejects_browser_other_chat_and_stale_run(client, chat, approval_run, auth, db):
   from app.runner_registry import RunnerKind, registry
 
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  receipt_id, _text = _turn_end_receipt(approval_run[0])
   url = f"/api/chats/{chat.id}/turn-end"
-  body = {"receipt_id": qid}
+  body = {"receipt_id": receipt_id}
   assert client.post(url, json=body, headers=auth).status_code == 403
   assert client.post("/api/chats/another-chat/turn-end", json=body,
                      headers=approval_run[1]).status_code == 403
+  # No Codex handle owns this chat's turn.
   assert client.post(url, json=body, headers=approval_run[1]).status_code == 409
   owner = db.query(models.Owner).first()
   stale = auth_mod.create_agent_token(
@@ -274,56 +321,46 @@ def test_card_end_rejects_browser_other_chat_and_stale_run(client, chat, approva
   registry.register(handle)
   try:
     # Existing authentication rejects a nonexistent/stale physical run before
-    # the card route can inspect its sink. Do not weaken that earlier guard.
+    # the route can inspect its sink. Do not weaken that earlier guard.
     assert client.post(url, json=body, headers={"Authorization": f"Bearer {stale}"}).status_code == 401
     assert handle.finishes == 0
-    assert _row(chat.id)[0] == qid
   finally:
     registry.unregister(chat.id, handle.kind)
 
 
-def test_completed_receipt_ends_only_the_exact_saved_card_turn(
-  client, chat, approval_run,
-):
+def test_completed_receipt_ends_only_the_exact_recorded_turn(chat, approval_run):
   from app.runner_registry import registry
   handle = _FakeCardHandle(chat.id)
   registry.register(handle)
   try:
     approval_run[0].publish({
-      "type": "tool_start", "tool": "Bash", "input": "owner helper",
-      "tool_use_id": "owner-helper-1",
+      "type": "tool_start", "tool": "Bash", "input": "ask parent",
+      "tool_use_id": "ask-parent-1",
     })
-    saved = _ask(client, chat, approval_run)
-    qid = saved.json()["question_id"]
+    _receipt_id, text = _turn_end_receipt(approval_run[0])
+
     async def deliver(content, *, complete=True, exit_code=0):
       approval_run[0].publish({
         "type": "tool_output", "content": content,
         "output_complete": complete, "output_exit_code": exit_code,
-        "tool_use_id": "owner-helper-1",
+        "tool_use_id": "ask-parent-1",
       })
-      # The runner must own the clean card ending before this callback returns;
+      # The runner must own the clean ending before this callback returns;
       # a provider terminal may be the very next already-queued event.
       if complete and exit_code == 0:
         assert handle.finishes == 1
       await asyncio.sleep(0)
 
-    asyncio.run(deliver(saved.text, complete=False))
-    asyncio.run(deliver(saved.text, exit_code=1))
+    asyncio.run(deliver(text, complete=False))
+    asyncio.run(deliver(text, exit_code=1))
     assert handle.finishes == 0
-    asyncio.run(deliver(saved.text))
+    asyncio.run(deliver(text))
     assert handle.finishes == 1
-    assert approval_run[0].assistant_blocks[0][
-      "owner_card_question_id"
-    ] == qid
 
     asyncio.run(deliver({
       "content": [{
         "type": "text",
-        "text": json.dumps({
-          "state": "waiting_for_owner",
-          "question_id": "another-card",
-          "next_action": "End",
-        }),
+        "text": json.dumps({"state": "turn_end", "turn_end_id": "another-receipt"}),
       }],
     }))
     assert handle.finishes == 1
@@ -331,30 +368,27 @@ def test_completed_receipt_ends_only_the_exact_saved_card_turn(
     registry.unregister(chat.id, handle.kind)
 
 
-def test_streamed_receipt_survives_an_empty_completed_payload(
-  client, chat, approval_run,
-):
-  """The card cut must not depend on which channel carried the receipt.
+def test_streamed_receipt_survives_an_empty_completed_payload(chat, approval_run):
+  """The cut must not depend on which channel carried the receipt.
 
   A provider that streams command output can omit its re-aggregated copy on
   completion (Codex's aggregatedOutput is optional). The completed event then
-  arrives empty; it must neither erase the streamed output nor skip the
-  finish-after-owner-card cut.
+  arrives empty; it must neither erase the streamed output nor skip the cut.
   """
   from app.runner_registry import registry
   handle = _FakeCardHandle(chat.id)
   registry.register(handle)
   try:
     approval_run[0].publish({
-      "type": "tool_start", "tool": "Bash", "input": "owner helper",
-      "tool_use_id": "owner-helper-1",
+      "type": "tool_start", "tool": "Bash", "input": "ask parent",
+      "tool_use_id": "ask-parent-1",
     })
-    saved = _ask(client, chat, approval_run)
-    qid = saved.json()["question_id"]
+    _receipt_id, text = _turn_end_receipt(approval_run[0])
+
     async def deliver(content, *, complete=False, exit_code=None):
       event = {
         "type": "tool_output", "content": content,
-        "tool_use_id": "owner-helper-1",
+        "tool_use_id": "ask-parent-1",
       }
       if complete:
         event["output_complete"] = True
@@ -363,15 +397,14 @@ def test_streamed_receipt_survives_an_empty_completed_payload(
       approval_run[0].publish(event)
       await asyncio.sleep(0)
 
-    asyncio.run(deliver(saved.text))
+    asyncio.run(deliver(text))
     asyncio.run(deliver("", complete=True, exit_code=0))
     assert handle.finishes == 1
     blk = next(
       block for block in approval_run[0].assistant_blocks
       if block.get("type") == "tool"
     )
-    assert blk["owner_card_question_id"] == qid
-    assert saved.text in blk["output"]
+    assert text in blk["output"]
   finally:
     registry.unregister(chat.id, handle.kind)
 
@@ -379,7 +412,7 @@ def test_streamed_receipt_survives_an_empty_completed_payload(
 def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
   """The native AskUserQuestion path shares `publish_question` but carries no
   `response_mode`: it parks on an awaited future in question_bridge and must NOT
-  be interrupted here. Only continuation cards end the turn."""
+  be interrupted here."""
   from app.runner_registry import registry
   sink = approval_run[0]
   handle = _FakeCardHandle(chat.id)
@@ -408,42 +441,178 @@ def test_native_question_event_does_not_end_the_active_turn(chat, approval_run):
     registry.unregister(chat.id, handle.kind)
 
 
-def test_approval_saves_before_receipt_without_a_waiting_future(
+def test_receipt_ends_the_turn_then_preserves_the_raced_tail(chat, approval_run):
+  """A successful completed receipt synchronously claims the runner's turn end
+  (the fallback path, for a runner that did not already end itself), while
+  provider events already in flight remain live and durable: Möbius removes
+  the cause of post-receipt output, never the evidence."""
+  from app.runner_registry import registry
+
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    assert sink.publish({
+      "type": "tool_start", "tool": "Bash", "input": "ask parent",
+      "tool_use_id": "ask-parent-race",
+    })
+    _receipt_id, text = _turn_end_receipt(sink)
+
+    async def deliver_receipt_and_raced_tail():
+      assert sink.publish({
+        "type": "tool_output", "content": text,
+        "output_complete": True, "output_exit_code": 0,
+        "tool_use_id": "ask-parent-race",
+      })
+      assert handle.finishes == 1
+
+      log_before = len(sink.bc.event_log)
+      assert sink.publish({"type": "text", "content": "Already emitted tail."})
+      assert sink.publish({"type": "thinking", "content": "Already emitted trace."})
+      assert len(sink.bc.event_log) == log_before + 2
+      await sink.finalize()
+
+    asyncio.run(deliver_receipt_and_raced_tail())
+
+    persisted = _row(chat.id)[1][-1]["blocks"]
+    assert [block["type"] for block in persisted] == ["tool", "text", "thinking"]
+    assert persisted[1]["content"] == "Already emitted tail."
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_turn_end_is_gated_on_the_exact_receipt_this_turn_recorded(chat, approval_run):
+  """A receipt-shaped tool result alone must never end a turn."""
+  from app.runner_registry import registry
+
+  sink = approval_run[0]
+  handle = _FakeCardHandle(chat.id)
+  registry.register(handle)
+  try:
+    receipt_id, _text = _turn_end_receipt(sink)
+    assert sink.ends_turn(receipt_id) is True
+    assert sink.ends_turn("receipt-from-last-week") is False
+    for stale in (
+      {"state": "turn_end", "turn_end_id": "receipt-from-last-week"},
+      {"state": "waiting_for_owner", "question_id": "card-from-last-week",
+       "next_action": "End now"},
+    ):
+      assert sink.publish({
+        "type": "tool_output", "content": json.dumps(stale),
+        "output_complete": True, "output_exit_code": 0,
+        "tool_use_id": "stale-echo",
+      })
+    assert handle.finishes == 0
+  finally:
+    registry.unregister(chat.id, handle.kind)
+
+
+def test_a_streamed_messages_tail_still_lands_in_its_own_block(chat, approval_run):
+  """A message tail reattaches to its original block across a card, while a
+  distinct later message remains visible after it instead of being discarded."""
+  sink = approval_run[0]
+  assert sink.publish(
+    {"type": "text", "content": "Reading it", "text_item_id": "msg-1"},
+  )
+  asyncio.run(sink.publish_question({
+    "type": "question", "question_id": "native-tail",
+    "questions": [{"question": "Pick one", "options": []}],
+  }))
+  assert sink.publish(
+    {"type": "text", "content": " first.", "text_item_id": "msg-1"},
+  )
+  assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
+  assert sink.assistant_blocks[0]["content"] == "Reading it first."
+  assert sink.publish(
+    {"type": "text", "content": " Done.", "text_item_id": "msg-2"},
+  )
+  assert [b["type"] for b in sink.assistant_blocks] == [
+    "text", "question", "text",
+  ]
+  assert sink.assistant_blocks[-1]["content"] == " Done."
+
+
+def test_native_question_keeps_recording_post_card_prose(chat, approval_run):
+  """A native AskUserQuestion is mid-turn, so prose after that card stays
+  ordinary transcript."""
+  sink = approval_run[0]
+
+  async def go():
+    await sink.publish_question({
+      "type": "question",
+      "question_id": "native-post-1",
+      "questions": [{
+        "question": "Pick one",
+        "options": [
+          {"label": "A", "description": "a"},
+          {"label": "B", "description": "b"},
+        ],
+      }],
+    })
+
+  asyncio.run(go())
+  assert sink.publish({"type": "text", "content": "While you decide, notes."})
+  assert [b["type"] for b in sink.assistant_blocks] == ["question", "text"]
+
+
+# ---- Approval requests and their saved card ---------------------------------
+
+def test_approval_card_is_saved_at_turn_end_without_a_waiting_future(
   client, chat, approval_run,
 ):
-  res = _ask(client, chat, approval_run)
-  assert res.status_code == 200, res.text
-  qid = res.json()["question_id"]
-  assert res.json()["state"] == "waiting_for_owner"
+  recorded = _record(client, chat, approval_run)
+  assert recorded.status_code == 200, recorded.text
+  # Asking is not showing: nothing bars the chat until the turn ends.
+  assert _row(chat.id)[0] is None
+  assert "answers" not in json.dumps(recorded.json()["open"])
+
+  _finish(chat, approval_run[0])
+
   marker, messages, pending = _row(chat.id)
-  assert marker == qid
+  block = messages[-1]["blocks"][-1]
+  # An entry of the request-list card, which never bars the chat.
+  assert marker is None and _list_card_id(chat.id) == block["question_id"]
   assert pending == []
   assert questions.get(chat.id) is None
-  block = messages[-1]["blocks"][-1]
-  assert block["response_mode"] == "continuation"
-  assert block["action_key"] == PROMPT["work_key"]
+  assert block["response_mode"] == "continuation" and block["input_requests"] is True
+  entry = block["questions"][0]
+  assert entry["kind"] == "approval" and entry["action_key"] == PROMPT["work_key"]
   assert block["questions"][0]["options"] == [
     {**option, "id": str(index)} for index, option in enumerate(PROMPT["options"])
   ]
   assert "answers" not in block
+  # The turn's closing text is committed with its card, before it.
+  assert messages[-1]["blocks"][0]["type"] == "text"
 
 
-def test_identical_creation_retry_returns_same_card_and_different_request_conflicts(
+def test_identical_retry_records_one_request_and_a_second_approval_is_a_second_entry(
   client, chat, approval_run,
 ):
-  first = _ask(client, chat, approval_run)
-  again = _ask(client, chat, approval_run)
-  assert first.json() == again.json()
-  assert len([b for b in _row(chat.id)[1][-1]["blocks"] if b["type"] == "question"]) == 1
-  changed = _ask(client, chat, approval_run, {**PROMPT, "question": "Different action?"})
-  assert changed.status_code == 409
+  first = _record(client, chat, approval_run)
+  again = _record(client, chat, approval_run)
+  assert [row["id"] for row in again.json()["open"]] == [first.json()["open"][0]["id"]]
+  other = _record(client, chat, approval_run,
+                  {**PROMPT, "question": "Different action?",
+                   "work_key": "platform:test-revision:other"}, key="other")
+  assert [row["key"] for row in other.json()["open"]] == ["approval", "other"]
+
+  _finish(chat, approval_run[0])
+
+  cards = [b for m in _row(chat.id)[1] for b in m.get("blocks", []) if b["type"] == "question"]
+  # Every open request is an entry of the one card, oldest first.
+  assert len(cards) == 1
+  assert [(entry["kind"], entry["question"], entry["action_key"])
+          for entry in cards[0]["questions"]] == [
+    ("approval", PROMPT["question"], PROMPT["work_key"]),
+    ("approval", "Different action?", "platform:test-revision:other"),
+  ]
 
 
 SHARED_KEY = "github:mobius-os/mobius:pr:1079:3134e050:merge"
 
 
 def _second_approval_chat(db, chat_id="other-approval-chat"):
-  """Another running chat with its own Goal and saved-card sink."""
+  """Another running chat with its own Goal."""
   other = create_chat(id=chat_id, title="Duplicate integrator", messages=[])
   other_run = models.ChatRun(
     id=f"{chat_id}-run", root_run_id=f"{chat_id}-run", chat_id=other.id,
@@ -466,63 +635,58 @@ def _second_approval_chat(db, chat_id="other-approval-chat"):
   return other, sink, {"Authorization": f"Bearer {token}"}
 
 
-def _ask_as(client, other, sink, headers, prompt):
-  register_active_sink(other.id, sink)
-  try:
-    return client.post(
-      f"/api/chats/{other.id}/approval", json=prompt, headers=headers,
-    )
-  finally:
-    unregister_active_sink(other.id, sink)
+def _record_as(client, other, headers, prompt, key="approval"):
+  return inputs.add(client, other.id, headers, key, **inputs.approval_body(prompt))
 
 
-def test_request_approval_claims_an_unclaimed_key_in_one_call(
+def test_an_approval_request_claims_an_unclaimed_key_in_one_call(
   client, chat, approval_run, db,
 ):
-  saved = _ask(client, chat, approval_run, {**PROMPT, "work_key": SHARED_KEY})
+  recorded = _record(client, chat, approval_run, {**PROMPT, "work_key": SHARED_KEY})
 
-  assert saved.status_code == 200, saved.text
-  assert saved.json()["state"] == "waiting_for_owner"
+  assert recorded.status_code == 200, recorded.text
+  assert recorded.json()["open"][0]["work_key"] == SHARED_KEY
   claim = db.query(models.AgentWorkClaim).one()
   assert (claim.work_key, claim.owner_chat_id) == (SHARED_KEY, chat.id)
   assert claim.completed_at is None and claim.released_at is None
 
 
-def test_losing_approval_request_follows_the_owner_without_a_card(
+def test_losing_approval_request_follows_the_owner_without_a_request(
   client, chat, approval_run, db,
 ):
   keyed = {**PROMPT, "work_key": SHARED_KEY}
-  first = _ask(client, chat, approval_run, keyed)
-  assert first.status_code == 200, first.text
+  assert _record(client, chat, approval_run, keyed).status_code == 200
   other, sink, headers = _second_approval_chat(db)
 
-  follower = _ask_as(client, other, sink, headers, keyed)
+  follower = _record_as(client, other, headers, keyed)
 
   # Same result claim_agent_work returns, not an error: the turn continues.
   assert follower.status_code == 200, follower.text
   body = follower.json()
   assert (body["state"], body["owner_chat_id"]) == ("held_by_peer", chat.id)
-  assert "question_id" not in body
-  assert "No approval card was saved and your turn continues" in body["next_action"]
+  assert "question_id" not in body and body["open"] == []
+  assert "No approval request was recorded and your turn continues" in body["next_action"]
   assert db.query(models.AgentWorkClaim).count() == 1
   assert db.query(models.GoalDependency).one().waiting_chat_id == other.id
+  inputs.finish_turn(sink)
   assert _row(other.id)[0] is None
 
   from app.agent_work_claims import finish_work
   finish_work(db, owner_id=db.query(models.Owner).first().id, chat_id=chat.id,
               work_key=SHARED_KEY, outcome="Merged as 0b44dc9d", release=False)
-  done = _ask_as(client, other, sink, headers, keyed)
+  done_chat, _done_sink, done_headers = _second_approval_chat(db, "third-approval-chat")
+  done = _record_as(client, done_chat, done_headers, keyed)
   assert done.status_code == 200, done.text
   assert done.json()["state"] == "completed"
   assert "do not repeat it" in done.json()["next_action"]
-  assert _row(other.id)[0] is None
+  assert db.query(models.OwnerInputRequest).filter_by(chat_id=done_chat.id).count() == 0
 
 
 def approval_run_id(chat):
   return f"approval-{chat.id}"
 
 
-def test_racing_approval_requests_on_one_key_save_exactly_one_card(
+def test_racing_approval_requests_on_one_key_record_exactly_one_request(
   client, chat, approval_run, db, monkeypatch,
 ):
   """The other chat's claim lands between this request's check and insert."""
@@ -534,8 +698,7 @@ def test_racing_approval_requests_on_one_key_save_exactly_one_card(
   original_fence = agent_work_claims.fence_owner
 
   def first_chat_wins_before_the_fence(session, owner_id):
-    # Compete after the collision read, before acquisition holds the fence;
-    # another writer cannot commit from inside its protected flush anymore.
+    # Compete after the collision read, before acquisition holds the fence.
     if not raced:
       raced.append(True)
       with SessionLocal() as competing:
@@ -546,29 +709,30 @@ def test_racing_approval_requests_on_one_key_save_exactly_one_card(
 
   keyed = {**PROMPT, "work_key": SHARED_KEY}
   monkeypatch.setattr(agent_work_claims, "fence_owner", first_chat_wins_before_the_fence)
-  lost = _ask_as(client, other, sink, headers, keyed)
-  won = _ask(client, chat, approval_run, keyed)
+  lost = _record_as(client, other, headers, keyed)
+  won = _record(client, chat, approval_run, keyed)
 
   assert raced == [True]
   assert lost.json()["state"] == "held_by_peer", lost.text
-  assert won.json()["state"] == "waiting_for_owner", won.text
-  assert _row(other.id)[0] is None
-  assert _row(chat.id)[0] == won.json()["question_id"]
+  assert [row["key"] for row in won.json()["open"]] == ["approval"], won.text
+  assert db.query(models.OwnerInputRequest).filter_by(chat_id=other.id).count() == 0
   assert db.query(models.AgentWorkClaim).count() == 1
 
 
-def test_approval_without_action_identity_is_rejected_before_card_creation(
-  client, chat, approval_run,
+def test_approval_without_action_identity_is_rejected_before_any_claim(
+  client, chat, approval_run, db,
 ):
-  unowned = {key: value for key, value in PROMPT.items() if key != "work_key"}
+  unowned = {key: value for key, value in inputs.approval_body(PROMPT).items()
+             if key != "work_key"}
 
-  response = _ask(client, chat, approval_run, unowned)
+  response = inputs.add(client, chat.id, approval_run[1], "approval", **unowned)
 
   assert response.status_code == 422
-  assert _row(chat.id)[0] is None
+  assert db.query(models.AgentWorkClaim).count() == 0
+  assert db.query(models.OwnerInputRequest).count() == 0
 
 
-def test_unsaved_card_keeps_its_claim_for_the_identical_retry(
+def test_unsaved_card_keeps_its_claim_and_request_for_the_next_turn_end(
   client, chat, approval_run, monkeypatch, db,
 ):
   writer = get_writer()
@@ -577,23 +741,138 @@ def test_unsaved_card_keeps_its_claim_for_the_identical_retry(
   def fail(*args, **kwargs):
     raise RuntimeError("test write failed")
 
+  assert _record(client, chat, approval_run).status_code == 200
   monkeypatch.setattr(writer, "_persist_question_required", fail)
-  res = _ask(client, chat, approval_run)
-  assert res.status_code == 503
+  inputs.publish_now(approval_run[0])
   assert _row(chat.id)[0] is None
-  # Admission succeeded, so exact-action ownership remains reserved for the
-  # identical retry even though the card acknowledgement failed.
+  assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
+  # Asking succeeded, so exact-action ownership stays reserved, and the
+  # request stays open and unshown for the next turn end.
   claim = db.query(models.AgentWorkClaim).one()
   assert (claim.owner_chat_id, claim.released_at) == (chat.id, None)
-  assert not any(b["type"] == "question" for b in approval_run[0].assistant_blocks)
+  row = db.query(models.OwnerInputRequest).one()
+  assert row.status == "open" and row.published_question_id is None
   monkeypatch.setattr(writer, "_persist_question_required", original)
-  assert _ask(client, chat, approval_run).status_code == 200
+  inputs.publish_now(approval_run[0])
+  assert _list_card_id(chat.id) == inputs.last_card(chat.id)["question_id"]
 
 
-def test_finished_approval_remains_answerable_and_late_answer_starts_once(
+def test_approval_requires_exact_agent_run_not_plain_owner_or_foreign_chat(
+  client, chat, auth, approval_run, db,
+):
+  body = {"op": "add", "key": "approval", **inputs.approval_body(PROMPT)}
+  assert client.post(f"/api/chats/{chat.id}/input-requests", json=body,
+                     headers=auth).status_code == 403
+  foreign = client.post("/api/chats", json={"title": "Other"}, headers=auth).json()["id"]
+  assert client.post(f"/api/chats/{foreign}/input-requests", json=body,
+                     headers=approval_run[1]).status_code == 403
+  assert _row(foreign)[0] is None
+  assert db.query(models.AgentWorkClaim).count() == 0
+
+
+def test_approval_rejects_a_run_that_is_no_longer_current(
+  client, chat, approval_run, db,
+):
+  get_writer().submit(FinishRun(
+    chat_id=chat.id, run_token=approval_run[0].run_token, terminal_status="completed",
+  )).result(timeout=5)
+  assert _record(client, chat, approval_run).status_code == 401
+  assert db.query(models.AgentWorkClaim).count() == 0
+
+
+def test_lost_broadcast_after_commit_keeps_the_saved_card_last(client, chat, approval_run, monkeypatch):
+  sink = approval_run[0]
+  original = sink.bc.publish
+
+  def fail(event):
+    if event.get("type") == "question":
+      raise RuntimeError("connection lost after commit")
+    original(event)
+
+  assert _record(client, chat, approval_run).status_code == 200
+  monkeypatch.setattr(sink.bc, "publish", fail)
+  inputs.publish_now(sink)
+  qid = _list_card_id(chat.id)
+  assert qid
+  # The committed card is shown on reload and stays the turn's last item; no
+  # "could not be shown" error is appended after it.
+  assert sink.assistant_blocks[-1]["question_id"] == qid
+  monkeypatch.setattr(sink.bc, "publish", original)
+  _finish(chat, sink)
+  assert _row(chat.id)[1][-1]["blocks"][-1]["question_id"] == qid
+
+
+def _control_against(client, monkeypatch, chat_id, run_token, headers):
+  """The real control server, its HTTP calls answered by this test client."""
+  import io
+  from tests.test_platform_tools import _control_module
+
+  control = _control_module()
+  monkeypatch.setenv("API_BASE_URL", "http://testserver")
+  monkeypatch.setenv("CHAT_ID", chat_id)
+  monkeypatch.setenv("MOBIUS_RUN_TOKEN", run_token)
+  monkeypatch.setenv("AGENT_TOKEN", headers["Authorization"].removeprefix("Bearer "))
+
+  def open_request(request, timeout):
+    response = client.post(
+      request.full_url, content=request.data, headers=dict(request.header_items()),
+    )
+    assert response.status_code == 200, response.text
+    return io.BytesIO(response.content)
+
+  monkeypatch.setattr(control, "urlopen", open_request)
+  return control
+
+
+def test_control_tool_records_an_approval_that_is_not_permission(
+  client, chat, approval_run, monkeypatch,
+):
+  control = _control_against(
+    client, monkeypatch, chat.id, approval_run[0].run_token, approval_run[1],
+  )
+  result = control._dispatch_message({
+    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {"name": "owner_input", "arguments": {
+      "op": "add", "key": "approval", **inputs.approval_body(PROMPT)}},
+  })["result"]
+  assert not result["isError"]
+  body = json.loads(result["content"][0]["text"])
+  assert [row["kind"] for row in body["open"]] == ["approval"]
+  assert "Nothing here is answered" in body["next_action"]
+  assert not any("answer" in row for row in body["open"])
+  assert _row(chat.id)[0] is None
+
+
+def test_control_tool_returns_follower_claim_to_the_losing_chat(
+  client, chat, approval_run, db, monkeypatch,
+):
+  """The losing approval is one successful call, not an error to retry."""
+  keyed = {**PROMPT, "work_key": SHARED_KEY}
+  assert _record(client, chat, approval_run, keyed).status_code == 200
+  other, sink, headers = _second_approval_chat(db)
+  control = _control_against(client, monkeypatch, other.id, sink.run_token, headers)
+
+  result = control._dispatch_message({
+    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+    "params": {"name": "owner_input", "arguments": {
+      "op": "add", "key": "approval", **inputs.approval_body(keyed)}},
+  })["result"]
+
+  assert not result["isError"]
+  follower = json.loads(result["content"][0]["text"])
+  assert (follower["state"], follower["owner_chat_id"]) == ("held_by_peer", chat.id)
+  assert _row(other.id)[0] is None
+
+
+# ---- Barring cards saved by earlier releases --------------------------------
+#
+# Chats keep the barring Approval and Q&A cards earlier releases saved; they
+# still bar the chat and settle through their own answer path.
+
+def test_a_legacy_approval_card_stays_answerable_after_its_turn_and_a_late_answer_starts_once(
   client, chat, auth, approval_run, monkeypatch,
 ):
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   _finish(chat, approval_run[0])
   assert not chat_mod.is_chat_running(chat.id)
   assert _row(chat.id)[0] == qid
@@ -612,11 +891,11 @@ def test_finished_approval_remains_answerable_and_late_answer_starts_once(
 
 
 @pytest.mark.parametrize("hidden", [False, True])
-def test_saved_question_answer_does_not_reorder_owner_models(
+def test_an_answer_to_a_legacy_card_does_not_reorder_owner_models(
   client, chat, auth, approval_run, monkeypatch, db, hidden,
 ):
   """A durable card continuation is not a new owner composer send."""
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   _finish(chat, approval_run[0])
   unregister_active_sink(chat.id, approval_run[0])
   owner = db.query(models.Owner).first()
@@ -644,10 +923,10 @@ def test_saved_question_answer_does_not_reorder_owner_models(
   ]
 
 
-def test_immediate_answer_queues_once_and_drain_starts_it_after_current_turn(
+def test_an_immediate_answer_to_a_legacy_approval_card_queues_once_and_starts_after_the_turn(
   client, chat, auth, approval_run, monkeypatch,
 ):
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   result = _answer(client, chat, auth, qid)
   assert result.status_code == 202, result.text
   assert result.json()["status"] == "queued"
@@ -657,7 +936,6 @@ def test_immediate_answer_queues_once_and_drain_starts_it_after_current_turn(
   assert len(pending) == 1 and pending[0]["continuation_reason"] == "question_answer"
   assert messages[-1]["blocks"][-1]["answers"] == {PROMPT["question"]: "Not now"}
   assert _answer(client, chat, auth, qid).status_code == 410
-  assert _ask(client, chat, approval_run).json()["state"] == "answered"
   scheduled = []
   monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kw: scheduled.append(kw))
   _finish(chat, approval_run[0])
@@ -666,10 +944,10 @@ def test_immediate_answer_queues_once_and_drain_starts_it_after_current_turn(
   assert _row(chat.id)[0] is None
 
 
-def test_failed_early_answer_keeps_the_card_open_and_does_not_queue(
+def test_a_failed_early_answer_keeps_a_legacy_approval_card_open_and_queues_nothing(
   client, chat, auth, approval_run, monkeypatch,
 ):
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   from app.chat_writer import AppendPending
   writer = get_writer()
   original = writer.submit
@@ -688,35 +966,13 @@ def test_failed_early_answer_keeps_the_card_open_and_does_not_queue(
   assert _row(chat.id)[2] == []
 
 
-def test_approval_requires_exact_agent_run_not_plain_owner_or_foreign_chat(
-  client, chat, auth, approval_run, db,
-):
-  assert client.post(f"/api/chats/{chat.id}/approval", json=PROMPT, headers=auth).status_code == 403
-  foreign = client.post("/api/chats", json={"title": "Other"}, headers=auth).json()["id"]
-  assert client.post(f"/api/chats/{foreign}/approval", json=PROMPT,
-                     headers=approval_run[1]).status_code == 403
-  assert _row(foreign)[0] is None
-  assert db.query(models.AgentWorkClaim).count() == 0
-
-
-def test_approval_rejects_missing_sink_and_superseded_run(
-  client, chat, approval_run, db,
-):
-  sink = approval_run[0]
-  sink.run_token = "another-run"
-  assert _ask(client, chat, approval_run).status_code == 409
-  unregister_active_sink(chat.id, sink)
-  assert _ask(client, chat, approval_run).status_code == 409
-  assert db.query(models.AgentWorkClaim).count() == 0
-
-
 @pytest.mark.parametrize("status,keeps_card", [
   ("completed", True), ("interrupted", True), ("failed", True), ("stopped", False),
 ])
-def test_terminal_status_preserves_owner_handoff_but_stop_cancels_it(
+def test_a_terminal_status_keeps_a_legacy_approval_card_but_stop_cancels_it(
   client, chat, approval_run, status, keeps_card,
 ):
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   get_writer().submit(FinishRun(
     chat_id=chat.id, run_token=approval_run[0].run_token, terminal_status=status,
   )).result(timeout=5)
@@ -727,8 +983,8 @@ def test_terminal_status_preserves_owner_handoff_but_stop_cancels_it(
   assert _row(chat.id)[0] == (qid if keeps_card else None)
 
 
-def test_native_question_cannot_overlap_an_owner_approval(client, chat, approval_run):
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+def test_a_native_question_cannot_overlap_a_legacy_approval_card(client, chat, approval_run):
+  qid = _ask(approval_run)
   from app.question_bridge import QuestionPersistenceError, park_question
 
   async def native():
@@ -743,242 +999,14 @@ def test_native_question_cannot_overlap_an_owner_approval(client, chat, approval
   assert _row(chat.id)[0] == qid
 
 
-def test_lost_broadcast_after_commit_recovers_same_receipt(client, chat, approval_run, monkeypatch):
-  sink = approval_run[0]
-  original = sink.bc.publish
-
-  def fail(event):
-    if event.get("type") == "question":
-      raise RuntimeError("connection lost after commit")
-    original(event)
-
-  monkeypatch.setattr(sink.bc, "publish", fail)
-  assert _ask(client, chat, approval_run).status_code == 503
-  qid = _row(chat.id)[0]
-  assert qid
-  monkeypatch.setattr(sink.bc, "publish", original)
-  assert _ask(client, chat, approval_run).json()["question_id"] == qid
-
-
-def test_control_tool_to_helper_to_saved_card_returns_receipt_not_permission(
-  client, chat, approval_run, monkeypatch,
-):
-  import io
-  import json
-  from tests.test_platform_tools import _control_module
-
-  control = _control_module()
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-  monkeypatch.setenv("CHAT_ID", chat.id)
-  monkeypatch.setenv("MOBIUS_RUN_TOKEN", approval_run[0].run_token)
-  monkeypatch.setenv("AGENT_TOKEN", approval_run[1]["Authorization"].removeprefix("Bearer "))
-
-  def open_request(request, timeout):
-    assert timeout == 35  # save deadline, never a human-answer deadline
-    response = client.post(
-      request.full_url, content=request.data, headers=dict(request.header_items()),
-    )
-    assert response.status_code == 200, response.text
-    return io.BytesIO(response.content)
-
-  monkeypatch.setattr(control._APPROVALS, "urlopen", open_request)
-  result = control._dispatch_message({
-    "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-    "params": {"name": "request_approval", "arguments": PROMPT},
-  })["result"]
-  assert not result["isError"]
-  receipt = json.loads(result["content"][0]["text"])
-  assert receipt["state"] == "waiting_for_owner"
-  assert _row(chat.id)[0] == receipt["question_id"]
-  assert "not approval" in receipt["next_action"]
-
-
-def test_control_tool_returns_follower_claim_to_the_losing_chat(
-  client, chat, approval_run, db, monkeypatch,
-):
-  """The losing request_approval is one successful call, not an error to retry."""
-  import io
-  import json
-  from tests.test_platform_tools import _control_module
-
-  keyed = {**PROMPT, "work_key": SHARED_KEY}
-  assert _ask(client, chat, approval_run, keyed).status_code == 200
-  other, sink, headers = _second_approval_chat(db)
-  control = _control_module()
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-  monkeypatch.setenv("CHAT_ID", other.id)
-  monkeypatch.setenv("MOBIUS_RUN_TOKEN", sink.run_token)
-  monkeypatch.setenv("AGENT_TOKEN", headers["Authorization"].removeprefix("Bearer "))
-
-  def open_request(request, timeout):
-    response = client.post(
-      request.full_url, content=request.data, headers=dict(request.header_items()),
-    )
-    assert response.status_code == 200, response.text
-    return io.BytesIO(response.content)
-
-  monkeypatch.setattr(control._APPROVALS, "urlopen", open_request)
-  register_active_sink(other.id, sink)
-  try:
-    result = control._dispatch_message({
-      "jsonrpc": "2.0", "id": 1, "method": "tools/call",
-      "params": {"name": "request_approval", "arguments": keyed},
-    })["result"]
-  finally:
-    unregister_active_sink(other.id, sink)
-
-  assert not result["isError"]
-  follower = json.loads(result["content"][0]["text"])
-  assert (follower["state"], follower["owner_chat_id"]) == ("held_by_peer", chat.id)
-  assert _row(other.id)[0] is None
-
-
-def test_helper_rejects_unconfirmed_receipt_and_transport_failure(monkeypatch):
-  import io
-  from urllib.error import URLError
-  from tests.test_platform_tools import _control_module
-
-  helper = _control_module()._APPROVALS
-  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
-    monkeypatch.setenv(name, "test-value")
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-  monkeypatch.setattr(helper, "urlopen", lambda *a, **kw: io.BytesIO(b'{}'))
-  with pytest.raises(SystemExit, match="Invalid owner-input card receipt"):
-    helper.request_approval(**PROMPT)
-
-  def fail(*args, **kwargs):
-    raise URLError("disconnected")
-
-  monkeypatch.setattr(helper, "urlopen", fail)
-  with pytest.raises(SystemExit, match="No answer or approval was granted"):
-    helper.request_approval(**PROMPT)
-
-
-def test_helper_preserves_bounded_deterministic_rejection_detail(monkeypatch):
-  import io
-  from urllib.error import HTTPError
-  from tests.test_platform_tools import _control_module
-
-  helper = _control_module()._APPROVALS
-  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
-    monkeypatch.setenv(name, "test-value")
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-
-  def reject(request, timeout):
-    return_value = HTTPError(
-      request.full_url, 409, "Conflict", {},
-      io.BytesIO(b'{"detail":"Owned by the integration chat; no duplicate card."}'),
-    )
-    raise return_value
-
-  monkeypatch.setattr(helper, "urlopen", reject)
-  with pytest.raises(SystemExit, match="Owned by the integration chat") as exc:
-    helper.request_approval(**PROMPT)
-  assert "owner-input card" in str(exc.value)
-  assert "Fix the stated conflict" in str(exc.value)
-
-
-def test_question_helper_leaves_canonicalization_to_server(monkeypatch):
-  from tests.test_platform_tools import _control_module
-
-  helper = _control_module()._APPROVALS
-  captured = []
-  monkeypatch.setattr(helper, "save_card", lambda kind, body: (
-    captured.append((kind, body)) or {"state": "waiting_for_owner"}
-  ))
-
-  helper.request_question([{
-    "question": "Which repair should I prepare?",
-    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
-  }])
-
-  assert captured == [("question", {"questions": [{
-    "question": "Which repair should I prepare?",
-    "options": [{"label": "Permanent repair", "description": "Fix the cause."}],
-  }]})]
-
-  captured.clear()
-  helper.request_question([{"question": "Ship it?"}], message="Tests pass.")
-  helper.request_restart(message="The fix is committed.")
-  assert captured == [
-    ("question", {"questions": [{"question": "Ship it?"}], "message": "Tests pass."}),
-    ("restart-request", {"message": "The fix is committed."}),
-  ]
-
-
-def test_helper_surfaces_fastapi_validation_paths_without_echoing_input(monkeypatch):
-  import io
-  from urllib.error import HTTPError
-  from tests.test_platform_tools import _control_module
-
-  helper = _control_module()._APPROVALS
-  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
-    monkeypatch.setenv(name, "test-value")
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-
-  def reject(request, timeout):
-    raise HTTPError(
-      request.full_url, 422, "Unprocessable Content", {}, io.BytesIO(json.dumps({
-        "detail": [
-          {"loc": ["body", "questions", 0, "header"],
-           "msg": "Field required", "type": "missing",
-           "input": "must-not-appear"},
-          {"loc": ["body", "questions", 0, "options"],
-           "msg": "List should have at most 3 items", "type": "too_long"},
-          {"loc": ["body", "questions", 0, "sk-live-do-not-echo"],
-           "msg": "Extra inputs are not permitted", "type": "extra_forbidden"},
-        ],
-      }).encode()),
-    )
-
-  monkeypatch.setattr(helper, "urlopen", reject)
-  with pytest.raises(SystemExit) as exc:
-    helper.request_question([{
-      "id": "choice", "header": "Direction", "question": "Which?",
-      "options": [],
-    }])
-  message = str(exc.value)
-  assert "questions[0].header: Field required" in message
-  assert "questions[0].options: List should have at most 3 items" in message
-  assert "questions[0].<field>: Extra inputs are not permitted" in message
-  assert "sk-live-do-not-echo" not in message
-  assert "must-not-appear" not in message
-
-
-def test_helper_preserves_structured_restart_rejection_detail(monkeypatch):
-  import io
-  from urllib.error import HTTPError
-  from tests.test_platform_tools import _control_module
-
-  helper = _control_module()._APPROVALS
-  for name in ("API_BASE_URL", "AGENT_TOKEN", "CHAT_ID", "MOBIUS_RUN_TOKEN"):
-    monkeypatch.setenv(name, "test-value")
-  monkeypatch.setenv("API_BASE_URL", "http://testserver")
-
-  def reject(request, timeout):
-    raise HTTPError(
-      request.full_url, 409, "Conflict", {}, io.BytesIO(json.dumps({
-        "detail": {
-          "code": "restart_source_must_be_committed",
-          "message": "Möbius could not bind a Restart card to exact committed source.",
-        },
-      }).encode()),
-    )
-
-  monkeypatch.setattr(helper, "urlopen", reject)
-  with pytest.raises(SystemExit, match="restart_source_must_be_committed") as exc:
-    helper.request_restart()
-  assert "exact committed source" in str(exc.value)
-
-
-def test_stop_winning_answer_admission_does_not_queue_a_continuation(
+def test_stop_winning_answer_admission_on_a_legacy_approval_card_queues_nothing(
   client, chat, auth, approval_run, monkeypatch,
 ):
   from contextlib import asynccontextmanager
   from app import chat_queue
   from app.chat_writer import await_ack
 
-  qid = _ask(client, chat, approval_run).json()["question_id"]
+  qid = _ask(approval_run)
   original_gate = chat_queue.get_transition_lock
 
   @asynccontextmanager
@@ -1000,164 +1028,26 @@ def test_stop_winning_answer_admission_does_not_queue_a_continuation(
   assert _row(chat.id)[2] == []
 
 
-@pytest.mark.parametrize("route", ["question", "approval"])
-def test_saved_owner_cards_share_blocking_marker_and_terminal_receipt(
-  client, chat, auth, approval_run, route,
+def test_a_legacy_approval_card_bars_a_plain_send_until_answered(
+  client, chat, auth, approval_run,
 ):
-  payload = PROMPT if route == "approval" else {"questions": [{
-    "id": "direction", "header": "Direction", **QUESTION_PROMPT,
-  }]}
-  response = client.post(f"/api/chats/{chat.id}/{route}",
-                         json=payload, headers=approval_run[1])
-  assert response.status_code == 200, response.text
-  receipt = response.json()
-  # The receipt still states the turn's terminal contract; only the reason
-  # changed — the response is CUT at the card rather than merely asked to end.
-  assert "The turn is over" in receipt["next_action"]
-  assert "nothing further can be delivered" in receipt["next_action"]
-  assert questions.get(chat.id) is None
+  qid = _ask(approval_run)
   _finish(chat, approval_run[0])
-  assert _row(chat.id)[0] == receipt["question_id"]
+  assert _row(chat.id)[0] == qid
   blocked = client.post(f"/api/chats/{chat.id}/messages", headers=auth,
                         json={"content": "Skip past the card"})
   assert blocked.status_code == 409
-  assert _row(chat.id)[0] == receipt["question_id"]
+  assert _row(chat.id)[0] == qid
 
 
-@pytest.mark.parametrize("route", ["question", "approval"])
-def test_card_carries_the_turns_closing_message_outside_its_identity(
-  client, chat, approval_run, route,
-):
-  payload = PROMPT if route == "approval" else {"questions": [QUESTION_PROMPT]}
-  message = "I tested the change.\n\n- It **passes** locally."
-  first = client.post(f"/api/chats/{chat.id}/{route}",
-                      json={**payload, "message": f"  {message}\n"}, headers=approval_run[1])
-  assert first.status_code == 200, first.text
-  # Rewording the prose on a retry addresses the same saved card, and the
-  # first saved message is kept.
-  again = client.post(f"/api/chats/{chat.id}/{route}",
-                      json={**payload, "message": "Reworded."}, headers=approval_run[1])
-  assert again.json() == first.json()
-  saved = _row(chat.id)[1][-1]
-  cards = [block for block in saved["blocks"] if block["type"] == "question"]
-  assert [card["message"] for card in cards] == [message]
-  assert "message" not in cards[0]["questions"][0]
-  assert saved["content"].endswith(message)
-
-
-def test_blank_card_message_is_ignored_and_an_over_long_one_refused(client, chat, approval_run):
-  response = client.post(f"/api/chats/{chat.id}/question", json={
-    "questions": [QUESTION_PROMPT], "message": "   ",
-  }, headers=approval_run[1])
-  assert response.status_code == 200, response.text
-  assert "message" not in _row(chat.id)[1][-1]["blocks"][-1]
-  too_long = client.post(f"/api/chats/{chat.id}/approval", json={
-    **PROMPT, "message": "x" * 20_001,
-  }, headers=approval_run[1])
-  assert too_long.status_code == 422
-
-
-def test_card_message_limit_is_exactly_twenty_thousand_characters(client, chat, approval_run):
-  over = client.post(f"/api/chats/{chat.id}/question", json={
-    "questions": [QUESTION_PROMPT], "message": "x" * 20_001,
-  }, headers=approval_run[1])
-  assert over.status_code == 422
-  at_limit = "y" * 20_000
-  saved = client.post(f"/api/chats/{chat.id}/question", json={
-    "questions": [QUESTION_PROMPT], "message": at_limit,
-  }, headers=approval_run[1])
-  assert saved.status_code == 200, saved.text
-  assert _row(chat.id)[1][-1]["blocks"][-1]["message"] == at_limit
-
-
-def test_saved_questions_keep_multiple_choices_and_retry_identity(client, chat, approval_run):
-  payload = {"questions": [
-    {"id": "direction", "header": "Direction", **QUESTION_PROMPT},
-    {"id": "timing", "header": "Timing", "question": "When?", "options": []},
-  ]}
-  first = client.post(f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1])
-  again = client.post(f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1])
-  assert first.status_code == 200, first.text
-  assert first.json() == again.json()
-  saved = _row(chat.id)[1][-1]["blocks"][-1]["questions"]
-  assert saved[0]["options"] == [
-    {**option, "id": str(index)}
-    for index, option in enumerate(QUESTION_PROMPT["options"])
-  ]
-  assert saved[1] == payload["questions"][1]
-
-
-def test_saved_questions_canonicalize_card_only_metadata_at_route_boundary(
-  client, chat, approval_run,
-):
-  payload = {"questions": [
-    {"question": "Which direction?"},
-    {"question": "When?", "options": []},
-  ]}
-  response = client.post(
-    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
-  )
-  assert response.status_code == 200, response.text
-  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [
-    {
-      "id": "question-1", "header": "Question 1",
-      "question": "Which direction?", "options": [],
-    },
-    {
-      "id": "question-2", "header": "Question 2",
-      "question": "When?", "options": [],
-    },
-  ]
-
-
-def test_saved_question_block_preserves_all_ten_questions_and_retry_identity(
-  client, chat, approval_run,
-):
-  payload = {"questions": [
-    {"question": f"Decision {index}?"} for index in range(1, 11)
-  ]}
-  response = client.post(
-    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
-  )
-  retry = client.post(
-    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
-  )
-  assert response.status_code == 200, response.text
-  assert retry.json() == response.json()
-  pending_id, messages, _ = _row(chat.id)
-  assert pending_id == response.json()["question_id"]
-  assert messages[-1]["blocks"][-1]["questions"] == [
-    {"id": f"question-{index}", "header": f"Question {index}",
-     "question": f"Decision {index}?", "options": []}
-    for index in range(1, 11)
-  ]
-
-
-@pytest.mark.parametrize("count", [0, 11])
-def test_question_block_count_outside_one_to_ten_does_not_save_a_card(
-  client, chat, approval_run, count,
-):
-  before = _row(chat.id)
-  response = client.post(
-    f"/api/chats/{chat.id}/question",
-    json={"questions": [{"question": f"Decision {index}?"} for index in range(count)]},
-    headers=approval_run[1],
-  )
-  assert response.status_code == 422, response.text
-  assert _row(chat.id) == before
-
-
-def test_answering_ten_questions_saves_all_answers_and_resumes_once(
+def test_answering_a_legacy_ten_question_card_saves_every_answer_and_resumes_once(
   client, chat, auth, approval_run, monkeypatch,
 ):
-  payload = {"questions": [
-    {"question": f"Decision {index}?"} for index in range(1, 11)
-  ]}
-  saved = client.post(
-    f"/api/chats/{chat.id}/question", json=payload, headers=approval_run[1],
-  )
-  assert saved.status_code == 200, saved.text
-  question_id = saved.json()["question_id"]
+  """A chat's saved barring Q&A card (earlier releases saved these) stays
+  answerable: every answer lands and exactly one continuation starts."""
+  question_id = inputs.save_barring_question(approval_run[0], [
+    {"question": f"Decision {index}?", "options": []} for index in range(1, 11)
+  ])
   _finish(chat, approval_run[0])
   unregister_active_sink(chat.id, approval_run[0])
   scheduled = []
@@ -1179,227 +1069,3 @@ def test_answering_ten_questions_saves_all_answers_and_resumes_once(
   retry = client.post(f"/api/chats/{chat.id}/messages", json=body, headers=auth)
   assert retry.status_code == 410
   assert len(scheduled) == 1
-
-
-def test_question_tool_and_route_agree_on_ten_questions_without_changing_choices():
-  from app.routes.owner_approvals import QuestionRequest
-  from tests.test_platform_tools import _control_module
-
-  tool = _control_module()._TOOL_DEFINITIONS["request_question"]
-  question_schema = tool["inputSchema"]["properties"]["questions"]
-  route_schema = QuestionRequest.model_json_schema()
-  assert question_schema["minItems"] == route_schema["properties"]["questions"]["minItems"] == 1
-  assert question_schema["maxItems"] == route_schema["properties"]["questions"]["maxItems"] == 10
-  assert question_schema["items"]["properties"]["options"]["maxItems"] == 3
-  assert route_schema["$defs"]["QuestionSpec"]["properties"]["options"]["maxItems"] == 3
-  assert "1–10" in tool["description"]
-
-
-def test_saved_single_question_uses_neutral_default_heading(
-  client, chat, approval_run,
-):
-  response = client.post(
-    f"/api/chats/{chat.id}/question",
-    json={"questions": [{"question": "Which direction?"}]},
-    headers=approval_run[1],
-  )
-  assert response.status_code == 200, response.text
-  assert _row(chat.id)[1][-1]["blocks"][-1]["questions"] == [{
-    "id": "question-1", "header": "Your choice",
-    "question": "Which direction?", "options": [],
-  }]
-
-
-def test_question_defaults_cannot_collide_with_an_explicit_id(
-  client, chat, approval_run,
-):
-  response = client.post(
-    f"/api/chats/{chat.id}/question",
-    json={"questions": [
-      {"id": "question-2", "question": "First?"},
-      {"question": "Second?"},
-    ]},
-    headers=approval_run[1],
-  )
-  assert response.status_code == 422
-  assert "question ids must be distinct" in response.text
-
-
-def test_question_tool_saves_receipt_and_never_returns_a_default_answer(monkeypatch):
-  from tests.test_platform_tools import _control_module
-  control = _control_module()
-  expected = {"state": "waiting_for_owner", "question_id": "q1", "next_action": "End"}
-  captured = []
-  monkeypatch.setattr(control._APPROVALS, "request_question", lambda questions: (
-    captured.append(questions) or expected
-  ))
-  payload = [{"id": "choice", "header": "Choice", **QUESTION_PROMPT}]
-  assert control._call_request_question({"questions": payload}) == expected
-  assert captured == [payload]
-  assert "answers" not in expected
-
-
-def test_prose_a_provider_races_after_a_saved_card_is_never_discarded(
-  client, chat, approval_run,
-):
-  """Generation is cut at the card, but anything that still arrives stays.
-
-  Möbius removes the CAUSE of post-card prose (Claude's card-end hook refuses
-  the next model request; other paths interrupt) and never the EVIDENCE: output
-  a provider did produce remains part of both session histories, so a future
-  leak is visible instead of masked.
-  """
-  sink = approval_run[0]
-  assert sink.publish({"type": "text", "content": "Reading the contract first."})
-  saved = _ask(client, chat, approval_run)
-  assert sink.assistant_blocks[-1]["type"] == "question"
-
-  log_before = len(sink.bc.event_log)
-  assert sink.publish({"type": "text", "content": "Card saved — waiting on you."})
-  assert sink.publish({"type": "thinking", "content": "Should I say more?"})
-  assert [b["type"] for b in sink.assistant_blocks] == [
-    "text", "question", "text", "thinking",
-  ]
-  assert len(sink.bc.event_log) == log_before + 2
-  asyncio.run(sink.finalize())
-  persisted = _row(chat.id)[1][-1]["blocks"]
-  assert [b["type"] for b in persisted] == [
-    "text", "question", "text", "thinking",
-  ]
-  assert persisted[1]["question_id"] == saved.json()["question_id"]
-
-
-def test_completed_card_receipt_ends_the_turn_then_preserves_the_raced_tail(
-  client, chat, approval_run,
-):
-  """The two owner-card guarantees hold at the same receipt boundary.
-
-  A successful completed receipt synchronously claims the runner's card end
-  (the fallback path, for a runner that did not already end itself at the
-  card), while provider events already in flight remain live and durable.
-  """
-  from app.runner_registry import registry
-
-  sink = approval_run[0]
-  handle = _FakeCardHandle(chat.id)
-  registry.register(handle)
-  try:
-    assert sink.publish({
-      "type": "tool_start", "tool": "Bash", "input": "owner helper",
-      "tool_use_id": "owner-helper-race",
-    })
-    saved = _ask(client, chat, approval_run)
-    qid = saved.json()["question_id"]
-
-    async def deliver_receipt_and_raced_tail():
-      assert sink.publish({
-        "type": "tool_output", "content": saved.text,
-        "output_complete": True, "output_exit_code": 0,
-        "tool_use_id": "owner-helper-race",
-      })
-      assert handle.finishes == 1
-
-      log_before = len(sink.bc.event_log)
-      assert sink.publish({"type": "text", "content": "Already emitted tail."})
-      assert sink.publish({
-        "type": "thinking", "content": "Already emitted trace.",
-      })
-      assert len(sink.bc.event_log) == log_before + 2
-      await sink.finalize()
-
-    asyncio.run(deliver_receipt_and_raced_tail())
-
-    persisted = _row(chat.id)[1][-1]["blocks"]
-    assert [block["type"] for block in persisted] == [
-      "tool", "question", "text", "thinking",
-    ]
-    assert persisted[0]["owner_card_question_id"] == qid
-    assert persisted[1]["question_id"] == qid
-    assert persisted[2]["content"] == "Already emitted tail."
-  finally:
-    registry.unregister(chat.id, handle.kind)
-
-
-def test_card_end_is_gated_on_the_exact_card_this_turn_saved(
-  client, chat, approval_run,
-):
-  """A receipt-shaped tool result alone must never end a turn.
-
-  `has_continuation_card` is the single identity gate both card-end paths ask
-  (the sink's fallback signal here, Claude's PostToolUse hook in its runner), so
-  a tool that merely printed an older card's JSON leaves the turn running.
-  """
-  from app.runner_registry import registry
-
-  sink = approval_run[0]
-  handle = _FakeCardHandle(chat.id)
-  registry.register(handle)
-  try:
-    saved = _ask(client, chat, approval_run)
-    qid = saved.json()["question_id"]
-    assert sink.has_continuation_card(qid) is True
-    assert sink.has_continuation_card("card-from-last-week") is False
-
-    stale = json.dumps({
-      "state": "waiting_for_owner", "question_id": "card-from-last-week",
-      "next_action": "End now",
-    })
-    assert sink.publish({
-      "type": "tool_output", "content": stale,
-      "output_complete": True, "output_exit_code": 0,
-      "tool_use_id": "stale-echo",
-    })
-    assert handle.finishes == 0
-    # The stale output is still recorded — no filtering, only no cut.
-    assert sink.assistant_blocks[-1].get("owner_card_question_id") is None
-  finally:
-    registry.unregister(chat.id, handle.kind)
-
-
-def test_a_streamed_messages_tail_still_lands_in_its_own_block(
-  client, chat, approval_run,
-):
-  """A pre-card message tail reattaches to its original block while a distinct
-  raced message remains visible after the card instead of being discarded."""
-  sink = approval_run[0]
-  assert sink.publish(
-    {"type": "text", "content": "Reading it", "text_item_id": "msg-1"},
-  )
-  _ask(client, chat, approval_run)
-  assert sink.publish(
-    {"type": "text", "content": " first.", "text_item_id": "msg-1"},
-  )
-  assert [b["type"] for b in sink.assistant_blocks] == ["text", "question"]
-  assert sink.assistant_blocks[0]["content"] == "Reading it first."
-  # A different message item is genuinely later, but must remain visible so
-  # Möbius and the provider session never diverge while the interrupt drains.
-  assert sink.publish(
-    {"type": "text", "content": " Done.", "text_item_id": "msg-2"},
-  )
-  assert [b["type"] for b in sink.assistant_blocks] == [
-    "text", "question", "text",
-  ]
-  assert sink.assistant_blocks[-1]["content"] == " Done."
-
-
-def test_native_question_keeps_recording_post_card_prose(chat, approval_run):
-  """Only a continuation card is terminal. A native AskUserQuestion is
-  mid-turn, so prose after that card stays ordinary transcript."""
-  sink = approval_run[0]
-
-  async def go():
-    await sink.publish_question({
-      "type": "question",
-      "question_id": "native-post-1",
-      "questions": [{
-        "question": "Pick one",
-        "options": [
-          {"label": "A", "description": "a"},
-          {"label": "B", "description": "b"},
-        ],
-      }],
-    })
-
-  asyncio.run(go())
-  assert sink.publish({"type": "text", "content": "While you decide, notes."})
-  assert [b["type"] for b in sink.assistant_blocks] == ["question", "text"]

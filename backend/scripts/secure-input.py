@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import urllib.error
 from urllib.parse import quote
@@ -106,35 +107,45 @@ def _submit_saved(args) -> int:
     values.clear()
 
 
-def _save_refusal(status: int, body: dict) -> str:
-  """Name the server's reason: the saved-card route returns static texts only."""
+class SecureInputRefused(RuntimeError):
+  """The server refused the request; the message is its static reason."""
+
+
+def _record_refusal(body: dict) -> str:
+  """Name the server's reason; the request route returns static texts only."""
   detail = _safe_error(body, "The server refused the request.")
-  message = f"Could not save secure input; no values were requested. {detail}"
-  # A refused request fails the same way again; only a server fault can pass.
-  return message + (" Retry the identical request." if status >= 500 else "")
+  return f"Could not record secure input; no values were requested. {detail}"
 
 
-def _request_saved(
-  spec: dict, command: list[str], action: str, cwd: str | None = None,
-) -> dict:
-  """Commit a sealed request, without retaining a waiting helper or values."""
+def _key_from_title(title: str) -> str:
+  """A stable request key for a title, so repeating the command revises the
+  same request instead of adding another."""
+  slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:72].strip("-")
+  return f"secret-{slug}" if slug else "secret"
+
+
+def _record_secret_request(key: str, request: dict) -> dict:
+  """Record a sealed request on this chat's owner-input list.
+
+  The same request as `owner_input` with kind secret: it does not end the
+  turn, and its card is shown when the turn ends. Values never pass here.
+  """
   base = os.environ.get("API_BASE_URL", "").rstrip("/")
   token = os.environ.get("AGENT_TOKEN", "")
   chat_id = os.environ.get("CHAT_ID", "")
   if not base or not token or not chat_id:
     raise RuntimeError("Secure input is unavailable: chat environment is incomplete.")
-  if not command:
-    raise RuntimeError("A sealed consumer command is required.")
-  status, receipt = _post(
-    f"{base}/api/secure-inputs/{chat_id}/saved",
-    {**spec, "command": command, "cwd": cwd or os.getcwd(), "action": action}, token,
+  status, result = _post(
+    f"{base}/api/chats/{quote(chat_id, safe='')}/input-requests",
+    {"op": "add", "kind": "secret", "key": key, **request}, token,
   )
   if status >= 300:
-    raise RuntimeError(_save_refusal(status, receipt))
-  if (receipt.get("state") not in {"waiting_for_owner", "answered"}
-      or not receipt.get("question_id") or not receipt.get("next_action")):
-    raise RuntimeError("Secure input save was not confirmed. Retry the identical request.")
-  return receipt
+    raise SecureInputRefused(
+      _record_refusal(result) + (" Retry the identical request." if status >= 500 else "")
+    )
+  if not isinstance(result, dict) or not isinstance(result.get("open"), list):
+    raise RuntimeError("Secure input request was not confirmed. Retry the identical request.")
+  return result
 
 
 def _request_and_consume(spec: dict) -> tuple[str, str, dict[str, str]]:
@@ -195,30 +206,6 @@ def _settle(request_id: str, capability: str, *, ok: bool, message: str) -> None
   )
 
 
-def _owner_credentials_consumer() -> list[str]:
-  return [
-    sys.executable,
-    str(Path(__file__).with_name("update-owner-credentials.py")),
-  ]
-
-
-# The sign-in change card; the request_secret control tool offers the same one.
-OWNER_CREDENTIALS_SPEC = {
-  "mode": "sealed",
-  "title": "Update sign-in",
-  "description": (
-    "Values go directly to a local credential updater and are not sent to "
-    "the AI provider."
-  ),
-  "fields": [
-    {"name": "current_password", "type": "password", "label": "Current password", "autocomplete": "current-password"},
-    {"name": "new_username", "type": "text", "label": "New username", "autocomplete": "username"},
-    {"name": "new_password", "type": "password", "label": "New password", "autocomplete": "new-password"},
-    {"name": "confirm_password", "type": "password", "label": "Confirm new password", "autocomplete": "new-password"},
-  ],
-}
-
-
 def main() -> int:
   parser = argparse.ArgumentParser(
     description="Request secure input without adding values to model context.",
@@ -226,9 +213,12 @@ def main() -> int:
   sub = parser.add_subparsers(dest="action", required=True)
 
   owner = sub.add_parser("owner-credentials")
-  owner.set_defaults(**OWNER_CREDENTIALS_SPEC, command=_owner_credentials_consumer())
+  owner.add_argument("--key", default="owner-credentials")
 
   run = sub.add_parser("run")
+  run.add_argument("--key", default=None,
+                   help="Short stable name for the request, e.g. mail-api-key; "
+                        "defaults to one derived from the title.")
   run.add_argument("--title", required=True)
   run.add_argument("--description", default="")
   run.add_argument("--field", action="append", required=True, type=_field)
@@ -250,28 +240,32 @@ def main() -> int:
     if not args.field_file and not args.field_env:
       parser.error("submit-saved needs --field-file or --field-env")
     return _submit_saved(args)
-  if args.action == "run":
-    args.mode = "sealed"
-    args.fields = args.field
-    args.command = args.command[1:] if args.command[:1] == ["--"] else args.command
-  elif args.action == "reveal":
-    args.mode = "reveal"
-    args.fields = args.field
-    args.command = None
+  if args.action in ("run", "owner-credentials"):
+    if args.action == "owner-credentials":
+      request = {"preset": "owner_credentials"}
+    else:
+      command = args.command[1:] if args.command[:1] == ["--"] else args.command
+      request = {
+        "title": args.title, "description": args.description,
+        "fields": args.field, "command": command, "cwd": os.getcwd(),
+      }
+    try:
+      key = args.key or _key_from_title(args.title)
+      print(json.dumps(_record_secret_request(key, request)))
+      return 0
+    except SecureInputRefused as exc:
+      print(f"{exc} Do not continue as if values were provided.")
+      return 1
+    except Exception:
+      print("Secure input request was not confirmed. Retry the identical request; do not continue as if values were provided.")
+      return 1
 
   spec = {
-    "mode": args.mode,
+    "mode": "reveal",
     "title": args.title,
     "description": args.description,
-    "fields": args.fields,
+    "fields": args.field,
   }
-  if args.action != "reveal":
-    try:
-      print(json.dumps(_request_saved(spec, args.command, args.action)))
-      return 0
-    except Exception:
-      print("Secure input save was not confirmed. Retry the identical request; do not continue as if values were provided.")
-      return 1
 
   request_id = capability = None
   values: dict[str, str] = {}

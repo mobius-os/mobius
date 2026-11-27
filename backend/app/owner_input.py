@@ -6,7 +6,9 @@ Secure field metadata and values stay on the chat-scoped secure-input channel.
 
 A saved owner-input card is also the single source of its owner notification:
 the platform sends it once when the card is committed, so agents never send
-their own "needs your answer" push.
+their own "needs your answer" push. A request-list card republished at a
+later turn's end notifies only when it shows a request revision the owner has
+not been shown (`owner_input_requests.shows_owner_something_new`).
 """
 
 from __future__ import annotations
@@ -27,12 +29,16 @@ def publish_owner_input_changed(
   input_kind: OwnerInputKind | None,
   *,
   question_id: str | None | object = _QUESTION_ID_UNSET,
+  request_card_id: str | None | object = _QUESTION_ID_UNSET,
 ) -> None:
   """Tell every shell whether a chat is waiting for owner involvement.
 
   ``questionId`` is optional rather than always nullable. Question producers
   include it so the shell can patch the durable question projection; secure
   inputs omit it so they never overwrite an unrelated question lifecycle.
+  ``requestCardId`` is the request-list card (``Chat.open_request_card_id``);
+  it never travels as ``questionId``, which the shell treats as the barring
+  card that locks the composer.
   """
   event = {
     "type": "chat_owner_input_changed",
@@ -41,6 +47,8 @@ def publish_owner_input_changed(
   }
   if question_id is not _QUESTION_ID_UNSET:
     event["questionId"] = question_id
+  if request_card_id is not _QUESTION_ID_UNSET:
+    event["requestCardId"] = request_card_id
   get_system_broadcast().publish(event)
 
 

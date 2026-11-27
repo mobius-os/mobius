@@ -2311,7 +2311,7 @@ def test_a_part_made_plain_without_its_value_is_refused_for_the_owner_too(client
 
 
 def test_an_agent_asks_for_a_key_of_several_parts_and_the_owner_pastes_each(client, auth, db, vault):
-  # The request_key card route relays exactly this ask (owner_approvals.KeyRequest).
+  # The request_key card route relays exactly this ask (key_requests.KeyRequest).
   vault.request_for_agents({
     "key": "twilio", "reason": "Send texts", "sites": [SITE], "inject": BASIC,
     "parts": [{"name": "account", "label": "Account SID", "secret": False}, {"name": "token", "label": "Auth token"}],

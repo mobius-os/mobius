@@ -442,7 +442,7 @@ function runtimeRefreshHarness(owner, server) {
     commitRuntimeSnapshot: noop, updateChatRuntimeCache: noop, onRuntimeSettledIdle: noop,
     setActiveAssistantMessageId: noop, setRecoveryRunId: noop, setContinuationWait: noop,
     setSending: noop, setServerRunningLocalState: noop, setGoalPresentationLocalState: noop,
-    setLiveQuestionId: noop, setArmedWaits: noop, setServerHandoff: noop,
+    setLiveQuestionId: noop, setOpenRequestCardId: noop, setArmedWaits: noop, setServerHandoff: noop,
     setChatCompacting: noop, setBackgroundHelpers: noop,
   }
   harness.refreshRuntimeState = new Function(...Object.keys(scope), `return ${callback}`)(...Object.values(scope))
