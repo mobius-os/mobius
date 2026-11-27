@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   api,
+  chatPath,
   PINNED_MUTATION_TIMEOUT_MS,
   reservePinnedIntent,
 } from '../../api/client.js'
@@ -146,4 +147,35 @@ test('a reorder retires both offline shell-list snapshots', async (t) => {
     'https://mobius.test/api/apps/',
     'https://mobius.test/api/chats',
   ])
+})
+
+test('chatPath keeps a traversal chat id inside one path segment', () => {
+  const id = '../storage/apps/7/fake-chat.json?'
+  for (const suffix of ['', '?limit=20&compact=1', '/runtime']) {
+    const url = new URL(`/api${chatPath(id, suffix)}`, 'https://mobius.test')
+    assert.equal(url.pathname, `/api/chats/${encodeURIComponent(id)}${suffix.startsWith('/') ? suffix : ''}`)
+  }
+  assert.equal(chatPath('chat-1', '?limit=20'), '/chats/chat-1?limit=20')
+})
+
+test('chat requests keep the chat id inside one path segment', async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => { globalThis.fetch = originalFetch })
+  const urls = []
+  globalThis.fetch = async (url) => {
+    urls.push(String(url))
+    return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+  const id = '../storage/apps/7/fake-chat.json?'
+  await api.chats.detail(id, { limit: 20, compact: true })
+  await api.chats.update(id, { title: 'x' })
+  await api.chats.setPinned(id, true)
+  await api.chats.remove(id)
+  await api.chats.recover(id)
+  assert.equal(urls.length, 5)
+  for (const url of urls) {
+    assert.equal(new URL(url, 'https://mobius.test').pathname.startsWith(
+      `/api/chats/${encodeURIComponent(id)}`,
+    ), true, url)
+  }
 })

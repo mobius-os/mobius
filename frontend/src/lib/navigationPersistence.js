@@ -1,3 +1,4 @@
+import { isShellLinkId } from './notificationTarget.js'
 import { isSharedBrowserRoute } from './sharedBrowserWorkspace.js'
 import { settingsSectionOrNull } from './settingsSections.js'
 import { localStore, sessionStore } from './workspaceStorage.js'
@@ -8,7 +9,10 @@ const ACTIVE_APP_KEY = 'moebius_active_app'
 const RETURN_VIEW_KEY = 'mobius:return-view'
 
 export function readStoredChatId(storage = localStore()) {
-  try { return storage?.getItem(ACTIVE_CHAT_KEY) ?? null } catch { return null }
+  try {
+    const chatId = storage?.getItem(ACTIVE_CHAT_KEY) ?? null
+    return isShellLinkId(chatId) ? chatId : null
+  } catch { return null }
 }
 
 export function readRestoredCanvas(storage = localStore()) {
@@ -73,6 +77,8 @@ export function parseShellDeepLink(location = globalThis.location) {
         const appId = /^\d+$/.test(app) ? Number.parseInt(app, 10) : null
         return { view: 'canvas', app, appId, intent }
       }
+      // A chat id is one path segment; anything else fails closed.
+      if (chat && !isShellLinkId(chat)) return null
       if (chat) return { view: 'chat', chatId: chat, intent, focusQuestion,
         ...(focusQuestion && params.get('question') ? { questionId: params.get('question') } : {}) }
       if (project && result && /^[A-Za-z0-9_-]{1,128}$/.test(project)
@@ -99,6 +105,7 @@ export function parseShellDeepLink(location = globalThis.location) {
     return { view: 'canvas', app, appId, intent: null }
   }
   const chatMatch = path.match(/^\/chat\/([^/]+)\/?$/)
+  if (chatMatch && !isShellLinkId(chatMatch[1])) return null
   if (chatMatch) return { view: 'chat', chatId: chatMatch[1], intent: null, focusQuestion: false }
   if (/^\/settings\/?$/.test(path)) {
     // The OAuth callback needs this one section after a cold navigation. Do

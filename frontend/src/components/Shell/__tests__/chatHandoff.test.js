@@ -108,7 +108,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
   )
   assert.match(
     initialLoad,
-    /if \(!reused\) \{[\s\S]*\/chats\/\$\{chatId\}\?limit=20&compact=1/,
+    /if \(!reused\) \{[\s\S]*\$\{chatPath\(chatId\)\}\?limit=20&compact=1/,
     'missing or changed versions must fail closed to the full detail route',
   )
   assert.match(

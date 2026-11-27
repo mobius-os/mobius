@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { chatPath } from '../../api/client.js'
 import { fetchLazyText } from './lazySidecar.js'
 
 // Backward-compatible names for the small pure retry contract's focused unit
@@ -62,7 +63,7 @@ export function useThinkingTrace({ open, thought, chatId }) {
     // yet returns 202 and makes a live thought hang on "Loading…", so instead
     // take whatever is stored now — the next revision bump re-fetches to catch
     // up.
-    const url = `/chats/${chatId}/thinking-trace/${encodeURIComponent(thought.thinking_id)}`
+    const url = `${chatPath(chatId)}/thinking-trace/${encodeURIComponent(thought.thinking_id)}`
 
     setLoadState('loading')
     fetchLazyText(url, { signal: controller.signal })

@@ -50,6 +50,25 @@ test('deep links preserve slug, numeric identity, and intent', () => {
   }), { view: 'chat', chatId: 'chat-1', intent: null, focusQuestion: true })
 })
 
+// A chat id is one path segment. URLSearchParams decodes %2F, and the
+// chat reads interpolate the id into /api/chats/<id>, so `..` would climb to an
+// arbitrary authenticated /api path (here app 7's own storage file).
+const TRAVERSAL_CHAT = '..%2Fstorage%2Fapps%2F7%2Ffake-chat.json%3F'
+
+test('a chat deep link with a non-id chat fails closed', () => {
+  for (const pathname of ['/shell/', '/shell/shared']) {
+    assert.equal(parseShellDeepLink({ pathname, search: `?chat=${TRAVERSAL_CHAT}` }), null)
+  }
+  assert.equal(parseShellDeepLink({ pathname: '/shell/', search: '?chat=a%20b' }), null)
+  assert.equal(parseShellDeepLink({ pathname: '/chat/..' }), null)
+})
+
+test('a stored active chat that is not an id is not restored', () => {
+  assert.equal(readStoredChatId(storage({
+    moebius_active_chat: '../storage/apps/7/fake-chat.json?',
+  })), null)
+})
+
 test('a /shell/?settings deep link opens Settings at a known section only', () => {
   assert.deepEqual(parseShellDeepLink({ pathname: '/shell/', search: '?settings=github' }),
     { view: 'settings', section: 'github' })

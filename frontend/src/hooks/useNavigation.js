@@ -15,6 +15,7 @@ import {
   updateCurrentNavEntry,
 } from '../lib/navHistory.js'
 import { requestChatQuestionReveal } from '../lib/chatQuestionReveal.js'
+import { isShellLinkId } from '../lib/notificationTarget.js'
 import { resolveInitialNav } from '../lib/resolveInitialNav.js'
 import {
   consumeReturnView,
@@ -1208,7 +1209,7 @@ export default function useNavigation({
   // snapshotRoute() is still the route being left. Returns false when there is
   // nothing to record.
   function recordChatNavigation(chatId, { paneId } = {}) {
-    if (chatId == null || String(chatId).trim() === '') return false
+    if (chatId == null || !isShellLinkId(String(chatId))) return false
     const previousRoute = snapshotRoute()
     const nextRoute = navRoute('chat', String(chatId), null, targetPaneFor(paneId))
     if (sameRoute(previousRoute, nextRoute)) return false
@@ -1269,8 +1270,10 @@ export default function useNavigation({
       openTab = tab
     } else if (view === 'chat') {
       const chatId = 'chatId' in opts ? opts.chatId : activeChatIdRef.current
-      // Reject a missing/empty chat id before any history write (§1.3.1).
-      if (chatId == null || String(chatId).trim() === '') return
+      // Reject a missing or non-id chat before any history write (§1.3.1).
+      // Every chat source (links, app frames, notifications, restored tabs)
+      // funnels through here, so a new entry point cannot open a `../` id.
+      if (chatId == null || !isShellLinkId(String(chatId))) return
       nextRoute = navRoute('chat', String(chatId), null, targetPaneId)
       openTab = tabModel.makeTab('chat', chatId)
     } else {

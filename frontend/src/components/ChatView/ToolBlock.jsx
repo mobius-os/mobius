@@ -6,6 +6,7 @@ import {
   toolResultCopyText,
 } from './toolResultFormat.js'
 import { copyPlainText } from './messageCopy.js'
+import { chatPath } from '../../api/client.js'
 import { fetchLazyText } from './lazySidecar.js'
 import {
   toolActivityIcon,
@@ -211,7 +212,7 @@ function GenericToolBlock({
     // (card-221 migrated all history), so a block without an id has no fetchable
     // full text — leave the inline excerpt.
     if (!t.tool_use_id) return
-    const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
+    const url = `${chatPath(chatId)}/tool-output/${encodeURIComponent(t.tool_use_id)}`
       + (isImageTool ? '' : '?preview=1')
     const controller = new AbortController()
     let cancelled = false
@@ -384,7 +385,7 @@ function GenericToolBlock({
       copyControllerRef.current?.abort()
       copyControllerRef.current = controller
       try {
-        const url = `/chats/${chatId}/tool-output/${encodeURIComponent(t.tool_use_id)}`
+        const url = `${chatPath(chatId)}/tool-output/${encodeURIComponent(t.tool_use_id)}`
         const result = await fetchLazyText(url, { signal: controller.signal })
         output = result.text
       } catch (error) {
