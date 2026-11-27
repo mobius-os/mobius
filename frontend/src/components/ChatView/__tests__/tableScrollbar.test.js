@@ -71,14 +71,15 @@ test('a track tap centres the thumb there, clamped to the table edges', () => {
 
 /** A press at `clientX` on a bar under the `wide` table, which starts at the
  * table's left edge; the thumb covers track pixels 0-100. */
-function pressBar(clientX, pointerType) {
+function pressBar(clientX, pointerType, zoom = 1) {
   const scroller = { ...wide, scrollLeft: 0 }
   const track = Object.assign(new EventTarget(), {
     clientWidth: wide.trackWidth,
-    getBoundingClientRect: () => ({ left: 0 }),
+    currentCSSZoom: zoom,
+    getBoundingClientRect: () => ({ left: 0, width: wide.trackWidth * zoom }),
     setPointerCapture() {},
   })
-  const thumb = { getBoundingClientRect: () => ({ left: 0, right: 100 }) }
+  const thumb = { getBoundingClientRect: () => ({ left: 0, right: 100 * zoom }) }
   followTableScrollbarPointer({ currentTarget: track, clientX, pointerId: 1, pointerType }, scroller, thumb)
   const send = (type, x = clientX) => track.dispatchEvent(Object.assign(new Event(type), { clientX: x }))
   return { scroller, send }
@@ -114,4 +115,16 @@ test('a sideways touch drag on the thumb moves the table until it lifts', () => 
   send('lostpointercapture')
   send('pointermove', 150)
   assert.equal(scroller.scrollLeft, 120)
+})
+
+test('desktop shell zoom preserves both track centering and drag distance', () => {
+  const zoom = 0.9
+  const tap = pressBar(150 * zoom, 'mouse', zoom)
+  assertNear(tap.scroller.scrollLeft, 300)
+  tap.send('lostpointercapture')
+
+  const drag = pressBar(50 * zoom, 'mouse', zoom)
+  drag.send('pointermove', 90 * zoom)
+  assertNear(drag.scroller.scrollLeft, 120)
+  drag.send('lostpointercapture')
 })

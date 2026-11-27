@@ -1,3 +1,5 @@
+import { captureLayoutSpace, clientLengthToLayout } from '../../../lib/layoutSpace.js'
+
 /**
  * Geometry and pointer gesture of the drawn scrollbar under a chat table that
  * cannot fit (useTableScrollbar in blocks.jsx). The track spans the scroller's
@@ -50,20 +52,25 @@ export function tableScrollLeftForTrackTap(offsetX, { clientWidth, scrollWidth, 
  * once it moves or lifts; a mouse press jumps at once, as on a native bar. */
 export function followTableScrollbarPointer(down, scroller, thumb) {
   const track = down.currentTarget
+  const trackSpace = captureLayoutSpace(track)
   const geometry = {
     clientWidth: scroller.clientWidth,
     scrollWidth: scroller.scrollWidth,
-    trackWidth: track.clientWidth,
+    trackWidth: trackSpace.width,
   }
   const startX = down.clientX
   const before = scroller.scrollLeft
   const thumbBox = thumb.getBoundingClientRect()
   const start = startX < thumbBox.left || startX > thumbBox.right
-    ? tableScrollLeftForTrackTap(startX - track.getBoundingClientRect().left, geometry)
+    ? tableScrollLeftForTrackTap(
+        clientLengthToLayout(startX - trackSpace.clientLeft, trackSpace), geometry,
+      )
     : before
   if (down.pointerType === 'mouse') scroller.scrollLeft = start
   const follow = (event) => {
-    scroller.scrollLeft = tableScrollLeftForDrag(start, event.clientX - startX, geometry)
+    scroller.scrollLeft = tableScrollLeftForDrag(
+      start, clientLengthToLayout(event.clientX - startX, trackSpace), geometry,
+    )
   }
   const drag = new AbortController()
   const { signal } = drag

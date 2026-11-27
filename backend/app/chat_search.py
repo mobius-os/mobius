@@ -14,6 +14,7 @@ release, which reconciles them from ``updated_at`` after a rollback.
 import heapq
 import json
 import re
+import unicodedata
 from types import SimpleNamespace
 
 from sqlalchemy import text as sql
@@ -28,15 +29,45 @@ _MARK_OPEN = "\ue000"
 _MARK_CLOSE = "\ue001"
 
 
-def _fts_query(tokens: list[str]) -> str:
-  """Build a safe FTS5 query from already-neutralized tokens."""
-  quoted = [f'"{token}"' for token in tokens]
-  quoted[-1] = f"{quoted[-1]}*"
-  return " ".join(quoted)
+def _fts_query(tokens: list[str], raw_query: str) -> str:
+  """Build the FTS5 candidate query for NFC ``tokens`` of ``raw_query``.
+
+  The index keeps each document's stored spelling. ``unicode61
+  remove_diacritics 2`` already folds a composed and a decomposed Latin
+  spelling of ``Réunion`` to one token, so Latin text needs only
+  the NFC comparison in ``_rank_results``. The per-word ``OR "<NFD>"`` and the
+  mixed-spelling branch exist for scripts whose decomposed form the tokenizer
+  does not fold, such as Hangul syllables versus their jamo. Keep them: they
+  find those documents without reindexing every stored transcript.
+  """
+  def conjunction(words: list[str], *, include_decomposed: bool) -> str:
+    clauses = []
+    for index, token in enumerate(words):
+      suffix = "*" if index == len(words) - 1 else ""
+      exact = f'"{token}"{suffix}'
+      decomposed = unicodedata.normalize("NFD", token) if include_decomposed else token
+      clauses.append(
+        exact if token == decomposed else f'({exact} OR "{decomposed}"{suffix})'
+      )
+    return " AND ".join(clauses)
+
+  query = conjunction(tokens, include_decomposed=True)
+  # A query typed with some letters composed and others decomposed (Hangul
+  # pasted from mixed sources) matches a document stored with that same
+  # mixture only through its own spelling. A wholly NFC or NFD query is
+  # already covered above; ``\w+`` would also split a decomposed Latin query
+  # at its combining marks, which only adds candidates that ranking discards.
+  if raw_query not in (
+    unicodedata.normalize("NFC", raw_query),
+    unicodedata.normalize("NFD", raw_query),
+  ):
+    original = _query_tokens(raw_query)
+    if original:
+      query = f"({query}) OR ({conjunction(original, include_decomposed=False)})"
+  return query
 
 
 def _query_tokens(raw: str) -> list[str]:
-  """Normalize one query consistently across both database backends."""
   return re.findall(r"\w+", raw, flags=re.UNICODE)
 
 
@@ -94,7 +125,7 @@ def _snippet(
   return "".join(pieces)
 
 
-def _candidate_rows(db: Session, tokens: list[str]):
+def _candidate_rows(db: Session, fts_query: str):
   """Stream FTS candidates of live chats, grouped by chat and position.
 
   While the previous release's column exists, a chat's prose entries count
@@ -118,7 +149,7 @@ def _candidate_rows(db: Session, tokens: list[str]):
       "(SELECT 1 FROM chat_transcript_state s WHERE s.chat_id = e.chat_id)) "
       "ORDER BY e.chat_id, e.seq"
     ).execution_options(stream_results=True, max_row_buffer=256),
-    {"query": _fts_query(tokens),
+    {"query": fts_query,
      "rows_authoritative": transcript_rows.rows_are_authority(db)},
   )
 
@@ -195,6 +226,10 @@ def _rank_results(rows, tokens: list[str], limit: int) -> list[dict]:
         "match_count": 0,
         "best_prose": None,
       }
+    # FTS already admits equivalent spellings. Use the same Unicode form
+    # for the exact comparison and the displayed snippet, without changing
+    # the original transcript or its reveal anchor.
+    doc_text = unicodedata.normalize("NFC", doc_text)
     spans = _match_spans(doc_text, patterns)
     if not spans:
       continue
@@ -261,7 +296,8 @@ def unindexed_chat_count(db: Session) -> int:
 
 def search(db: Session, raw_query: str, limit: int = 20) -> list[dict]:
   """Return ranked chat hits with only the fields consumed by the shell."""
-  tokens = _query_tokens(raw_query)
+  tokens = _query_tokens(unicodedata.normalize("NFC", raw_query))
   if not tokens or limit <= 0:
     return []
-  return _rank_results(_visible_rows(_candidate_rows(db, tokens)), tokens, limit)
+  fts_query = _fts_query(tokens, raw_query)
+  return _rank_results(_visible_rows(_candidate_rows(db, fts_query)), tokens, limit)

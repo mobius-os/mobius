@@ -31,6 +31,20 @@ test('exact marked terms produce case-insensitive, non-overlapping text ranges',
   ])
 })
 
+test('equivalent Unicode spellings highlight the original text at its real offsets', () => {
+  const decomposed = 'Re\u0301union'
+  const composed = 'Réunion'
+  const source = `📅 ${decomposed}, then ${composed}`
+  const secondStart = source.lastIndexOf(composed)
+  assert.deepEqual(searchTextMatches(source, [composed]), [
+    { start: 3, end: 3 + decomposed.length, text: decomposed },
+    { start: secondStart, end: source.length, text: composed },
+  ])
+  assert.deepEqual(searchTextMatches(composed, [decomposed]), [
+    { start: 0, end: composed.length, text: composed },
+  ])
+})
+
 test('Custom Highlight ranges leave React-owned text nodes intact and stay bounded', () => {
   const source = `needle ${'needle '.repeat(180)}`
   const textNode = {
