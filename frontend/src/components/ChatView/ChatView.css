@@ -28,7 +28,7 @@
    ║      the composer grows multi-line. --composer-h-based     ║
    ║      padding would drift the logo every keystroke.         ║
    ║                                                            ║
-   ║   4. Pill + + button are a UNIFIED PAIR:                   ║
+   ║   4. Compact pill + + button are a UNIFIED PAIR:           ║
    ║        - Same background: color-mix(srgb, --surface 60%,   ║
    ║          transparent).                                     ║
    ║        - Same backdrop-filter: blur(16px) saturate(140%).  ║
@@ -36,6 +36,8 @@
    ║        - Same hairline border-color.                       ║
    ║      Touching one without the other breaks the visual      ║
    ║      pairing — they read as one composer surface.          ║
+   ║      An expanded draft uses an opaque writing surface      ║
+   ║      so the chat underneath cannot compete with the draft. ║
    ║                                                            ║
    ║   5. Active `+` (popover open) is PURPLE FROSTED GLASS:    ║
    ║      `color-mix(srgb, --accent 75%, transparent)` — not    ║
@@ -2800,7 +2802,7 @@
   opacity: 0.5;
 }
 
-/* The pill: TRANSLUCENT surface with backdrop-blur — chat content
+/* The compact pill: translucent surface with backdrop-blur — chat content
    visibly softens through the pill background. Hairline border and
    slight surface tint keep it readable as a card. ~48px tall to
    match a WhatsApp-style composer; send/mic buttons live INSIDE
@@ -2816,6 +2818,7 @@
      the text and the action buttons never shift when a file comes or goes. */
   --pill-pad: 4px;
   --pill-border: 1px;
+  --pill-surface-tint: var(--surface) 60%;
   --composer-input-floor: 48px;
   --composer-reserve: calc(
     var(--pill-pad) * 2
@@ -2826,7 +2829,7 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  background: color-mix(in srgb, var(--surface) 60%, transparent);
+  background: color-mix(in srgb, var(--pill-surface-tint), transparent);
   border: var(--pill-border) solid var(--border-light); /* CONTRACT: subtle 1px hairline on opaque fill */
   border-radius: 24px;
   padding: var(--pill-pad);
@@ -2836,9 +2839,14 @@
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
-/* Multi-line: pill grows downward and the send/mic anchor to the
-   bottom-right so the action stays near the cursor. */
+/* An expanded draft keeps the shade of the compact pill over the chat
+   background, but makes it solid so transcript text cannot show through. */
 [data-composer-tall] { align-items: flex-end; }
+.chat__pill[data-composer-tall] {
+  background: color-mix(in srgb, var(--pill-surface-tint), var(--bg));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
 [data-composer-tall] .chat__send,
 [data-composer-tall] .chat__stop,
 [data-composer-tall] .chat__steer,

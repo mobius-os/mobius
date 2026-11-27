@@ -38,26 +38,46 @@ export function composerMarkdownDecorations(state, { focused = true, composing =
       ranges.push(Decoration.replace({}).range(node.from, node.to))
     }
   }
-  const lineStyle = (node, className) => {
-    let line = doc.lineAt(Math.max(node.from, from))
-    const end = Math.min(node.to, to)
+  const lineStyles = (first, last, style) => {
+    const start = Math.max(first.from, from)
+    const end = Math.min(last.to, to)
+    if (start > end) return
+    let line = doc.lineAt(start)
     for (;;) {
-      ranges.push(Decoration.line({ class: className }).range(line.from))
+      ranges.push(Decoration.line({ class: style(line) }).range(line.from))
       if (line.to >= end || line.number === doc.lines) break
       line = doc.line(line.number + 1)
     }
+  }
+  const lineStyle = (node, className) => lineStyles(doc.lineAt(node.from), doc.lineAt(node.to), () => className)
+  const codeStyle = node => {
+    const first = doc.lineAt(node.from)
+    const last = doc.lineAt(node.to)
+    const closingFence = node.lastChild
+    // Keep fence rows in the editor so caret navigation can reveal the source.
+    // Outside quotes/lists the hidden rows just provide space around the code.
+    const preview = node.name === 'FencedCode' && node.parent?.name === 'Document' && !active(node)
+    const bodyStart = first.number + Number(preview)
+    const bodyEnd = last.number - Number(preview && closingFence?.name === 'CodeMark' && closingFence.from !== node.firstChild.from)
+    lineStyles(first, last, line => {
+      if (line.number < bodyStart || line.number > bodyEnd) return 'cm-md-code-fence'
+      return `cm-md-code-line${line.number === bodyStart ? ' cm-md-code-start' : ''}${line.number === bodyEnd ? ' cm-md-code-end' : ''}`
+    })
   }
   syntaxTree(state).iterate({ from, to, enter(ref) {
     const node = ref.node
     const name = node.name
     if (inlineClasses[name]) mark(node, inlineClasses[name])
     if (/^(ATX|Setext)Heading/.test(name)) lineStyle(node, `cm-md-heading cm-md-heading-${name.at(-1)}`)
-    if (name === 'FencedCode' || name === 'CodeBlock') lineStyle(node, 'cm-md-code-line')
+    if (name === 'FencedCode' || name === 'CodeBlock') codeStyle(node)
     if (name === 'Blockquote') lineStyle(node, 'cm-md-quote')
     if (name === 'TaskMarker') mark(node, 'cm-md-task')
     if (syntaxMarks.has(name)) {
       if (active(node.parent)) mark(node, 'cm-md-syntax')
-      else hide(node)
+      else if (name === 'HeaderMark' && /^ATXHeading/.test(node.parent.name) && node.from === node.parent.from) {
+        const separator = /^[\t ]*/.exec(doc.sliceString(node.to, doc.lineAt(node.to).to))[0]
+        hide({ from: node.from, to: node.to + separator.length })
+      } else hide(node)
     }
     if (name === 'ListMark') {
       if (active(node.parent)) mark(node, 'cm-md-syntax')
@@ -65,7 +85,19 @@ export function composerMarkdownDecorations(state, { focused = true, composing =
         ranges.push(Decoration.replace({ widget: new ListBullet() }).range(node.from, node.to))
       }
     }
-    if ((name === 'URL' || name === 'LinkTitle') && node.parent?.name === 'Link' && !active(node.parent)) hide(node)
+    if (name === 'URL') {
+      const parent = node.parent
+      if (parent?.name === 'LinkReference') return
+      const link = parent?.name === 'Link' || parent?.name === 'Autolink' ? parent : node
+      if (link === node) {
+        // A bare URL may stop before @, escapes, or an invalid port. Don't
+        // style a recognized prefix of an address pointing somewhere else.
+        if (/[\\@%\p{L}\p{N}]/u.test(doc.sliceString(node.to, node.to + 1))) return
+        mark(node, 'cm-md-link')
+      }
+      if (parent?.name === 'Link' && !active(link)) hide(node)
+    }
+    if (name === 'LinkTitle' && node.parent?.name === 'Link' && !active(node.parent)) hide(node)
     if (name === 'CodeInfo' && !active(node.parent)) hide(node)
     // Images remain source text: drafts must never load remote resources or
     // conceal an image destination that the owner has not sent yet.
