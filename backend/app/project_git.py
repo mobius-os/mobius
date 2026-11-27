@@ -3,15 +3,40 @@
 Reads may project a project nested inside the platform repository. Writes are
 stricter: Projects can initialize or commit only when their own root is the
 repository root, so an owner action can never stage unrelated Möbius files.
+
+In a shared project (``untrusted_settings``) the repository's own settings
+are not the owner's: a project agent's room can write ``.git``
+(``project_agent_access``), and Git starts programs its settings name (hooks,
+the file-system monitor, filters, drivers, a submodule's ssh command, a local
+push URL's receiving hooks). So on a host that builds rooms, no process
+outside a room reads those settings:
+
+- every local command runs inside an agent room (``scripts/mobius_fence.py``):
+  the repository writable only when the command writes, no network, and no
+  settings file but the repository's own, so a program Git starts there
+  reaches no more than the agent that could have named it;
+- GitHub fetch and push run in a scratch repository the server creates
+  (``github_contribution_git``, as contribution checkouts do): no system or
+  global settings, https only, the validated ``github.com`` address of the
+  project's origin, and the project's objects read through an alternates
+  file. A local command in the room then copies fetched refs into the
+  project.
+
+A host that cannot build rooms runs no project agent, so nothing but the
+owner and members (who cannot reach ``.git``) changes the repository there.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import functools
 import os
 import json
 import re
 import selectors
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -61,12 +86,96 @@ class GitProjectError(RuntimeError):
   """An owner-actionable repository error safe to surface at the route."""
 
 
+_untrusted = contextvars.ContextVar("project_git_untrusted", default=False)
+# Switched off for every command in an untrusted repository; they would
+# otherwise run on a plain status read.
+_INERT_CONFIG = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+@contextlib.contextmanager
+def untrusted_settings(untrusted: bool):
+  """Within this block, treat the repository's own settings as untrusted
+  when ``untrusted`` (a shared project): see the module docstring."""
+  token = _untrusted.set(untrusted)
+  try:
+    yield
+  finally:
+    _untrusted.reset(token)
+
+
+# Commands that talk to a remote; in a shared project only the scratch
+# repository runs them (``_fetch_origin``, ``_push_origin``).
+_NETWORK_COMMANDS = frozenset({"fetch", "push", "pull", "ls-remote"})
+
+
+def _confined() -> bool:
+  return _untrusted.get() and _rooms_available()
+
+
+def _git(cwd: Path, *args: str, writes: bool = False, reads: tuple[Path, ...] = ()) -> list[str]:
+  """The command line for one Möbius Git command in ``cwd`` (``writes``:
+  it changes the repository; ``reads``: other folders it reads)."""
+  if not _confined():
+    return ["git", "-C", str(cwd), *args]
+  # The one fetch here is local: from the scratch repository it may read.
+  local_fetch = args[0] == "fetch" and any(str(path) in args for path in reads)
+  if args[0] in _NETWORK_COMMANDS and not local_fetch:
+    raise GitProjectError("A shared project's Git reaches GitHub only through Möbius's own copy.")
+  repo = str(cwd.resolve())
+  return [
+    sys.executable, "-I", str(_FENCE), "--home", _room_home(repo),
+    "--rw" if writes else "--ro", repo, "--cwd", repo,
+    *[arg for path in reads for arg in ("--ro", str(path))],
+    *[arg for name in _ROOM_ENV for arg in ("--keep-env", name)],
+    # No settings file in the room's home applies.
+    "--", "env", "GIT_CONFIG_GLOBAL=/dev/null",
+    "git", "-C", str(cwd), *_INERT_CONFIG, *args,
+  ]
+
+
+# The settings Möbius's Git commands set, kept inside the room.
+_ROOM_ENV = ("GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT", "LC_ALL")
+
+
+_FENCE = Path(__file__).resolve().parent.parent / "scripts" / "mobius_fence.py"
+
+
+@functools.cache
+def _rooms_available() -> bool:
+  """Only the host's own answer means "no rooms". A check that cannot run
+  refuses the command instead, and is not cached, so one transient failure
+  cannot take shared projects out of their rooms until the next restart."""
+  try:
+    answer = subprocess.run(
+      [sys.executable, "-I", str(_FENCE), "--check"],
+      stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=10,
+    )
+    available = json.loads(answer.stdout).get("available")
+  except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+    raise GitProjectError("Möbius could not check whether this host can confine Git.") from exc
+  if not isinstance(available, bool):
+    raise GitProjectError("Möbius could not check whether this host can confine Git.")
+  return available
+
+
+def _room_home(repo: str) -> str:
+  """A home of its own for Git in this repository's rooms."""
+  import hashlib
+  import tempfile
+  home = (
+    Path(tempfile.gettempdir()) / "mobius-project-git-room"
+    / hashlib.sha256(repo.encode()).hexdigest()[:16]
+  )
+  home.mkdir(mode=0o700, parents=True, exist_ok=True)
+  return str(home)
+
+
 def _safe_git_error(value: str) -> str:
   value = re.sub(r"https://[^/@\s]+@", "https://***@", value)
   return value[:400]
 
 
-def _run_git_write(cwd: Path, *args: str, timeout: int = 15) -> str:
+def _run_git_write(
+  cwd: Path, *args: str, timeout: int = 15, reads: tuple[Path, ...] = (),
+) -> str:
   env = {
     **os.environ,
     "GIT_TERMINAL_PROMPT": "0",
@@ -74,7 +183,7 @@ def _run_git_write(cwd: Path, *args: str, timeout: int = 15) -> str:
   }
   try:
     result = subprocess.run(
-      ["git", "-C", str(cwd), *args],
+      _git(cwd, *args, writes=True, reads=reads),
       stdin=subprocess.DEVNULL,
       capture_output=True,
       env=env,
@@ -117,7 +226,7 @@ def initialize_project(root: Path) -> dict:
   _ensure_commit_identity(root)
   _stage_project(root)
   staged = subprocess.run(
-    ["git", "-C", str(root), "diff", "--cached", "--quiet"],
+    _git(root, "diff", "--cached", "--quiet"),
     stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10,
   )
   if staged.returncode == 1:
@@ -143,7 +252,7 @@ def commit_project(root: Path, message: str, expected_head: str | None = None) -
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   _stage_project(root)
   staged = subprocess.run(
-    ["git", "-C", str(root), "diff", "--cached", "--quiet"],
+    _git(root, "diff", "--cached", "--quiet"),
     stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=10,
   )
   if staged.returncode == 0:
@@ -335,7 +444,7 @@ def fetch_project(root: Path) -> dict:
   status = project_remote_status(root)
   if not status["connected"]:
     raise GitProjectError("Connect a GitHub repository before fetching.")
-  _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
+  _fetch_origin(context)
   return project_remote_status(root)
 
 
@@ -349,7 +458,7 @@ def pull_project(root: Path, expected_head: str | None = None) -> dict:
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   if not status["connected"]:
     raise GitProjectError("Connect a GitHub repository before pulling.")
-  _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
+  _fetch_origin(context)
   status = project_remote_status(root)
   if status["diverged"]:
     raise GitProjectError("Local and GitHub history diverged. Review them outside the fast-forward flow.")
@@ -394,21 +503,103 @@ def push_project(
   commit = output.decode("ascii", "replace").strip() if code == 0 else ""
   if not commit or not status["head"] or not commit.startswith(status["head"]):
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
-  _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
+  _fetch_origin(context)
   refreshed = project_remote_status(root)
   reviewed = (branch, status["head"], destination)
   if (refreshed["branch"], refreshed["head"], refreshed["push_branch"]) != reviewed:
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   if refreshed["behind"]:
     raise GitProjectError("GitHub has newer commits. Pull and review them before pushing.")
-  _run_git_write(
-    context.repo, "push", "origin", f"{commit}:refs/heads/{destination}", timeout=60,
-  )
+  _push_origin(context, commit, destination)
   # A commit refspec cannot carry --set-upstream; record the same destination
   # so the next status compares with the branch that was just updated.
   _run_git_write(context.repo, "config", f"branch.{branch}.remote", "origin")
   _run_git_write(context.repo, "config", f"branch.{branch}.merge", f"refs/heads/{destination}")
   return project_remote_status(root)
+
+
+def _fetch_origin(context: "_GitContext") -> None:
+  """``git fetch --prune origin``; in a shared project, through a scratch
+  repository the server creates (see the module docstring)."""
+  if not _confined():
+    _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
+    return
+  with _github_scratch(context) as (scratch, url, run):
+    tracking = "refs/remotes/origin/"
+    before = {ref: sha for ref, sha in _room_refs(context.repo).items() if ref.startswith(tracking)}
+    run(["update-ref", "--stdin"], network=False,
+        input_text="".join(f"create {ref} {sha}\n" for ref, sha in before.items()))
+    run(["fetch", "--prune", "--no-tags", url, f"+refs/heads/*:{tracking}*"], network=True)
+    after = {
+      ref: sha for ref, sha in (
+        line.split(" ", 1)[::-1] for line in run(
+          ["for-each-ref", "--format=%(objectname) %(refname)", tracking], network=False,
+        ).splitlines() if line
+      )
+    }
+    fetched = [ref for ref, sha in after.items() if before.get(ref) != sha]
+    if fetched:
+      # Local and credential-free, inside the room: the project copies them.
+      _run_git_write(
+        context.repo, "fetch", "--quiet", "--no-tags", "--force", "--no-write-fetch-head",
+        "--no-recurse-submodules", str(scratch), *(f"+{ref}:{ref}" for ref in fetched),
+        timeout=60, reads=(scratch,),
+      )
+    for ref in sorted(set(before) - set(after)):
+      _run_git_write(context.repo, "update-ref", "-d", ref)
+
+
+def _push_origin(context: "_GitContext", commit: str, destination: str) -> None:
+  """Push ``commit`` to ``destination`` on origin; in a shared project from
+  a scratch repository the server creates, then record the pushed ref."""
+  if not _confined():
+    _run_git_write(context.repo, "push", "origin", f"{commit}:refs/heads/{destination}", timeout=60)
+    return
+  with _github_scratch(context) as (_scratch, url, run):
+    run(["push", url, f"{commit}:refs/heads/{destination}"], network=True)
+  _run_git_write(context.repo, "update-ref", f"refs/remotes/origin/{destination}", commit)
+
+
+def _room_refs(repo: Path) -> dict[str, str]:
+  code, output, _truncated = _run_git(repo, "for-each-ref", "--format=%(objectname) %(refname)")
+  if code != 0:
+    raise GitProjectError("Git could not list this project's branches.")
+  lines = output.decode("utf-8", "replace").splitlines()
+  return {ref: sha for sha, _, ref in (line.partition(" ") for line in lines if line)}
+
+
+@contextlib.contextmanager
+def _github_scratch(context: "_GitContext"):
+  """A scratch repository the server creates, reading the project's objects
+  through an alternates file, with the validated GitHub address of the
+  project's origin and a runner for Git in it. No process that can reach
+  GitHub reads the project's settings, hooks or attributes."""
+  from app.github_contribution_git import _git_env, _run_cmd, _server_scratch
+  code, output, _truncated = _run_git(context.repo, "config", "--get", "remote.origin.url", limit=4096)
+  repository = _github_repository(output.decode("utf-8", "replace")) if code == 0 else None
+  if repository is None:
+    raise GitProjectError("Connect a GitHub repository before synchronizing.")
+  code, output, _truncated = _run_git(
+    context.repo, "rev-parse", "--path-format=absolute", "--git-path", "objects", limit=4096,
+  )
+  objects = output.decode("utf-8", "replace").strip()
+  if code != 0 or not objects:
+    raise GitProjectError("Git could not read this project's history.")
+  with _server_scratch() as scratch:
+    (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
+    (scratch / "objects" / "info" / "alternates").write_text(objects + "\n")
+
+    def run(args: list[str], *, network: bool, input_text: str | None = None) -> str:
+      proc = _run_cmd(
+        ["git", "-C", str(scratch), *args], cwd=scratch, check=False, timeout=60,
+        env=_git_env(scratch, network=network), input_text=input_text,
+      )
+      if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        raise GitProjectError(_safe_git_error(detail[-1] if detail else "GitHub did not accept that."))
+      return proc.stdout
+
+    yield scratch, f"https://github.com/{repository}.git", run
 
 
 @dataclass(frozen=True)
@@ -430,7 +621,7 @@ def _run_git(
   }
   try:
     process = subprocess.Popen(
-      ["git", "-C", str(cwd), *args],
+      _git(cwd, *args),
       stdin=subprocess.DEVNULL,
       stdout=subprocess.PIPE,
       stderr=subprocess.DEVNULL,

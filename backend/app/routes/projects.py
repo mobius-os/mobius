@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -1557,6 +1558,9 @@ def redeem_project_invite(
   owner = db.query(models.Owner).first()
   if owner is None:
     raise HTTPException(503, "The project owner is unavailable.")
+  # The project may have just become shared: the owner's agents lock down.
+  from app import project_agent_access
+  project_agent_access.sharing_changed(str(project.id))
   token = auth.create_project_collaborator_token(
     owner_username=owner.username,
     owner_epoch=owner.token_epoch,
@@ -1866,6 +1870,9 @@ def revoke_project_member(
   member.revoked_at = now_naive_utc()
   member.token_epoch += 1
   db.commit()
+  # The project may have just become private: the owner's agents unlock.
+  from app import project_agent_access
+  project_agent_access.sharing_changed(project_id)
   return Response(status_code=204)
 
 
@@ -2403,6 +2410,19 @@ def read_project_file(
   )
 
 
+@contextlib.contextmanager
+def _project_git(db: Session, project: models.Project):
+  """Möbius's Git in this project: the repository's own settings are
+  untrusted once the project is shared (``project_git``), and a refusal is an
+  owner-actionable 409."""
+  from app import project_agent_access
+  try:
+    with project_git.untrusted_settings(project_agent_access.is_shared(db, project.id)):
+      yield
+  except project_git.GitProjectError as exc:
+    raise HTTPException(409, str(exc)) from exc
+
+
 @router.get("/{project_id}/git/status")
 def get_project_git_status(
   project_id: str,
@@ -2411,15 +2431,16 @@ def get_project_git_status(
 ):
   project = _project_for(db, project_id, principal, "viewer")
   root = _project_root(project)
-  status = project_git.project_status(root)
-  app_id = linked_app_id(project.template_snapshot_json)
-  if app_id:
-    app = db.get(models.App, app_id)
-    status["app_build"] = (
-      project_git.applied_source_status(root, app.source_commit, status)
-      if app and Path(app.source_dir).resolve() == root.resolve()
-      else {"state": "unknown"}
-    )
+  with _project_git(db, project):
+    status = project_git.project_status(root)
+    app_id = linked_app_id(project.template_snapshot_json)
+    if app_id:
+      app = db.get(models.App, app_id)
+      status["app_build"] = (
+        project_git.applied_source_status(root, app.source_commit, status)
+        if app and Path(app.source_dir).resolve() == root.resolve()
+        else {"state": "unknown"}
+      )
   return status
 
 
@@ -2432,13 +2453,11 @@ async def initialize_project_git(
   db: Session = Depends(get_db),
 ):
   project = _project_for(db, project_id, principal, "maintainer")
-  try:
+  with _project_git(db, project):
     async with fs_locks.source_dir_lock(str(_project_root(project))):
       return await settled.run_settled(
         project_git.initialize_project, _project_root(project),
       )
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
 
 
 @router.post(
@@ -2451,13 +2470,11 @@ async def commit_project_git(
   db: Session = Depends(get_db),
 ):
   project = _project_for(db, project_id, principal, "maintainer")
-  try:
+  with _project_git(db, project):
     async with fs_locks.source_dir_lock(str(_project_root(project))):
       return await settled.run_settled(
         project_git.commit_project, _project_root(project), body.message, body.expected_head,
       )
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
 
 
 @router.get("/{project_id}/git/diff")
@@ -2469,13 +2486,14 @@ def get_project_git_diff(
 ):
   project = _project_for(db, project_id, principal, "viewer")
   root, target = _resolve_project_path(project, path)
-  if not target.is_file():
-    relative = target.relative_to(root).as_posix()
-    deleted = any(row["path"] == relative and row["status"] == "deleted"
-                  for row in project_git.project_status(root)["changes"])
-    if not deleted:
-      raise HTTPException(404, "File not found.")
-  return project_git.project_file_diff(root, target)
+  with _project_git(db, project):
+    if not target.is_file():
+      relative = target.relative_to(root).as_posix()
+      deleted = any(row["path"] == relative and row["status"] == "deleted"
+                    for row in project_git.project_status(root)["changes"])
+      if not deleted:
+        raise HTTPException(404, "File not found.")
+    return project_git.project_file_diff(root, target)
 
 
 @router.get("/{project_id}/git/remote")
@@ -2485,10 +2503,11 @@ def get_project_git_remote(
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
-  return {
-    **project_git.project_remote_status(_project_root(project)),
-    "github_connected": github_auth.get_token() is not None,
-  }
+  with _project_git(db, project):
+    return {
+      **project_git.project_remote_status(_project_root(project)),
+      "github_connected": github_auth.get_token() is not None,
+    }
 
 
 @router.post(
@@ -2501,13 +2520,11 @@ def connect_project_git_remote(
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
-  try:
+  with _project_git(db, project):
     return {
       **project_git.connect_github_remote(_project_root(project), body.repository),
       "github_connected": github_auth.get_token() is not None,
     }
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
 
 
 def _require_project_github_connection() -> None:
@@ -2525,13 +2542,11 @@ def fetch_project_git_remote(
 ):
   project = _live_project(db, project_id)
   _require_project_github_connection()
-  try:
+  with _project_git(db, project):
     return {
       **project_git.fetch_project(_project_root(project)),
       "github_connected": True,
     }
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
 
 
 @router.post(
@@ -2546,11 +2561,9 @@ async def pull_project_git_remote(
   project = _live_project(db, project_id)
   _require_project_github_connection()
   root = _project_root(project)
-  try:
+  with _project_git(db, project):
     async with fs_locks.source_dir_lock(str(root)):
       result = await settled.run_settled(project_git.pull_project, root, body.expected_head)
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
   project.updated_at = now_naive_utc()
   change = append_project_change(
     db,
@@ -2579,15 +2592,13 @@ def push_project_git_remote(
   if body.confirmed is not True:
     raise HTTPException(400, "Confirm the reviewed commits before pushing.")
   _require_project_github_connection()
-  try:
+  with _project_git(db, project):
     return {
       **project_git.push_project(
         _project_root(project), body.expected_head, body.expected_push_branch,
       ),
       "github_connected": True,
     }
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
 
 
 @router.put(
