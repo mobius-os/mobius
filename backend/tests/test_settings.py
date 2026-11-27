@@ -445,8 +445,11 @@ def test_set_background_agents_persists_only_current_provider_rows(client, auth)
   assert merged["skills_enabled"] is True
   assert merged["background_agents"] == {"providers": rows}
   resolved = client.get("/api/settings", headers=auth).json()["background_agents"]
-  # The platform-owned Möbius row is offered with no app installed.
-  assert resolved["providers"] == rows
+  # The platform-owned Möbius row is offered with no app installed; built-in
+  # Gemini is offered too, switched off until the owner chooses it.
+  assert resolved["providers"] == rows + [
+    {"provider": "gemini", "model": "gemini-3.5-flash", "effort": "medium", "enabled": False},
+  ]
   assert resolved["primary"]["provider"] == "claude"
   assert resolved["fallback"]["provider"] == "codex"
 
@@ -736,7 +739,8 @@ def test_model_registry_returns_known_models_on_discovery_failure(
   assert res.status_code == 200
   body = res.json()
   # Möbius stays listed while not linked; its catalogue is local data.
-  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  assert set(body["providers"]) == {"claude", "codex", "mobius", "gemini"}
+  assert [m["id"] for m in body["providers"]["gemini"]] == providers.known_model_ids("gemini")
   assert [m["id"] for m in body["providers"]["mobius"]] == providers.known_model_ids("mobius")
   claude_ids = [m["id"] for m in body["providers"]["claude"]]
   assert claude_ids == KNOWN_MODELS["claude"]

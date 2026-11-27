@@ -5,9 +5,9 @@ import { api } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries } from '../../hooks/queries.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 
-export default function ProviderConnection({ provider, name, connected, onDisconnected, children }) {
+/** Local sign-out for one provider, with the queries every picker reads refreshed. */
+export function useProviderDisconnect(provider, onDisconnected) {
   const queryClient = useQueryClient()
-  const [action, setAction] = useState('manage')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -19,7 +19,7 @@ export default function ProviderConnection({ provider, name, connected, onDiscon
       if (!response.ok) {
         const data = await response.json().catch(() => ({}))
         setError(detailToMessage(data.detail, 'Could not disconnect. Please try again.'))
-        return
+        return false
       }
       const statuses = authQueries.provider.statuses
       await queryClient.cancelQueries({ queryKey: statuses.key })
@@ -31,12 +31,21 @@ export default function ProviderConnection({ provider, name, connected, onDiscon
       void modelQueries.registry.invalidate(queryClient)
       void settingsQueries.providerUsage.invalidate(queryClient, provider)
       onDisconnected?.()
+      return true
     } catch {
       setError('Could not confirm the connection status. Please try again.')
+      return false
     } finally {
       setBusy(false)
     }
   }
+
+  return { disconnect, busy, error, setError }
+}
+
+export default function ProviderConnection({ provider, name, connected, onDisconnected, children }) {
+  const [action, setAction] = useState('manage')
+  const { disconnect, busy, error, setError } = useProviderDisconnect(provider, onDisconnected)
 
   if (!connected || action === 'reconnect') return children
 

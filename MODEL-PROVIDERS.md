@@ -25,6 +25,18 @@ A vault-key declaration names its wire protocol with optional `protocol`:
   (`/v1/messages` is appended). Each such provider gets its own Claude config
   directory with Möbius's Claude settings defaults, and every Claude model
   alias resolves to its `default_model`.
+- `gemini` — **Google's Gemini API**, driven by the Codex agent runtime.
+  `base_url` is the Gemini API root (for Google AI Studio keys,
+  `https://generativelanguage.googleapis.com/v1beta`). The engine still
+  speaks Responses to the relay; the relay translates each request to
+  `POST <base_url>/models/<model>:streamGenerateContent?alt=sse` with the key
+  in `x-goog-api-key`, and translates the streamed answer back. The model must
+  be one the app declared. Gemini's thought signatures travel in a reasoning
+  item's `encrypted_content`, which the engine replays, so the relay keeps no
+  conversation state. Namespaced engine tools are declared to Gemini as
+  `<namespace>.<name>`; other non-function tool kinds are not offered.
+  Google's consumer subscriptions (AI Pro/Ultra sign-in) are not a supported
+  credential for third-party agents; use an AI Studio or Gemini Enterprise key.
 
 Each provider's engine home (Codex threads, Claude config and transcripts)
 lives with the other engine homes under `cli-auth/app-<id>/`, outside the
@@ -54,9 +66,10 @@ owner's key vault. The app asks for the key named by `secret_name`
 **Settings › Keys**; it is not a manifest value and never passes through the
 app, the agent process or a chat prompt. The models are available while the
 owner's grant to the app stands and that grant's sites allow every path the
-relay calls for the declared protocol (`POST <base_url>/responses`, or
+relay calls for the declared protocol (`POST <base_url>/responses`,
 `POST <base_url>/v1/messages` and `/v1/messages/count_tokens` for
-`anthropic_messages`); availability never reads the value. Only the
+`anthropic_messages`, or `POST <base_url>/models/*:streamGenerateContent` for
+`gemini`); availability never reads the value. Only the
 relay reads the key (logged as `platform:app-<id>`), and it never leaves the
 server. The provider
 app's endpoint receives the conversation and tool requests, so installing and
@@ -137,6 +150,22 @@ removes a provider from pickers and blocks new turns without deleting chats.
 
 ## Boundaries and next steps
 
+- Google Gemini is built in on the same `gemini` relay path. Settings ›
+  AI providers › Google Gemini › Connection offers two keys, one in use at a
+  time: an AI Studio key (vault key `gemini`, Google's Gemini API) or a Gemini
+  Enterprise Agent Platform express-mode key (vault key
+  `gemini-agent-platform`, `aiplatform.googleapis.com/v1/publishers/google`).
+  Both are kept from agents; the platform fixes each key's destination
+  (`providers.GEMINI_CONNECTIONS`), the status reports which `connection` is
+  in use, and Disconnect deletes both keys. A third way is a Google Cloud
+  sign-in (`gemini_google_cloud`) built on the connectors' Google-account
+  sign-in (`connector_oauth`): the Cloud SDK's published client and Google's
+  "copy this code" page, then a project picked from the owner's Cloud
+  projects. Möbius ships no gcloud and registers no Google app; it seals the
+  tokens, refreshes them before expiry, and sends Bearer plus
+  `x-goog-user-project` to that project's Agent Platform. Its model list is the
+  platform's declaration in `providers.GEMINI_DECLARATION`, with each model's
+  documented thinking levels and default as its effort scale.
 - Claude, Codex and Möbius are built in. The Möbius provider keeps the stable
   `mobius` identity for existing chats and offers its service-discovered models
   with no app installed. Both broker and external app connections use the
@@ -156,7 +185,9 @@ removes a provider from pickers and blocks new turns without deleting chats.
 - One provider per app, one protocol per provider, and one vault key.
   OAuth, provider-specific headers, multiple endpoints per app, and further
   protocols (such as Chat Completions, which Codex no longer speaks) need
-  separate reviewed contracts, not ad-hoc fields.
+  separate reviewed contracts, not ad-hoc fields. `gemini` is the first
+  translating protocol: the relay rewrites requests and streamed responses for
+  it, while the forwarding protocols keep the rule below.
 - The raw key stays outside the agent process for both protocols; only the
   relay token is there. Codex shell tools, including helpers in a shared
   host, do not receive it; the Claude engine reads it from

@@ -93,6 +93,39 @@
   cursor: not-allowed;
 }
 
+/* A button at work stays at full strength; its spinner says it is busy. */
+.pa__btn--with-spinner {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.pa__btn[aria-busy="true"]:disabled { opacity: 1; cursor: progress; }
+
+.pa__spinner {
+  --_thickness: 2px;
+  inline-size: 14px;
+  block-size: 14px;
+  flex: none;
+  border: 0;
+  border-radius: 50%;
+  appearance: none;
+  background: conic-gradient(currentColor 0 120deg, color-mix(in srgb, currentColor 25%, transparent) 0);
+  mask-image: radial-gradient(farthest-side, transparent calc(100% - var(--_thickness)), black calc(100% - var(--_thickness)));
+  animation: pa-spin 0.8s linear infinite;
+}
+/* Separate rules: one unknown vendor pseudo-element drops a whole selector list. */
+.pa__spinner::-webkit-progress-bar { background: none; }
+.pa__spinner::-webkit-progress-value { background: none; }
+.pa__spinner::-moz-progress-bar { background: none; }
+@keyframes pa-spin { to { rotate: 1turn; } }
+@media (prefers-reduced-motion: reduce) {
+  .pa__spinner { animation-duration: 4s; }
+}
+@media (forced-colors: active) {
+  .pa__spinner { forced-color-adjust: none; background: conic-gradient(ButtonText 0 120deg, ButtonFace 0); }
+}
+
 .pa__btn--sm {
   padding: 5px 12px;
   font-size: 13px;
@@ -163,15 +196,16 @@
   padding-left: 3px;
 }
 
-.codex-auth__settings-button {
+.pa__external-link {
   display: inline-flex;
   align-items: center;
   justify-self: start;
+  align-self: flex-start;
   gap: 6px;
   text-decoration: none;
 }
 
-.codex-auth__settings-button svg {
+.pa__external-link svg {
   flex-shrink: 0;
 }
 
@@ -432,3 +466,78 @@
 .provider-connection p { margin: 0; }
 .provider-connection__actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .provider-connection__actions .pa__btn { min-height: 36px; }
+
+/* Google Gemini: one row per way to connect, the row in use marked Connected. */
+.gemini-connection { display: grid; gap: 4px; font-size: 13px; line-height: 1.5; }
+.gemini-connection__row { display: grid; gap: 10px; padding: 10px 0; }
+.gemini-connection__row + .gemini-connection__row,
+.gemini-signin + .gemini-connection__row { border-top: 1px solid var(--border-light); }
+.gemini-connection__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.gemini-connection__label { display: block; font-weight: 600; color: var(--text); }
+.gemini-connection__detail { display: block; }
+.gemini-connection__form { padding-bottom: 4px; }
+.gemini-connection__fold {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-top: 8px; padding: 10px 0 2px; border: 0; border-top: 1px solid var(--border-light);
+  background: none; color: var(--muted); font: inherit; font-size: 13px; text-align: left; cursor: pointer;
+}
+.gemini-connection__fold:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.gemini-connection__chevron { transition: rotate 0.15s; }
+.gemini-connection__fold[aria-expanded="true"] .gemini-connection__chevron,
+.gemini-disclosure__head[aria-expanded="true"] .gemini-connection__chevron { rotate: 90deg; }
+@media (prefers-reduced-motion: reduce) { .gemini-connection__chevron { transition: none; } }
+.gemini-connection__link {
+  border: 0; padding: 0; background: none; font: inherit; cursor: pointer;
+  color: var(--accent-text, var(--accent));
+}
+.gemini-connection__project { display: inline-grid; justify-items: end; }
+.gemini-connection__project-id,
+.gemini-project__id { font-family: var(--font-mono, ui-monospace, monospace); font-size: 12px; color: var(--muted); }
+
+.gemini-signin { display: grid; gap: 8px; padding: 2px 0 10px; }
+.gemini-signin__button { width: 100%; }
+
+.gemini-steps { display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.gemini-step { display: grid; grid-template-columns: 22px 1fr; gap: 10px; align-items: start; }
+.gemini-step__n {
+  width: 22px; height: 22px; display: grid; place-items: center; border-radius: 50%;
+  border: 1px solid var(--border, var(--border-light)); color: var(--muted); font-size: 11.5px;
+}
+.gemini-step__n--now { border-color: var(--accent); color: var(--accent-text, var(--accent)); }
+.gemini-step__n--done {
+  border-color: var(--accent); color: var(--accent-text, var(--accent));
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+.gemini-step__body { display: grid; gap: 4px; min-width: 0; }
+.gemini-step__title { font-weight: 600; color: var(--text); }
+.gemini-step--todo .gemini-step__title { font-weight: 400; color: var(--muted); }
+.gemini-step__form { display: grid; gap: 8px; }
+
+.gemini-projects { display: grid; border: 1px solid var(--border-light); border-radius: 10px; overflow: hidden; }
+.gemini-project { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+.gemini-project + .gemini-project { border-top: 1px solid var(--border-light); }
+.gemini-project input {
+  appearance: none; flex: none; width: 15px; height: 15px; margin: 0;
+  border: 2px solid var(--muted); border-radius: 50%; background: transparent;
+}
+.gemini-project input:checked {
+  border-color: var(--accent);
+  background: radial-gradient(var(--accent) 0 3.5px, transparent 4px);
+}
+.gemini-project--on { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.gemini-project:has(input:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
+.gemini-project__name { display: block; color: var(--text); }
+.gemini-project__id { display: block; }
+@media (forced-colors: active) {
+  .gemini-project--on { outline: 2px solid Highlight; outline-offset: -2px; }
+}
+
+.gemini-disclosure + .gemini-disclosure,
+.gemini-signin + .gemini-disclosure { border-top: 1px solid var(--border-light); }
+.gemini-disclosure__head {
+  width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 11px 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.gemini-disclosure__head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+.gemini-disclosure__body { padding: 0 0 12px; }
+.gemini-disclosures { display: grid; border: 1px solid var(--border-light); border-radius: 10px; padding: 0 12px; }

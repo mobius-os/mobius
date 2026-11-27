@@ -7,7 +7,7 @@ import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { catalogDefault, catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
-import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
+import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider, rowsAfterConnect } from '../../lib/backgroundProviderOrder.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
 import { forgetNativePush } from '../../lib/nativePush.js'
 import { stopLocationForSignOut } from '../../lib/nativeLocation.js'
@@ -21,6 +21,7 @@ import {
 import * as themeService from '../../lib/themeService.js'
 import ProviderAuth from '../ProviderAuth/ProviderAuth.jsx'
 import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
+import GeminiConnection, { geminiConnectionDetails } from '../ProviderAuth/GeminiConnection.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
@@ -57,6 +58,7 @@ const PROVIDER_CHOICES = [
   { id: 'mobius', label: 'Möbius' },
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'OpenAI Codex' },
+  { id: 'gemini', label: 'Google Gemini' },
 ]
 const DEFAULT_BACKGROUND_MODELS = {
   claude: 'claude-opus-4-8',
@@ -300,6 +302,7 @@ export default function SettingsView({
   const providerAvailability = resolveProviderAvailability(providerStatusQuery)
   const configuredProviders = providerAvailability.configuredProviders
   const codexAuthenticated = configuredProviders.has('codex')
+  const geminiAuthenticated = configuredProviders.has('gemini')
   // Live-probed CLI versions (null when the CLI isn't installed or
   // didn't respond). Read-only — updates happen via the agent, not here.
   const claudeVersion = settingsQuery.data?.claude_version
@@ -776,16 +779,11 @@ export default function SettingsView({
         providerFromSettings(settingsQuery.data),
         connectedCatalog,
       )
-      const connectedRow = {
+      const next = rowsAfterConnect(current, {
         ...(current.find(row => row.provider === provider) || { provider }),
-        enabled: true,
         model: defaultBackgroundModel(provider, connectedCatalog),
         effort: defaultEffort(provider),
-      }
-      const rest = current.filter(row => row.provider !== provider)
-      const next = providersBefore.size === 0
-        ? [connectedRow, ...rest.map(row => ({ ...row, enabled: false }))]
-        : current.map(row => row.provider === provider ? connectedRow : row)
+      }, { first: providersBefore.size === 0 })
       backgroundDraftRef.current = next
       setBackgroundDraft(next)
       const saved = await persistBackgroundAgents(
@@ -813,6 +811,9 @@ export default function SettingsView({
   }, [onProviderConnected])
   const onCodexAuthDone = useCallback(() => {
     onProviderConnected('codex')
+  }, [onProviderConnected])
+  const onGeminiAuthDone = useCallback(() => {
+    onProviderConnected('gemini')
   }, [onProviderConnected])
 
   async function toggleTheme() {
@@ -1054,6 +1055,13 @@ export default function SettingsView({
       <ProviderConnection key={connectionEpoch} provider="claude" name="Claude Code" connected={claudeAuthenticated} onDisconnected={() => onProviderDisconnected('claude')}>
         <ProviderAuth authenticated={claudeAuthenticated} compact onDone={onClaudeAuthDone} />
       </ProviderConnection>
+    ) : selectedProvider === 'gemini' ? (
+      <GeminiConnection
+        key={connectionEpoch}
+        active={geminiAuthenticated ? providerStatusQuery.data?.gemini?.connection : null}
+        onConnected={onGeminiAuthDone}
+        onDisconnected={() => onProviderDisconnected('gemini')}
+      />
     ) : null
     const version = selectedProvider === 'codex' ? codexVersion : selectedProvider === 'claude' ? claudeVersion : null
     // The Möbius account and its credit are the owner's: a guest sees neither.
@@ -1094,7 +1102,9 @@ export default function SettingsView({
           ) : null}
           connection={connection}
           signInNotice={signInNoticeFor(selectedProvider)}
-          connectionDetails={configured && version ? [{ label: 'Version', value: version }] : []}
+          connectionDetails={selectedProvider === 'gemini'
+            ? geminiConnectionDetails(providerStatusQuery.data?.gemini)
+            : configured && version ? [{ label: 'Version', value: version }] : []}
           chatModelsRef={(node) => setSetupFocusRef('chat-models', node)}
           chatModelsAttention={attentionSection === 'chat-models'}
         />

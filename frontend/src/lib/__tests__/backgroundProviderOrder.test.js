@@ -6,6 +6,7 @@ import {
   disablesLastConnectedProvider,
   hasActiveConnectedProvider,
   moveConnectedProvider,
+  rowsAfterConnect,
 } from '../backgroundProviderOrder.js'
 
 const rows = [
@@ -67,4 +68,18 @@ test('edits stay possible after the only active provider was signed out', () => 
   const enableClaude = current.map(row => row.provider === 'claude' ? { ...row, enabled: true } : row)
   assert.equal(disablesLastConnectedProvider(current, enableClaude, configured), false)
   assert.equal(disablesLastConnectedProvider(current, [...current].reverse(), configured), false)
+})
+
+test('connecting Gemini leaves it out of background work; other providers join', () => {
+  const saved = [{ provider: 'claude', enabled: true }, { provider: 'gemini', enabled: false }, { provider: 'codex', enabled: false }]
+  const gemini = rowsAfterConnect(saved, { provider: 'gemini', model: 'gemini-3.8-flash', effort: 'medium' }, { first: false })
+  assert.deepEqual(gemini.map(row => [row.provider, row.enabled]), [['claude', true], ['gemini', false], ['codex', false]])
+  assert.equal(gemini[1].model, 'gemini-3.8-flash')
+  const codex = rowsAfterConnect(saved, { provider: 'codex', model: 'gpt', effort: 'medium' }, { first: false })
+  assert.deepEqual(codex.map(row => [row.provider, row.enabled]), [['claude', true], ['gemini', false], ['codex', true]])
+})
+
+test('Gemini as the first provider still runs background work, which needs one', () => {
+  const next = rowsAfterConnect([{ provider: 'claude', enabled: true }], { provider: 'gemini', model: 'm' }, { first: true })
+  assert.deepEqual(next.map(row => [row.provider, row.enabled]), [['gemini', true], ['claude', false]])
 })

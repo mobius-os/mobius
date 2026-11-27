@@ -954,8 +954,8 @@ def test_providers_models_returns_known_models_on_missing_creds(
   r = client.get("/api/auth/providers/models", headers=auth)
   assert r.status_code == 200
   body = r.json()
-  # The platform-owned Möbius catalogue is listed with no app installed.
-  assert set(body) == {"claude", "codex", "mobius"}
+  # The platform-owned Möbius and Gemini catalogues are listed with no app installed.
+  assert set(body) == {"claude", "codex", "mobius", "gemini"}
   from app.providers import known_model_ids
   assert [m["id"] for m in body["mobius"]] == known_model_ids("mobius")
   claude_ids = [m["id"] for m in body["claude"]]

@@ -969,6 +969,19 @@ export const api = {
         body: JSON.stringify({ app_id: appId }),
       }),
       disconnect: (provider) => apiFetch(`/auth/provider/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' }),
+      // Google Cloud sign-in for Gemini: link, pasted code, then the project.
+      geminiGoogleCloud: {
+        start: () => apiFetch('/auth/provider/gemini/google-cloud/start', { method: 'POST' }),
+        code: (code, state) => apiFetch('/auth/provider/gemini/google-cloud/code', {
+          method: 'POST',
+          body: JSON.stringify({ code, state }),
+        }),
+        project: (project, name) => apiFetch('/auth/provider/gemini/google-cloud/project', {
+          method: 'POST',
+          body: JSON.stringify({ project, name }),
+        }),
+        forget: () => apiFetch('/auth/provider/gemini/google-cloud', { method: 'DELETE' }),
+      },
       claude: {
         startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
         submitCode: (code) => apiFetch('/auth/provider/code', {
@@ -1165,6 +1178,8 @@ export const api = {
     }),
     revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
     reveal: (name, part) => apiFetch(`/keys/${encodeURIComponent(name)}/value${part && part !== 'value' ? `?part=${encodeURIComponent(part)}` : ''}`),
+    // Sends one request with the key added by the vault (`host/path?query`).
+    use: (name, destination, init = {}) => apiFetch(`/keys/use/${encodeURIComponent(name)}/${destination}`, init),
     approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',
       body: JSON.stringify(body),

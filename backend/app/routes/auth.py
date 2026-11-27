@@ -11,6 +11,7 @@ refuses it, so an agent cannot turn its bearer into a clean app credential there
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -25,7 +26,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -723,7 +724,7 @@ _PKCE_TIMEOUT = 300  # 5 minutes
 _active_pkce: dict | None = None
 # Serialize login/exchange/disconnect so an older sign-in cannot finish after
 # the owner's disconnect and silently restore the connection.
-_provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock()}
+_provider_login_locks = {"claude": asyncio.Lock(), "codex": asyncio.Lock(), "gemini": asyncio.Lock()}
 
 
 async def _provider_signin_changed(provider_id: str) -> None:
@@ -923,6 +924,13 @@ async def providers_status(
       "error": error,
       "available": enabled,
     }
+    if error is None:
+      connection = await run_in_threadpool(provider.connection_kind, data_dir)
+      if connection is not None:
+        out[pid]["connection"] = connection
+      if connection == "google_cloud":
+        from app import gemini_google_cloud
+        out[pid]["project"] = gemini_google_cloud.project_label(data_dir)
     if pid == "mobius" and error is None and is_owner_caller:
       try:
         out[pid]["trial"] = await run_in_threadpool(provider.trial_status)
@@ -1713,6 +1721,73 @@ async def codex_login_status_view(
   return {"status": "pending"}
 
 
+class GoogleCloudSignInCode(BaseModel):
+  code: str = Field(min_length=1, max_length=512)
+  state: str = Field(min_length=1, max_length=4096)
+
+
+class GoogleCloudSignInProject(BaseModel):
+  project: str = Field(min_length=1, max_length=64)
+  name: str | None = Field(default=None, max_length=200)
+
+
+@router.post("/provider/gemini/google-cloud/start", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_start(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Google's sign-in link for Gemini; the flow state travels sealed inside it."""
+  from app import gemini_google_cloud
+  return {"url": gemini_google_cloud.start()}
+
+
+@router.post("/provider/gemini/google-cloud/code", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_code(
+  body: GoogleCloudSignInCode,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Exchange the code Google showed and list the owner's Cloud projects."""
+  from app import gemini_google_cloud
+  async with _provider_login_locks["gemini"]:
+    try:
+      projects = await gemini_google_cloud.accept_code(get_settings().data_dir, body.code, body.state)
+    except gemini_google_cloud.GoogleCloudSignInError as exc:
+      raise HTTPException(400, str(exc)) from exc
+  return {"projects": projects}
+
+
+@router.post("/provider/gemini/google-cloud/project", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_project(
+  body: GoogleCloudSignInProject,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Finish the sign-in with the project Gemini bills to; it replaces any Gemini key."""
+  from app import gemini_google_cloud, key_vault
+  from app.providers import GEMINI_CONNECTIONS
+  data_dir = get_settings().data_dir
+  async with _provider_login_locks["gemini"]:
+    try:
+      await gemini_google_cloud.choose_project(data_dir, body.project, body.name)
+    except gemini_google_cloud.GoogleCloudSignInError as exc:
+      raise HTTPException(400, str(exc)) from exc
+    for name, _ in GEMINI_CONNECTIONS.values():
+      with contextlib.suppress(key_vault.VaultRefused, key_vault.VaultUnavailable):
+        await key_vault.vault_call("DELETE", f"/keys/{name}", caller="owner")
+    await _provider_signin_changed("gemini")
+  return {"ok": True}
+
+
+@router.delete("/provider/gemini/google-cloud", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_forget(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Remove the Google Cloud sign-in when the owner switches to a key."""
+  from app import gemini_google_cloud
+  async with _provider_login_locks["gemini"]:
+    await gemini_google_cloud.forget(get_settings().data_dir)
+    await _provider_signin_changed("gemini")
+  return {"ok": True}
+
+
 @router.post(
   "/provider/{provider_id}/disconnect", dependencies=[Depends(reject_cross_site)],
 )
@@ -1729,7 +1804,7 @@ async def provider_disconnect(
     if provider_id == "claude":
       global _active_pkce
       _active_pkce = None
-    else:
+    elif provider_id == "codex":
       proc = _codex_login_procs.get("active")
       if proc and proc.returncode is None:
         proc.kill()
