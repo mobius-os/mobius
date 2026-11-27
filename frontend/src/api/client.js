@@ -969,6 +969,19 @@ export const api = {
         body: JSON.stringify({ app_id: appId }),
       }),
       disconnect: (provider) => apiFetch(`/auth/provider/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' }),
+      // Google Cloud sign-in for Gemini: link, pasted code, then the project.
+      geminiGoogleCloud: {
+        start: () => apiFetch('/auth/provider/gemini/google-cloud/start', { method: 'POST' }),
+        code: (code, state) => apiFetch('/auth/provider/gemini/google-cloud/code', {
+          method: 'POST',
+          body: JSON.stringify({ code, state }),
+        }),
+        project: (project) => apiFetch('/auth/provider/gemini/google-cloud/project', {
+          method: 'POST',
+          body: JSON.stringify({ project }),
+        }),
+        forget: () => apiFetch('/auth/provider/gemini/google-cloud', { method: 'DELETE' }),
+      },
       claude: {
         startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
         submitCode: (code) => apiFetch('/auth/provider/code', {

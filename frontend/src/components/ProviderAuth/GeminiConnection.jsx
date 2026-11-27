@@ -5,6 +5,7 @@ import { api } from '../../api/client.js'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
 import { useProviderDisconnect } from './ProviderConnection.jsx'
+import GoogleCloudSignIn from './GoogleCloudSignIn.jsx'
 
 const CHECK_BODY = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] })
 
@@ -63,7 +64,16 @@ async function connectWith(connection, value) {
       : 'Google did not accept this key. Check it and try again.')
   }
   const others = GEMINI_CONNECTIONS.filter(other => other.id !== connection.id)
-  await Promise.all(others.map(other => api.keys.revoke(other.key).catch(() => null)))
+  await Promise.all([
+    ...others.map(other => api.keys.revoke(other.key).catch(() => null)),
+    api.auth.provider.geminiGoogleCloud.forget().catch(() => null),
+  ])
+}
+
+/** The Google Cloud sign-in row; GoogleCloudSignIn runs it. */
+export const GOOGLE_CLOUD = {
+  id: 'google_cloud', label: 'Google Cloud sign-in',
+  detail: 'Sign in with Google · billed to your Cloud project (Agent Platform)',
 }
 
 function KeyForm({ connection, onConnected }) {
@@ -112,15 +122,43 @@ function KeyForm({ connection, onConnected }) {
   )
 }
 
-function rowAction(connected, active) {
-  if (connected) return 'Reconnect'
-  return active ? 'Use instead' : 'Connect'
+function rowAction(connection, connected, active) {
+  if (connected) return connection.id === GOOGLE_CLOUD.id ? 'Sign in again' : 'Reconnect'
+  if (active) return 'Use instead'
+  return connection.id === GOOGLE_CLOUD.id ? 'Sign in' : 'Connect'
+}
+
+function ConnectionRow({ connection, connected, active, open, onToggle, onDisconnect, children }) {
+  return (
+    <div className="gemini-connection__row">
+      <div className="gemini-connection__head">
+        <div>
+          <span className="gemini-connection__label">
+            {connection.label}
+            {connected && <span className="pa__success gemini-connection__state">Connected</span>}
+          </span>
+          <span className="pa__muted gemini-connection__detail">{connection.detail}</span>
+        </div>
+        <div className="provider-connection__actions">
+          <button type="button" className="settings__btn settings__btn--sm settings__btn--outline" aria-expanded={open} onClick={onToggle}>
+            {rowAction(connection, connected, active)}
+          </button>
+          {connected && (
+            <button type="button" className="settings__btn settings__btn--sm settings__btn--danger" onClick={onDisconnect}>
+              Disconnect…
+            </button>
+          )}
+        </div>
+      </div>
+      {open && children}
+    </div>
+  )
 }
 
 /**
  * Google allows no subscription sign-in for third-party agents, so Gemini
- * connects with a key: from AI Studio, or from a Google Cloud project on the
- * Agent Platform. One is in use at a time and the row in use says so.
+ * connects with a key (AI Studio or Agent Platform) or a Google Cloud sign-in
+ * through Google's gcloud. One is in use at a time and the row in use says so.
  */
 export default function GeminiConnection({ active, onConnected, onDisconnected }) {
   const [open, setOpen] = useState(null)
@@ -132,40 +170,28 @@ export default function GeminiConnection({ active, onConnected, onDisconnected }
     <div className="gemini-connection">
       {!active && (
         <p className="pa__muted">
-          Google lets third-party apps use Gemini with an API key, not a Google AI Pro or Ultra
-          sign-in. Keys are saved in your key vault and sent only to Google.
+          Connect with an API key or sign in to Google Cloud. A Google AI Pro or Ultra subscription
+          sign-in isn’t allowed for third-party apps; its monthly Cloud credits can pay for either.
         </p>
       )}
-      {GEMINI_CONNECTIONS.map(connection => (
-        <div key={connection.id} className="gemini-connection__row">
-          <div className="gemini-connection__head">
-            <div>
-              <span className="gemini-connection__label">
-                {connection.label}
-                {connected(connection) && <span className="pa__success gemini-connection__state">Connected</span>}
-              </span>
-              <span className="pa__muted gemini-connection__detail">{connection.detail}</span>
-            </div>
-            <div className="provider-connection__actions">
-              <button
-                type="button" className="settings__btn settings__btn--sm settings__btn--outline"
-                aria-expanded={open === connection.id}
-                onClick={() => setOpen(open === connection.id ? null : connection.id)}
-              >
-                {rowAction(connected(connection), Boolean(active))}
-              </button>
-              {connected(connection) && (
-                <button type="button" className="settings__btn settings__btn--sm settings__btn--danger" onClick={() => setConfirming(true)}>
-                  Disconnect…
-                </button>
-              )}
-            </div>
-          </div>
-          {open === connection.id && (
-            <KeyForm connection={connection} onConnected={() => { setOpen(null); onConnected?.() }} />
-          )}
-        </div>
-      ))}
+      {[...GEMINI_CONNECTIONS, GOOGLE_CLOUD].map(connection => {
+        const done = () => { setOpen(null); onConnected?.() }
+        return (
+          <ConnectionRow
+            key={connection.id}
+            connection={connection}
+            connected={connected(connection)}
+            active={Boolean(active)}
+            open={open === connection.id}
+            onToggle={() => setOpen(open === connection.id ? null : connection.id)}
+            onDisconnect={() => setConfirming(true)}
+          >
+            {connection.id === GOOGLE_CLOUD.id
+              ? <GoogleCloudSignIn onConnected={done} />
+              : <KeyForm connection={connection} onConnected={done} />}
+          </ConnectionRow>
+        )
+      })}
       {confirming && (
         <div className="provider-connection" aria-busy={busy}>
           <p>Disconnect Google Gemini from this Möbius? Its saved key is removed.</p>
