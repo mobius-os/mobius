@@ -1381,7 +1381,7 @@ class ParkRun(_Command):
 
 @dataclass
 class PrepareRestartIntents(_Command):
-  """Stamp the exact live runs covered by one planned restart.
+  """Stamp live runs and still-pending parks covered by this boot's restart.
 
   This happens BEFORE provider interruption. A slow provider stop or failed
   terminal transcript write must not erase the one fact startup needs to
@@ -1398,6 +1398,7 @@ class PrepareRestartIntents(_Command):
 
   restart_nonce: str = ""
   runs: list[dict[str, str]] = field(default_factory=list)
+  previous_restart_nonce: str = ""
 
 
 @dataclass
@@ -6642,7 +6643,7 @@ class ChatWriterActor:
   def _prepare_restart_intents(
     self, db, cmd: PrepareRestartIntents,
   ) -> list[dict[str, str]]:
-    """Bind one authenticated-restart nonce to exact live run rows."""
+    """Carry exact live runs and acknowledged parks into one planned boot."""
     from app.models import Chat, ChatRun
 
     if not cmd.restart_nonce:
@@ -6677,6 +6678,27 @@ class ChatWriterActor:
         run.restart_nonce = cmd.restart_nonce
         changed = True
       accepted.append({"chat_id": chat_id, "run_token": run_token})
+
+    # A second planned boot can happen before every park from the first has
+    # resumed. Carry only parks authorized by this boot's trusted nonce;
+    # never adopt an old crash, superseded turn, or a different kind of park.
+    if cmd.previous_restart_nonce:
+      parks = db.query(ChatRun).join(Chat, Chat.id == ChatRun.chat_id).filter(
+        ChatRun.status.in_(("parked", "resume_pending")),
+        ChatRun.park_reason == "restart",
+        ChatRun.restart_nonce.in_((cmd.previous_restart_nonce, cmd.restart_nonce)),
+        Chat.deleted_at.is_(None),
+      ).all()
+      for run in parks:
+        key = (run.chat_id, run.id)
+        owner = self._run_token_owner.get(run.chat_id)
+        if (key in seen or (owner is not None and owner != run.id)
+            or not self._run_is_latest(db, run)):
+          continue
+        if run.restart_nonce != cmd.restart_nonce:
+          run.restart_nonce = cmd.restart_nonce
+          changed = True
+        accepted.append({"chat_id": run.chat_id, "run_token": run.id})
 
     if changed and not _commit_or_rollback(db):
       raise _PersistFailed("PrepareRestartIntents did not persist")

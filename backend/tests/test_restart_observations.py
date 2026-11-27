@@ -14,11 +14,8 @@ from app.timeutil import now_naive_utc
 from tests.test_platform_restart_cards import _install
 
 
-@pytest.mark.parametrize("replayed, expected", [
-  (None, "restoring_edits"), ("restored-sha", "restart_required"),
-])
-def test_restart_receipt_reaches_card_while_resume_is_held(
-  client, auth, monkeypatch, replayed, expected,
+def test_restart_receipt_is_delivered_while_late_update_edits_are_pending(
+  client, auth, monkeypatch,
 ):
   from app import chat_waits
 
@@ -31,9 +28,6 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
     ))
     db.commit()
   monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {
-    "replayed": replayed,
-  })
   delivered = []
   async def capture_delivery(row_id):
     delivered.append(row_id)
@@ -42,8 +36,8 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
   changed = []
   monkeypatch.setattr(chat_waits, "_broadcast_changed", changed.append)
 
-  assert asyncio.run(chat_waits.sweep_due_waits()) == 0
-  assert delivered == []
+  assert asyncio.run(chat_waits.sweep_due_waits()) == 1
+  assert delivered == [wait_id]
   assert changed == [chat_id]
   response = client.get(f"/api/chats/{chat_id}?compact=true", headers=auth)
   assert response.status_code == 200
@@ -51,7 +45,7 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
               for block in message.get("blocks", [])
               if block.get("question_id") == qid)
   observation = card["platform_action"]["observation"]
-  assert observation["continuation"] == expected
+  assert observation["continuation"] == "pending"
   assert observation["observed_at"].endswith("Z")
   runtime = client.get(f"/api/chats/{chat_id}/runtime", headers=auth).json()
   assert runtime["lifecycle_projection_key"] == response.json()["lifecycle_projection_key"]
@@ -69,24 +63,16 @@ def test_restart_receipt_reaches_card_while_resume_is_held(
     assert "observation" not in list(transcript_rows.history(chat))[0]["blocks"][0]["platform_action"]
 
 
-def test_observation_follows_current_hold_and_delivery_without_transcript_writes(
-  monkeypatch,
-):
+def test_observation_follows_delivery_without_transcript_writes(monkeypatch):
   chat_id = "observed-transitions"
   _qid, wait_id, _run, _requirement = _install(chat_id, status="met")
-  held = [True]
-  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: held[0])
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {
-    "replayed": "restored-sha",
-  })
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
   with SessionLocal() as db:
     chat = db.get(models.Chat, chat_id)
     original = deepcopy(list(transcript_rows.history(chat)))
     def observation():
       return project_restart_observations(db, chat_id, list(transcript_rows.history(chat)))[0][
         "blocks"][0]["platform_action"]["observation"]
-    assert observation()["continuation"] == "restart_required"
-    held[0] = False
     assert observation()["continuation"] == "pending"
     wait = db.get(models.ChatWait, wait_id)
     wait.resume_delivered_at = now_naive_utc()
@@ -154,15 +140,11 @@ def test_projection_preserves_message_window_and_unrelated_blocks(monkeypatch):
     assert project_restart_observations(db, chat_id, [unrelated]) == [unrelated]
 
 
-def test_receipt_freshness_tracks_observation_hold_and_delivery(monkeypatch):
+def test_receipt_freshness_tracks_observation_and_delivery_not_update_state(monkeypatch):
   chat_id = "observed-freshness"
   _qid, wait_id, _run, _requirement = _install(chat_id)
   held = [True]
-  replayed = [None]
   monkeypatch.setattr(platform_update, "late_edits_pending", lambda: held[0])
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {
-    "replayed": replayed[0],
-  })
   with SessionLocal() as db:
     def key():
       return _lifecycle_projection_key(db, chat_id, 0, include_foreign_context=True)
@@ -173,14 +155,9 @@ def test_receipt_freshness_tracks_observation_hold_and_delivery(monkeypatch):
     wait.status = "met"
     db.commit()
     keys.append(key())
-    # The hold lives on disk, so only the key's hold input can see it move.
-    replayed[0] = "restored-sha"
-    keys.append(key())
     held[0] = False
-    keys.append(key())
+    assert key() == keys[-1], "update state on disk is not a receipt input"
     wait.resume_delivered_at = now_naive_utc()
     db.commit()
     keys.append(key())
-    assert len(set(keys)) == len(keys)
-    held[0] = True
-    assert key() == keys[-1], "a delivered receipt no longer shows the hold"
+    assert len(set(keys)) == 3

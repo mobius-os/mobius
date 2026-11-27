@@ -107,7 +107,6 @@ from app.run_state import (
 )
 from app.schemas import ChatCompactRequest, ChatPatch, ChatProviderSwitch
 from app.timeutil import now_naive_utc, SOFT_DELETE_TTL
-from app.platform_restart import continuation_hold
 from app.tool_output_storage import (
   TOOL_OUTPUT_STORAGE_PREFIX,
   decode_tool_output,
@@ -226,8 +225,6 @@ def _lifecycle_projection_key(
     runtime_revision,
     *([list(row) for row in rows] for rows in (waits, goals, dependencies, helpers)),
     helper_runs,
-    # A restart receipt shows update state that lives on disk, not in a row.
-    continuation_hold(waits),
   ]
   if include_foreign_context:
     # Dependency cards name their source chat, and question cards name the

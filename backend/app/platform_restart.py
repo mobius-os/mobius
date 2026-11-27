@@ -316,30 +316,6 @@ def activation_notice(row: models.ChatWait, outcome: str) -> str:
   return f"{lead}\n<platform_activation>{body}</platform_activation>"
 
 
-def _restart_continuation_hold() -> str:
-  from app.platform_update import late_edits_pending, read_prepared_update
-
-  if not late_edits_pending():
-    return "pending"
-  update = read_prepared_update()
-  return "restart_required" if update and update["replayed"] else "restoring_edits"
-
-
-def continuation_hold(waits) -> str | None:
-  """Return the continuation hold an undelivered restart receipt shows, if any.
-
-  A met activation wait stays mutable until a reply or continuation settles
-  it, and its card then reads the update state on disk rather than a row.
-  """
-  if any(
-    row.kind == ACTIVATION_WAIT_KIND and row.status == "met" and row.met_at is not None
-    and row.resume_delivered_at is None and row.result_disposition is None
-    for row in waits
-  ):
-    return _restart_continuation_hold()
-  return None
-
-
 def project_restart_observations(
   db: Session, chat_id: str, messages: list[dict],
 ) -> list[dict]:
@@ -371,8 +347,6 @@ def project_restart_observations(
   if not waits:
     return messages
 
-  hold = continuation_hold(waits.values()) or "pending"
-
   observations = {}
   for card in cards:
     action = card["platform_action"]
@@ -383,7 +357,7 @@ def project_restart_observations(
     continuation = (
       "delivered" if row.resume_delivered_at is not None
       else "cancelled" if row.status == "cancelled" or row.result_disposition == "retired_by_goal_outcome"
-      else hold
+      else "pending"
     )
     observations[id(card)] = {
       "observed_at": row.met_at.isoformat() + "Z",

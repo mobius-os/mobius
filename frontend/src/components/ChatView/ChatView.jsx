@@ -532,7 +532,6 @@ export default function ChatView({
   // the first authoritative detail read.
   const cached = queryClient.getQueryData(chatMessagesQueryKey(chatId))
   const [recoveryRunId, setRecoveryRunId] = useState(cached?.recoveryRunId || null)
-  const [continuationWait, setContinuationWait] = useState(cached?.continuationWait || null)
   const transcriptCacheKey = useMemo(() => chatMessagesQueryKey(chatId), [chatId])
   const {
     messages,
@@ -1526,7 +1525,6 @@ export default function ChatView({
       const refreshedChatInfo = chatDetailCacheValue(data).chatInfo
       setGoalPresentationLocalState(runtimeGoal)
       setRecoveryRunId(data.recovery_run_id || null)
-      setContinuationWait(data.continuation_wait || null)
       if (embedded) setEmbeddedRunActive(!!data.running)
       const adoptAssistantOwner = shouldAdoptRuntimeAssistantOwner({
         runtimeRunning: !!data.running,
@@ -1547,7 +1545,6 @@ export default function ChatView({
         runStatus: data.run_status || null,
         runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
-        continuationWait: data.continuation_wait || null,
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: data.pending_messages || [],
@@ -1709,7 +1706,6 @@ export default function ChatView({
       }
       commitRuntimeSnapshot(runtimeTransition)
       setRecoveryRunId(data.recovery_run_id || null)
-      setContinuationWait(data.continuation_wait || null)
       // A finalized reply can advance while this client holds an idle warm
       // cache with no stream left to reconcile it. Foreground runtime reads
       // already carry the durable version; when it disproves the cache, use
@@ -1753,7 +1749,6 @@ export default function ChatView({
         runStatus: data.run_status || null,
         runtimeRevision: data.runtime_revision,
         recoveryRunId: data.recovery_run_id || null,
-        continuationWait: data.continuation_wait || null,
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: serverPending,
@@ -2563,7 +2558,6 @@ export default function ChatView({
     // this chat's cache (or ordinary absence) before any early surface can
     // paint, so a failed cold read cannot expose the previous chat's provider.
     setChatInfo(activationCache?.chatInfo ?? null)
-    setContinuationWait(activationCache?.continuationWait || null)
     const savedAnchorKey = savedReadingAnchorKey(chatId)
     const searchAnchorKey = decisionAnchorKey || searchReveal?.anchorKey || null
     // A search selection is a deliberate one-shot navigation, so it wins over
@@ -2651,7 +2645,6 @@ export default function ChatView({
       activationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
-      setContinuationWait(runtime.continuation_wait || null)
       const attachesToStream = shouldAttachRunningStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2811,7 +2804,6 @@ export default function ChatView({
           runStatus: runtime.run_status || null,
           runtimeRevision: runtime.runtime_revision,
           recoveryRunId: runtime.recovery_run_id || null,
-          continuationWait: runtime.continuation_wait || null,
           handoff: runtime.handoff || null,
           activeAssistantMessageId:
             runtime.active_assistant_message_id || null,
@@ -6111,7 +6103,6 @@ export default function ChatView({
       onAutoResumeChange={last ? handleAutoResumeChange : undefined}
       limitResetElapsed={last && limitResetElapsed}
       recoveryCredit={last ? pendingLimitRecoveryCredit : null}
-      continuationWait={last ? continuationWait : null}
       handoff={last ? serverHandoff : null}
       submissionBlocked={providerSwitching}
       liveQuestionId={answerableQuestionId}

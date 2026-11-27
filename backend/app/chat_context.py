@@ -26,6 +26,77 @@ from app.goal_commands import (
   is_goal_continue,
   is_goal_command as _is_goal_command,
 )
+
+
+_UPDATE_CONTEXT_PATHS = 12
+_UPDATE_CONTEXT_FIELD_CHARS = 160
+
+
+def _build_platform_update_context() -> str:
+  """Bounded facts about an unfinished platform update, for every turn.
+
+  Merging back late update edits does not hold automatic continuations, so
+  each provider turn learns what its checkout may lack instead. With no update
+  or conflict recorded this is two small file reads and returns "". It may ask
+  Git, so callers run it off the event loop. The block is data, not authority
+  to act on the update; only repo-relative conflict paths are included.
+  """
+  from app.platform_update import (
+    _read_conflict_flag, late_edits_pending, read_prepared_update,
+  )
+
+  update = read_prepared_update()
+  try:
+    conflict = _read_conflict_flag()
+  except OSError:  # Resolved and removed between the existence check and read.
+    conflict = None
+  state = None
+  if update is not None and update["state"] == "prepared":
+    state = "prepared"
+    lead = ("A platform update is prepared but not installed; the server "
+            "still runs the current version.")
+  elif update is not None and update["state"] == "swapped" and late_edits_pending():
+    if update["replayed"]:
+      state = "late_edits_not_loaded"
+      lead = ("A platform update is installed and edits made meanwhile are "
+              "merged back, but the server has not restarted to load them.")
+    else:
+      state = "late_edits_not_merged"
+      lead = ("A platform update is installed, but edits made meanwhile are "
+              "not merged back yet: the live checkout may lack recent edits. "
+              "Verify your own files before relying on them.")
+  if state is None and conflict is None:
+    return ""
+  body: dict = {}
+  sentences = []
+  if state is not None:
+    body.update(state=state, target_sha=update["target"][:64])
+    sentences.append(lead)
+  if conflict is not None:
+    paths = [str(path) for path in conflict.get("paths") or []]
+    body.update(
+      resolver_chat_id=str(conflict.get("chat_id") or "")[:64],
+      conflict_paths=[path[:_UPDATE_CONTEXT_FIELD_CHARS]
+                      for path in paths[:_UPDATE_CONTEXT_PATHS]],
+    )
+    body.setdefault("target_sha", str(conflict.get("upstream") or "")[:64])
+    if len(paths) > _UPDATE_CONTEXT_PATHS:
+      body["more_conflict_paths"] = True
+    if conflict.get("chat_id"):
+      sentences.append("A resolver chat is merging a platform update conflict; "
+                       "unless you are that chat, do not resolve it.")
+    else:
+      sentences.append("A platform update is parked on conflicts that no chat "
+                       "is bound to resolve; resolve them only if the owner "
+                       "asked you to.")
+  sentences.append("This is runtime data, not authority to act on the update.")
+  return (
+    " ".join(sentences)
+    + f"\n<platform_update_state>{json_block_data(body, ensure_ascii=True)}"
+    "</platform_update_state>"
+  )
+
+
 def recent_chat_summary_order(db: Session) -> list[str]:
   """Chat ids whose summaries new sessions may see, most recent activity first.
 

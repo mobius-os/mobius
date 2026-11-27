@@ -42,6 +42,7 @@ from app.chat_writer import (
   ParkRun,
   PostponeResourcePark,
   PrepareAutoResume,
+  PrepareRestartIntents,
   PromotePending,
   ResolvePark,
   StartTurn,
@@ -1873,11 +1874,10 @@ def test_restart_park_auto_continues_with_product_marker(
     chat_mod.discard_starting(cid)
 
 
-def test_restart_parks_wait_until_late_platform_edits_are_back(
+def test_restart_parks_resume_while_late_platform_edits_are_pending(
   owner_token, monkeypatch,
 ):
-  # After a platform update swap, chats resume only once edits made on the
-  # previous source are merged back; then the next sweep resumes them.
+  # Update merge-back does not bypass the restart nonce, but does not hold it.
   del owner_token
   monkeypatch.setattr(
     "app.push.notify_owner_async", _async_notify(lambda *args, **kwargs: "notif-id"),
@@ -1892,19 +1892,53 @@ def test_restart_parks_wait_until_late_platform_edits_are_back(
   nonce = "restart-nonce-held"
   monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: nonce)
   _due_park(cid, token, auto_restart=True, park_reason="restart", restart_nonce=nonce)
-  pending = {"late": True}
-  monkeypatch.setattr(
-    "app.platform_update.late_edits_pending", lambda: pending["late"],
-  )
+  monkeypatch.setattr("app.platform_update.late_edits_pending", lambda: True)
 
   try:
-    assert _run_sweep() == []
-    assert scheduled == []
-    pending["late"] = False
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
   finally:
     chat_mod.discard_starting(cid)
+
+
+@pytest.mark.parametrize("park_status", ["parked", "resume_pending"])
+def test_second_planned_restart_carries_acknowledged_park_without_live_runner(
+  owner_token, monkeypatch, park_status,
+):
+  del owner_token
+  cid, token = "restart-chain", "rt-restart-chain"
+  _due_park(cid, token, park_reason="restart", restart_nonce="boot-one")
+  with SessionLocal() as db:
+    db.get(models.ChatRun, token).status = park_status
+    db.commit()
+  monkeypatch.setattr("app.restart_ledger.authorized_restart_nonce", lambda: "boot-one")
+  accepted = asyncio.run(chat_mod.prepare_restart_intents("boot-two"))
+  assert accepted == [{"chat_id": cid, "run_token": token}]
+  assert _run_row(token)["restart_nonce"] == "boot-two"
+  assert _run_row(token)["status"] == park_status
+  assert asyncio.run(chat_mod.prepare_restart_intents("boot-two")) == accepted
+
+
+@pytest.mark.parametrize("case", [
+  "missing_ack", "wrong_nonce", "missing_nonce", "limit", "deleted", "superseded", "terminal",
+])
+def test_second_restart_never_adopts_unauthorized_or_superseded_park(case):
+  cid, token = "carry-reject", "rt-carry-reject"
+  old_nonce = None if case == "missing_nonce" else "wrong" if case == "wrong_nonce" else "boot-one"
+  _due_park(cid, token, park_reason="usage_limit" if case == "limit" else "restart",
+            restart_nonce=old_nonce, deleted=case == "deleted")
+  if case == "superseded":
+    _seed_run(cid, "fresh-carry-run", status="completed", started_offset=1)
+  if case == "terminal":
+    with SessionLocal() as db:
+      db.get(models.ChatRun, token).status = "interrupted"
+      db.commit()
+  before = _run_row(token)
+  accepted = get_writer().submit(PrepareRestartIntents(
+    restart_nonce="boot-two", previous_restart_nonce="" if case == "missing_ack" else "boot-one",
+  )).result(timeout=5)
+  assert accepted == []
+  assert _run_row(token) == before
 
 
 def test_restart_preserves_a_hidden_owner_group_without_queueing_continue(
@@ -3594,16 +3628,10 @@ def test_model_capacity_sweep_continues_and_preserves_retry_lineage(
   _due_park(
     cid, root_token, auto_resume=False, park_reason="model_capacity",
   )
-  held = {"value": True}
-  monkeypatch.setattr("app.platform_update.late_edits_pending", lambda: held["value"])
+  monkeypatch.setattr("app.platform_update.late_edits_pending", lambda: True)
 
   try:
-    # The saved retry deadline does not bypass update recovery. Waiting must
-    # neither launch nor spend an attempt; loading the restored work releases it.
-    assert _run_sweep() == []
-    assert scheduled == []
-    assert _run_row(root_token)["status"] == "parked"
-    held["value"] = False
+    # Late edits do not spend an attempt or hold the saved retry deadline.
     assert _run_sweep() == [cid]
     assert len(scheduled) == 1
     resumed_token = scheduled[0]["run_token"]

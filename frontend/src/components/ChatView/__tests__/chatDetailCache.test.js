@@ -351,13 +351,6 @@ test('a tail refresh retains every verified older row needed by a saved address'
 })
 
 
-test('continuation wait is retained on reopen and cleared by a resumed snapshot', () => {
-  const cached = chatDetailCacheValue({ messages: [], continuation_wait: 'restart_required' })
-  assert.equal(cached.continuationWait, 'restart_required')
-  assert.equal(chatDetailCacheValue({ messages: [], continuation_wait: null }).continuationWait, null)
-  assert.equal(chatDetailCacheValue({ messages: [] }).continuationWait, null)
-})
-
 test('exact decision coordinate matches the saved card after answer, not another pending question', () => {
   const answered = { role: 'assistant', id: 'old', blocks: [{ type: 'question', question_id: 'choice', answers: { q: 'Not now' } }] }
   const pending = { role: 'assistant', id: 'new', blocks: [{ type: 'question', question_id: 'new-choice' }] }

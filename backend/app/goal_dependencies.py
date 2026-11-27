@@ -245,12 +245,9 @@ def selected_dependency_carrier(db, row):
 
 def dependency_resume_blocker(db, row):
   from app.chat import programmatic_start_blocker
-  from app.platform_update import late_edits_pending
   blocker = dependency_delivery_blocker(db, row)
   if blocker:
     return blocker
-  if late_edits_pending():
-    return "restoring_edits"
   blocker = programmatic_start_blocker(db, row.waiting_chat_id)
   if blocker:
     return blocker
@@ -471,7 +468,6 @@ async def deliver_dependency(row_id):
   from app.chat_start import start_programmatic_chat_continuation
   from app.chat_writer import AppendPending, await_ack, get_writer
   from app.database import SessionLocal
-  from app.platform_update import late_edits_pending
   with SessionLocal() as db:
     row = db.get(models.GoalDependency, row_id)
     if row is None:
@@ -483,7 +479,7 @@ async def deliver_dependency(row_id):
     elif blocker == "goal_closed":
       stage_retire_goal_dependencies(db, row.waiting_chat_id, row.waiting_goal_id)
       db.commit()
-    if blocker or late_edits_pending():
+    if blocker:
       return False
     run_id, carrier = selected_dependency_carrier(db, row)
     if carrier is not None and not (carrier.status == "running"

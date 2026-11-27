@@ -285,19 +285,13 @@ def test_waiting_ignores_restart_without_authorized_nonce(chat, db):
 
 @pytest.mark.parametrize("status", ["parked", "resume_pending"])
 @pytest.mark.parametrize("park_reason", ["restart", "model_capacity"])
-@pytest.mark.parametrize("hold,replayed,expected", [
-  (True, None, "restoring_edits"),
-  (True, "restored-sha", "restart_required"),
-  (False, "restored-sha", "restart"),
-])
+@pytest.mark.parametrize("late_edits", [True, False])
 def test_continuation_wait_agrees_across_detail_and_runtime(
-  client, auth, chat, db, monkeypatch, status, hold, replayed, expected, park_reason,
+  client, auth, chat, db, monkeypatch, status, late_edits, park_reason,
 ):
   from app import platform_update
-  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: hold)
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {
-    "replayed": replayed,
-  })
+  # Unmerged late update edits never change what a park says it waits for.
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: late_edits)
   base = datetime.now(UTC)
   db.add(make_goal_run(db,
     id="restart-wait", chat_id=chat.id, status=status, provider="codex",
@@ -312,9 +306,7 @@ def test_continuation_wait_agrees_across_detail_and_runtime(
     return runtime["continuation_wait"]
 
   reason = read_wait()
-  if park_reason == "model_capacity" and not hold:
-    expected = None
-  assert reason == expected
+  assert reason == ("restart" if park_reason == "restart" else None)
   # Reading presentation must not launch, retire or otherwise mutate the park.
   db.expire_all()
   assert db.get(models.ChatRun, "restart-wait").status == status
@@ -339,7 +331,7 @@ def test_terminal_recovery_history_never_claims_to_be_waiting(chat, db, status, 
   assert continuation_wait_for_chat(db, chat.id) is None
 
 
-def test_busy_model_wait_clears_when_restored_work_is_loaded(chat, db, monkeypatch):
+def test_busy_model_park_shows_no_wait_while_late_edits_are_pending(chat, db, monkeypatch):
   from app import platform_update
   from app.chat import continuation_wait_for_chat
   db.add(make_goal_run(db,
@@ -348,9 +340,6 @@ def test_busy_model_wait_clears_when_restored_work_is_loaded(chat, db, monkeypat
   ))
   db.commit()
   monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {"replayed": "restored"})
-  assert continuation_wait_for_chat(db, chat.id) == "restart_required"
-  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: False)
   assert continuation_wait_for_chat(db, chat.id) is None
   assert db.get(models.ChatRun, "busy-model-wait").status == "parked"
 
@@ -1425,20 +1414,15 @@ def test_restart_park_handoff_requires_exact_ready_boot_authorization(chat, db, 
   }
 
 
-def test_park_handoff_does_not_promise_wake_before_required_source_restart(chat, db, monkeypatch):
+def test_park_handoff_remains_automatic_during_late_edits(chat, db, monkeypatch):
   from app import platform_update
   from app.chat import continuation_handoff_for_chat
   db.add(make_goal_run(db, id="late-edits-park", chat_id=chat.id, status="parked",
     provider="codex", park_reason="memory", started_at=datetime.now(UTC)))
   db.commit()
   monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {"replayed": "new-source"})
   assert continuation_handoff_for_chat(db, chat.id) == {
-    "kind": "recovery", "reason": "restart_required",
-  }
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {"replayed": None})
-  assert continuation_handoff_for_chat(db, chat.id) == {
-    "kind": "automatic", "reason": "restoring_edits",
+    "kind": "automatic", "reason": "memory",
   }
 
 

@@ -46,7 +46,7 @@ export function classifyChatHandoff({
   if (blockers.some(blocker => ['manual_resume', 'resume_failed', 'restart'].includes(blocker))) return 'recovery'
   const eligibleWait = (Array.isArray(waits) ? waits : []).some(wait =>
     !wait?.delivery_pending || [
-      null, 'platform_restart', 'restoring_edits', 'provider_park', 'live_turn',
+      null, 'provider_park', 'live_turn',
     ].includes(wait.resume_blocker),
   )
   const kind = resourcePause?.pause?.kind

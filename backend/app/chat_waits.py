@@ -574,11 +574,6 @@ def wait_resume_blocker(db: Session, row: models.ChatWait) -> str | None:
   Check deadlines bound polling, not an owner action or provider recovery.
   """
   from app.chat import is_chat_running, programmatic_start_blocker
-  from app.platform_update import late_edits_pending, read_prepared_update
-
-  if late_edits_pending():
-    update = read_prepared_update()
-    return "platform_restart" if update and update["replayed"] else "restoring_edits"
   blocker = programmatic_start_blocker(
     db, row.chat_id,
     activation_wait_id=row.id if row.kind == "platform_activation" else None,
@@ -1308,13 +1303,9 @@ async def _deliver_resume(row_id: str) -> bool:
 
 def _select_wait_sweep(
   now, force_kind: str | None,
-) -> tuple[list[str], list[str], bool]:
-  """Armed waits due for a check, closed waits owed a resume, and whether
-  resumes are held for unmerged late edits. Pure reads, for a worker."""
+) -> tuple[list[str], list[str]]:
+  """Armed waits due for a check and closed waits owed a resume."""
   from app.database import SessionLocal
-  from app.platform_update import late_edits_pending
-
-  hold_resumes = late_edits_pending()
 
   due_ids: list[str] = []
   undelivered_ids: list[str] = []
@@ -1346,7 +1337,7 @@ def _select_wait_sweep(
         due_ids.append(row_id)
       else:
         undelivered_ids.append(row_id)
-  return due_ids, undelivered_ids, hold_resumes
+  return due_ids, undelivered_ids
 
 
 async def sweep_due_waits(*, force_kind: str | None = None) -> int:
@@ -1358,15 +1349,9 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
   immediately after its owning event instead of waiting for the polling
   interval. Returns the number of resumes delivered.
 
-  While edits made on the previous platform source are still being merged back
-  after an update, checks still run but resumes wait, like every other
-  automatic resume: a woken agent must not act on a checkout missing its own
-  recent edits. Undelivered results go out on the first sweep after that.
   """
-  # The selection scans every wait row and the hold check reads update state
-  # (and may run git); on a busy disk that froze the event loop each tick, so
-  # both run in a worker with its own session.
-  due_ids, undelivered_ids, hold_resumes = await asyncio.to_thread(
+  # The selection scans every wait row; keep it off the event loop.
+  due_ids, undelivered_ids = await asyncio.to_thread(
     _select_wait_sweep, now_naive_utc(), force_kind,
   )
 
@@ -1383,8 +1368,6 @@ async def sweep_due_waits(*, force_kind: str | None = None) -> int:
         return None
 
   async def deliver(row_id: str) -> int:
-    if hold_resumes:
-      return 0
     try:
       return int(await _deliver_resume(row_id))
     except Exception:

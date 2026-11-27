@@ -189,7 +189,6 @@ export function chatDetailCacheValue(data = {}) {
       ? data.lifecycle_projection_key : null,
     activeAssistantMessageId: data.active_assistant_message_id || null,
     recoveryRunId: data.recovery_run_id || null,
-    continuationWait: data.continuation_wait || null,
     handoff: data.handoff || null,
     runId: data.run_id || null,
     runStatus: data.run_status || null,

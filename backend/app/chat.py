@@ -80,6 +80,7 @@ from app.chat_branches import (
 from app.chat_context import (
   _build_app_context,
   _build_app_report_block,
+  _build_platform_update_context,
   _build_resumed_context,
   _build_time_context,
   _chat_has_goal_intent,
@@ -494,12 +495,6 @@ def continuation_handoff_for_chat(db: Session, chat_id: str) -> dict:
       nonce = None
     if not nonce or not run.restart_nonce or nonce != run.restart_nonce:
       return {"kind": "recovery", "reason": "restart_manual"}
-  from app.platform_update import late_edits_pending, read_prepared_update
-  if late_edits_pending():
-    update = read_prepared_update()
-    if update and update["replayed"]:
-      return {"kind": "recovery", "reason": "restart_required"}
-    return {"kind": "automatic", "reason": "restoring_edits"}
   return {"kind": "automatic", "reason": reason}
 
 
@@ -513,13 +508,6 @@ def continuation_wait_for_chat(db: Session, chat_id: str) -> str | None:
   run = _latest_continuation_park(db, chat_id)
   if run is None or run.park_reason not in {"restart", "model_capacity"}:
     return None
-  from app.platform_update import late_edits_pending, read_prepared_update
-
-  if late_edits_pending():
-    update = read_prepared_update()
-    if update and update["replayed"]:
-      return "restart_required"
-    return "restoring_edits"
   return "restart" if run.park_reason == "restart" else None
 
 
@@ -2023,7 +2011,7 @@ async def drain_all_for_restart(
 async def prepare_restart_intents(
   restart_nonce: str,
 ) -> list[dict[str, str]]:
-  """Durably bind a planned restart to every exact live run before stopping.
+  """Bind live runs and this boot's pending restart parks to the next boot.
 
   The writer actor revalidates the registry snapshot and commits all accepted
   ChatRun nonce stamps atomically. This operation intentionally does not touch
@@ -2044,12 +2032,15 @@ async def prepare_restart_intents(
         "chat_id": chat_id,
         "run_token": run_token,
       })
-  if not candidates:
+  from app.restart_ledger import authorized_restart_nonce
+  previous_restart_nonce = authorized_restart_nonce() or ""
+  if not candidates and not previous_restart_nonce:
     return []
   prepared = await _await_ack(get_writer().submit(
     PrepareRestartIntents(
       restart_nonce=restart_nonce,
       runs=candidates,
+      previous_restart_nonce=previous_restart_nonce,
     )
   ))
   return list(prepared or [])
@@ -2606,11 +2597,6 @@ async def sweep_reset_parks(
   resolved: list[str] = []
   restart_deferred = False
   if draining:
-    return ContinuationSweepResult()
-  from app.platform_update import late_edits_pending
-  if late_edits_pending():
-    # Chats resume only once edits made on the previous platform source are
-    # back; a resolver chat started meanwhile is not a park and runs normally.
     return ContinuationSweepResult()
   now = datetime.now(UTC).replace(tzinfo=None)
   limit_resume_started = False
@@ -6351,6 +6337,11 @@ async def _run_chat_impl_with_db(
   # last so it leads the message the agent sees; only the agent's copy is
   # touched here, never the persisted/displayed user text.
   time_context = _build_time_context(timezone, turn_reads.last_user_elapsed)
+  # The update record and conflict flag are files (and may ask Git), so the
+  # bounded state block is read off the event loop.
+  update_context = await asyncio.to_thread(_build_platform_update_context)
+  if update_context:
+    user_message = f"{update_context}\n\n{user_message}"
   user_message = f"{time_context}\n\n{user_message}"
 
   bc = get_broadcast(chat_id)

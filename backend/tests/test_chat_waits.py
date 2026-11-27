@@ -824,11 +824,9 @@ def test_met_command_wait_resumes_idle_chat(client, owner_token, db, monkeypatch
   assert len(starts) == 1
 
 
-def test_met_wait_resumes_only_after_late_update_edits_are_back(
+def test_met_wait_resumes_while_late_update_edits_are_pending(
   client, owner_token, db, monkeypatch,
 ):
-  """A wait woken while an update's late edits are still being merged back
-  records its result but resumes the chat only once those edits land."""
   from app import platform_update
 
   chat_id = _owner_chat(client, owner_token)
@@ -839,26 +837,53 @@ def test_met_wait_resumes_only_after_late_update_edits_are_back(
   row.next_check_at = now_naive_utc() - timedelta(seconds=1)
   db.commit()
   starts = _capture_starts(monkeypatch, running=False)
-  pending = [True]
-  hold_reads = set()
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
 
-  def late_edits_pending():
-    # The hold check reads update state (and may run git): never on the loop.
-    hold_reads.add(threading.current_thread() is threading.main_thread())
-    return pending[0]
-
-  monkeypatch.setattr(platform_update, "late_edits_pending", late_edits_pending)
-
-  assert asyncio.run(sweep_due_waits()) == 0
-  assert starts == []
-  db.expire_all()
-  held = db.get(models.ChatWait, row.id)
-  assert held.status == "met" and held.resume_delivered_at is None
-
-  pending[0] = False
   assert asyncio.run(sweep_due_waits()) == 1
   assert len(starts) == 1 and starts[0]["chat_id"] == chat_id
-  assert hold_reads == {False}
+  db.expire_all()
+  assert db.get(models.ChatWait, row.id).status == "met"
+
+
+def test_resolver_and_unrelated_met_waits_both_deliver_during_merge_back(
+  client, owner_token, db, monkeypatch,
+):
+  from app import platform_update
+
+  chats = [_owner_chat(client, owner_token) for _ in range(2)]
+  rows = []
+  for chat_id in chats:
+    row = _command_wait(
+      db, chat_id=chat_id, description="finish observed", kind="command",
+      command="true", created_by_run_id=_seed_declaring_run(db, chat_id, f"declaring-{chat_id}"),
+    )
+    row.next_check_at = now_naive_utc() - timedelta(seconds=1)
+    rows.append(row)
+  db.commit()
+  starts = _capture_starts(monkeypatch, running=False)
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
+
+  assert asyncio.run(sweep_due_waits()) == 2
+  assert {start["chat_id"] for start in starts} == set(chats)
+  db.expire_all()
+  assert all(db.get(models.ChatWait, row.id).status == "met" for row in rows)
+
+
+def test_open_owner_question_still_blocks_wait_during_merge_back(
+  client, owner_token, db, monkeypatch,
+):
+  from app import platform_update
+
+  chat_id = _owner_chat(client, owner_token)
+  row = _command_wait(db, chat_id=chat_id, description="finished",
+    command="true", created_by_run_id=_seed_declaring_run(db, chat_id))
+  row.status = "met"
+  row.met_at = now_naive_utc()
+  db.get(models.Chat, chat_id).pending_question_id = "owner-question"
+  db.commit()
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
+
+  assert chat_waits_mod.wait_resume_blocker(db, row) == "owner_input"
 
 
 def test_unmet_command_wait_reschedules(client, owner_token, db, monkeypatch):
@@ -2139,7 +2164,10 @@ def test_a_resume_whose_start_fails_is_re_woken_once_then_rides_the_next_turn(
 
 def test_a_stopped_resume_is_not_re_woken(client, owner_token, db, monkeypatch):
   """Stop is the owner's decision: the Wait rides the next turn instead."""
+  from app import platform_update
   from app.chat_writer import FinishRun
+
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
 
   chat_id = _owner_chat(client, owner_token)
   row = _command_wait(
@@ -2262,10 +2290,12 @@ def test_finished_wait_stays_visible_until_result_delivery_not_just_check_succes
   assert runtime["waits"] == waits
   assert waits[0]["status"] == outcome
   assert waits[0]["delivery_pending"] is True
-  assert waits[0]["resume_blocker"] == "platform_restart"
+  assert waits[0]["resume_blocker"] is None
   assert waits[0]["resume_delivered_at"] is None
   assert build_active_waits_context(db, chat_id) == ""  # Do not repeat finished checks.
-  assert asyncio.run(sweep_due_waits()) == 0
+  starts = _capture_starts(monkeypatch, running=False)
+  assert asyncio.run(sweep_due_waits()) == 0  # No declaring run owns this synthetic wait.
+  assert starts == []
   db.expire_all()
   assert db.get(models.ChatWait, row.id).checks_count == 0
   _a_turn_carrying_it_succeeds(db, chat_id, row.id)
@@ -2274,7 +2304,7 @@ def test_finished_wait_stays_visible_until_result_delivery_not_just_check_succes
   assert listed["waiting"] is False
 
 
-def test_loaded_restart_releases_visible_wait_once_without_rechecking_ci(
+def test_late_edits_do_not_delay_visible_wait_or_recheck_ci(
   client, owner_token, db, monkeypatch,
 ):
   from app import platform_update
@@ -2285,17 +2315,10 @@ def test_loaded_restart_releases_visible_wait_once_without_rechecking_ci(
     created_by_run_id=_seed_declaring_run(db, chat_id),
   )
   starts = _capture_starts(monkeypatch, running=False)
-  hold = [True]
-  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: hold[0])
-  monkeypatch.setattr(platform_update, "read_prepared_update", lambda: {"replayed": "restored-sha"})
-  assert asyncio.run(sweep_due_waits()) == 0
+  monkeypatch.setattr(platform_update, "late_edits_pending", lambda: True)
+  assert asyncio.run(sweep_due_waits()) == 1
   db.expire_all()
   row = db.get(models.ChatWait, row.id)
-  assert chat_waits_mod.serialize_wait(row, db=db)["resume_blocker"] == "platform_restart"
-  # The receipt is persisted, not owned by a monitor in the old turn.
-  db.expire_all()
-  hold[0] = False
-  assert asyncio.run(sweep_due_waits()) == 1
   assert len(starts) == 1
   _a_turn_carrying_it_succeeds(db, chat_id, row.id)
   assert asyncio.run(sweep_due_waits()) == 0

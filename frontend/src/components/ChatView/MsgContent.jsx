@@ -248,7 +248,6 @@ function MsgContentInner({
   helperChat = false,
   helperParentChatId = null,
   resumeState,
-  continuationWait = null,
   handoff = null,
   onInternalNav,
   autoResumeEnabled,
@@ -656,13 +655,11 @@ function MsgContentInner({
           && handoff?.kind === 'automatic' && !!autoResumeEnabled
         // Resource waits retain automatic retry. A warned storage or process
         // action can admit one cleanup turn even while that measured pressure
-        // remains. Not while an update restores edits or awaits a restart: the
-        // server reports those for a resource wait as the handoff's reason.
+        // remains.
         const continueAnywayCopy = RESOURCE_PAUSE_LABELS[block.pause?.kind]?.continueAnyway
         const continueAnywayAvailable = recoveryOwner && canContinueAnyway && !helperChat
           && !!continueAnywayCopy
           && ['automatic', 'recovery'].includes(handoff?.kind)
-          && !['restart_required', 'restoring_edits'].includes(handoff?.reason)
         // Auto-continue schedules the next attempt; it does not remove the
         // owner's explicit retry after adding credits or changing providers.
         const manualResumeAvailable = recoveryOwner
@@ -682,7 +679,6 @@ function MsgContentInner({
           <ErrorCard
             key={assistantBlockKey(block, i)}
             block={block}
-            continuationWait={recoveryOwner ? continuationWait : null}
             manualRecovery={recoveryOwner && handoff?.kind === 'recovery'}
             autoResume={automaticContinuation}
             resetElapsed={!!limitResetElapsed}
@@ -914,7 +910,6 @@ export default memo(MsgContentInner, (prev, next) => {
     && prev.helperChat === next.helperChat
     && prev.helperParentChatId === next.helperParentChatId
     && prev.resumeState === next.resumeState
-    && prev.continuationWait === next.continuationWait
     && prev.handoff === next.handoff
     && prev.onInternalNav === next.onInternalNav
     && prev.autoResumeEnabled === next.autoResumeEnabled

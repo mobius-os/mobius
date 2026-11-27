@@ -383,45 +383,6 @@ test('the refusal sentence names exactly the offered actions', () => {
   assert.match(refusalActionSentence({ switchModel: true, freshSession: true }), /^Switch model.*fresh session/)
 })
 
-for (const [continuationWait, title, explanation] of [
-  ['restoring_edits', 'Waiting for the platform update', 'while the update restores unfinished work'],
-  ['restart_required', 'Waiting for a server restart', 'until a server restart loads the restored work'],
-]) {
-  test(`busy-model retry names ${continuationWait} instead of promising a deadline`, (t) => {
-    const previousWindow = globalThis.window
-    globalThis.window = { location: { href: 'https://mobius.test/' } }
-    t.after(() => {
-      if (previousWindow === undefined) delete globalThis.window
-      else globalThis.window = previousWindow
-    })
-    const msg = { role: 'assistant', content: '', blocks: [{
-      type: 'error', resumable: true,
-      message: 'Selected model is at capacity.',
-      pause: { kind: 'model_capacity', resets_at: '2026-09-04T09:00:00Z' },
-    }] }
-    const props = { msg, isLastMsg: true, onResume() {}, continuationWait, handoff: { kind: 'automatic', reason: 'model_capacity' } }
-    const blocked = renderToStaticMarkup(createElement(MsgContent, props))
-    assert.ok(blocked.includes(title))
-    assert.ok(blocked.includes(explanation))
-    assert.match(blocked, /Automatic retries are paused/)
-    assert.match(blocked, /Technical details/)
-    assert.match(blocked, /Selected model is at capacity/)
-    assert.doesNotMatch(blocked, /Trying again|up to five times/)
-
-    // Clearing the live hold restores the ordinary retry presentation without
-    // changing the saved provider failure or its retry deadline.
-    const cleared = renderToStaticMarkup(createElement(MsgContent, {
-      ...props, continuationWait: null,
-    }))
-    assert.match(cleared, /Trying again/)
-    assert.doesNotMatch(cleared, /Automatic retries are paused/)
-    const historical = renderToStaticMarkup(createElement(MsgContent, {
-      ...props, isLastMsg: false,
-    }))
-    assert.doesNotMatch(historical, /Automatic retries are paused/)
-  })
-}
-
 test('the one block renderer owns ErrorCard for both active sources', () => {
   // The live/catch-up surface once hardcoded a red "Error" card, so a benign
   // pause flashed red until promotion. AssistantReply owns the stable
@@ -678,45 +639,25 @@ test('a genuine resumable failure remains an error, not a Goal pause', (t) => {
 })
 
 
-for (const [continuationWait, expected] of [
-  ['restoring_edits', /Waiting for the update to restore unfinished work/],
-  ['restart_required', /Waiting for a server restart to load the restored work/],
-  ['restart', /continue automatically when the restart is complete/],
-]) {
-  test(`restart card names the current ${continuationWait} blocker`, () => {
-    const msg = { role: 'assistant', content: '', blocks: [{
-      type: 'error', message: 'Paused for a platform update.', resumable: true,
-      pause: { kind: 'restart' },
-    }] }
-    const html = renderToStaticMarkup(createElement(MsgContent, {
-      msg, isLastMsg: true, onResume() {}, continuationWait,
-      handoff: { kind: 'automatic', reason: 'restart' },
-    }))
-    assert.match(html, expected)
-    assert.doesNotMatch(html, /chat__recovery-title[^>]*>Error/)
-    const history = renderToStaticMarkup(createElement(MsgContent, {
-      msg, isLastMsg: false, onResume() {}, continuationWait,
-    }))
-    assert.doesNotMatch(history, /Waiting for (the update|a server restart)/)
-  })
-}
+test('restart card promises automatic continuation after the restart', () => {
+  const msg = { role: 'assistant', content: '', blocks: [{
+    type: 'error', message: 'Paused for a platform update.', resumable: true,
+    pause: { kind: 'restart' },
+  }] }
+  const html = renderToStaticMarkup(createElement(MsgContent, {
+    msg, isLastMsg: true, onResume() {},
+    handoff: { kind: 'automatic', reason: 'restart' },
+  }))
+  assert.match(html, /continue automatically when the restart is complete/)
+  assert.doesNotMatch(html, /chat__recovery-title[^>]*>Error/)
+})
 
 test('manual restart recovery never promises automatic continuation', () => {
   const html = renderToStaticMarkup(createElement(ErrorCard, {
     block: { type: 'error', resumable: true, pause: { kind: 'restart', manual: true } },
-    continuationWait: 'restart_required',
   }))
   assert.match(html, /Your work is saved. Resume to continue/)
   assert.doesNotMatch(html, /automatically|Waiting for a server restart/)
-})
-
-test('continuation blocker changes survive mounted and cached runtime reconciliation', () => {
-  assert.match(msgContent, /prev\.continuationWait === next\.continuationWait/)
-  assert.match(chatView, /setContinuationWait\(activationCache\?\.continuationWait \|\| null\)/)
-  for (const source of ['data', 'runtime']) {
-    assert.ok(chatView.includes(`setContinuationWait(${source}.continuation_wait || null)`))
-    assert.ok(chatView.includes(`continuationWait: ${source}.continuation_wait || null`))
-  }
 })
 
 test('manual recovery remains available while only storage and process waits offer a warned override', () => {
@@ -758,9 +699,6 @@ for (const [name, overrides] of [
     { type: 'error', resumable: false, pause: { kind: 'memory' } },
   ] } }],
   ['working', { handoff: { kind: 'working' } }],
-  // The server's real shape for a storage wait during an update.
-  ['waiting for restart', { handoff: { kind: 'recovery', reason: 'restart_required' } }],
-  ['restoring work', { handoff: { kind: 'automatic', reason: 'restoring_edits' } }],
 ]) {
   test(`${name} storage pause cannot offer Continue anyway`, () => {
     const html = renderToStaticMarkup(createElement(MsgContent, {

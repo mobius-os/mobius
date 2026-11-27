@@ -146,11 +146,9 @@ test('what started an answer leads it while live; a stopped wait trails the sett
 
 test('finished-but-undelivered checks show the blocker, not expired polling promises', () => {
   for (const [blocker, message] of [
-    ['platform_restart', 'waiting for platform restart'],
     ['owner_input', 'waiting for your answer'],
     ['manual_resume', 'waiting for Resume'],
     ['provider_park', 'waiting for agent availability'],
-    ['restoring_edits', 'restoring local work'],
     ['live_turn', 'waiting for current turn'],
     ['resume_failed', 'follow-up needs attention'],
   ]) {
@@ -172,11 +170,11 @@ test('finished-but-undelivered checks show the blocker, not expired polling prom
 
 test('failed and deadline outcomes remain honest while their follow-up is blocked', () => {
   for (const [status, expected] of [
-    ['failed', 'Check failed; waiting for platform restart'],
-    ['expired', 'Check reached its deadline; waiting for platform restart'],
+    ['failed', 'Check failed; waiting for Resume'],
+    ['expired', 'Check reached its deadline; waiting for Resume'],
   ]) {
     const html = renderToStaticMarkup(createElement(WaitCard, {
-      wait: { id: status, status, kind: 'command', description: 'CI', delivery_pending: true, resume_blocker: 'platform_restart' },
+      wait: { id: status, status, kind: 'command', description: 'CI', delivery_pending: true, resume_blocker: 'manual_resume' },
       expanded: true, onToggle: () => {},
     }))
     assert.ok(html.includes(expected))
