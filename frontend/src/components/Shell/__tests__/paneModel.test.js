@@ -111,6 +111,22 @@ test('seedFromFlatTabs sanitizes and dedups untrusted input', () => {
   assertInvariants(seeded)
 })
 
+test('a restored workspace drops chat tabs and slots whose id is not an id', () => {
+  const bad = '../storage/apps/7/fake-chat.json?'
+  const restored = paneModel.parseWorkspace(JSON.stringify({
+    v: 1,
+    viewMode: 'panes',
+    layout: 'p0',
+    panes: { p0: { id: 'p0', tabs: [{ kind: 'chat', id: bad }, { kind: 'chat', id: 'a' }] } },
+    focusedPaneId: 'p0',
+    nextId: 1,
+    singleScreen: { kind: 'chat', id: bad },
+  }))
+  assert.deepEqual(paneModel.flatten(restored), [makeTab('chat', 'a')])
+  assert.equal(restored.singleScreen, null)
+  assertInvariants(restored)
+})
+
 test('normalize is idempotent and reference-stable on an already-clean tree', () => {
   const once = paneModel.normalize({
     v: 1,

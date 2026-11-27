@@ -127,13 +127,42 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
   const stylesheet = /<link\b([^>]*\brel=["']?stylesheet["']?[^>]*)>/gi
   const script = /<script\b([^>]*\bsrc=["']([^"']+)["'][^>]*)><\/script\s*>/gi
 
+  // Inline local binary assets (images, fonts, CSS background images) as data:
+  // URIs when a binary loader is supplied. The srcDoc frame is an opaque origin
+  // whose CSP is default-src 'none' + img-src/font-src data:, so a relative
+  // asset URL would otherwise be blocked; a data: URI is the only way a built
+  // site's own images and fonts can render. Each local path is fetched once.
+  // Remote/absolute refs are left untouched (and stay CSP-blocked, so a missing
+  // asset is visible rather than silently wrong).
+  const assetCache = new Map()
+  const resolveAsset = async (reference, ownerPath) => {
+    const path = localProjectPath(reference, ownerPath)
+    if (!path) return null
+    if (!assetCache.has(path)) {
+      try { assetCache.set(path, await loadDataUri(path)) }
+      catch { assetCache.set(path, null) }
+    }
+    return assetCache.get(path)
+  }
+  const inlineCssAssets = async (content, ownerPath) => {
+    const cssUrl = /url\(\s*(["']?)([^)"']+)\1\s*\)/gi
+    for (const match of [...content.matchAll(cssUrl)]) {
+      const uri = await resolveAsset(match[2], ownerPath)
+      if (uri) content = content.split(match[0]).join(`url(${uri})`)
+    }
+    return content
+  }
+
+  if (loadDataUri) document = await inlineCssAssets(document, entryPath)
+
   const styles = [...document.matchAll(stylesheet)]
   for (const match of styles) {
     const href = /\bhref=["']([^"']+)["']/i.exec(match[1])?.[1]
     const path = localProjectPath(href, entryPath)
     if (!path) continue
     try {
-      const content = await loadText(path)
+      let content = await loadText(path)
+      if (loadDataUri) content = await inlineCssAssets(content, path)
       document = document.replace(
         match[0],
         () => `<style data-project-file="${path}">${content}</style>`,
@@ -146,7 +175,8 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
     const path = localProjectPath(match[2], entryPath)
     if (!path) continue
     try {
-      const content = await loadText(path)
+      let content = await loadText(path)
+      if (loadDataUri) content = await inlineCssAssets(content, entryPath)
       document = document.replace(
         match[0],
         () => `<script data-project-file="${path}">${escapeInlineScript(content)}</script>`,
@@ -154,41 +184,16 @@ export async function assembleProjectHtmlPreview(source, entryPath, loadText, lo
     } catch { /* the CSP-blocked original makes a missing dependency visible */ }
   }
 
-  // Inline local binary assets (images, fonts, CSS background images) as data:
-  // URIs when a binary loader is supplied. The srcDoc frame is an opaque origin
-  // whose CSP is default-src 'none' + img-src/font-src data:, so a relative
-  // asset URL would otherwise be blocked; a data: URI is the only way a built
-  // site's own images and fonts can render. Each local path is fetched once.
-  // Remote/absolute refs are left untouched (and stay CSP-blocked, so a missing
-  // asset is visible rather than silently wrong).
   if (loadDataUri) {
-    const assetCache = new Map()
-    const resolveAsset = async (reference) => {
-      const path = localProjectPath(reference, entryPath)
-      if (!path) return null
-      if (!assetCache.has(path)) {
-        try { assetCache.set(path, await loadDataUri(path)) }
-        catch { assetCache.set(path, null) }
-      }
-      return assetCache.get(path)
-    }
-
     const image = /<img\b[^>]*?\bsrc=(["'])([^"']+)\1[^>]*>/gi
     for (const match of [...document.matchAll(image)]) {
-      const uri = await resolveAsset(match[2])
+      const uri = await resolveAsset(match[2], entryPath)
       if (!uri) continue
       const replaced = match[0].replace(
         `src=${match[1]}${match[2]}${match[1]}`,
         `src=${match[1]}${uri}${match[1]}`,
       )
       document = document.replace(match[0], () => replaced)
-    }
-
-    const cssUrl = /url\(\s*(["']?)([^)"']+)\1\s*\)/gi
-    for (const match of [...document.matchAll(cssUrl)]) {
-      const uri = await resolveAsset(match[2])
-      if (!uri) continue
-      document = document.split(match[0]).join(`url(${uri})`)
     }
   }
 

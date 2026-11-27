@@ -40,6 +40,10 @@ class ChannelCreate(BaseModel):
 class ChannelUpdate(BaseModel):
   # A replacement link; like on add, it is checked, encrypted and never returned.
   url: str | None = Field(default=None, min_length=8, max_length=2000)
+  # The service the replacement link belongs to, as on add. Without it the
+  # server guesses from the link, and a self-hosted ntfy server and a generic
+  # webhook look alike.
+  kind: Literal["slack", "discord", "ntfy", "webhook"] | None = None
   label: str | None = Field(default=None, max_length=80)
   copy_notifications: bool | None = None
   app_ids: list[int] | None = Field(default=None, max_length=200)
@@ -152,6 +156,19 @@ def create_channel(
   return _channel_out(row)
 
 
+def _replacement_kind(current: str, url: str) -> str:
+  """The kind a replaced link gets when the caller does not name one.
+
+  A link a known service claims moves the channel to that service. No service
+  claims a self-hosted ntfy link, so an unclaimed link keeps an ntfy or webhook
+  channel's kind; a caller switching between those two sends ``kind``.
+  """
+  detected = notification_channels.detect_kind(url.strip())
+  if detected == "webhook" and current in ("ntfy", "webhook"):
+    return current
+  return detected
+
+
 @router.patch("/{channel_id}", dependencies=[Depends(reject_cross_site)])
 def update_channel(
   channel_id: str,
@@ -160,8 +177,12 @@ def update_channel(
   db: Session = Depends(get_db),
 ):
   row = _owned_channel(db, owner.id, channel_id)
+  if body.kind is not None and body.kind != row.kind and body.url is None:
+    # The stored link was checked for its current service; a new kind comes
+    # with the link it applies to.
+    raise HTTPException(400, "Send the link again to change the service.")
   if body.url is not None:
-    kind = notification_channels.detect_kind(body.url.strip())
+    kind = body.kind or _replacement_kind(row.kind, body.url)
     url = notification_channels.check_url(body.url, kind)
     if row.label == notification_channels.KIND_NAMES[row.kind]:
       row.label = notification_channels.KIND_NAMES[kind]

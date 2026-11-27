@@ -2521,6 +2521,16 @@
   z-index: 5;
 }
 
+/* Desktop pointers: keep the composer clear of the screen's bottom edge. In a
+   maximized or full-screen window, an auto-hiding OS dock or taskbar slides up
+   when the pointer touches that edge, and an 8px gutter is easy to overshoot
+   while aiming at the pill. Touch devices keep the tighter gutter and the iOS
+   tuck. The foot's measured height carries the extra room into transcript
+   clearance, so the list needs no matching change. */
+@media (hover: hover) and (pointer: fine) {
+  .chat__foot { padding-bottom: 20px; }
+}
+
 /* Bottom fade + gesture-strip fill. A STATIC gradient scrim tuned to the owner's
    spec: text stays crisp around the composer, then dissolves toward the very
    bottom / gesture strip. The ramp starts at an explicit zero-alpha bg stop so

@@ -6,7 +6,7 @@ import Users from 'lucide-react/dist/esm/icons/users.mjs'
 import {
   api, BASE, clearEphemeralAuthSession, jsonOrThrow, setEphemeralAuthSession,
 } from '../../api/client.js'
-import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import { buildProjectFileArtifact, queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import ArtifactWorkspace from './ArtifactWorkspace.jsx'
 import ProjectThemeResource from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
@@ -234,13 +234,8 @@ export default function ProjectShare() {
 
   async function buildFileAsArtifact(path, builder) {
     if (!canEdit) return
-    const base = (path.split('/').pop() || path).replace(/\.[^.]+$/, '') || 'output'
-    const id = path.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64) || 'artifact'
     try {
-      const create = await api.projects.createArtifact(projectId, { id, name: base, builder, source: path })
-      if (!create.ok && create.status !== 409) await jsonOrThrow(create, 'Build failed:')
-      await jsonOrThrow(await api.projects.buildArtifact(projectId, id), 'Build failed:')
+      const id = await buildProjectFileArtifact(api.projects, jsonOrThrow, projectId, path, builder)
       await queryClient.invalidateQueries({ queryKey: ['projects', 'artifacts', projectId] })
       setArtifactId(id)
     } catch (cause) {

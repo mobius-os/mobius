@@ -3306,8 +3306,11 @@ def commit_worktree_tree(
     )
   # The checked-out branch moved without checkout. Make the ordinary index
   # describe the accepted commit while preserving any later worktree edits as
-  # an unapplied draft.
+  # an unapplied draft. read-tree writes entries without stat data, which
+  # ``git apply --index`` reads as a local edit; the refresh re-hashes them, so
+  # unchanged files turn clean and only a real later edit stays dirty.
   _run(repo, "read-tree", sha)
+  _run(repo, "update-index", "-q", "--refresh")
   return sha
 
 

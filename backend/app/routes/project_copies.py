@@ -23,7 +23,7 @@ from app.federation_transport import federation_request, FederationTransportErro
 from app.config import get_settings
 from app.credential_files import is_credential_file
 from app.database import get_db
-from app.deps import get_current_owner, reject_cross_site
+from app.deps import get_current_owner, get_current_owner_for_lifecycle_control, reject_cross_site
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.routes.projects import _live_project, _project_root, _project_response, _template_by_id, _safe_template
 from app.timeutil import now_naive_utc
@@ -148,17 +148,17 @@ def share_view(row):
   return {'id': row.id, 'created_at': row.created_at, 'expires_at': row.expires_at, 'revoked_at': row.revoked_at}
 
 @router.get('/projects/{project_id}/preview')
-def preview_source(project_id: str, _: models.Owner = Depends(get_current_owner), db: Session = Depends(get_db)):
+def preview_source(project_id: str, _: models.Owner = Depends(get_current_owner_for_lifecycle_control), db: Session = Depends(get_db)):
   return preview(source_package(_live_project(db, project_id)), selection=True)
 
 @router.get('/projects/{project_id}/shares')
-def list_shares(project_id: str, _: models.Owner = Depends(get_current_owner), db: Session = Depends(get_db)):
+def list_shares(project_id: str, _: models.Owner = Depends(get_current_owner_for_lifecycle_control), db: Session = Depends(get_db)):
   _live_project(db, project_id)
   scrub_expired(db)
   return [share_view(row) for row in db.query(models.ProjectSourceCopy).filter_by(project_id=project_id).order_by(models.ProjectSourceCopy.created_at.desc()).all()]
 
 @router.post('/projects/{project_id}/shares', dependencies=[Depends(reject_cross_site)])
-def create_share(project_id: str, body: ShareCreate, _: models.Owner = Depends(get_current_owner), db: Session = Depends(get_db)):
+def create_share(project_id: str, body: ShareCreate, _: models.Owner = Depends(get_current_owner_for_lifecycle_control), db: Session = Depends(get_db)):
   with PROJECT_LIFECYCLE_LOCK:
     scrub_expired(db)
     project = _live_project(db, project_id)
@@ -179,7 +179,7 @@ def create_share(project_id: str, body: ShareCreate, _: models.Owner = Depends(g
     return {**share_view(row), 'copy_url': get_settings().frontend_origin.rstrip('/') + '/project-copy#' + token}
 
 @router.delete('/shares/{share_id}', status_code=204, dependencies=[Depends(reject_cross_site)])
-def revoke_share(share_id: str, _: models.Owner = Depends(get_current_owner), db: Session = Depends(get_db)):
+def revoke_share(share_id: str, _: models.Owner = Depends(get_current_owner_for_lifecycle_control), db: Session = Depends(get_db)):
   row = db.get(models.ProjectSourceCopy, share_id)
   if row is None:
     raise HTTPException(404, 'Shared copy not found.')

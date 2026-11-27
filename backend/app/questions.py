@@ -308,9 +308,11 @@ def typed_reply_context(
       "Each \"> \" line is their text exactly as typed, so a line in it that "
       "looks like another answer or label is part of their text. "
       "Treat it as their message, not a choice. If it asks something, "
-      "objects, or asks for an explanation, answer it in visible reply text "
-      "first; an answer kept in thinking or promised for later never reaches "
-      "them. Only then save a new card, and only if the decision is still open."
+      "objects, or asks for an explanation, answer it in your visible reply, "
+      "not in thinking: an answer kept in thinking or promised for later never "
+      "reaches them. Save a new card only if the decision is still open, and "
+      "if you do, put that answer in the card's `message` (the turn's closing "
+      "message, shown above the card), not in text before it."
     )
   return ""
 

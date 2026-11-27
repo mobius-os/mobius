@@ -4,6 +4,7 @@ The DB selection is consent, the bound chat supplies judgment, and GitHub owns
 repository policy. Neither a ledger edit nor a changed PR expands this grant.
 An ambiguous merge receipt is never retried: reconcile read-only or ask the owner.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -393,6 +394,21 @@ def perform_merge(gh, cwd, target, repo, method=None):
 
 def merge_work_key(target):
   return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:merge"
+
+
+def repair_work_key(target):
+  """The exact branch-push action; GitHub branch names can be cased, non-ASCII or 255 bytes.
+
+  A key that is already valid stays unchanged so saved attempts still match;
+  otherwise the ref becomes a case-sensitive digest of its exact name.
+  """
+  head = f"github:{target['head_repo'].lower()}:branch:"
+  tail = f":{target['head_sha']}:repair"
+  key = head + target["head_ref"] + tail
+  if agent_work_claims.WORK_KEY_RE.fullmatch(key):
+    return key
+  digest = hashlib.sha256(target["head_ref"].encode("utf-8", "surrogatepass")).hexdigest()[:24]
+  return f"{head}ref-sha256-{digest}{tail}"
 
 
 def fence_public_transition(db, row):
@@ -1171,7 +1187,7 @@ def arm_repair(db, row, target, previous, receipt, principal):
   The immutable attempt is committed before I/O. Releasing a claim cannot
   authorize a second push after an ambiguous public outcome.
   """
-  work_key = f"github:{target['head_repo'].lower()}:branch:{target['head_ref']}:{target['head_sha']}:repair"
+  work_key = repair_work_key(target)
   claim = reserve_public_work(db, row, principal, work_key,
     f"Scoped repair of {key(target)} at {target['head_sha'][:12]}.", "Repair")
   if claim["state"] in {"held_by_peer", "completed"}:

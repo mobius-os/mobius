@@ -2,9 +2,23 @@
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 
-function asDate(value) {
+const NAIVE_API_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/
+
+/** Milliseconds for an API timestamp, or NaN. Möbius persists UTC as
+ *  SQLite-compatible naive datetimes, so API timestamps can arrive without a
+ *  zone suffix. Browsers read that shape as local wall time, which would put
+ *  every label off by the viewer's UTC offset; an explicit zone is kept. */
+export function parseApiTimestamp(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  if (!raw) return NaN
+  return Date.parse(NAIVE_API_DATETIME.test(raw) ? `${raw}Z` : raw)
+}
+
+/** A Date for a Date, epoch milliseconds or an API timestamp; null otherwise. */
+export function apiDate(value) {
   if (value == null) return null
-  const date = value instanceof Date ? value : new Date(value)
+  const date = value instanceof Date ? value
+    : new Date(typeof value === 'string' ? parseApiTimestamp(value) : value)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
@@ -27,7 +41,7 @@ const TIME_FORMAT = new Intl.DateTimeFormat('en-GB', {
 const YEAR_FORMAT = new Intl.DateTimeFormat('en-GB', { year: 'numeric' })
 
 export function formatTime(value) {
-  const date = asDate(value)
+  const date = apiDate(value)
   if (!date) return ''
   return TIME_FORMAT.format(date)
 }
@@ -39,7 +53,7 @@ const RELATIVE_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'always' })
  *  full date and time. A server clock a little ahead of this one stamps a
  *  just-finished reply up to a minute in the future: that is still now. */
 export function formatRecentDateTime(value, now = Date.now()) {
-  const date = asDate(value)
+  const date = apiDate(value)
   if (!date) return ''
   const elapsed = now - date.getTime()
   if (elapsed <= -60_000 || elapsed >= 86_400_000) return formatDateTime(date)
@@ -50,7 +64,7 @@ export function formatRecentDateTime(value, now = Date.now()) {
 }
 
 export function formatDateTime(value) {
-  const date = asDate(value)
+  const date = apiDate(value)
   if (!date) return ''
   const year = YEAR_FORMAT.format(date)
   return `${ordinal(date.getDate())} ${MONTHS[date.getMonth()]} ${year}, ${formatTime(date)}`

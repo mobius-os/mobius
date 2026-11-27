@@ -76,7 +76,7 @@ def test_send_push_loads_delivery_dependency_and_preserves_arguments(monkeypatch
   assert calls == [
     {
       "subscription_info": subscription,
-      "data": json.dumps(payload),
+      "data": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
       "vapid_private_key": fake_vapid,
       "vapid_claims": claims,
       "content_encoding": "aes128gcm",

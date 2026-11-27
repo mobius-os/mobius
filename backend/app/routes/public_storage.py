@@ -192,7 +192,13 @@ def _assert_write(grant: PublicStorageGrant, path: str) -> str:
   if not prefix:
     raise HTTPException(403, "This public surface does not accept writes.")
   normalized = prefix.rstrip("/")
-  if not _within(path, normalized):
+  # Strictly below the prefix: a file AT the prefix would block the area.
+  # This compares the raw string while storage resolves the canonical path,
+  # so refuse every segment canonicalization would collapse: an empty one
+  # ("public/inbox/" or "public/inbox//") lands on the prefix itself, and a
+  # "." (from a prefix installed before manifests refused it) resolves past
+  # the prefix this check sees.
+  if {"", ".", ".."} & set(path.split("/")) or not path.startswith(normalized + "/"):
     raise HTTPException(403, "Path is outside this app's public write area.")
   return normalized
 

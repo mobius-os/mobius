@@ -22,12 +22,15 @@ nothing here retries.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
+from collections.abc import Callable
 
 import httpx
 
 from app.runtime_identity import broker_client
 
+logger = logging.getLogger(__name__)
 
 BIND_PATH = "/v1/push/devices/bind"
 UNBIND_PATH = "/v1/push/devices/unbind"
@@ -72,10 +75,16 @@ def _payload_bytes(title: str, body: str, data: dict[str, str]) -> int:
 
 
 def _shrink(text: str, excess: int, *, keep: int) -> str:
-  # Every character is at least one byte, so dropping ``excess`` characters
-  # (plus room for the three-byte ellipsis) removes at least that many bytes.
-  cut = text[:max(keep, len(text) - excess - len(_ELLIPSIS.encode()))]
-  return cut + _ELLIPSIS if cut else ""
+  # Cut on UTF-8 bytes, not characters: a CJK character is 3 bytes and an
+  # emoji 4, so a character count would drop several times what is needed.
+  # Serializing never makes text smaller, so removing ``excess`` raw bytes
+  # (plus room for the three-byte ellipsis) removes at least that many.
+  raw = text.encode()
+  cut = raw[:max(0, len(raw) - excess - len(_ELLIPSIS.encode()))]
+  kept = cut.decode("utf-8", "ignore")
+  if len(kept) < keep:
+    kept = text[:keep]
+  return kept + _ELLIPSIS if kept else ""
 
 
 def fit_notification(
@@ -88,12 +97,31 @@ def fit_notification(
   """
   title = _clip(title, MAX_TITLE_CHARS)
   body = _clip(body, MAX_BODY_CHARS)
-  while (excess := _payload_bytes(title, body, data) - MAX_PAYLOAD_BYTES) > 0:
+  return fit_text(
+    title, body, lambda t, b: _payload_bytes(t, b, data), MAX_PAYLOAD_BYTES,
+  )
+
+
+def fit_text(
+  title: str, body: str, measure: Callable[[str, str], int], max_bytes: int,
+) -> tuple[str, str]:
+  """Shorten body, then title, until ``measure(title, body)`` fits.
+
+  ``measure`` returns the encoded size, in which every UTF-8 byte of either
+  text takes at least one byte. At least the title's first character stays.
+  When the other fields alone exceed ``max_bytes`` no text cut can help, so
+  that is logged and the shortest text is returned.
+  """
+  while (excess := measure(title, body) - max_bytes) > 0:
     if body:
       body = _shrink(body, excess, keep=0)
     elif len(title) > 2:
       title = _shrink(title, excess, keep=1)
     else:
+      logger.warning(
+        "push payload is %d bytes over its %d-byte limit after shortening the text",
+        excess, max_bytes,
+      )
       break
   return title, body
 

@@ -3106,7 +3106,15 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
             projectsRef.current = rows
             queryClient.setQueryData(projectQueries.keys.all, rows)
           },
-          onProjectCreated: project => setProjectRenameId(String(project.id)),
+          onProjectCreated: project => {
+            projectsRef.current = [
+              project,
+              ...projectsRef.current.filter(row => String(row.id) !== String(project.id)),
+            ]
+            queryClient.setQueryData(projectQueries.keys.all, projectsRef.current)
+            void projectQueries.importSources.invalidate(queryClient)
+            setProjectRenameId(String(project.id))
+          },
         }, request)
       }
       if (request.type === 'moebius:new-chat') {

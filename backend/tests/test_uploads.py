@@ -587,6 +587,42 @@ def test_session_file_notice_marks_own_files_and_hides_unsent_drafts(client, db,
   assert not any("draft.pdf" in line for line in lines)
 
 
+def test_session_file_notice_names_this_chats_file_not_the_stored_path(client, db, auth, chat):
+  """A stale stored `path` (an older branch's copy of its source's record, or a
+  moved chat folder) never sends the agent to another chat's files."""
+  from pathlib import Path
+  from app.config import get_settings
+  from app.routes.chats_stream import _content_with_uploads
+
+  record = _upload(client, auth, chat, "notes.txt")
+  other_chat = Path(get_settings().data_dir) / "chats" / "source-chat" / "uploads" / "notes.txt"
+  chat.uploads = [{**record, "path": str(other_chat), "claimed": True}]
+  db.commit()
+
+  notice = _content_with_uploads(chat, "next")
+
+  assert f"notes.txt → {Path(record['path']).resolve()}" in notice
+  assert "source-chat" not in notice
+
+
+def test_upload_names_that_leave_the_chats_folder_are_never_offered(client, db, auth, chat):
+  """Names are resolved inside this chat's own upload folder, so a tampered
+  record cannot point the agent or an answer at another chat's files."""
+  from fastapi import HTTPException
+  from app.upload_lifecycle import upload_dir
+  from app.routes.chats_stream import _canonical_question_attachments, _content_with_uploads
+
+  escaping = f"../../{chat.id}-other/uploads/notes.txt"
+  other_chat = (upload_dir(chat.id) / escaping).resolve()
+  chat.uploads = [{"name": escaping, "path": str(other_chat), "size": 1, "claimed": True}]
+  db.commit()
+
+  assert _content_with_uploads(chat, "next") == "next"
+  with pytest.raises(HTTPException) as refused:
+    _canonical_question_attachments(chat, [{"name": escaping}])
+  assert refused.value.status_code == 409
+
+
 def test_pending_edit_keeps_the_rows_attachment_mark(client, db, auth, chat):
   """Re-deriving the notice on a queued edit still marks the row's own files."""
   chat.pending_messages = [

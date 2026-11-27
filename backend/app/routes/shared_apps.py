@@ -19,7 +19,10 @@ from sqlalchemy.orm import Session
 from app import auth, models, project_builders
 from app.config import get_settings
 from app.database import get_db
-from app.deps import SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site
+from app.deps import (
+  SharedAppPrincipal, get_current_owner, get_shared_app_principal, reject_cross_site,
+  require_installation_owner_control,
+)
 from app.path_utils import validate_path_within_base
 from app.project_retention import PROJECT_LIFECYCLE_LOCK, creation_staging_root, place_and_commit_new_root
 from app.shared_app_retention import owned_snapshot_root
@@ -80,9 +83,9 @@ class SharedAppMemberUpdate(BaseModel):
 
 def _require_membership_administration(principal: SharedAppPrincipal) -> None:
   # Existing shared-app owners keep their resource-confined member powers.
-  # Browser guests cannot create independent access that escapes their grant.
-  if principal.browser is not None:
-    raise HTTPException(403, "Only the installation owner can change shared access.")
+  # Browser guests and delegated helpers cannot create or revoke independent
+  # access; this is the same gate project invites use, so the two cannot drift.
+  require_installation_owner_control(principal)
 
 
 def _invite_hash(secret: str) -> str:
@@ -343,6 +346,8 @@ def delete_shared_app(
   principal: SharedAppPrincipal = Depends(get_shared_app_principal),
   db: Session = Depends(get_db),
 ):
+  # Removal revokes every member and invite, so it is membership administration.
+  _require_membership_administration(principal)
   with PROJECT_LIFECYCLE_LOCK:
     row = _instance_for(db, instance_id, principal, "owner")
     now = now_naive_utc()

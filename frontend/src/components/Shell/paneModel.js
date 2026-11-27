@@ -21,6 +21,9 @@ import * as tabModel from './tabModel.js'
 // helper keeps paneModel dependency-free of the DOM while reusing the exact
 // clamp semantics the drag layer commits with.
 import { clampRatio as clampRatioPx } from '../../lib/splitHelper.js'
+// A persisted chat tab or slot is restored and fetched as /api/chats/<id>, so
+// its id must pass the same one-segment check as every shell link.
+import { isShellLinkId } from '../../lib/notificationTarget.js'
 
 // At most four leaf panes, nested at most two splits deep (a balanced binary
 // tree of depth 2 has four leaves). moveTab refuses to cross either bound.
@@ -152,6 +155,7 @@ function sanitizeTab(raw) {
   }
   if (raw.kind !== 'chat' && raw.kind !== 'app' && raw.kind !== 'project') return null
   if (raw.kind === 'app' && !Number.isFinite(Number(raw.id))) return null
+  if (raw.kind === 'chat' && !isShellLinkId(String(raw.id))) return null
   return tabModel.makeTab(raw.kind, raw.id)
 }
 
@@ -183,7 +187,7 @@ function sanitizeSingleScreen(raw) {
   if (raw.kind === 'projects' && String(raw.id) === tabModel.PROJECTS_ID) {
     return tabModel.projectsTab()
   }
-  if (raw.kind === 'chat' && raw.id != null && String(raw.id).trim() !== '') {
+  if (raw.kind === 'chat' && raw.id != null && isShellLinkId(String(raw.id))) {
     return { kind: 'chat', id: String(raw.id) }
   }
   if (raw.kind === 'app' && Number.isFinite(Number(raw.id))) {

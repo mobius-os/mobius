@@ -1,6 +1,6 @@
 /* Pure attention state for app updates that land in the Brain artifact picker. */
 
-import { parseApiTimestamp } from '../../lib/relativeTime.js'
+import { parseApiTimestamp } from '../../lib/dateTimeFormat.js'
 
 function touchTime(value) {
   const parsed = parseApiTimestamp(value)

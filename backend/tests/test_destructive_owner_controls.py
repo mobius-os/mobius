@@ -134,6 +134,11 @@ def test_real_delegated_bearer_is_rejected_across_owner_control_surface(
     ("DELETE", "/api/projects/missing/invites/missing", None, None),
     ("PATCH", "/api/projects/missing/members/missing", {"role": "viewer"}, None),
     ("DELETE", "/api/projects/missing/members/missing", None, None),
+    ("POST", "/api/shared-apps/missing/invites", {"role": "viewer"}, None),
+    ("DELETE", "/api/shared-apps/missing/invites/missing", None, None),
+    ("PATCH", "/api/shared-apps/missing/members/missing", {"role": "viewer"}, None),
+    ("DELETE", "/api/shared-apps/missing/members/missing", None, None),
+    ("DELETE", "/api/shared-apps/missing", None, None),
     ("DELETE", "/api/projects/missing", None, None),
     ("POST", "/api/projects/missing/git/push", {"confirmed": True}, None),
     ("POST", "/api/apps/999/publish", {}, None),
@@ -376,7 +381,7 @@ def test_project_push_does_not_reach_git_for_delegated_bearer(
   monkeypatch.setattr(
     project_routes.project_git,
     "push_project",
-    lambda _root, expected: pushed.append(expected) or {"head": "pushed"},
+    lambda _root, expected, _expected_push_branch: pushed.append(expected) or {"head": "pushed"},
   )
 
   delegated = client.post(

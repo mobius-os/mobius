@@ -159,6 +159,8 @@ class SharedAppPrincipal:
   member_id: str | None = None
   display_name: str | None = None
   browser: BrowserLineage | None = None
+  # A delegated helper's bearer; it may use the app, never administer access.
+  delegation_id: str | None = None
 
   @property
   def is_owner(self) -> bool:
@@ -447,7 +449,8 @@ def resolve_shared_app_principal(token: str, db: Session) -> SharedAppPrincipal:
   scope = payload.get("scope")
   if scope is None:
     return SharedAppPrincipal(owner=owner, role="owner", display_name=owner.username,
-                              browser=BrowserLineage.from_claims(payload))
+                              browser=BrowserLineage.from_claims(payload),
+                              delegation_id=payload.get("delegation_id"))
   if scope != "shared_app_collaborator":
     raise HTTPException(403, "Token scope is not valid for shared apps.")
   member_id = payload.get("shared_app_member")

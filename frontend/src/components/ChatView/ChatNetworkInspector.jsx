@@ -10,12 +10,6 @@ import PeerNoteBody, { noteReaders } from './PeerNoteBody.jsx'
 import './ChatUsageInspector.css'
 import './ChatNetworkInspector.css'
 
-function timestamp(value) {
-  if (!value) return ''
-  const date = new Date(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`)
-  return Number.isNaN(date.getTime()) ? '' : formatDateTime(date)
-}
-
 export function NetworkMessage({ message, chatId }) {
   const sent = message.sender_chat_id === chatId
   const audience = message.broadcast
@@ -28,7 +22,7 @@ export function NetworkMessage({ message, chatId }) {
         <strong>{sent ? audience : message.sender_name || 'Agent'}</strong>
         {message.broadcast && <span> · Broadcast{!sent && ` to ${audience}`}</span>}
       </span>
-      <time dateTime={message.created_at}>{timestamp(message.created_at)}</time>
+      <time dateTime={message.created_at}>{formatDateTime(message.created_at)}</time>
     </div>
     <PeerNoteBody readers={noteReaders(chatId, message.id)} body={message.body}
       truncated={Boolean(message.truncated)}

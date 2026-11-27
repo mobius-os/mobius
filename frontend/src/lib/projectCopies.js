@@ -50,10 +50,6 @@ export function copyByteLabel(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
-export function copyDate(value) {
-  return new Date(/(?:Z|[+-]\d{2}:\d{2})$/i.test(value) ? value : `${value}Z`)
-}
-
 const PENDING_COPY_KEY = 'mobius:pending-project-copy'
 
 /** Keep one incoming copy in tab-local memory across the external identity redirect, never a query. */

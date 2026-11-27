@@ -1,6 +1,6 @@
 import { questionAnswerPatch } from './questionSubmission.js'
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { getAuthHeaders, getToken, BASE } from '../../api/client.js'
+import { getAuthHeaders, getToken, BASE, chatPath } from '../../api/client.js'
 import {
   isChatStreamSystemEvent,
   shouldForwardChatStreamSystemEvent,
@@ -837,7 +837,7 @@ export default function useStreamConnection(chatId, {
 
     try {
       const res = await fetch(
-        `${BASE}/api/chats/${chatIdRef.current}/stream`,
+        `${BASE}/api${chatPath(chatIdRef.current)}/stream`,
         {
           headers: {
             ...getAuthHeaders(),

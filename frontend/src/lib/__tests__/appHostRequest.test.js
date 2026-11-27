@@ -18,6 +18,17 @@ test('app host requests expose only the reviewed navigation contract', () => {
   assert.equal(appHostRequest({ type: 'unexpected', appId: 1 }), null)
 })
 
+test('an app cannot open a chat whose id is not one path segment', () => {
+  // The id is later fetched as /api/chats/<id>; `../` would reach app storage.
+  const chatId = 'x/media/a/../../../../storage/apps/7/fake-chat.json?'
+  assert.equal(appHostRequest({ type: 'moebius:open-chat', chatId }), null)
+  assert.equal(appHostRequest({
+    type: 'moebius:open-existing-chat', chatId, requestId: 'open-chat:abc:1',
+  }), null)
+  assert.equal(appHostRequest({ type: 'moebius:open-chat', chatId: 'a b' }), null)
+  assert.equal(appHostRequest({ type: 'moebius:open-chat', chatId: 'chat-1' })?.chatId, 'chat-1')
+})
+
 test('project host requests retain only the correlated, bounded contract', () => {
   assert.deepEqual(appHostRequest({
     type: 'moebius:projects',

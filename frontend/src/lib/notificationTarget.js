@@ -30,6 +30,13 @@
 import { settingsSectionOrNull } from './settingsSections.js'
 
 const ID_RE = /^[A-Za-z0-9_-]+$/
+
+/** Whether a link-supplied chat/app id is one safe path segment. Every shell
+ * link entry point (notification, cold deep link, in-chat link, restore)
+ * shares this so none can carry `../` into /api/chats/<id>. */
+export function isShellLinkId(value) {
+  return typeof value === 'string' && ID_RE.test(value)
+}
 // Ids plus the ':' and '.' that namespace an intent's target (see sw.js).
 const INTENT_RE = /^[A-Za-z0-9_.:-]{1,128}$/
 

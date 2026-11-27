@@ -5,7 +5,6 @@ import json
 import logging
 import time
 from contextlib import nullcontext
-from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -65,7 +64,7 @@ from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.goal_commands import goal_clear_requested
 from app.owner_input import publish_owner_input_changed
-from app.upload_lifecycle import attachment_names, is_draft, sweep_expired_uploads
+from app.upload_lifecycle import attachment_names, is_draft, sweep_expired_uploads, upload_file
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -416,26 +415,6 @@ def _message_persist_unavailable(exc: Exception, *, chat_id: str) -> HTTPExcepti
   )
 
 
-def _safe_upload_path(path_str: str, data_dir: str) -> str | None:
-  """Returns the resolved path if it lives within data_dir, None otherwise.
-
-  Validates upload paths from the DB before passing them to the CLI so a
-  tampered record cannot redirect the agent to read credentials or other
-  sensitive files outside /data/.
-  """
-  try:
-    p = FilePath(path_str).resolve()
-    allowed = FilePath(data_dir).resolve()
-    if not str(p).startswith(str(allowed) + '/'):
-      logging.getLogger(__name__).warning(
-        "Upload path outside data dir, skipping: %s", path_str
-      )
-      return None
-    return str(p)
-  except Exception:
-    return None
-
-
 def _sse(data: dict) -> str:
   """Formats a dict as a Server-Sent Events data line."""
   return f"data: {json.dumps(data)}\n\n"
@@ -451,7 +430,6 @@ def _content_with_uploads(
   answer refers to. Unsent drafts (another card's or the composer's) stay out
   until a message carrying them is admitted.
   """
-  settings = get_settings()
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
   # steered multi-message turns look duplicated/newline-heavy in the client and
@@ -465,7 +443,7 @@ def _content_with_uploads(
     for f in chat.uploads:
       if is_draft(f) and f.get("name") not in own:
         continue
-      safe = _safe_upload_path(f['path'], settings.data_dir)
+      safe = upload_file(chat.id, f.get('name'))
       if safe is not None:
         safe_entries.append(
           f"- {f['name']} → {safe}"
@@ -505,7 +483,7 @@ def _canonical_question_attachments(
     name = attachment.get("name") if isinstance(attachment, dict) else None
     label = name if isinstance(name, str) and name else "An attached file"
     entry = uploads.get(name) if isinstance(name, str) and name else None
-    if not entry or not _safe_upload_path(entry.get("path"), get_settings().data_dir):
+    if not entry or upload_file(chat.id, name) is None:
       raise HTTPException(
         status_code=409,
         detail=f"{label} is no longer available. Remove it and attach it again.",

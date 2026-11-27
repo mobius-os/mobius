@@ -634,16 +634,8 @@ class SecretEchoes:
   longest: int
 
 
-def secret_echoes(value: str) -> SecretEchoes:
-  """Match the key wherever a site echoes it, however the site escaped it.
-
-  Escaping is matched per character, so mixed and partial escaping is caught
-  too: raw, percent-encoding, JSON ``\\u`` and short escapes, HTML numeric and
-  named entities, ``+`` for a space. Letters match in either case, which also
-  catches hex digits written either way and an upper-cased echo. Hex, UTF-16
-  (either byte order) and base64 at every alignment cover a key the site
-  re-encoded whole.
-  """
+def _key_echoes(value: str) -> tuple[list[bytes], int]:
+  """The alternatives matching one key's echoes, and how long an echo can be."""
   per_char, longest, groups = [], 0, {}
   for ch in value:
     if ch not in groups:
@@ -659,11 +651,33 @@ def secret_echoes(value: str) -> SecretEchoes:
   alternatives = [b"(?i:" + b"".join(per_char) + b")", *(b"(?i:" + re.escape(form) + b")" for form in whole),
                   *(re.escape(core) for core in sorted(cores, key=len, reverse=True))]
   longest = max([longest, *map(len, whole), *map(len, cores)])
-  return SecretEchoes(re.compile(b"|".join(alternatives)), longest)
+  return alternatives, longest
 
 
-def redact(data: bytes, echoes: SecretEchoes) -> bytes:
-  return echoes.pattern.sub(REDACTED, data)
+def secret_echoes(*values: str) -> SecretEchoes:
+  """Match each key wherever a site echoes it, however the site escaped it.
+
+  Escaping is matched per character, so mixed and partial escaping is caught
+  too: raw, percent-encoding, JSON ``\\u`` and short escapes, HTML numeric and
+  named entities, ``+`` for a space. Letters match in either case, which also
+  catches hex digits written either way and an upper-cased echo. Hex, UTF-16
+  (either byte order) and base64 at every alignment cover a key the site
+  re-encoded whole. The longest value comes first, so an echo of a whole header
+  value wins over the key inside it.
+  """
+  alternatives, longest = [], 0
+  for value in sorted(set(values), key=lambda value: (-len(value), value)):
+    forms, size = _key_echoes(value)
+    alternatives += forms
+    longest = max(longest, size)
+  # Compiled outside re's process-wide cache: each matcher is large and embeds
+  # its key, and keys rotate (an OAuth token on every refresh), so matchers of
+  # retired keys would otherwise pile up there until its 512-entry limit.
+  return SecretEchoes(re._compiler.compile(b"|".join(alternatives), 0), longest)
+
+
+def redact(data: bytes, echoes: SecretEchoes, replacement: bytes = REDACTED) -> bytes:
+  return echoes.pattern.sub(replacement, data)
 
 
 class StreamRedactor:
@@ -676,8 +690,9 @@ class StreamRedactor:
   begin the key. Everything before that tail is final and goes out at once.
   """
 
-  def __init__(self, echoes: SecretEchoes) -> None:
+  def __init__(self, echoes: SecretEchoes, replacement: bytes = REDACTED) -> None:
     self.echoes = echoes
+    self.replacement = replacement
     self.hold = max(echoes.longest - 1, 0)
     self.pending = b""
 
@@ -693,7 +708,7 @@ class StreamRedactor:
     for match in self.echoes.pattern.finditer(data):
       if match.start() >= cut:
         break
-      out += [data[position:match.start()], REDACTED]
+      out += [data[position:match.start()], self.replacement]
       position = match.end()
     end = max(position, cut)
     out.append(data[position:end])
@@ -701,7 +716,7 @@ class StreamRedactor:
     return b"".join(out)
 
   def finish(self) -> bytes:
-    out, self.pending = redact(self.pending, self.echoes), b""
+    out, self.pending = redact(self.pending, self.echoes, self.replacement), b""
     return out
 
 

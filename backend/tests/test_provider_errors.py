@@ -8,6 +8,7 @@ from app import codex_events
 from app.provider_errors import (
   ProviderErrorKind as Kind,
   classify_provider_error,
+  is_quota_limit,
   is_workspace_credits_exhausted,
 )
 
@@ -88,6 +89,7 @@ def test_unmapped_structured_fields_fall_back_to_text():
   ("quota exceeded", Kind.USAGE_LIMIT),
   ("You've hit your weekly limit · resets Jul 4, 3am (UTC)", Kind.USAGE_LIMIT),
   ("You've hit your session limit · resets 2:20am (UTC)", Kind.USAGE_LIMIT),
+  ("You've hit your 5-hour limit · resets 2:30pm (UTC)", Kind.USAGE_LIMIT),
   ("You've hit your limit · resets 5pm", Kind.USAGE_LIMIT),
   (
     "API Error: Server is temporarily limiting requests "
@@ -109,6 +111,25 @@ def test_unmapped_structured_fields_fall_back_to_text():
 ])
 def test_text_classification(text, kind):
   assert classify_provider_error(text) is kind
+
+
+@pytest.mark.parametrize("text,is_quota", [
+  ("You've hit your 5-hour limit · resets 2:30pm (UTC)", True),
+  ("You've hit your Opus limit · resets 3pm", True),
+  ("You've hit your weekly limit", True),
+  ("usage_limit_reached", True),
+  ("quota exceeded", True),
+  ("Server is temporarily limiting requests. Try again in 30 minutes.", False),
+  ("429 too many requests", False),
+  ("model overloaded, try again", False),
+  ("ValueError: list index out of range (limit check)", False),
+  ("", False),
+  (None, False),
+])
+def test_quota_limit_is_the_accounts_own_allowance_not_a_throttle(
+  text, is_quota,
+):
+  assert is_quota_limit(text) is is_quota
 
 
 def test_size_and_credit_refusals_are_not_limits_that_reset():

@@ -1,5 +1,6 @@
 /* Project retained peer mail onto transcript boundaries without changing delivery or stored messages. */
 import { isAgentWorkBlock } from './activityGrouping.js'
+import { parseApiTimestamp } from '../../lib/dateTimeFormat.js'
 /** Stored coordinates of one projected block. Recorded positions name a
  * boundary in the stored message's blocks; projections that renumber those
  * blocks (the compact transcript and assistant-fragment folding) declare the
@@ -24,9 +25,7 @@ export function activityEventsFromPages(pages) {
 }
 
 export function peerTime(value) {
-  if (typeof value === 'number') return value
-  if (typeof value !== 'string' || !value) return NaN
-  return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`)
+  return typeof value === 'number' ? value : parseApiTimestamp(value)
 }
 
 // Older hidden carriers are the only retained copy of some exchanges. Read only

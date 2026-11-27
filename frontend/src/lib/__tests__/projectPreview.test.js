@@ -103,6 +103,39 @@ test('project HTML preview inlines local images and CSS url() as data URIs', asy
   assert.match(result, /url\(data:image\/jpeg;base64,BBBB\)/)
 })
 
+test('project preview resolves each stylesheet URL from its own source directory', async () => {
+  const stylesheets = new Map([
+    ['site/one/theme.css', '.one{background:url("./badge.png")} .abs{background:url("/badge.png")}'],
+    ['site/two/theme.css', '.two{background:url("./badge.png")} .missing{background:url("./missing.png")}'],
+  ])
+  const assets = new Map([
+    ['site/badge.png', 'data:image/png;base64,AAAA'],
+    ['site/missing.png', 'data:image/png;base64,BBBB'],
+    ['site/one/badge.png', 'data:image/png;base64,CCCC'],
+    ['site/two/badge.png', 'data:image/png;base64,DDDD'],
+  ])
+  const fetched = []
+  const result = await assembleProjectHtmlPreview(
+    '<style>.inline{background:url("./badge.png")}</style>'
+      + '<link rel="stylesheet" href="one/theme.css"><link rel="stylesheet" href="two/theme.css">',
+    'site/index.html',
+    async path => stylesheets.get(path),
+    async path => {
+      fetched.push(path)
+      if (!assets.has(path)) throw new Error('missing')
+      return assets.get(path)
+    },
+  )
+  assert.ok(result.includes('.inline{background:url(data:image/png;base64,AAAA)}'))
+  assert.ok(result.includes('.one{background:url(data:image/png;base64,CCCC)}'))
+  assert.ok(result.includes('.two{background:url(data:image/png;base64,DDDD)}'))
+  assert.ok(result.includes('.missing{background:url("./missing.png")}'))
+  assert.ok(result.includes('.abs{background:url("/badge.png")}'))
+  assert.deepEqual(fetched.sort(), [
+    'site/badge.png', 'site/one/badge.png', 'site/two/badge.png', 'site/two/missing.png',
+  ])
+})
+
 test('project HTML preview leaves remote images untouched (CSP-blocked)', async () => {
   const result = await assembleProjectHtmlPreview(
     '<img src="https://tracker.invalid/pixel.gif">',

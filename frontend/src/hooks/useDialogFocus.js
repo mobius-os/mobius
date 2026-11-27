@@ -45,20 +45,38 @@ export function dialogSiblingElements(container, boundary = null) {
 
 // Nested dialogs can both make the same element inert. Each element is counted and gets its original
 // state back only when the last dialog holding it lets go, whichever closes first.
+//
+// A held element keeps its own owner: a shell view's `inert` prop still follows whether that view is
+// shown. If the element is no longer inert when a hold is taken or released, the owner rewrote it
+// while it was held, and that newer value is what it returns to. Restoring the value seen when the
+// first hold began would re-lock a view that became visible meanwhile, leaving it painted but deaf
+// to every click.
 const inertHolds = new WeakMap()
 
+function adoptOwnerWrite(element, hold) {
+  if (element.inert !== true) hold.original = element.inert
+}
+
 export function holdInert(element) {
-  const hold = inertHolds.get(element) || { count: 0, original: element.inert }
-  hold.count += 1
-  inertHolds.set(element, hold)
+  const hold = inertHolds.get(element)
+  if (hold) {
+    adoptOwnerWrite(element, hold)
+    hold.count += 1
+  } else {
+    inertHolds.set(element, { count: 1, original: element.inert })
+  }
   element.inert = true
 }
 
 export function releaseInert(element) {
   const hold = inertHolds.get(element)
   if (!hold) return
+  adoptOwnerWrite(element, hold)
   hold.count -= 1
-  if (hold.count > 0) return
+  if (hold.count > 0) {
+    element.inert = true
+    return
+  }
   inertHolds.delete(element)
   element.inert = hold.original
 }

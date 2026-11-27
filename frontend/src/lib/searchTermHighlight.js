@@ -2,11 +2,14 @@ export const SEARCH_MARK_OPEN = '\ue000'
 export const SEARCH_MARK_CLOSE = '\ue001'
 const CHAT_SEARCH_HIGHLIGHT_NAME = 'chat-search-result'
 const MAX_HIGHLIGHT_RANGES = 128
+const graphemes = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
 
 function uniqueTerms(terms) {
   const seen = new Set()
   return (Array.isArray(terms) ? terms : [])
-    .map(term => String(term || '').trim())
+    .map(term => String(term || '').trim().normalize('NFC'))
     .filter(term => {
       const key = term.toLocaleLowerCase()
       if (!key || seen.has(key)) return false
@@ -43,11 +46,33 @@ function escapedExpression(terms) {
 export function searchTextMatches(text, terms) {
   const expression = escapedExpression(terms)
   if (!expression) return []
-  return [...String(text || '').matchAll(expression)].map(match => ({
+  const source = String(text || '')
+  const normalized = graphemes ? source.normalize('NFC') : source
+  const matches = [...normalized.matchAll(expression)].map(match => ({
     start: match.index,
     end: match.index + match[0].length,
     text: match[0],
   }))
+  if (normalized === source || !matches.length) return matches
+
+  // DOM ranges address the original string. NFC can combine multiple code
+  // units into one, so project each matched boundary back to its grapheme.
+  let normalizedEnd = 0
+  let startIndex = 0
+  let endIndex = 0
+  for (const { segment, index } of graphemes.segment(source)) {
+    normalizedEnd += segment.normalize('NFC').length
+    while (startIndex < matches.length && matches[startIndex].start < normalizedEnd) {
+      matches[startIndex++].start = index
+    }
+    while (endIndex < matches.length && matches[endIndex].end <= normalizedEnd) {
+      const match = matches[endIndex++]
+      match.end = index + segment.length
+      match.text = source.slice(match.start, match.end)
+    }
+    if (endIndex === matches.length) break
+  }
+  return matches
 }
 
 /** Highlight only rendered prose without replacing React-owned text nodes.
