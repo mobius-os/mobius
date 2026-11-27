@@ -92,12 +92,15 @@ def _chat(db, card, turn_content, reason="question_answer", earlier=()):
   return chat
 
 
-def test_typed_reply_turn_tells_the_agent_to_answer_visibly_first(db):
+def test_typed_reply_turn_answers_visibly_and_routes_a_new_card_answer_to_its_message(
+  db,
+):
   content = "- Ship it?: why is option one safer?"
   chat = _chat(db, _card({"Ship it?": "why is option one safer?"}), content)
   note = typed_reply_context(db, chat, content, answered_by_owner=True)
   assert _wrote("Owner wrote", "why is option one safer?") in note
-  assert "visible reply text first" in note
+  assert "not in thinking" in note
+  assert "the card's `message`" in note
 
 
 def test_answer_from_an_agent_is_not_framed_as_the_owners_message(db):

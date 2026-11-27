@@ -50,7 +50,7 @@ export default function useKeyRequestCard(keyRequest, { live }) {
     hidesAllow: Boolean(answer.words?.allowHidden) && !anyway,
     showAllow: () => setAnyway(true),
     /** Whether choosing ``kind`` leaves anything still to fill in. */
-    ready: kind => kind !== KEY_ALLOW || !needsValue || Boolean(answer.value),
+    ready: kind => kind !== KEY_ALLOW || !needsValue || answer.filled,
     /** Answer the vault (the owner's own input) for ``kind``; throws to keep the card open. */
     async settle(kind) {
       if (settled === kind) return

@@ -150,6 +150,24 @@ def test_commit_worktree_tree_commits_candidate_and_leaves_later_edit_draft(
   ).stdout
 
 
+def test_commit_worktree_tree_leaves_accepted_files_clean_in_the_index(tmp_path):
+  """A later ``git apply --index`` refuses a file whose index entry carries no
+  stat data, so the accepted files must read as clean and only a real later
+  edit may stay dirty."""
+  repo = tmp_path / "app"
+  repo.mkdir()
+  app_git.ensure_repo(repo)
+  _write(repo, "export default () => 'accepted'\n")
+  (repo / "helper.js").write_text("export const value = 1\n")
+  snapshot = app_git.snapshot_worktree(repo)
+  _write(repo, "export default () => 'later draft'\n")
+
+  assert app_git.commit_worktree_tree(repo, snapshot, "apply app")
+
+  dirty = app_git._run(repo, "diff-files", "--name-only").stdout.split()
+  assert dirty == ["index.jsx"]
+
+
 def test_commit_worktree_tree_rejects_a_branch_switch_without_touching_index(
   tmp_path,
 ):

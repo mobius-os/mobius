@@ -18,6 +18,14 @@ function claimFileDrag(event) {
 }
 
 /**
+ * Whether the drag is over a field that takes the dropped file itself (a key
+ * file pasted into a key card): the chat must not attach it to a message.
+ */
+function ownDropTarget(event) {
+  return Boolean(event.target?.closest?.('[data-own-file-drop]'))
+}
+
+/**
  * Own the synchronous enter/leave depth independently of React render timing.
  * Browser drag events can enter and leave nested children before a state update
  * commits, so handlers must read the ref owner rather than a captured boolean.
@@ -30,21 +38,21 @@ export function createFileDragHandlers({
 }) {
   return {
     onDragEnter(event) {
-      if (!dataTransferHasFiles(event.dataTransfer)) return
+      if (!dataTransferHasFiles(event.dataTransfer) || ownDropTarget(event)) return
       claimFileDrag(event)
       setDepth(getDepth() + 1)
       setActive(true)
     },
 
     onDragOver(event) {
-      if (!dataTransferHasFiles(event.dataTransfer)) return
+      if (!dataTransferHasFiles(event.dataTransfer) || ownDropTarget(event)) return
       claimFileDrag(event)
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy'
     },
 
     onDragLeave(event) {
       const depth = getDepth()
-      if (depth <= 0) return
+      if (depth <= 0 || ownDropTarget(event)) return
       claimFileDrag(event)
       const nextDepth = Math.max(0, depth - 1)
       setDepth(nextDepth)
@@ -53,6 +61,11 @@ export function createFileDragHandlers({
 
     onDrop(event) {
       if (!dataTransferHasFiles(event.dataTransfer)) return
+      if (ownDropTarget(event)) {
+        setDepth(0)
+        setActive(false)
+        return
+      }
       claimFileDrag(event)
       setDepth(0)
       setActive(false)

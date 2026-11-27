@@ -473,6 +473,37 @@ def test_agent_change_to_one_chat_does_not_become_the_owner_preference(
   ).json()["auto_resume_on_limit"] is True
 
 
+def test_agent_picker_change_on_one_chat_does_not_rewrite_owner_defaults(
+  client, auth, chat, db,
+):
+  """An agent configuring one chat leaves the default for later chats alone."""
+  from datetime import timedelta
+  from app import auth as auth_mod
+
+  _write_global_settings({"model": "claude-opus-4-7", "effort": "high"})
+  defaults_file = Path(os.environ["DATA_DIR"]) / "shared" / "agent-settings.json"
+  before = defaults_file.read_bytes()
+  run_id = _start_provider_turn(chat)
+  owner = db.query(models.Owner).first()
+  agent_token = auth_mod.create_agent_token(
+    chat.id, owner.username, owner.token_epoch,
+    run_id=run_id, expires_delta=timedelta(minutes=5),
+  )
+  changed = client.patch(
+    f"/api/chats/{chat.id}",
+    headers={"Authorization": f"Bearer {agent_token}"},
+    json={"agent_settings_json": {
+      "model": "claude-sonnet-4-5-20250929", "effort": "xhigh",
+    }},
+  )
+  assert changed.status_code == 200, changed.text
+
+  settings = client.get(f"/api/chats/{chat.id}", headers=auth).json()
+  assert settings["agent_settings_json"]["model"] == "claude-sonnet-4-5-20250929"
+  assert settings["agent_settings_json"]["effort"] == "xhigh"
+  assert defaults_file.read_bytes() == before
+
+
 def test_restart_continuation_is_always_on_and_not_owner_configurable(
   client, auth, chat, db,
 ):

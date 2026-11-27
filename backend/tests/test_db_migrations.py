@@ -1906,7 +1906,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0107_app_install_id",
     "0108_chat_pending_revision",
     "0109_channel_feeds",
-    "0110_claim_work_report",
+    "0110_schedule_state_out_of_app_data",
+    "0111_claim_work_report",
   ]
   assert second == first
 

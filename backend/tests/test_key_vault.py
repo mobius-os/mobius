@@ -59,6 +59,20 @@ def _apps(*ids, sites=None):
            "paused": False} for app_id in ids]
 
 
+def _as_version_one(payload):
+  """A current store as version 1 wrote it: one sealed value per key."""
+  for record in payload["keys"].values():
+    if "parts" in record:  # a store with parts; single-value stores are already flat
+      [part] = record.pop("parts")
+      record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
+  payload["version"] = 1
+  return payload
+
+
+def _loan(inject, value):
+  return kv.Loan(inject, {"value": value}, frozenset({"value"}))
+
+
 def _grants(**overrides):
   if "apps" in overrides and all(isinstance(a, int) for a in overrides["apps"]):
     overrides["apps"] = _apps(*overrides["apps"])
@@ -78,7 +92,7 @@ def test_value_is_encrypted_at_rest_and_reloads(tmp_path, vault):
   assert stat.S_IMODE(vault.dir.stat().st_mode) == 0o700
   assert stat.S_IMODE(vault.store_path.stat().st_mode) == 0o600
   reloaded = kv.Vault(tmp_path / "vault")
-  _, value = reloaded.authorize("echo", ("agent", ""), "GET", "echo.example.com", "/anything/x")
+  value = reloaded.authorize("echo", ("agent", ""), "GET", "echo.example.com", "/anything/x").values["value"]
   assert value == DUMMY
 
 
@@ -172,7 +186,8 @@ def test_approving_a_new_key_creates_it_and_grants_only_that_app(vault):
                                         "inject": ASK["inject"], "sites": ASK["sites"]})
   assert vault.list_requests() == []
   assert vault.request_access(9, install(9), ASK)["status"] == "granted"
-  inject, value = vault.authorize("maps", app(9), "GET", "maps.example.com", "/v1/route")
+  loan = vault.authorize("maps", app(9), "GET", "maps.example.com", "/v1/route")
+  inject, value = loan.inject, loan.values["value"]
   assert inject == ASK["inject"] and value == DUMMY
   with pytest.raises(kv.VaultError, match="may not use"):
     vault.authorize("maps", app(10), "GET", "maps.example.com", "/v1/route")
@@ -221,15 +236,15 @@ def test_a_version_one_store_keeps_each_apps_reach_when_migrated(tmp_path):
   v.put_key("echo", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
   payload = json.loads(v.store_path.read_text())
   payload["keys"]["echo"]["grants"]["apps"] = [WEATHER]  # how version 1 stored a grant
-  payload["version"] = 1
+  _as_version_one(payload)
   v.store_path.write_text(json.dumps(payload))
   migrated = kv.Vault(folder)
-  assert json.loads(migrated.store_path.read_text())["version"] == kv.STORE_VERSION
+  assert json.loads(migrated.store_path.read_text())["version"] == 3  # single-value keys are still written as version 3
   [listed] = migrated.list_keys()
   assert listed["grants"]["apps"] == [{**grant, "install": None} for grant in _apps(WEATHER)]
   # Unstamped until the platform names the app's installation.
   migrated.adopt_installs({WEATHER: install(WEATHER)})
-  assert migrated.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x")[1] == DUMMY
+  assert migrated.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"] == DUMMY
 
 
 def test_a_granted_app_can_ask_for_more_sites_for_itself_only(vault):
@@ -360,13 +375,13 @@ def test_wildcard_site_matches_subdomains_only():
 
 
 def test_header_slot_replaces_any_caller_supplied_copy():
-  request = kv.build_upstream_request(
+  request, _ = kv.build_upstream_request(
     method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="a=1",
     caller_headers=[
       ("authorization", "Bearer attacker"), ("X-Vault-Caller", "agent"),
       ("Host", "elsewhere.test"), ("Accept-Encoding", "gzip"), ("X-Trace", "1"),
     ],
-    inject=HEADER_SLOT, value=DUMMY,
+    loan=_loan(HEADER_SLOT, DUMMY),
   )
   headers = [(k.lower(), v) for k, v in request.headers]
   assert [v for k, v in headers if k == "authorization"] == [f"Bearer {DUMMY}"]
@@ -378,10 +393,10 @@ def test_header_slot_replaces_any_caller_supplied_copy():
 
 
 def test_a_ranged_request_cannot_slice_an_echoed_key_past_redaction():
-  request = kv.build_upstream_request(
+  request, _ = kv.build_upstream_request(
     method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
     caller_headers=[("Range", "bytes=10-13"), ("If-Range", '"etag"'), ("X-Trace", "1")],
-    inject={"type": "query", "name": "api_key"}, value=DUMMY,
+    loan=_loan({"type": "query", "name": "api_key"}, DUMMY),
   )
   names = {k.lower() for k, _ in request.headers}
   assert "range" not in names and "if-range" not in names
@@ -389,10 +404,10 @@ def test_a_ranged_request_cannot_slice_an_echoed_key_past_redaction():
 
 
 def test_query_slot_replaces_any_caller_supplied_parameter():
-  request = kv.build_upstream_request(
+  request, _ = kv.build_upstream_request(
     method="GET", host="echo.example.com", raw_path="/anything/x",
     raw_query="api_key=attacker&q=1", caller_headers=[],
-    inject={"type": "query", "name": "api_key"}, value=DUMMY,
+    loan=_loan({"type": "query", "name": "api_key"}, DUMMY),
   )
   query = request.target.split("?", 1)[1]
   assert "attacker" not in query
@@ -924,7 +939,7 @@ def test_a_purged_creator_leaves_no_ownership_for_an_app_that_reuses_its_id(vaul
   # It borrows the key; it does not own it, so saving its own secret makes a new key.
   assert _origin(vault, name) is None
   assert vault.save_owned(5, install(5), "api_key", "other-dummy-key")["name"] != name
-  _, value = vault.authorize(name, app(WEATHER), "GET", "echo.example.com", "/anything/x")
+  value = vault.authorize(name, app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"]
   assert value == DUMMY
 
 
@@ -987,7 +1002,7 @@ def test_a_name_an_app_took_first_never_lends_it_the_owners_value(monkeypatch, v
   assert _run_store_key(monkeypatch, vault, [name, "--site", site, "--replace"], "owners-real-key") == 0
   with pytest.raises(kv.VaultError, match="may not use"):
     vault.authorize(name, app(9), "POST", "api.openai.com", "/v1/responses")
-  _, value = vault.authorize(name, ("agent", "c1"), "POST", "api.openai.com", "/v1/responses")
+  value = vault.authorize(name, ("agent", "c1"), "POST", "api.openai.com", "/v1/responses").values["value"]
   assert value == "owners-real-key"
 
 
@@ -1066,7 +1081,7 @@ def test_values_with_line_breaks_are_kept_but_never_sent_in_a_header(vault):
     vault.authorize("pem", app(WEATHER), "GET", "echo.example.com", "/anything/x")
   assert refused.value.status == 400
   vault.put_key("pem", {"inject": {"type": "query", "name": "key"}, "grants": _grants()})
-  assert vault.authorize("pem", app(WEATHER), "GET", "echo.example.com", "/anything/x")[1] == pem
+  assert vault.authorize("pem", app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"] == pem
 
 
 def test_usage_counts_cover_the_whole_log(vault):
@@ -1092,9 +1107,7 @@ class _Slow(BaseHTTPRequestHandler):
     self.send_header("Content-Type", "text/event-stream")
     self.send_header("Transfer-Encoding", "chunked")
     self.end_headers()
-    # Followed by more than redaction's fixed tail, so the event itself goes out.
-    padding = b": " + b"." * kv.secret_echoes(DUMMY).longest + b"\n\n"
-    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n" + padding
+    first = b"data: first " + self.headers["Authorization"].encode() + b"\n\n"
     self.wfile.write(b"%x\r\n%s\r\n" % (len(first), first))
     self.wfile.flush()
     type(self).release.wait(20)
@@ -1116,10 +1129,9 @@ def test_answers_stream_back_as_they_arrive_with_the_key_hidden(vault):
                          headers={"X-Vault-Caller": "agent:c1"}) as response:
         pieces = response.iter_bytes()
         first = next(pieces)
-        # The first event arrived while the site is still holding the rest.
+        # The whole first event arrived while the site is still holding the rest.
         assert not _Slow.release.is_set()
-        assert first.startswith(b"data: first Bearer " + kv.REDACTED + b"\n\n")
-        assert DUMMY.encode() not in first
+        assert first == b"data: first Bearer " + kv.REDACTED + b"\n\n"
         _Slow.release.set()
         rest = b"".join(pieces)
       assert b"data: last" in first + rest and DUMMY.encode() not in first + rest
@@ -1137,7 +1149,7 @@ def test_replacing_only_the_value_keeps_who_may_use_the_key_and_how_it_is_sent(v
   vault.put_key("echo", {"value": "rotated-dummy"}, actor="agent:c1")
   [after] = vault.list_keys()
   assert after["grants"] == before["grants"] and after["inject"] == before["inject"]
-  _, value = vault.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x")
+  value = vault.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"]
   assert value == "rotated-dummy"
   # Changing only how it is sent keeps the grants too.
   vault.put_key("echo", {"inject": {"type": "query", "name": "key"}})
@@ -1271,6 +1283,86 @@ def test_redaction_holds_back_the_same_tail_whether_or_not_it_begins_the_key():
     assert redactor.finish() == b"x" * (hold - len(tail)) + tail
 
 
+EVENT = b'event: message\ndata: {"jsonrpc":"2.0","method":"notifications/tools/list_changed"}\n\n'
+
+
+def test_a_stream_event_goes_out_at_its_newline_not_with_the_next_one():
+  redactor = kv.StreamRedactor(kv.secret_echoes(DUMMY))
+  assert redactor.feed(EVENT[:30]) == b"event: message\n"
+  assert redactor.feed(EVENT[30:]) == EVENT[len(b"event: message\n"):]
+  assert redactor.pending == b"" and redactor.finish() == b""
+
+
+def _echo_forms(key):
+  import base64
+  import urllib.parse
+  units = key.encode("utf-16-be")
+  return {
+    "raw": key.encode(),
+    "json-unicode": "".join(f"\\u{int.from_bytes(units[i:i + 2], 'big'):04x}"
+                            for i in range(0, len(units), 2)).encode(),
+    "percent": urllib.parse.quote(key, safe="").encode(),
+    "html": "".join(f"&#{ord(ch)};" for ch in key).encode(),
+    "hex": key.encode().hex().encode(),
+    "utf-16-le": key.encode("utf-16-le"),
+    "base64": base64.b64encode(key.encode()),
+  }
+
+
+@pytest.mark.parametrize("form", _echo_forms(DUMMY))
+def test_an_echo_split_across_pieces_with_no_newline_is_still_redacted(form):
+  echoes = kv.secret_echoes(DUMMY)
+  echo = _echo_forms(DUMMY)[form]
+  body = b"id: 1\ndata: " + echo + b" more"
+  for split in range(len(b"id: 1\ndata: ") + 1, len(body) - len(b" more")):
+    redactor = kv.StreamRedactor(echoes)
+    first = redactor.feed(body[:split])
+    assert first.startswith(b"id: 1\n")
+    out = first + redactor.feed(body[split:]) + redactor.finish()
+    assert out == kv.redact(body, echoes) and kv.REDACTED in out
+
+
+@pytest.mark.parametrize("form", _echo_forms(DUMMY))
+def test_an_echo_right_before_a_newline_is_redacted_and_released(form):
+  echoes = kv.secret_echoes(DUMMY)
+  body = b"data: " + _echo_forms(DUMMY)[form] + b"\n\n"
+  for split in range(len(body)):
+    redactor = kv.StreamRedactor(echoes)
+    out = redactor.feed(body[:split]) + redactor.feed(body[split:])
+    assert out == kv.redact(body, echoes) and out.endswith(b"\n\n") and redactor.pending == b""
+    assert kv.REDACTED in out
+
+
+def test_only_a_newline_itself_escapes_to_a_newline_byte():
+  """Why releasing at a newline is safe: no per-character form adds one."""
+  # Beyond the BMP every form is UTF-8 lead and continuation bytes or ASCII escapes.
+  for code in [*range(0x10000), *range(0x10000, 0x110000, 0x3FF)]:
+    if not 0xD800 <= code <= 0xDFFF:
+      forms = kv._char_echoes(chr(code))
+      assert any(b"\n" in form for form in forms) == (code == 0x0A), hex(code)
+
+
+@pytest.mark.parametrize("key, spans", [
+  (DUMMY, False),
+  ("".join(map(chr, range(1, 0x80))).replace("\n", ""), False),  # all of ASCII but a newline
+  ("fake-é€😀-key-0123", False),
+  ("-----BEGIN KEY-----\nMIIfake0123456789\n-----END KEY-----", True),
+  ("fake-\u010a-key-0123", True),     # UTF-16 0x01 0x0A
+  ("fake-\u0a05-key-0123", True),     # UTF-16 0x0A 0x05
+  ("fake-\U0001f00a-key-0123", True),  # a surrogate half ending in 0x0A
+])
+def test_a_key_whose_echo_can_hold_a_newline_keeps_the_whole_tail(key, spans):
+  echoes = kv.secret_echoes(key)
+  forms = [*_echo_forms(key).values(), key.encode("utf-16-be")]
+  assert echoes.spans_lines == spans == any(b"\n" in form for form in forms)
+  for echo in forms:
+    body = b"data: " + echo + b"\n\n"
+    for split in range(1, len(body)):
+      redactor = kv.StreamRedactor(echoes)
+      out = redactor.feed(body[:split]) + redactor.feed(body[split:]) + redactor.finish()
+      assert out == kv.redact(body, echoes) and kv.REDACTED in out
+
+
 KEY_WITH_PUNCTUATION = "sk-Ab+c/d&e<f>g=h1234567890"
 
 
@@ -1343,9 +1435,9 @@ def test_text_http_cannot_carry_is_refused_not_crashed(vault):
 
 @pytest.mark.parametrize("header", ["X-Original-URL", "X-Rewrite-URL", "x-override-url"])
 def test_a_header_naming_another_path_never_reaches_the_site(header):
-  request = kv.build_upstream_request(
+  request, _ = kv.build_upstream_request(
     method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
-    caller_headers=[(header, "/admin/delete-all"), ("X-Trace", "1")], inject=HEADER_SLOT, value=DUMMY,
+    caller_headers=[(header, "/admin/delete-all"), ("X-Trace", "1")], loan=_loan(HEADER_SLOT, DUMMY),
   )
   assert [k for k, _ in request.headers if k.lower() == header.lower()] == []
   assert ("X-Trace", "1") in request.headers
@@ -1355,7 +1447,7 @@ def test_a_folded_header_line_is_refused_before_reaching_the_site(vault):
   with pytest.raises(kv.VaultError, match="folded"):
     kv.build_upstream_request(
       method="GET", host="echo.example.com", raw_path="/anything/x", raw_query="",
-      caller_headers=[("X-Foo", "a\r\n Transfer-Encoding: chunked")], inject=HEADER_SLOT, value=DUMMY,
+      caller_headers=[("X-Foo", "a\r\n Transfer-Encoding: chunked")], loan=_loan(HEADER_SLOT, DUMMY),
     )
   with _raw_site(lambda conn: conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")) as (connect, heads):
     with _vault_server(vault, connect) as path:
@@ -1658,7 +1750,7 @@ def test_a_master_key_that_opens_no_stored_key_refuses_to_start(vault):
 
 def test_a_key_that_cannot_be_decrypted_answers_a_clean_error(vault):
   vault.put_key("other", {"value": DUMMY, "inject": HEADER_SLOT, "grants": _grants()})
-  vault._records["echo"]["sealed"] = vault._records["other"]["sealed"]  # sealed for another name
+  vault._records["echo"]["parts"][0]["sealed"] = vault._records["other"]["parts"][0]["sealed"]  # sealed for another name
   with pytest.raises(kv.VaultError, match="can't be decrypted") as refused:
     vault.reveal("echo", ("owner", ""))
   assert refused.value.status == 500
@@ -1691,7 +1783,7 @@ def test_a_version_one_store_merges_duplicates_and_drops_what_no_longer_holds(tm
   keys["nosites"]["grants"] = {"apps": [3], "agents": True}
   keys["orphan"]["grants"]["apps"] = []
   keys["orphan"]["origin"] = {"app": 9, "install": install(9), "name": "x"}
-  payload["version"] = 1
+  _as_version_one(payload)
   v.store_path.write_text(json.dumps(payload))
   migrated = {k["name"]: k for k in kv.Vault(folder).list_keys()}
   assert migrated["dupes"]["grants"]["apps"] == [{**grant, "install": None} for grant in _apps(3)]
@@ -1806,7 +1898,7 @@ def test_pausing_keeps_the_apps_sites_and_unpausing_restores_use_without_a_new_r
   assert vault.request_access(WEATHER, install(WEATHER), ask) == {"status": "paused", "key": "echo"}
   assert vault.list_requests() == []
   _paused(vault, WEATHER, False)
-  assert vault.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x")[1] == DUMMY
+  assert vault.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"] == DUMMY
   assert vault.request_access(WEATHER, install(WEATHER), ask) == {"status": "granted", "key": "echo"}
 
 
@@ -1851,7 +1943,7 @@ def test_a_store_saved_before_pausing_existed_loads_every_app_live(tmp_path, vau
   reloaded = kv.Vault(vault.dir)
   [record] = reloaded.list_keys()
   assert record["grants"]["apps"] == _apps(WEATHER)
-  assert reloaded.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x")[1] == DUMMY
+  assert reloaded.authorize("echo", app(WEATHER), "GET", "echo.example.com", "/anything/x").values["value"] == DUMMY
 
 
 # -- agents ask for a key on a new site, by card -------------------------------
@@ -2213,6 +2305,9 @@ def _as_version_two(vault) -> None:
   store = json.loads(vault.store_path.read_text())
   store["version"] = 2
   for record in store["keys"].values():
+    if "parts" in record:  # a store with parts; single-value stores are already flat
+      [part] = record.pop("parts")
+      record.update(nonce=part["nonce"], sealed=part["sealed"], multiline=part["multiline"])
     for grant in record["grants"]["apps"]:
       del grant["install"]
     if record.get("origin"):
@@ -2238,7 +2333,7 @@ def unstamped(vault):
 
 def test_entries_from_before_installations_never_authorize_an_app(unstamped):
   store = json.loads(unstamped.store_path.read_text())
-  assert store["version"] == kv.STORE_VERSION
+  assert store["version"] == 3  # single-value keys are still written as version 3
   assert all(g["install"] is None for k in unstamped.list_keys() for g in k["grants"]["apps"])
   for installation in (install(WEATHER), REUSED):
     with pytest.raises(kv.VaultError, match="may not use"):

@@ -832,7 +832,9 @@ def test_a_kept_vault_from_before_installation_ids_has_its_grants_withdrawn(tmp_
   _vault_granting(data, kv, [1])
   store = json.loads((data / ".vault" / "keys.json").read_text())
   store["version"] = 2
-  for grant in store["keys"]["shared"]["grants"]["apps"]:
+  record = store["keys"]["shared"]
+  assert "parts" not in record  # a single-value store is written as version 3: one sealed value
+  for grant in record["grants"]["apps"]:
     del grant["install"]
   (data / ".vault" / "keys.json").write_text(json.dumps(store))
 

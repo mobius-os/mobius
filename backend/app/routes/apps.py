@@ -557,6 +557,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
+  # The owner's schedule for the app lives outside its storage tree.
+  await asyncio.to_thread(_rmtree_strict, app_cron.schedule_state_dir(deleted_app_id))
   # The app's model engine home (threads, transcripts) is id-keyed too.
   from app.providers import app_engine_home
   await asyncio.to_thread(_rmtree_strict, app_engine_home(settings.data_dir, deleted_app_id))
@@ -3591,8 +3593,7 @@ async def delete_app_data(
 
   This is a separate, additive action from uninstall: uninstall (delete_app)
   tombstones the row and hides the app; this leaves the app fully live and
-  running, just with an empty `/data/apps/<id>` tree (only the schedule
-  declaration under `schedule/` is kept, because cron stays). There is no tombstone and
+  running, just with an empty `/data/apps/<id>` tree. There is no tombstone and
   no recovery window — a data wipe is what the owner asked for, so unlike the
   reversible uninstall it takes effect immediately.
 
@@ -3649,9 +3650,7 @@ async def delete_app_data(
     # owner asked to erase are still on disk and readable by the still-live app.
     from app import key_vault
     try:
-      # Cron stays, so its durable declaration under schedule/ stays too.
-      with app_cron.preserved_schedule_declaration(app.id):
-        await settled.run_settled(_rmtree_strict, storage_dir)
+      await settled.run_settled(_rmtree_strict, storage_dir)
       # The app's own secrets are its data too (keys it only borrows are not).
       await settled.settle(key_vault.erase_app_keys(app.id), what="App key erase")
     except (OSError, key_vault.VaultUnavailable, key_vault.VaultRefused) as exc:

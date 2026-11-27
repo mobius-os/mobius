@@ -21,7 +21,7 @@ def test_work_report_schema_converges_from_fresh_and_frozen_release(tmp_path, so
     history = migrations.schema_migration_history(eng)
     migrations.run_migrations(eng)
     assert migrations.schema_migration_history(eng) == history
-    assert "0110_claim_work_report" in {row["version"] for row in history}
+    assert "0111_claim_work_report" in {row["version"] for row in history}
     assert migrations.mapped_schema_gaps(eng) == []
     assert "work_report" in {c["name"] for c in inspect(eng).get_columns("agent_work_claims")}
   finally:
