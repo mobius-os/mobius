@@ -6689,7 +6689,10 @@ async def _run_chat_impl_with_db(
     if first_branch_turn and app_room is None else None
   )
   resumed_context_fallback = (
-    _build_resumed_context(chat_row, keep_task=run_policy is not None)
+    _build_resumed_context(
+      chat_row, history_rows=len(messages) - 1,
+      keep_task=run_policy is not None,
+    )
     if (
       (session_id or fresh_delegated_session or first_branch_turn)
       and provider_runtime_kind(provider) in ("claude_sdk", "codex_sdk")
