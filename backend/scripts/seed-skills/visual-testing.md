@@ -153,6 +153,16 @@ The frame context scopes refs and snapshots, not everything:
   page, not the element under the pointer. For an inner scroller that neither
   command reaches, dispatch a CDP `Input.dispatchMouseEvent` wheel at the
   element's coordinates via `get cdp-url`.
+- A long chat opens on its newest messages (one page of about 20). Older pages
+  load only after a real wheel, scroll-key, touch or pointer event on the
+  transcript (`.chat__scroll`); `scrollTop = 0`, `scroll up` and
+  `scrollintoview` move the view without one, so nothing older ever appears.
+  To see an older card rendered, send a CDP `Input.dispatchMouseEvent` wheel
+  (via `get cdp-url`) at a point inside the transcript, whose box is
+  `get box .chat__scroll`. Start from a scroll position below the top so the
+  view actually moves (a wheel at the very top moves nothing and loads
+  nothing), and wait for the page; each burst loads one older page. To read
+  older messages as data, use `mapi "/api/chats/$CHAT_ID?limit=500"`.
 
 For press-and-hold or drag, let a ref place the pointer, then press (on the
 standalone page; in a shell frame the hover shares the offset shift above):

@@ -488,8 +488,15 @@ def _mirror_agent_defaults(
   data_dir: str,
   provider_id: str,
   settings_obj: dict,
+  owner_pick: bool,
 ) -> None:
-  """Repair the best-effort defaults mirrored from a committed chat choice."""
+  """Repair the best-effort defaults mirrored from a committed chat choice.
+
+  Only the owner's own pick becomes the default for new chats; an agent
+  switching one chat's provider leaves it alone.
+  """
+  if not owner_pick:
+    return
   # Keep the model's provider in the SAME atomic shared-file update. Live model
   # discovery can expose ids outside KNOWN_MODELS, so model text alone is not a
   # durable provider classifier.
@@ -1965,9 +1972,11 @@ async def patch_chat(
     settings_obj = _coerce_agent_settings(chat.agent_settings_json) or {}
     # An auto-resume/title/pin-only PATCH must not mirror this chat's old
     # model snapshot back into the global defaults. Only an actual picker
-    # mutation owns that side effect.
+    # mutation owns that side effect, and only the owner's own pick: an agent
+    # configuring one chat must not rewrite the default for later chats.
     if (
       principal.scope != "chat_embed"
+      and is_owner_input_principal(principal)
       and settings_obj
       and picker_settings_changed
     ):
@@ -3024,6 +3033,7 @@ async def recover_chat(
 async def switch_chat_provider(
   body: ChatProviderSwitch,
   chat_id: str,
+  principal: Principal = Depends(get_principal),
   _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
   db: Session = Depends(get_db),
 ):
@@ -3039,7 +3049,9 @@ async def switch_chat_provider(
   from app.chat_queue import get_transition_lock
 
   async with get_transition_lock(chat_id):
-    return await _switch_chat_provider_locked(body, chat_id, db)
+    return await _switch_chat_provider_locked(
+      body, chat_id, db, owner_pick=is_owner_input_principal(principal),
+    )
 
 
 def _switch_handover(
@@ -3064,6 +3076,8 @@ async def _switch_chat_provider_locked(
   body: ChatProviderSwitch,
   chat_id: str,
   db: Session,
+  *,
+  owner_pick: bool,
 ):
   """Run one provider switch while settings PATCHes are excluded."""
   from app.chat_writer import (
@@ -3123,6 +3137,7 @@ async def _switch_chat_provider_locked(
       data_dir=data_dir,
       provider_id=body.provider,
       settings_obj=settings_obj,
+      owner_pick=owner_pick,
     )
     return {
       "ok": True,
@@ -3199,6 +3214,7 @@ async def _switch_chat_provider_locked(
     data_dir=data_dir,
     provider_id=body.provider,
     settings_obj=settings_obj,
+    owner_pick=owner_pick,
   )
   if result.get("status") == "committed":
     activity.log_event(

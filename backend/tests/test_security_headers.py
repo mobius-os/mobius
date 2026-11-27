@@ -295,6 +295,17 @@ def test_backend_owns_complete_app_frame_policy():
     assert "'self'" not in sources
 
 
+def test_app_frame_policy_allows_inline_fonts_like_inline_images():
+  """A page previewed in the app frame may inline its font as it may its images."""
+  policy = app_frame_csp("https://app.example.test")
+  assert "data:" in policy.split("font-src ", 1)[1].split(";", 1)[0].split()
+  for directive in (
+    "default-src", "script-src", "style-src", "connect-src", "frame-src",
+  ):
+    sources = policy.split(f"{directive} ", 1)[1].split(";", 1)[0].split()
+    assert "data:" not in sources
+
+
 def test_app_frame_policy_allows_a_distinct_configured_api_origin():
   policy = app_frame_csp(
     "https://app.example.test",

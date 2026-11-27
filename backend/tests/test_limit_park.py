@@ -226,6 +226,16 @@ def test_park_fields_text_dated_clock_without_year_rolls_forward():
   assert timing.check_at == datetime(2031, 3, 7, 9, 15)
 
 
+@pytest.mark.parametrize("text", [
+  "You've hit your 5-hour limit · resets 2:30pm (UTC)",
+  "You've hit your Opus limit · resets 3pm",
+  "You've hit your limit · resets 5pm",
+])
+def test_park_fields_label_every_hit_your_limit_wording_a_usage_limit(text):
+  # Only a usage-limit park can be retried after a manual reset.
+  assert chat_mod._limit_park_fields({}, text, now=NOW).reason == "usage_limit"
+
+
 def test_park_fields_text_relative_duration():
   timing = chat_mod._limit_park_fields(
     {}, "Server is temporarily limiting requests. Try again in 30 minutes.",
@@ -339,6 +349,13 @@ def test_park_exit_publishes_enriched_event_and_kwargs():
   # Explicit-UTC ISO so the client's Date() renders the right local time.
   assert event["pause"]["resets_at"].endswith("+00:00")
   assert event["pause"]["kind"] == kwargs["park_reason"]
+
+
+def test_park_exit_saves_a_five_hour_limit_as_a_usage_limit_park():
+  sink = _Sink()
+  text = "You've hit your 5-hour limit · resets 2:30pm (UTC)"
+  kwargs = chat_mod._park_exit(sink, {"api_error_status": 429}, text)
+  assert kwargs["park_reason"] == "usage_limit"
 
 
 def test_park_exit_non_limit_error_stays_plain():
