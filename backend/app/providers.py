@@ -1476,6 +1476,8 @@ class RelayKeyRead(NamedTuple):
   unavailable: str | None
   # The API root this key belongs to, when a provider has more than one.
   base_url: str | None = None
+  # Request headers that carry the credential, when it is not a plain key.
+  headers: dict[str, str] | None = None
 
 
 def app_engine_home(data_dir: str | Path, app_id: int) -> Path:
@@ -1779,7 +1781,9 @@ class GeminiProvider(AppModelProvider):
     self.auth_dir = "gemini"
 
   def connection_kind(self, data_dir: str) -> str | None:
-    from app import key_vault
+    from app import gemini_google_cloud, key_vault
+    if gemini_google_cloud.project(data_dir):
+      return "google_cloud"
     return next((
       kind for kind, (name, _) in GEMINI_CONNECTIONS.items()
       if key_vault.platform_key_sync(name, reveal=False, caller="platform:gemini")
@@ -1790,7 +1794,9 @@ class GeminiProvider(AppModelProvider):
       return RelayKeyRead(None, "Google Gemini is turned off in Settings.")
     kind = self.connection_kind(data_dir)
     if kind is None:
-      return RelayKeyRead(None, "Connect Google Gemini with an AI Studio or Agent Platform key in Settings › AI providers.")
+      return RelayKeyRead(None, "Connect Google Gemini in Settings › AI providers.")
+    if kind == "google_cloud":
+      return self._google_cloud_credential(data_dir, authorize)
     name, base_url = GEMINI_CONNECTIONS[kind]
     if not authorize:
       return RelayKeyRead(None, None, base_url)
@@ -1799,6 +1805,18 @@ class GeminiProvider(AppModelProvider):
     if key:
       return RelayKeyRead(key, None, base_url)
     return RelayKeyRead(None, "Google Gemini's key could not be read from the key vault.")
+
+  def _google_cloud_credential(self, data_dir: str, authorize: bool) -> RelayKeyRead:
+    from app import gemini_google_cloud
+    project_id = gemini_google_cloud.project(data_dir)
+    base_url = gemini_google_cloud.endpoint_root(project_id)
+    if not authorize:
+      return RelayKeyRead(None, None, base_url)
+    token = gemini_google_cloud.access_token(data_dir)
+    if not token:
+      return RelayKeyRead(None, "Google Cloud sign-in expired. Sign in again in Settings › AI providers.")
+    headers = {"authorization": f"Bearer {token}", "x-goog-user-project": project_id}
+    return RelayKeyRead(token, None, base_url, headers)
 
   def _runtime_home(self, data_dir: str) -> Path:
     return Path(data_dir) / "cli-auth" / "gemini"
@@ -2573,7 +2591,8 @@ async def disconnect_provider(data_dir: str, provider_id: str) -> None:
   elif provider_id == "codex":
     (Path(data_dir) / "cli-auth" / "codex" / "auth.json").unlink(missing_ok=True)
   elif provider_id == "gemini":
-    from app import key_vault
+    from app import gemini_google_cloud, key_vault
+    gemini_google_cloud.forget(data_dir)
     for name, _ in GEMINI_CONNECTIONS.values():
       try:
         await key_vault.vault_call("DELETE", f"/keys/{name}", caller="owner")

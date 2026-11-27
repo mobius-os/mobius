@@ -58,3 +58,17 @@ export function moveConnectedProvider(rows, fromIndex, toIndex, configuredProvid
   slots.forEach((slot, position) => { next[slot] = connected[position] })
   return next
 }
+
+// Gemini bills each token to the owner's own Google account or Cloud project,
+// so connecting it does not hand it background work: its row starts as None
+// until the owner chooses a model. A first provider still joins, because
+// background work needs one.
+const STARTS_OUT_OF_BACKGROUND = new Set(['gemini'])
+
+/** The saved rows after `connected` (its row with model and effort) is newly connected. */
+export function rowsAfterConnect(current, connected, { first }) {
+  const row = { ...connected, enabled: first || !STARTS_OUT_OF_BACKGROUND.has(connected.provider) }
+  if (first) return [row, ...current.filter(other => other.provider !== row.provider).map(other => ({ ...other, enabled: false }))]
+  const known = current.some(other => other.provider === row.provider)
+  return known ? current.map(other => other.provider === row.provider ? row : other) : [...current, row]
+}

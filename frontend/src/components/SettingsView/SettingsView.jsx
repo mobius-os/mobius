@@ -7,7 +7,7 @@ import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
 import { catalogDefault, catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
 import { settleBackgroundAgentSave } from '../../lib/backgroundAgentSave.js'
-import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider } from '../../lib/backgroundProviderOrder.js'
+import { connectedProvidersFirst, disablesLastConnectedProvider, moveConnectedProvider, rowsAfterConnect } from '../../lib/backgroundProviderOrder.js'
 import { clearExplicitOwnerSession } from '../../lib/explicitLogout.js'
 import { forgetNativePush } from '../../lib/nativePush.js'
 import { stopLocationForSignOut } from '../../lib/nativeLocation.js'
@@ -779,16 +779,11 @@ export default function SettingsView({
         providerFromSettings(settingsQuery.data),
         connectedCatalog,
       )
-      const connectedRow = {
+      const next = rowsAfterConnect(current, {
         ...(current.find(row => row.provider === provider) || { provider }),
-        enabled: true,
         model: defaultBackgroundModel(provider, connectedCatalog),
         effort: defaultEffort(provider),
-      }
-      const rest = current.filter(row => row.provider !== provider)
-      const next = providersBefore.size === 0
-        ? [connectedRow, ...rest.map(row => ({ ...row, enabled: false }))]
-        : current.map(row => row.provider === provider ? connectedRow : row)
+      }, { first: providersBefore.size === 0 })
       backgroundDraftRef.current = next
       setBackgroundDraft(next)
       const saved = await persistBackgroundAgents(

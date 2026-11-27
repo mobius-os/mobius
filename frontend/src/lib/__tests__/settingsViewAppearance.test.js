@@ -243,7 +243,8 @@ test('new provider connections use the curated unattended defaults', () => {
   assert.match(view, /codex: 'gpt-5\.6-terra'/)
   assert.match(view, /authProvidersAtStartRef\.current = new Set\(configuredProvidersRef\.current\)/)
   assert.match(view, /const newlyConnected = !providersBefore\.has\(provider\)/)
-  assert.match(view, /providersBefore\.size === 0[\s\S]*connectedRow[\s\S]*enabled: false/)
+  // The first-connection rule (it alone stays enabled) is rowsAfterConnect's, tested with it.
+  assert.match(view, /rowsAfterConnect\(current, \{[\s\S]*\}, \{ first: providersBefore\.size === 0 \}\)/)
   assert.match(view, /const onProviderConnected = useCallback\(async \(provider\)/)
   assert.match(view, /await persistBackgroundAgents\([\s\S]*providersBefore\.size === 0 \? \{ provider \} : \{\}/)
   assert.match(view, /api\.settings\.save\(\{[\s\S]*\.\.\.companionSettings,[\s\S]*background_agents: payload/)

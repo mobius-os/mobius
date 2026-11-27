@@ -241,6 +241,18 @@ RUN pip install --no-cache-dir --no-deps "openai-codex==${CODEX_SDK_VERSION}" \
       'from pathlib import Path; import openai_codex; from codex_cli_bin import bundled_codex_path; assert bundled_codex_path().samefile(Path("/usr/local/bin/codex"))' \
     && pip check
 
+# Google's gcloud CLI. Gemini's Google Cloud sign-in runs Google's own
+# `gcloud auth application-default login` and mints short-lived tokens with it,
+# so Möbius registers no Google sign-in app of its own.
+ARG GCLOUD_VERSION=594.0.1
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in amd64) _gcloud_arch=x86_64 ;; arm64) _gcloud_arch=arm ;; \
+      *) echo "unsupported architecture ${TARGETARCH}" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://dl.google.com/dl/cloudsdk/channels/rapid/downloads/google-cloud-cli-${GCLOUD_VERSION}-linux-${_gcloud_arch}.tar.gz" \
+      | tar -xz -C /opt \
+    && ln -s /opt/google-cloud-sdk/bin/gcloud /usr/local/bin/gcloud \
+    && gcloud --version | head -1
+
 # Capture each installed agent CLI's publish date into a small JSON the
 # Settings row reads (routes/settings._cli_release_dates), keyed by the
 # version reported by its actual executable. Done at build time so a CLI bump

@@ -157,7 +157,15 @@ removes a provider from pickers and blocks new turns without deleting chats.
   `gemini-agent-platform`, `aiplatform.googleapis.com/v1/publishers/google`).
   Both are kept from agents; the platform fixes each key's destination
   (`providers.GEMINI_CONNECTIONS`), the status reports which `connection` is
-  in use, and Disconnect deletes both keys. Its model list is the
+  in use, and Disconnect deletes both keys. A third way is a Google Cloud
+  sign-in through Google's own gcloud (`gemini_google_cloud`): Möbius runs
+  `gcloud auth application-default login --no-launch-browser`, shows its link,
+  passes back the owner's verification code, and mints short-lived tokens with
+  `gcloud auth application-default print-access-token`; requests go to the
+  owner's project on the Agent Platform. The sign-in belongs to gcloud, so
+  Möbius registers no Google OAuth app. Gemini has no Usage section: a key
+  cannot read usage or spend back from Google, and a local estimate priced
+  from a fixed list would drift from Google's bill. Its model list is the
   platform's declaration in `providers.GEMINI_DECLARATION`, with each model's
   documented thinking levels and default as its effort scale.
 - Claude, Codex and Möbius are built in. The Möbius provider keeps the stable

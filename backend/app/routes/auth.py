@@ -11,6 +11,7 @@ refuses it, so an agent cannot turn its bearer into a clean app credential there
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -25,7 +26,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -1715,6 +1716,58 @@ async def codex_login_status_view(
       return {"status": result}
     return {"status": "none"}
   return {"status": "pending"}
+
+
+class GoogleCloudSignInFinish(BaseModel):
+  code: str = Field(min_length=1, max_length=512)
+  project: str = Field(min_length=1, max_length=64)
+
+
+@router.post("/provider/gemini/google-cloud/start", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_start(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Start Google's own gcloud sign-in and return its link."""
+  from app import gemini_google_cloud
+  async with _provider_login_locks["gemini"]:
+    try:
+      return {"url": await gemini_google_cloud.start(get_settings().data_dir)}
+    except gemini_google_cloud.GoogleCloudSignInError as exc:
+      raise HTTPException(400, str(exc)) from exc
+
+
+@router.post("/provider/gemini/google-cloud/finish", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_finish(
+  body: GoogleCloudSignInFinish,
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Pass the verification code to gcloud; Google Cloud replaces any Gemini key."""
+  from app import gemini_google_cloud, key_vault
+  from app.providers import GEMINI_CONNECTIONS
+  data_dir = get_settings().data_dir
+  async with _provider_login_locks["gemini"]:
+    try:
+      await gemini_google_cloud.finish(data_dir, body.code, body.project)
+    except gemini_google_cloud.GoogleCloudSignInError as exc:
+      raise HTTPException(400, str(exc)) from exc
+    for name, _ in GEMINI_CONNECTIONS.values():
+      with contextlib.suppress(key_vault.VaultRefused, key_vault.VaultUnavailable):
+        await key_vault.vault_call("DELETE", f"/keys/{name}", caller="owner")
+    await _provider_signin_changed("gemini")
+  return {"ok": True}
+
+
+@router.delete("/provider/gemini/google-cloud", dependencies=[Depends(reject_cross_site)])
+async def gemini_google_cloud_forget(
+  _: models.Owner = Depends(get_current_owner_for_lifecycle_control),
+):
+  """Remove the Google Cloud sign-in when the owner switches to a key."""
+  from app import gemini_google_cloud
+  async with _provider_login_locks["gemini"]:
+    await gemini_google_cloud.cancel()
+    gemini_google_cloud.forget(get_settings().data_dir)
+    await _provider_signin_changed("gemini")
+  return {"ok": True}
 
 
 @router.post(
