@@ -14,6 +14,18 @@ from __future__ import annotations
 _DIGEST_TERMINATORS = frozenset({"facts & intent", "related"})
 
 
+def is_section_heading(line: str) -> bool:
+  """Whether a reader may treat ``line`` (one ``str.splitlines()`` item) as a
+  level-two section heading.
+
+  Every heading the readers below match satisfies this, and the note writer
+  neutralizes every line that does, so agent text cannot open or close a
+  platform section. ``str.strip()`` removes all Unicode whitespace (U+00A0,
+  U+3000, ...), not only spaces and tabs; the writer must agree.
+  """
+  return line.strip().startswith("## ")
+
+
 def extract_section(
   text: str,
   heading: str,
@@ -33,9 +45,8 @@ def extract_section(
 
   body: list[str] = []
   for line in lines[start:]:
-    stripped = line.strip()
-    if stripped.startswith("## "):
-      found = stripped[3:].strip().lower()
+    if is_section_heading(line):
+      found = line.strip()[3:].strip().lower()
       if terminators is None or found in terminators:
         break
     body.append(line)
