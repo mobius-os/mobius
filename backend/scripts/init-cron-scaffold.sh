@@ -268,6 +268,13 @@ mkdir -p "${DATA_DIR:-/data}/cron-logs"
 
 # 3. Install the entry NOW so the agent doesn't need to wait for a
 #    restart. Reuses the same script so install + replay logic match.
+#    The backend sets MOBIUS_CRON_DECLARE_ONLY and installs the entry itself
+#    (app_cron.register_cron), replacing the app's previous job even when its
+#    filename changed.
+if [ "${MOBIUS_CRON_DECLARE_ONLY:-}" = "1" ]; then
+  echo "declared only; the caller installs the live entry"
+  exit 0
+fi
 bash "$INIT_PATH"
 
 echo

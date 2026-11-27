@@ -973,6 +973,55 @@ def test_renamed_job_debris_does_not_shadow_the_real_schedule(client, auth, db):
   assert f"{source_dir}/fetch.sh" in written
 
 
+def test_reconcile_keeps_the_declared_job_over_leftover_renamed_job_entries(
+  client, auth, db,
+):
+  """Rename debris whose old job still exists must not win reconciliation.
+
+  Older registration left the renamed job's supervised line in place and
+  appended the new one after it. Registration now replaces the app's entry,
+  so if discovery still took the first live line, the next boot would
+  re-register the stale job and delete the owner's current schedule.
+  """
+  from app import app_cron
+  source_dir = Path(get_settings().data_dir) / "apps" / "renamer"
+  source_dir.mkdir(parents=True)
+  for name in ("first.sh", "second.sh"):
+    (source_dir / name).write_text("#!/bin/sh\n", encoding="utf-8")
+  app_id = create_local_app(
+    client, _service_auth(), name="Renamer", description="test",
+    source_dir=source_dir,
+  )["id"]
+  runner = "/data/platform/backend/scripts/app-job-runner.py"
+  state = app_cron.schedule_state_dir(app_id)
+  state.mkdir(parents=True, exist_ok=True)
+  (state / "init-cron.sh").write_text(
+    f'ENTRY="0 2 * * * python3 {runner} --scheduled {app_id} '
+    f'{source_dir}/second.sh"\n',
+    encoding="utf-8",
+  )
+  live = (
+    f"0 1 * * * python3 {runner} --scheduled {app_id} {source_dir}/first.sh\n"
+    f"0 2 * * * python3 {runner} --scheduled {app_id} {source_dir}/second.sh\n"
+  )
+
+  from app.routes import app_schedules as apps_module
+  with patch("app.app_cron.read_crontab", lambda: live):
+    r = client.get("/api/apps/schedules", headers=auth)
+    assert r.status_code == 200, r.text
+    assert [(j["cron"], j["job"]) for j in r.json()] == [("0 2 * * *", "second.sh")]
+
+    with patch("app.app_cron.register_cron") as register, \
+         patch("app.app_cron.write_crontab", return_value=True):
+      count, warnings, _ = apps_module.reconcile_app_cron_supervision(db)
+
+  assert warnings == []
+  assert count == 1
+  register.assert_called_once_with(
+    "renamer", "0 2 * * *", source_dir / "second.sh", app_id,
+  )
+
+
 def test_prune_spares_unsupervised_and_unreadable_crontabs(client, auth, db):
   """Pruning only ever retires a supervised entry whose job is really gone."""
   from app.routes import app_schedules as apps_module
