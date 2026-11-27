@@ -8,6 +8,7 @@ import {
   androidBrowserIntentHref,
   detectInstallPlatform,
   installCopyForPlatform,
+  isInstalledIosApp,
   isStandaloneDisplay,
 } from '../installPlatform.js'
 
@@ -268,6 +269,19 @@ test('every installed manifest display mode counts as standalone', () => {
 test('the legacy flag still answers where display-mode is unavailable', () => {
   assert.equal(isStandaloneDisplay({ navigator: { standalone: true } }), true)
   assert.equal(isStandaloneDisplay({ navigator: { standalone: false } }), false)
+})
+
+test('only a web app installed on an iPhone or iPad counts as an installed iOS app', () => {
+  const display = ({ installed, iosStandalone }) => ({
+    navigator: iosStandalone === undefined ? {} : { standalone: iosStandalone },
+    matchMedia: query => ({ media: query, matches: installed && query.includes('standalone') }),
+  })
+  assert.equal(isInstalledIosApp(display({ installed: true, iosStandalone: true })), true)
+  // Apple's in-app browser leaks navigator.standalone as true.
+  assert.equal(isInstalledIosApp(display({ installed: false, iosStandalone: true })), false)
+  assert.equal(isInstalledIosApp(display({ installed: false, iosStandalone: false })), false, 'Safari tab')
+  assert.equal(isInstalledIosApp(display({ installed: true })), false, 'installed Android app')
+  assert.equal(isInstalledIosApp(null), false)
 })
 
 test('standalone detection never throws on hostile or absent globals', () => {

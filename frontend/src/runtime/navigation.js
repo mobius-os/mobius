@@ -1,4 +1,5 @@
 import { encodeNavLocation, validNavLocationText } from '../lib/appNavLocation.js'
+import { makeEdgeSwipeBack } from './edgeSwipeBack.js'
 
 // ── ChatSplit — window.mobius.split(opts) ────────────────────────────────────
 //
@@ -312,6 +313,11 @@ export function makeNav({
   const stack = []
   const entries = new Set()
   const entriesByRequestId = new Map()
+  // The host turns this on where the device has no system back gesture.
+  const edgeSwipe = makeEdgeSwipeBack({
+    canGoBack: () => stack.length > 0,
+    goBack: () => stack[stack.length - 1].goBack(false),
+  })
 
   function postForwardResult(type, requestId) {
     try {
@@ -334,6 +340,7 @@ export function makeNav({
       if (navigationReady) {
         flushQueue()
       }
+      edgeSwipe.setEnabled(msg.visible === true && msg.edgeSwipeBack === true)
       return
     }
     if (msg?.type !== 'moebius:nav-forward' || typeof msg.requestId !== 'string') return
@@ -408,6 +415,7 @@ export function makeNav({
       onForward: typeof handlers.onForward === 'function' ? handlers.onForward : null,
       reversible: typeof handlers.onForward === 'function',
       dispose: null,
+      goBack: null,
     }
     entries.add(entry)
     entriesByRequestId.set(requestId, entry)
@@ -474,6 +482,13 @@ export function makeNav({
       if (!entry.reversible || !entry.settled) dispose()
     }
 
+    // System back and the edge swipe are one action. For system back the shell
+    // has already consumed its history entry; the swipe asks it to pop one.
+    entry.goBack = (fromShell) => {
+      close(fromShell)
+      if (entry.onBack) entry.onBack()
+    }
+
     function onMessage(event) {
       if (event.origin !== window.location.origin) return
       if (event.source !== window.parent) return
@@ -481,8 +496,7 @@ export function makeNav({
       if (msg?.type === 'moebius:nav-back') {
         if (stack[stack.length - 1] !== entry) return
         if (msg.requestId && msg.requestId !== requestId) return
-        close(true)
-        if (entry.onBack) entry.onBack()
+        entry.goBack(true)
         return
       }
       if (msg?.requestId !== requestId) return

@@ -31,6 +31,30 @@ export function isStandaloneDisplay(target = typeof window !== 'undefined' ? win
   }
 }
 
+/**
+ * True for a web app installed on an iPhone or iPad. `navigator.standalone`
+ * exists only on iOS, and display-mode excludes the in-app browser where Apple
+ * leaks it as true.
+ */
+export function isInstalledIosApp(win = typeof window !== 'undefined' ? window : null) {
+  return isStandaloneDisplay(win) && win?.navigator?.standalone === true
+}
+
+/**
+ * Whether this host turns on the app runtime's edge swipe Back
+ * (runtime/edgeSwipeBack.js). No platform does yet. Android and browser tabs
+ * have their own system back gesture, so one swipe would go back twice. An
+ * installed iOS web app was the intended case, but iOS may give it a native
+ * left-edge back swipe as well, with the same double Back; that is unverified
+ * on a device (see the review of mobius-os/mobius#2278), so it stays off there
+ * until a real-device check. A host that turns it on must also keep it off for
+ * a frame whose left edge is not the screen's (beside the docked sidebar or to
+ * the right of a pane divider), where the swipe would fight their drag.
+ */
+export function hostEdgeSwipeBack() {
+  return false
+}
+
 export function detectInstallPlatform(ua, maxTouchPoints) {
   if (ua === undefined) {
     ua = typeof navigator !== 'undefined' ? (navigator.userAgent || '') : ''

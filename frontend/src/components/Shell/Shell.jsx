@@ -239,6 +239,7 @@ import { rememberRecentDestination } from '../../lib/recentSelections.js'
 import { isSharedBrowserRoute, sharedBrowserRoutePath, sharedBrowserStorageForGrant } from '../../lib/sharedBrowserWorkspace.js'
 import { KEYS_QUERY, useKeys } from '../SettingsView/keysQueries.js'
 import { appsWaitingForKeys } from '../../lib/keyRequestPlaces.js'
+import { hostEdgeSwipeBack } from '../../utils/installPlatform.js'
 
 const EMPTY_LIST = Object.freeze([])
 // Reconnect list reads order durable state ahead of buffered system events, so
@@ -5336,6 +5337,7 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
                 // Reaching for the drawer holds whatever a leave would hold, so a
                 // heavy game cannot starve the drawer and its sound stops first.
                 covered={modalDrawerOpen || drawerOpening}
+                edgeSwipeBack={hostEdgeSwipeBack()}
                 // An app's key request waits over the app while the owner looks at it.
                 keyRequests={!isSharedBrowserAccess}
                 version={versionForApp(id)}

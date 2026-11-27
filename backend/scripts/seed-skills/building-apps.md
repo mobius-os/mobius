@@ -1961,6 +1961,15 @@ Unknown future statuses should be treated like failure. `handle.ready` remains
 as a compatibility promise (`true` only for `owned`), but its historical
 `false` folded all other outcomes together. New code should use `outcome`.
 
+The runtime can also give every owned `nav.open` level an edge swipe, but
+Möbius turns it on for no device yet, so keep a visible Back for nested views.
+Where a host turns it on, a swipe right from the app's left edge does exactly
+what system Back does for the newest level, so it runs that level's `onBack`.
+It stays off while a modal dialog is open (`<dialog open>`, or `role="dialog"`
+with `aria-modal="true"`) and beside a pane divider, and a nested iframe inside
+the app never receives it. Do not build your own edge-swipe Back: where the
+system already has one, one swipe would go back twice.
+
 ### Android back-preview — host-mediated back protocol
 
 The swipe-back gesture renders a preview of the previous screen from a top-level history snapshot. Iframe `history.pushState` is invisible to that mechanism, so iframe-history-only apps get a blank preview. `window.mobius.nav.open(...)` wraps the AppCanvas-mediated protocol below, including timeout handling; use the raw postMessage form only for legacy apps or custom choreography.

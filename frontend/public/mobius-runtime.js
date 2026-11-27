@@ -3085,6 +3085,147 @@ function validNavLocationText(text) {
 	return text;
 }
 
+// src/runtime/edgeSwipeBack.js
+const EDGE_PX = 28;
+const COMMIT_PX = 72;
+const FLICK_PX = 32;
+const FLICK_SPEED = .45;
+const DECIDE_PX = 8;
+const SIDEWAYS_DOMINANCE = 1.2;
+const TRAVEL_PX = 56;
+const OPEN_MODALS = "dialog[open], [role=\"dialog\"][aria-modal=\"true\"], [role=\"alertdialog\"][aria-modal=\"true\"]";
+const ARROW_STYLE = [
+	"position:fixed",
+	"left:0",
+	"top:0",
+	"z-index:2147483647",
+	"width:44px",
+	"height:44px",
+	"margin:-22px 0 0 -48px",
+	"display:grid",
+	"place-items:center",
+	"border-radius:50%",
+	"color:var(--text,#111)",
+	"background:var(--surface,#fff)",
+	"border:1px solid var(--border,rgba(128,128,128,.4))",
+	"box-shadow:0 6px 18px rgb(0 0 0 / .18)",
+	"pointer-events:none"
+].join(";");
+const ARROW_SVG = "<svg width=\"22\" height=\"22\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><path d=\"M15 18l-6-6 6-6\"/></svg>";
+function swipeCommits(dx, dy, ms) {
+	if (dx <= 0 || dx < Math.abs(dy)) return false;
+	if (dx >= COMMIT_PX) return true;
+	return dx >= FLICK_PX && dx / Math.max(ms, 1) >= FLICK_SPEED;
+}
+function makeEdgeSwipeBack({ canGoBack, goBack }) {
+	let doc = null;
+	let swipe = null;
+	let arrow = null;
+	let tracking = false;
+	const passive = {
+		passive: true,
+		capture: true
+	};
+	const blocking = {
+		passive: false,
+		capture: true
+	};
+	const canStart = () => canGoBack() && !doc.querySelector(OPEN_MODALS);
+	function place(dx, y) {
+		if (!arrow) {
+			arrow = doc.createElement("div");
+			arrow.setAttribute("aria-hidden", "true");
+			arrow.style.cssText = ARROW_STYLE;
+			arrow.innerHTML = ARROW_SVG;
+			doc.body.appendChild(arrow);
+		}
+		const progress = Math.min(dx / COMMIT_PX, 1);
+		arrow.style.top = `${y}px`;
+		arrow.style.opacity = String(Math.min(1, .25 + progress));
+		arrow.style.transform = `translateX(${progress * TRAVEL_PX}px) scale(${.8 + .2 * progress})`;
+	}
+	function hide() {
+		arrow?.remove();
+		arrow = null;
+	}
+	function track() {
+		if (tracking) return;
+		tracking = true;
+		doc.addEventListener("touchmove", onMove, blocking);
+		doc.addEventListener("touchend", onEnd, blocking);
+		doc.addEventListener("touchcancel", onCancel, passive);
+	}
+	function untrack() {
+		if (!tracking) return;
+		tracking = false;
+		doc.removeEventListener("touchmove", onMove, blocking);
+		doc.removeEventListener("touchend", onEnd, blocking);
+		doc.removeEventListener("touchcancel", onCancel, passive);
+	}
+	function abandon() {
+		swipe = null;
+		untrack();
+		hide();
+	}
+	function onStart(event) {
+		const touch = event.touches.length === 1 ? event.touches[0] : null;
+		if (!touch || touch.clientX > EDGE_PX || !canStart()) {
+			abandon();
+			return;
+		}
+		swipe = {
+			x: touch.clientX,
+			y: touch.clientY,
+			t: event.timeStamp,
+			sideways: false
+		};
+		track();
+	}
+	function onMove(event) {
+		if (!swipe) return;
+		if (event.touches.length !== 1) {
+			abandon();
+			return;
+		}
+		const touch = event.touches[0];
+		const dx = touch.clientX - swipe.x;
+		const dy = touch.clientY - swipe.y;
+		if (!swipe.sideways) {
+			if (Math.abs(dx) < DECIDE_PX && Math.abs(dy) < DECIDE_PX) return;
+			if (dx <= 0 || dx < Math.abs(dy) * SIDEWAYS_DOMINANCE) {
+				abandon();
+				return;
+			}
+			swipe.sideways = true;
+		}
+		if (event.cancelable) event.preventDefault();
+		place(dx, touch.clientY);
+	}
+	function onEnd(event) {
+		const current = swipe;
+		abandon();
+		const touch = event.changedTouches[0];
+		if (!current?.sideways || !touch) return;
+		if (event.cancelable) event.preventDefault();
+		if (!swipeCommits(touch.clientX - current.x, touch.clientY - current.y, event.timeStamp - current.t)) return;
+		if (canStart()) goBack();
+	}
+	function onCancel() {
+		abandon();
+	}
+	return { setEnabled(enabled) {
+		if (enabled === (doc !== null)) return;
+		if (enabled) {
+			doc = globalThis.document;
+			doc.addEventListener("touchstart", onStart, passive);
+			return;
+		}
+		abandon();
+		doc.removeEventListener("touchstart", onStart, passive);
+		doc = null;
+	} };
+}
+
 // src/runtime/navigation.js
 const SPLIT_WIDE_BP = 600;
 const SPLIT_FLICK_VEL = .4;
@@ -3323,6 +3464,10 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 	const stack = [];
 	const entries = /* @__PURE__ */ new Set();
 	const entriesByRequestId = /* @__PURE__ */ new Map();
+	const edgeSwipe = makeEdgeSwipeBack({
+		canGoBack: () => stack.length > 0,
+		goBack: () => stack[stack.length - 1].goBack(false)
+	});
 	function postForwardResult(type, requestId) {
 		try {
 			window.parent.postMessage({
@@ -3339,6 +3484,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			navigationFocused = msg.navigationFocused !== false;
 			navigationReady = !waitForNavigationReady || msg.visible === true && msg.navigationReady !== false;
 			if (navigationReady) flushQueue();
+			edgeSwipe.setEnabled(msg.visible === true && msg.edgeSwipeBack === true);
 			return;
 		}
 		if (msg?.type !== "moebius:nav-forward" || typeof msg.requestId !== "string") return;
@@ -3400,7 +3546,8 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			onBack: typeof handlers.onBack === "function" ? handlers.onBack : null,
 			onForward: typeof handlers.onForward === "function" ? handlers.onForward : null,
 			reversible: typeof handlers.onForward === "function",
-			dispose: null
+			dispose: null,
+			goBack: null
 		};
 		entries.add(entry);
 		entriesByRequestId.set(requestId, entry);
@@ -3453,6 +3600,10 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			}
 			if (!entry.reversible || !entry.settled) dispose();
 		};
+		entry.goBack = (fromShell) => {
+			close(fromShell);
+			if (entry.onBack) entry.onBack();
+		};
 		function onMessage(event) {
 			if (event.origin !== window.location.origin) return;
 			if (event.source !== window.parent) return;
@@ -3460,8 +3611,7 @@ function makeNav({ location = null, waitForNavigationReady = false } = {}) {
 			if (msg?.type === "moebius:nav-back") {
 				if (stack[stack.length - 1] !== entry) return;
 				if (msg.requestId && msg.requestId !== requestId) return;
-				close(true);
-				if (entry.onBack) entry.onBack();
+				entry.goBack(true);
 				return;
 			}
 			if (msg?.requestId !== requestId) return;

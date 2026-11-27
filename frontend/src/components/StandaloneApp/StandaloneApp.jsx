@@ -23,6 +23,7 @@ import {
 } from '../../lib/standaloneHistory.js'
 import { retireAppEntries } from '../../lib/navHistory.js'
 import { settingsDeepLink } from '../../lib/settingsSections.js'
+import { hostEdgeSwipeBack } from '../../utils/installPlatform.js'
 import StandaloneInstallCard from './StandaloneInstallCard.jsx'
 import './StandaloneApp.css'
 
@@ -262,6 +263,7 @@ export default function StandaloneApp({ initialApp }) {
         visible
         interactive={!crash}
         immersive={immersive}
+        edgeSwipeBack={hostEdgeSwipeBack()}
         onImmersive={(_id, value) => setImmersive(value)}
         onNavPush={onNavPush}
         onNavPop={onNavPop}
