@@ -128,7 +128,8 @@ def test_blocked_prompt_fails_the_response():
 ])
 def test_the_key_is_checked_for_the_concrete_model_path(monkeypatch, endpoint, allowed):
   from app import key_vault
-  keys = [{"name": "gemini", "multiline": False}]
+  keys = [{"name": "gemini", "multiline": False, "inject": {"type": "header", "name": "x-goog-api-key"},
+           "parts": [{"name": "value", "secret": True, "multiline": False}]}]
   monkeypatch.setattr(key_vault, "resolve_key_in", lambda *_: "gemini")
   monkeypatch.setattr(key_vault, "_grant_of", lambda *_: {"sites": [
     {"host": "generativelanguage.googleapis.com", "methods": ["POST"], "paths": ["/v1beta/models/*"]},
