@@ -960,15 +960,6 @@ export const api = {
         body: JSON.stringify({ app_id: appId }),
       }),
       disconnect: (provider) => apiFetch(`/auth/provider/${encodeURIComponent(provider)}/disconnect`, { method: 'POST' }),
-      // Google Cloud sign-in for Gemini runs Google's own gcloud on the server.
-      geminiGoogleCloud: {
-        start: () => apiFetch('/auth/provider/gemini/google-cloud/start', { method: 'POST' }),
-        finish: (code, project) => apiFetch('/auth/provider/gemini/google-cloud/finish', {
-          method: 'POST',
-          body: JSON.stringify({ code, project }),
-        }),
-        forget: () => apiFetch('/auth/provider/gemini/google-cloud', { method: 'DELETE' }),
-      },
       claude: {
         startLogin: () => apiFetch('/auth/provider/login', { method: 'POST' }),
         submitCode: (code) => apiFetch('/auth/provider/code', {

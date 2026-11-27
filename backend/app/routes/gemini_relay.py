@@ -53,8 +53,7 @@ async def relay_gemini(provider: Any, request: Request, data_dir: str):
   body = await anyio.to_thread.run_sync(to_gemini_request, payload)
   base_url = credential.base_url or provider.declaration["base_url"]
   url = f"{base_url.rstrip('/')}{endpoint}?alt=sse"
-  headers = credential.headers or {"x-goog-api-key": credential.key}
-  return await _send(provider, url, headers, body, payload)
+  return await _send(provider, url, credential.key, body, payload)
 
 
 async def _json_payload(request: Request) -> dict[str, Any] | None:
@@ -65,9 +64,9 @@ async def _json_payload(request: Request) -> dict[str, Any] | None:
   return payload if isinstance(payload, dict) else None
 
 
-async def _send(provider: Any, url: str, auth: dict, body: dict, payload: dict):
+async def _send(provider: Any, url: str, key: str, body: dict, payload: dict):
   client = _client()
-  headers = {"content-type": "application/json", **auth}
+  headers = {"content-type": "application/json", "x-goog-api-key": key}
   try:
     upstream = await client.send(
       client.build_request("POST", url, json=body, headers=headers), stream=True,
