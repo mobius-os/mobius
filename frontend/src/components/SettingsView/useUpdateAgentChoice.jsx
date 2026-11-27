@@ -47,7 +47,7 @@ export function UpdateAgentPicker({ onChoice }) {
   const notice = failed ? 'Could not load your agents. Close this picker and try again.'
     : loading ? 'Loading your agents…'
       : 'Uses your latest chat agent. Completed jobs are kept in Archived.'
-  return <ModelSheet open collapsible title="Update agent" groups={groups}
+  return <ModelSheet open collapsible showGroupHeadings={false} title="Update agent" groups={groups}
     provider={selected.provider} model={effectiveModel}
     configuredProviders={availability.configuredProviders}
     onClose={() => onChoice(null)} notice={notice}

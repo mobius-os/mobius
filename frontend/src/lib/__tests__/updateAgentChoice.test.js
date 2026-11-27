@@ -52,6 +52,7 @@ test('the update picker respects MRU, hidden models, availability and model effo
   const choices = []
   const hook = renderHook(() => UpdateAgentPicker({ onChoice: value => choices.push(value) }))
   let props = hook.result.current.props
+  assert.equal(props.showGroupHeadings, false, 'mixed recent models do not repeat provider headings')
   assert.equal(props.collapsible, true, 'the catalogue stays collapsed behind the latest agent')
   assert.equal(props.model, 'codex-test', 'the default is the saved chat agent, not the first catalogue row')
   assert.deepEqual(props.groups.flatMap(group => group.models.map(model => model.id)), ['claude-test', 'codex-test'])
