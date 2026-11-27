@@ -61,6 +61,7 @@ from app.frontend_assets import (
 )
 from app.managed_paths import SERVED_STATIC_DIR
 from app.memory_observability import record_memory_checkpoint
+from app.net_utils import rate_limit_client
 from app.runtime_provenance import (
   protected_runtime_status,
   served_runtime_status,
@@ -413,19 +414,8 @@ async def lifespan(app):
 
 settings = get_settings()
 
-def _real_peer_address(request: Request) -> str:
-  """Rate-limit key: actual TCP peer address, never X-Forwarded-For.
-
-  Port 8000 is only exposed inside the Docker network (not published to the
-  host), so the only peer that can reach it is Caddy. Trusting
-  X-Forwarded-For would let any client that injects that header bypass
-  per-IP limits; the real peer address is simpler and correct.
-  """
-  return request.client.host if request.client else "127.0.0.1"
-
-
 limiter = Limiter(
-  key_func=_real_peer_address, default_limits=["120/minute"]
+  key_func=rate_limit_client, default_limits=["120/minute"]
 )
 
 app = FastAPI(

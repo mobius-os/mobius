@@ -17,7 +17,6 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import contribution_config, contribution_runtime, fs_locks, settled
@@ -63,11 +62,12 @@ from app.github_contributions import (
   _settle_equivalence,
   _validate_submit_app,
 )
+from app.net_utils import rate_limit_client
 from app.storage_io import atomic_write
 
 
 router = APIRouter(prefix="/api/contribution-relay", tags=["contribution-relay"])
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 log = logging.getLogger(__name__)
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _CONTRIBUTION_ID = re.compile(r"^ctr_[0-9a-f]{32}$")

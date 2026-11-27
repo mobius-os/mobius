@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.orm import Session
 
 from app import auth, models, browser_access as access, account_browser_access as account_access
@@ -19,9 +18,10 @@ from app.deps import (
   Principal, get_principal, get_owner_or_app_with_connect_manage,
   require_installation_owner_control, reject_cross_site,
 )
+from app.net_utils import rate_limit_client
 
 router = APIRouter(prefix="/api/connect/browser-access", tags=["connect"])
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 _COOKIE = "mobius_shared_browser"
 _COOKIE_PATH = "/api/connect/browser-access/session"
 # The cookie is written only when a browser signs in, never on renewal, so a

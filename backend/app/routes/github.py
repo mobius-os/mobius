@@ -41,7 +41,6 @@ from weakref import WeakValueDictionary
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, Field
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy import Text, cast, or_
 from sqlalchemy.orm import Session, load_only, selectinload
 
@@ -131,6 +130,7 @@ from app.github_contribution_git import (
   _resolve_reviewed_commit,
   _assert_fresh,
 )
+from app.net_utils import rate_limit_client
 from app.storage_io import atomic_write
 from app.terminal_output import readable_output
 from app.github_contributions import (
@@ -221,7 +221,7 @@ from app.deps import (
 from app.push import notify_owner
 
 router = APIRouter(prefix="/api/github", tags=["github"])
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 log = logging.getLogger("moebius.github")
 
 

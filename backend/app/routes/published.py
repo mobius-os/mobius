@@ -45,14 +45,10 @@ def _public_token_key(request: Request) -> str:
 # a caller could mint a fresh 60/minute budget for every {key} it invented,
 # which made the limit unbounded in practice.
 #
-# The key stays the TOKEN rather than the client address on purpose. Public
-# traffic reaches this app through the proxy, and main.py deliberately refuses
-# to trust X-Forwarded-For for rate limiting (any client could spoof it), so
-# get_remote_address resolves to the proxy peer for EVERY public request —
-# a "per-client" limit would collapse into one global bucket that a single
-# visitor could use to starve every published site. Per-token keeps one site's
-# traffic from affecting another; the residual is that heavy traffic to one
-# site can throttle that same site, which is the blast radius we want.
+# The key is the TOKEN rather than the client address on purpose: this is a
+# per-site budget, so one site's traffic never affects another. The residual
+# is that heavy traffic to one site can throttle that same site, which is the
+# blast radius we want.
 _public_data_limiter = Limiter(
   key_func=_public_token_key, key_style="endpoint",
 )

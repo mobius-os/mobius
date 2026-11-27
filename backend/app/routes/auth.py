@@ -28,7 +28,6 @@ from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -48,16 +47,19 @@ from app.deps import (
   require_chat_embed_operation,
   require_installation_owner_control,
 )
+from app.net_utils import rate_limit_client
 from app.timeutil import now_naive_utc
 from app.routes.shell_install_pass import router as shell_install_pass_router
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 router.include_router(shell_install_pass_router)
-_limiter = Limiter(key_func=get_remote_address)
+_limiter = Limiter(key_func=rate_limit_client)
 log = logging.getLogger("moebius.auth")
 
-# Global login attempt tracking keyed by username. IP-level defense
-# remains handled separately by slowapi rate limits.
+# Login attempt tracking keyed by username and visitor (``_login_key``), so
+# one visitor's failures lock out only that visitor: keyed by username alone,
+# any stranger who knew the owner's username could keep the owner locked out.
+# Per-visitor request rates are limited separately by slowapi.
 #
 # Both dicts are bounded at _LOGIN_TRACK_CAP entries: a real instance
 # never sees more than a handful of distinct usernames, so a much lower
@@ -80,10 +82,14 @@ def _ensure_login_tracking_maps() -> None:
     _login_cooldown_until = {}
 
 
-def _check_login_cooldown(username: str):
+def _login_key(username: str, request: Request) -> str:
+  return f"{username}\x00{rate_limit_client(request)}"
+
+
+def _check_login_cooldown(key: str):
   """Raises 429 if in a cooldown period from too many failed logins."""
   _ensure_login_tracking_maps()
-  until = _login_cooldown_until.get(username)
+  until = _login_cooldown_until.get(key)
   if until and datetime.now(UTC) < until:
     remaining = int((until - datetime.now(UTC)).total_seconds())
     raise HTTPException(
@@ -91,7 +97,7 @@ def _check_login_cooldown(username: str):
       detail=f"Too many failed attempts. Try again in {remaining}s.",
     )
   if until:
-    _login_cooldown_until.pop(username, None)
+    _login_cooldown_until.pop(key, None)
 
 
 def _evict_oldest_if_over_cap(d: dict) -> None:
@@ -105,28 +111,28 @@ def _evict_oldest_if_over_cap(d: dict) -> None:
     d.pop(next(iter(d)), None)
 
 
-def _record_login_failure(username: str):
+def _record_login_failure(key: str):
   """Increments failure count and sets cooldown if threshold reached."""
   _ensure_login_tracking_maps()
-  failures = _login_failures.get(username, 0) + 1
-  _login_failures[username] = failures
+  failures = _login_failures.get(key, 0) + 1
+  _login_failures[key] = failures
   _evict_oldest_if_over_cap(_login_failures)
   if failures >= 30:
-    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=15)
+    _login_cooldown_until[key] = datetime.now(UTC) + timedelta(minutes=15)
     _evict_oldest_if_over_cap(_login_cooldown_until)
   elif failures >= 20:
-    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=5)
+    _login_cooldown_until[key] = datetime.now(UTC) + timedelta(minutes=5)
     _evict_oldest_if_over_cap(_login_cooldown_until)
   elif failures >= 10:
-    _login_cooldown_until[username] = datetime.now(UTC) + timedelta(minutes=1)
+    _login_cooldown_until[key] = datetime.now(UTC) + timedelta(minutes=1)
     _evict_oldest_if_over_cap(_login_cooldown_until)
 
 
-def _reset_login_failures(username: str):
+def _reset_login_failures(key: str):
   """Resets the failure counter on successful login."""
   _ensure_login_tracking_maps()
-  _login_failures.pop(username, None)
-  _login_cooldown_until.pop(username, None)
+  _login_failures.pop(key, None)
+  _login_cooldown_until.pop(key, None)
 
 
 def _extract_provider_code_and_state(raw_code: str) -> tuple[str, str | None]:
@@ -489,7 +495,8 @@ def login(
       status_code=403,
       detail="Local password login is disabled; sign in with mobius.you.",
     )
-  _check_login_cooldown(form.username)
+  login_key = _login_key(form.username, request)
+  _check_login_cooldown(login_key)
   owner = (
     db.query(models.Owner)
     .filter(models.Owner.username == form.username)
@@ -502,7 +509,7 @@ def login(
     form.password, owner.hashed_password if owner else _DUMMY_PASSWORD_HASH
   )
   if not owner or not password_ok:
-    _record_login_failure(form.username)
+    _record_login_failure(login_key)
     raise HTTPException(
       status_code=401,
       detail="Incorrect username or password.",
@@ -521,7 +528,7 @@ def login(
     except SQLAlchemyError as exc:
       db.rollback()
       log.warning("Could not upgrade legacy owner password hash: %s", exc)
-  _reset_login_failures(form.username)
+  _reset_login_failures(login_key)
   # TOCTOU guard: re-check the mode immediately before minting. A host-side flip
   # to mobius after the gate but before the credential verified must not still
   # issue a local session.

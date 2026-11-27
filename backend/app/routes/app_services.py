@@ -13,12 +13,12 @@ from limits import RateLimitItemPerMinute
 from limits.storage import MemoryStorage
 from limits.strategies import SlidingWindowCounterRateLimiter
 from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from app import app_services, models, public_service_index
 from app.database import get_db
 from app.deps import Principal, get_principal, reject_cross_site
 from app.manifest_contract import PUBLIC_SERVICE_REQUESTS_PER_MINUTE, PUBLIC_SERVICE_VISITOR_SHARES
+from app.net_utils import rate_limit_client
 from app.resource_access import live_app_or_404
 from app.storage_io import read_capped_body
 
@@ -26,7 +26,7 @@ from app.storage_io import read_capped_body
 router = APIRouter(tags=["app-services"])
 # Total body-read lifetime, separate from the unchanged 15-second execution timeout.
 SERVICE_BODY_TIMEOUT_SECONDS = 120
-_limiter = Limiter(key_func=get_remote_address, key_style="endpoint")
+_limiter = Limiter(key_func=rate_limit_client, key_style="endpoint")
 # The anonymous door holds each public service to its accepted allowance (60 a
 # minute unless its manifest declares more) across all its visitors, and each
 # visitor to a 1/PUBLIC_SERVICE_VISITOR_SHARES share of it (never under 60), so
@@ -45,7 +45,7 @@ def _admit_public_request(request: Request, bucket: str, per_minute: int) -> Non
   )
   service = RateLimitItemPerMinute(per_minute)
   counters = (
-    (visitor, ("visitor", bucket, get_remote_address(request))),
+    (visitor, ("visitor", bucket, rate_limit_client(request))),
     (service, ("service", bucket)),
   )
   for allowance, key in counters:

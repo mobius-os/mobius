@@ -49,7 +49,10 @@ being external attackers reaching the public HTTPS endpoint.
   app-scoped token; the retired direct-execution cache is evicted on service
   worker activation.
 - **Rate limiting:** 120 req/min global, 3-5/min on auth endpoints.
-  Uses TCP peer address (not X-Forwarded-For).
+  Counts each visitor, not the proxy in front: X-Forwarded-For is read only
+  from a peer on an internal network (the deployment's proxy), and only its
+  rightmost entry, which that proxy wrote; a publicly routable peer is
+  counted by its own address and its headers are ignored.
 
 ## Accepted trade-offs
 
