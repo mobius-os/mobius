@@ -642,10 +642,18 @@ class RuntimeSupervisors:
     async def platform_update_watch_loop():
       # An unfinished update whose resolver stopped stays parked silently
       # until the owner opens Settings; tell them once per stall episode.
-      from app.platform_update import notify_update_stall_once
+      # A re-conflict notice a finish recorded but did not deliver (the
+      # process stopped in between) is delivered first.
+      from app.platform_update import notify_owed_reconflict, notify_update_stall_once
 
       await asyncio.sleep(300)
       while True:
+        try:
+          await notify_owed_reconflict()
+        except asyncio.CancelledError:
+          raise
+        except Exception as exc:
+          self.log.error("platform re-conflict notice failed: %s", exc, exc_info=True)
         try:
           await notify_update_stall_once(SessionLocal)
         except asyncio.CancelledError:
