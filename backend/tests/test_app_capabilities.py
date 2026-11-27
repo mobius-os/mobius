@@ -631,6 +631,89 @@ def test_digest_mismatch_rejects_before_fetching_code_or_mutating(
 
 
 
+_TEMPLATES = [{"id": "notes", "name": "Notes"}]
+
+
+def _preview_digest(client, auth, url, manifest):
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({url: (200, json.dumps(manifest).encode())}),
+  ):
+    response = client.post(
+      "/api/apps/preview", headers=auth, json={"manifest_url": url},
+    )
+  assert response.status_code == 200, response.text
+  return response.json()["capability_digest"]
+
+
+def test_review_digest_binds_project_builders_without_moving_other_digests():
+  from app.app_capabilities import capability_digest
+
+  contract, plain = contract_and_digest(_manifest())
+  templated_contract, templated = contract_and_digest(_manifest(project_templates=_TEMPLATES))
+  _again, more_templates = contract_and_digest(_manifest(
+    project_templates=[*_TEMPLATES, {"id": "slides", "name": "Slides"}],
+  ))
+
+  assert templated_contract == contract
+  assert plain == capability_digest(contract)
+  assert templated != plain
+  # Another template asks for the same access, so the review still holds.
+  assert more_templates == templated
+
+
+def test_project_templates_added_after_review_refuse_the_install(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://capability.test/memory/"
+  url = base + "mobius.json"
+  reviewed = _preview_digest(client, auth, url, _manifest())
+  changed = _manifest(project_templates=_TEMPLATES)
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client({url: (200, json.dumps(changed).encode())}),
+  ):
+    response = client.post(
+      "/api/apps/install",
+      headers=auth,
+      json={"manifest_url": url, "reviewed_capability_digest": reviewed},
+    )
+
+  assert response.status_code == 409, response.text
+  detail = response.json()["detail"]
+  assert detail["code"] == "capability_changed"
+  assert "project_builders" in {row["id"] for row in detail["access_rows"]}
+  assert db.query(models.App).count() == 0
+
+
+def test_an_unchanged_manifest_with_project_templates_installs_under_its_review(
+  client, auth, db, bypass_url_validation,
+):
+  base = "https://capability.test/memory/"
+  url = base + "mobius.json"
+  manifest = _manifest(project_templates=_TEMPLATES)
+  reviewed = _preview_digest(client, auth, url, manifest)
+  responses = {
+    url: (200, json.dumps(manifest).encode()),
+    base + "index.jsx": (200, JSX.encode()),
+    base + "memory-core.md": (200, b"Retrieve memory only on demand."),
+    base + "memory-job.sh": (200, b"#!/bin/sh\nexit 0\n"),
+  }
+  with patch(
+    "app.install.httpx.AsyncClient",
+    side_effect=_fake_async_client(responses),
+  ), patch("app.app_jobs.launch_app_job"):
+    response = client.post(
+      "/api/apps/install",
+      headers=auth,
+      json={"manifest_url": url, "reviewed_capability_digest": reviewed},
+    )
+
+  assert response.status_code == 201, response.text
+  app = db.query(models.App).filter(models.App.slug == "memory").one()
+  assert app.project_templates_json == _TEMPLATES
+
+
 @pytest.mark.asyncio
 async def test_bootstrap_initialization_waits_for_backend_readiness(
   db, bypass_url_validation,

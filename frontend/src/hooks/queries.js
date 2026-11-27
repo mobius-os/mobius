@@ -681,6 +681,12 @@ export const appQueries = {
     fetch: fetchAppConsent,
     useQuery: useAppConsentQuery,
     invalidate: (queryClient, appId) => queryClient.invalidateQueries({ queryKey: ['app-consent', appId] }),
+    // Accepting or revoking an app's access (or an update that asks again)
+    // also decides whether its project types are offered in New project.
+    changed: (queryClient, appId) => Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['app-consent', appId] }),
+      queryClient.invalidateQueries({ queryKey: projectTemplatesKey }),
+    ]),
   },
   creditsPayments: {
     useQuery: useAppWaitingPaymentsQuery,

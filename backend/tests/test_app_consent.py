@@ -671,6 +671,31 @@ def test_installed_rows_use_the_installed_versions_templates():
   assert "project_builders" not in {r["id"] for r in preview["installed_access_rows"]}
 
 
+def test_a_store_apps_project_types_wait_for_acceptance(client, owner_token, db):
+  headers = _owner_headers(client, owner_token)
+  app = _app(db, "builder", contract=_contract())
+  app.project_templates_json = [{"id": "notes", "name": "Notes"}]
+  db.commit()
+
+  def offered():
+    return {t["key"] for t in client.get("/api/projects/templates", headers=headers).json()}
+
+  assert "builder:notes" not in offered()
+  created = client.post(
+    "/api/projects", headers=headers,
+    json={"name": "Early", "template_id": "builder:notes"},
+  )
+  assert created.status_code == 422, created.text
+
+  view = client.get(f"/api/apps/{app.id}/consent", headers=headers).json()
+  assert [r["id"] for r in view["rows"]] == ["project_builders"]
+  accepted = client.post(
+    f"/api/apps/{app.id}/consent", json={"digest": view["digest"]}, headers=headers,
+  )
+  assert accepted.status_code == 200, accepted.text
+  assert "builder:notes" in offered()
+
+
 def _install_dormant_skilled(client, auth):
   from tests.test_app_skills import SKILL_V1, JSX, _install, _skill_manifest
 

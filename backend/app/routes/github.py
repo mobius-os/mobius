@@ -5626,11 +5626,12 @@ async def connect_published_app(
     if install._catalog_identity_matches(
       current.manifest_url, spec.manifest_url, spec.manifest_id,
     ):
-      from app.app_capabilities import capability_digest
+      from app.app_capabilities import access_review_digest
 
       try:
-        installed_capability_digest = capability_digest(
+        installed_capability_digest = access_review_digest(
           current.capability_contract,
+          project_builders=bool(current.project_templates_json),
         )
       except (TypeError, ValueError):
         installed_capability_digest = ""
