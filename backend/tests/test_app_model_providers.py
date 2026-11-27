@@ -222,6 +222,32 @@ async def test_installed_app_models_join_chat_and_background_then_revoke(db, tmp
     "deepseek-next",
   ]
   assert providers.DEFAULT_BACKGROUND_MODELS[provider_id] == "deepseek-next"
+  assert providers.PROVIDERS[provider_id].resolve_selection("deepseek-flash", "low") == (None, None)
+  assert providers.effective_agent_settings(
+    data_dir, {"model": "deepseek-flash"}, provider=provider_id,
+  )["model"] is None
+  assert providers.snapshot_chat_agent_settings(
+    data_dir, provider_id, model="deepseek-flash", fallback_model="deepseek-next",
+  ) is None
+  assert providers.snapshot_chat_agent_settings(
+    data_dir, provider_id, fallback_model="deepseek-next",
+  )["model"] == "deepseek-next"
+  assert "deepseek-next" not in [row["id"] for row in (await providers.list_models(data_dir))["mobius"]]
+  from app.routes.chats import AppChatCreate, _add_app_chat
+  from fastapi import HTTPException
+  before = db.query(models.Chat).count()
+  with pytest.raises(HTTPException, match="selected model is unavailable") as exc:
+    _add_app_chat(AppChatCreate(provider=provider_id, model="deepseek-flash"), app_id, db)
+  assert exc.value.status_code == 422
+  assert db.query(models.Chat).count() == before
+  default_chat = _add_app_chat(AppChatCreate(provider=provider_id), app_id, db)
+  assert default_chat.agent_settings_json["model"] == "deepseek-next"
+  db.rollback()
+  monkeypatch.setattr(background_agents, "resolve_background_provider", lambda *a, **kw: {
+    "provider": provider_id, "model": "deepseek-flash", "effort": "low",
+  })
+  with pytest.raises(RuntimeError, match="deepseek-flash is unavailable"):
+    background_agents.resolve_background_chat_choice(data_dir, db)
 
   app.deleted_at = datetime.now(UTC)
   db.commit()
