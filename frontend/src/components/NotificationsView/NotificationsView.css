@@ -244,7 +244,7 @@
 .notifications__update-action--primary {
   border-color: var(--accent-fill, var(--accent));
   background: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
 }
 
 @media (hover: hover) and (pointer: fine) {

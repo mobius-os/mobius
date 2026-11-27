@@ -51,10 +51,10 @@
   background: var(--muted); /* CONTRACT: calm, in-progress — motion lives on the label, not here */
 }
 .chat__subagent-dot--done {
-  background: var(--green, #10b981); /* CONTRACT: settled OK */
+  background: var(--green); /* CONTRACT: settled OK */
 }
 .chat__subagent-dot--failed {
-  background: var(--danger, #f87171); /* CONTRACT: vivid danger — the helper failed or was stopped */
+  background: var(--danger); /* CONTRACT: vivid danger — the helper failed or was stopped */
 }
 
 .chat__subagent-body {

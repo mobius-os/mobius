@@ -135,13 +135,12 @@
   height: 30px;
   border-radius: 8px;
   background: var(--surface);
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
   display: grid;
   place-items: center;
   color: var(--text);
   flex-shrink: 0;
 }
-[data-theme="light"] .csp-row__icon { border-color: rgba(15, 18, 25, 0.10); }
 
 .csp__mobius-logo {
   display: block;
@@ -215,7 +214,7 @@
   top: 2px;
   width: 5px;
   height: 8px;
-  border: 1.5px solid var(--accent-fg, #fff);
+  border: 1.5px solid var(--accent-fg);
   border-top: 0;
   border-left: 0;
   transform: rotate(45deg);
@@ -415,7 +414,7 @@
 }
 
 .csp__confirm-btn--primary {
-  color: var(--accent-fg, #ffffff);
+  color: var(--accent-fg);
   border-color: var(--accent-fill, var(--accent));
   background: var(--accent-fill, var(--accent));
 }

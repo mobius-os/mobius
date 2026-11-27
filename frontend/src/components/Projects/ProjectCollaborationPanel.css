@@ -127,7 +127,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.project-collab__online { color: var(--green, #2f8b58); }
+.project-collab__online { color: var(--green); }
 
 .project-collab__member-actions { display: flex; align-items: center; gap: 4px; }
 .project-collab__role-picker {
@@ -161,8 +161,8 @@
 }
 .project-collab__remove:hover,
 .project-collab__pending button:hover {
-  color: var(--danger, #b34040);
-  background: color-mix(in srgb, var(--danger, #b34040) 9%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
 }
 
 .project-collab__invite-toggle {
@@ -218,7 +218,7 @@
   cursor: pointer;
 }
 .project-collab__invite > div > button:first-child,
-.project-collab__invite-result button { color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); }
+.project-collab__invite-result button { color: var(--accent-fg); background: var(--accent-fill, var(--accent)); }
 .project-collab__invite > .project-collab__invite-via {
   display: grid;
   grid-template-columns: 1fr 1fr;

@@ -983,7 +983,7 @@ test('chat drawer indicators distinguish owner input, active work, waiting, and 
     'chat rows carry no persistent not-upstream-yet marker',
   )
   assert.match(drawerCss, /\.drawer__attention-diamond\s*\{[\s\S]*?transform:\s*rotate\(45deg\)/)
-  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--owner-input, #f59e0b\)/)
+  assert.match(drawerCss, /\.drawer__owner-input-dot\s*\{[\s\S]*?var\(--warning\)/)
   assert.match(drawerCss, /\.drawer__streaming-dot\s*\{[\s\S]*?background:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__waiting-icon\s*\{[\s\S]*?color:\s*var\(--accent\)/)
   assert.match(drawerCss, /\.drawer__attention-dot\s*\{[\s\S]*?border:\s*1\.5px solid var\(--green\)/)

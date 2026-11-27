@@ -9,9 +9,9 @@
 }
 .uninstalled-apps__clock {
   position: absolute; right: -5px; bottom: -5px; box-sizing: content-box; width: 12px; height: 12px; padding: 4px;
-  border: 1px solid var(--border-light); border-radius: 50%; background: var(--surface); color: #f5b942;
+  border: 1px solid var(--border-light); border-radius: 50%; background: var(--surface); color: var(--warning-text);
 }
-.uninstalled-apps__clock[data-tone="urgent"] { color: #f87171; }
+.uninstalled-apps__clock[data-tone="urgent"] { color: var(--danger-text); }
 
 /* What can be done with it: a card under the tile, placed like the item menu. */
 .uninstalled-popover-layer { position: fixed; inset: 0; z-index: 1000; pointer-events: none; }
@@ -36,9 +36,9 @@
 .uninstalled-popover__pill {
   padding: 2px 9px; border: 1px solid var(--border-light); border-radius: 999px; color: var(--muted); font-size: 12px; font-weight: 650; white-space: nowrap;
 }
-.uninstalled-popover__pill.is-soon { color: #f5b942; border-color: color-mix(in srgb, #f5b942 45%, transparent); }
-.uninstalled-popover__pill.is-urgent { color: #f87171; border-color: color-mix(in srgb, #f87171 45%, transparent); }
-.uninstalled-popover > p.uninstalled-popover__error { color: var(--danger, #f87171); }
+.uninstalled-popover__pill.is-soon { color: var(--warning-text); border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
+.uninstalled-popover__pill.is-urgent { color: var(--danger-text); border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.uninstalled-popover > p.uninstalled-popover__error { color: var(--danger); }
 .uninstalled-popover__actions { display: flex; gap: 8px; }
 .uninstalled-popover > p.uninstalled-popover__note {
   display: block; padding-top: 10px; border-top: 1px solid var(--border-light); font-size: 11px; font-style: italic; line-height: 1.35;
@@ -47,8 +47,8 @@
   flex: 1 1 0; min-width: 0; min-height: 38px; padding: 7px 10px; border: 1px solid var(--border-light); border-radius: 11px;
   background: transparent; color: var(--text); font: inherit; font-size: 13px; font-weight: 650; white-space: nowrap; cursor: pointer;
 }
-.uninstalled-popover__btn--primary { border-color: var(--accent-fill, var(--accent)); background: var(--accent-fill, var(--accent)); color: var(--accent-fg, #fff); }
-.uninstalled-popover__btn--danger { border-color: color-mix(in srgb, var(--danger, #f87171) 55%, transparent); color: var(--danger-text, var(--danger, #f87171)); }
+.uninstalled-popover__btn--primary { border-color: var(--accent-fill, var(--accent)); background: var(--accent-fill, var(--accent)); color: var(--accent-fg); }
+.uninstalled-popover__btn--danger { border-color: color-mix(in srgb, var(--danger) 55%, transparent); color: var(--danger-text, var(--danger)); }
 .uninstalled-popover__btn:hover:not(:disabled) { filter: brightness(1.1); }
 /* Brightening the fill would drop its label below 4.5:1; deepen it instead. */
 .uninstalled-popover__btn--primary:hover:not(:disabled) { filter: none; background: var(--accent-fill-hover, var(--accent-hover, var(--accent))); }

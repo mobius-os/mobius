@@ -10,7 +10,7 @@
 .artifact-preview--phone { align-self: center; width: min(100%, 390px); }
 .project-pdf__toolbar { flex-wrap: wrap; padding: 4px 8px; }
 .project-pdf__toolbar .project-pdf__text-control { width: auto; padding: 0 8px; }
-.project-pdf__toolbar button[aria-pressed="true"] { background: rgba(255, 255, 255, .16); }
+.project-pdf__toolbar button[aria-pressed="true"] { background: color-mix(in srgb, var(--text) 16%, transparent); }
 .project-pdf__toolbar button:disabled { opacity: .45; }
 .artifact-workspace .project-pdf__viewport { justify-content: flex-start; }
 .artifact-workspace .project-pdf__viewport canvas { max-width: none; margin: 0 auto; }

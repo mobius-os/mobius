@@ -144,11 +144,6 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  --shared-folders-warning: #e5b20e;
-}
-
-[data-theme="light"] .shared-folders__visit {
-  --shared-folders-warning: #a87b00;
 }
 
 .shared-folders__note-trigger {
@@ -156,16 +151,16 @@
   height: 40px;
   display: grid;
   place-items: center;
-  border: 1px solid color-mix(in srgb, var(--shared-folders-warning) 45%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning-text) 45%, transparent);
   border-radius: 999px;
-  background: color-mix(in srgb, var(--shared-folders-warning) 12%, transparent);
-  color: var(--shared-folders-warning);
+  background: color-mix(in srgb, var(--warning-text) 12%, transparent);
+  color: var(--warning-text);
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
 
 .shared-folders__note-trigger:focus-visible {
-  outline: 2px solid var(--shared-folders-warning);
+  outline: 2px solid var(--warning-text);
   outline-offset: 2px;
 }
 
@@ -196,7 +191,7 @@
 .shared-folders__note-title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--shared-folders-warning);
+  color: var(--warning-text);
 }
 
 .shared-folders__note-close {

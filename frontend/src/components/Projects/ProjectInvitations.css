@@ -14,7 +14,7 @@
   min-width: 18px;
   padding: 1px 6px;
   border-radius: 999px;
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   background: var(--accent);
   font-size: 10px;
   text-align: center;
@@ -56,7 +56,7 @@
 }
 .project-invitations__actions .project-invitations__accept {
   border-color: transparent;
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   background: var(--accent);
 }
 .project-invitations__actions button:disabled { opacity: .6; cursor: default; }

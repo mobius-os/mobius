@@ -8,7 +8,7 @@
   margin: 10px 0;
   padding: 16px;
   border-radius: 14px;
-  background: var(--surface, rgba(255,255,255,.06));
+  background: var(--surface);
   border: 1px solid var(--border-light, var(--border));
 }
 /* The card is a programmatic landing spot for links to a saved question, not
@@ -219,7 +219,7 @@
   outline-offset: 2px;
 }
 .qcard__opt:hover:not(.qcard__opt--static) {
-  background: var(--surface-2, rgba(128,128,128,.1));
+  background: var(--surface-2);
 }
 .qcard__opt--on {
   background: color-mix(in srgb, var(--accent) 12%, var(--surface));
@@ -285,7 +285,7 @@
   top: 1px;
   width: 4px;
   height: 7px;
-  border: 1.5px solid var(--accent-fg, #fff);
+  border: 1.5px solid var(--accent-fg);
   border-top: none;
   border-left: none;
   transform: rotate(45deg);
@@ -305,7 +305,7 @@
   min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--surface-2, rgba(128,128,128,.1));
+  background: var(--surface-2);
   transition: border-color .15s, box-shadow .15s;
 }
 .qcard__composer--active {
@@ -435,7 +435,7 @@
   border-radius: 8px;
   border: none;
   background: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;

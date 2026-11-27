@@ -21,9 +21,9 @@
   position: relative;
   width: 100%;
   max-width: 420px;
-  background: var(--surface, #14181f);
-  color: var(--text, #d4d4d8);
-  border: 1px solid var(--border, #252b36);
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 20px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
@@ -63,14 +63,14 @@
   /* No opaque tile — the raw /api/apps/{id}/icon route returns the original
      transparent PNG so glossy 3D catalog icons render without a dark halo.
      A 1px border keeps the tap-target visible for the custom-icon affordance. */
-  border: 1px solid var(--border, #252b36);
+  border: 1px solid var(--border);
   background: transparent;
   cursor: pointer;
   padding: 0;
 }
 
 .is__icon-wrap:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -87,10 +87,10 @@
   right: 0;
   width: 22px;
   height: 22px;
-  background: var(--accent, #a78bfa);
-  color: var(--accent-fg, #ffffff);
+  background: var(--accent);
+  color: var(--accent-fg);
   border-radius: 50%;
-  border: 2px solid var(--surface, #14181f);
+  border: 2px solid var(--surface);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -107,7 +107,7 @@
 .is__field-label {
   display: block;
   font-size: 12px;
-  color: var(--muted, #9ca3af);
+  color: var(--muted);
   margin-bottom: 6px;
 }
 
@@ -115,9 +115,9 @@
   width: 100%;
   padding: 10px 12px;
   border-radius: 8px;
-  border: 1px solid var(--border, #252b36);
-  background: var(--bg, #0d0d0d);
-  color: var(--text, #d4d4d8);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
   font: inherit;
   font-size: 15px;
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
@@ -126,18 +126,18 @@
 .is__name-input:focus,
 .is__name-input:focus-visible {
   outline: none;
-  border-color: var(--accent, #a78bfa);
-  box-shadow: 0 0 0 3px var(--accent-dim, rgba(167, 139, 250, 0.14));
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .is__preview {
   margin-top: 8px;
   font-size: 12px;
-  color: var(--muted, #9ca3af);
+  color: var(--muted);
 }
 
 .is__preview strong {
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -145,16 +145,16 @@
   margin: 14px 0 0;
   font-size: 12px;
   line-height: 1.45;
-  color: var(--muted, #9ca3af);
+  color: var(--muted);
 }
 
 .is__error {
   margin-top: 12px;
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(248, 113, 113, 0.12);
-  border: 1px solid var(--danger, #f87171);
-  color: var(--danger, #f87171);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  border: 1px solid var(--danger);
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -198,7 +198,7 @@
 }
 
 .is__btn:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -208,14 +208,14 @@
 }
 
 .is__btn--primary {
-  background: var(--accent-fill, var(--accent, #a78bfa));
-  color: var(--accent-fg, #ffffff);
+  background: var(--accent-fill, var(--accent));
+  color: var(--accent-fg);
 }
 
 .is__btn--secondary {
   background: transparent;
-  color: var(--muted, #9ca3af);
-  border: 1px solid var(--border, #252b36);
+  color: var(--muted);
+  border: 1px solid var(--border);
 }
 
 /* Hand-off step copy: larger and higher-contrast than the form hint, since
@@ -224,11 +224,11 @@
   margin-top: 4px;
   font-size: 14px;
   line-height: 1.55;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
 }
 
 .is__hint--steps strong {
-  color: var(--accent-text, var(--accent, #a78bfa));
+  color: var(--accent-text, var(--accent));
   font-weight: 600;
 }
 
@@ -262,7 +262,7 @@
   border: none;
   border-radius: 8px;
   background: transparent;
-  color: var(--muted, #9ca3af);
+  color: var(--muted);
   font: inherit;
   font-size: 22px;
   line-height: 1;
@@ -271,18 +271,18 @@
 }
 
 .is__close:hover {
-  color: var(--text, #d4d4d8);
-  background: var(--hover, rgba(255, 255, 255, 0.06));
+  color: var(--text);
+  background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 .is__close:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
 /* The address is a pass-free recovery path to read or retype by hand. */
 .is__url {
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   overflow-wrap: anywhere;
   user-select: all;
 }

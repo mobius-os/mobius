@@ -519,7 +519,7 @@
   padding: 0 6px;
   border-radius: 999px;
   background: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   font-size: 11px;
   font-weight: 700;
   line-height: 19px;
@@ -945,7 +945,7 @@
    in both built-in themes without adding a second custom-theme token. */
 .drawer__owner-input-dot {
   margin-right: 2px;
-  color: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
+  color: color-mix(in srgb, var(--warning) 60%, var(--text));
 }
 
 /* "The latest background run FINISHED while you were elsewhere" — a
@@ -1213,7 +1213,7 @@
 }
 .drawer__apps-card-dot--needs,
 .drawer__apps-card-dot--new { background: var(--accent); }
-.drawer__apps-card-dot--building { left: 2px; right: auto; background: var(--green, #3fb950); }
+.drawer__apps-card-dot--building { left: 2px; right: auto; background: var(--green); }
 
 /* App name label above the hovered / keyboard-focused icon. It lives in the
    section, outside the scrolling row, so the row is never clipped around it

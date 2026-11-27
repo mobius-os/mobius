@@ -11,8 +11,8 @@
 .setup__card {
   width: 100%;
   max-width: 400px;
-  background: var(--surface, #14181f);
-  border: 1px solid var(--border, #252b36);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 12px;
   padding: 30px 32px 32px;
   box-sizing: border-box;
@@ -32,7 +32,7 @@
   justify-content: center;
   gap: 10px;
   margin-bottom: 18px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
 }
 
 .setup__progress-text {
@@ -51,11 +51,11 @@
   width: 6px;
   height: 6px;
   border-radius: 999px;
-  background: var(--border, #252b36);
+  background: var(--border);
 }
 
 .setup__progress-dot--active {
-  background: var(--accent, #a78bfa);
+  background: var(--accent);
 }
 
 .setup__title {
@@ -63,11 +63,11 @@
   font-weight: 700;
   margin-bottom: 6px;
   text-align: center;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
 }
 
 .setup__subtitle {
-  color: var(--muted, #52525b);
+  color: var(--muted);
   margin: 0 auto 24px;
   text-align: center;
   line-height: 1.5;
@@ -75,7 +75,7 @@
 }
 
 .setup__subtitle a {
-  color: var(--accent-text, var(--accent, #a78bfa));
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -91,16 +91,16 @@
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
 }
 
 .setup__input {
   width: 100%;
   box-sizing: border-box;
-  background: var(--bg, #0d0d0d);
-  border: 1px solid var(--border, #252b36);
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   padding: 9px 12px;
   outline: none;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -109,30 +109,30 @@
 .setup__input:focus,
 .setup__input:focus-visible,
 .setup__select:focus-visible {
-  border-color: var(--accent, #a78bfa);
-  box-shadow: 0 0 0 3px var(--accent-dim, rgba(167, 139, 250, 0.14));
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-dim);
 }
 
 .setup__error {
-  color: var(--danger, #f87171);
+  color: var(--danger);
   font-size: 13px;
 }
 
 .setup__success {
   margin: 14px 0 0;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   font-size: 13px;
   text-align: center;
 }
 
 .setup__hint {
   font-size: 12px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
 }
 
 .setup__btn {
-  background: var(--accent-fill, var(--accent, #7c5ce6));
-  color: var(--accent-fg, #fff);
+  background: var(--accent-fill, var(--accent));
+  color: var(--accent-fg);
   border: none;
   border-radius: 10px;
   padding: 10px;
@@ -156,7 +156,7 @@
 }
 
 .setup__btn:hover:not(:disabled) {
-  background: var(--accent-fill-hover, var(--accent-hover, #7053cf));
+  background: var(--accent-fill-hover, var(--accent-hover));
 }
 
 .setup__btn:disabled {
@@ -168,7 +168,7 @@
 .setup__skip:focus-visible,
 .setup__subtitle a:focus-visible,
 .setup__auth-msg a:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -179,20 +179,20 @@
 
 .setup__auth-msg {
   font-size: 14px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
   margin-bottom: 8px;
 }
 
 .setup__auth-msg a {
-  color: var(--accent-text, var(--accent, #a78bfa));
+  color: var(--accent-text, var(--accent));
   text-decoration: underline;
 }
 
 .setup__spinner {
   width: 24px;
   height: 24px;
-  border: 3px solid var(--border, #252b36);
-  border-top-color: var(--accent, #a78bfa);
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
   border-radius: 50%;
   margin: 16px auto;
   animation: setup-spin 0.8s linear infinite;
@@ -204,7 +204,7 @@
 
 .setup__auth-waiting {
   font-size: 13px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
 }
 
 .setup__auth-done {
@@ -214,14 +214,14 @@
 
 .setup__auth-success {
   font-size: 14px;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   margin-bottom: 16px;
 }
 
 .setup__badge {
   display: inline-block;
-  background: var(--accent-fill, var(--accent, #7c5ce6));
-  color: var(--accent-fg, #fff);
+  background: var(--accent-fill, var(--accent));
+  color: var(--accent-fg);
   font-size: 11px;
   font-weight: 600;
   padding: 2px 8px;
@@ -237,7 +237,7 @@
 }
 
 .setup__provider-status {
-  color: var(--muted, #52525b);
+  color: var(--muted);
   font-size: 12px;
 }
 
@@ -247,7 +247,7 @@
   justify-content: space-between;
   gap: 12px;
   margin: 0 0 16px;
-  color: var(--danger, #f87171);
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -258,18 +258,18 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--accent-text, var(--accent, #a78bfa));
+  color: var(--accent-text, var(--accent));
   font: inherit;
   font-weight: 600;
   cursor: pointer;
 }
 
 .setup__provider-error button:hover {
-  background: var(--accent-dim, rgba(167, 139, 250, 0.14));
+  background: var(--accent-dim);
 }
 
 .setup__provider-error button:focus-visible {
-  outline: 2px solid var(--accent, #a78bfa);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -277,10 +277,10 @@
   width: 100%;
   min-height: 38px;
   box-sizing: border-box;
-  background: var(--surface, #14181f);
-  border: 1px solid var(--border, #252b36);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  color: var(--text, #d4d4d8);
+  color: var(--text);
   padding: 8px 10px;
   font: inherit;
   font-size: 13px;
@@ -296,7 +296,7 @@
 .setup__skip-warn {
   margin-top: 16px;
   font-size: 12px;
-  color: var(--accent-text, var(--accent, #a78bfa));
+  color: var(--accent-text, var(--accent));
   text-align: center;
 }
 
@@ -307,7 +307,7 @@
   padding: 8px;
   background: none;
   border: none;
-  color: var(--muted, #52525b);
+  color: var(--muted);
   font-size: 13px;
   cursor: pointer;
   text-align: center;
@@ -315,16 +315,16 @@
 }
 
 .setup__skip:hover {
-  color: var(--text, #d4d4d8);
+  color: var(--text);
 }
 
 .setup__auth-help {
-  background: var(--surface, #14181f);
-  border: 1px solid var(--border, #252b36);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 12px 14px;
   font-size: 13px;
-  color: var(--muted, #52525b);
+  color: var(--muted);
   margin-top: 10px;
 }
 
@@ -337,8 +337,8 @@
 }
 
 .setup__auth-help-cmd {
-  background: var(--bg, #0d0d0d);
-  border: 1px solid var(--border, #252b36);
+  background: var(--bg);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px 10px;
   font-size: 12px;

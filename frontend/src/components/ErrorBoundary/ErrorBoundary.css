@@ -16,8 +16,8 @@
     max(24px, env(safe-area-inset-right))
     max(24px, env(safe-area-inset-bottom))
     max(24px, env(safe-area-inset-left));
-  background: var(--bg, #0d0d0d);
-  color: var(--text, #ececec);
+  background: var(--bg);
+  color: var(--text);
 }
 
 /* Inline variant: fill the nearest positioned ancestor (e.g. .shell__content)
@@ -32,8 +32,8 @@
   max-width: 28rem;
   margin: auto;
   padding: 24px;
-  background: var(--surface, #171717);
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 8px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.32);
 }
@@ -45,7 +45,7 @@
   align-items: center;
   justify-content: center;
   text-align: center;
-  color: var(--text-muted, rgba(236, 236, 236, 0.72));
+  color: var(--muted);
 }
 
 .errbound__updating-text {
