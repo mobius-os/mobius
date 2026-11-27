@@ -16,6 +16,7 @@
  */
 
 import { BASE, apiFetch, getAuthSessionCacheKey } from './client.js'
+import { closeAuthWindow, navigateAuthWindow } from '../utils/authWindow.js'
 
 // Per-chat token cache: { token: string, expiresAt: number }
 // Cache for 10 minutes (server TTL is 15 min, giving 5 min buffer for clock skew
@@ -77,6 +78,43 @@ export async function mediaTokenParam(chatId) {
 export async function buildMediaUrl(path, chatId) {
   const param = await mediaTokenParam(chatId)
   return `${BASE}${path}${param}`
+}
+
+/**
+ * Opens a chat file link with a media token that is valid when it is clicked.
+ *
+ * A link can be clicked long after it rendered, when the token in its href has
+ * expired. The tab is reserved inside the click, as popup blockers require, and
+ * pointed at the file once a token is ready; a download starts the same way.
+ * Modified clicks and blocked popups keep the browser's default behaviour.
+ *
+ * @param {MouseEvent} event  the link's click event
+ * @param {string} chatId
+ * @param {string} path  e.g. "/api/chats/{id}/generated-files/{name}"
+ * @param {{ query?: string, download?: string }} [options]
+ *   query: extra parameters starting with "&"; download: save under this name
+ */
+export function openMediaLink(event, chatId, path, { query = '', download } = {}) {
+  if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  const tab = download ? null : window.open('', '_blank')
+  if (!download && !tab) return
+  event.preventDefault()
+  mediaTokenParam(chatId).then((param) => {
+    const url = `${BASE}${path}${param}${param ? query : query.replace(/^&/, '?')}`
+    if (tab) {
+      // The shared helper severs the opener and tolerates a tab the owner
+      // closed while the token was being fetched; a tab it cannot navigate
+      // is closed rather than left blank.
+      if (!navigateAuthWindow(tab, url)) closeAuthWindow(tab)
+      return
+    }
+    const link = document.createElement('a')
+    link.href = url
+    link.download = download
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  })
 }
 
 /**
