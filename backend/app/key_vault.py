@@ -281,6 +281,28 @@ def sites_outside(sites: list[dict], requested: list[dict]) -> list[dict]:
   return _vault_rules().sites_outside(sites, requested)
 
 
+def secret_echoes(*values: str):
+  """The vault's matcher for every echo of ``values``, however a site escaped them.
+
+  Building it can take a large part of a second for a long OAuth token, so call
+  it off the event loop. The few most recent matchers are kept, so repeat
+  requests with the same key do not rebuild one, while a rotated token's is soon
+  released.
+  """
+  return _secret_echoes_of(frozenset(values))
+
+
+@functools.lru_cache(maxsize=4)
+def _secret_echoes_of(values: frozenset[str]):
+  return _vault_rules().secret_echoes(*values)
+
+
+def stream_redactor(echoes, replacement: bytes):
+  """The vault's redactor for a body streamed in pieces, so the broker and the
+  vault relay share one hold-back rule."""
+  return _vault_rules().StreamRedactor(echoes, replacement)
+
+
 def stored_slot(inject):
   """A slot as the vault stores it, so one written differently but stored the
   same (spacing around its name, an absent prefix) compares equal; one the
