@@ -172,6 +172,34 @@ test('authored work reports show purpose, result and next step without inventing
   }
 })
 
+test('Goal plan uses a settled report as the row title and keeps exact claim texts in valid flow content', () => {
+  const dependency = { id: 'reported', target_kind: 'claim_acquisition', disposition: 'delivered',
+    condition: 'Exact technical condition', truncated: true,
+    outcome: { kind: 'completed', outcome: 'Exact technical outcome', work_report: {
+      purpose: 'Make saved work reliable', result: 'Verified in isolation.', next_step: 'Review before activation.',
+    } } }
+  const html = render(h(Details, { dependencyHistory: [dependency] }))
+  const row = html.match(/<div class="chat__goal-task-copy">(.*?)<\/div>/s)?.[1]
+  assert.ok(row)
+  assert.match(row, /<span class="chat__goal-task-title">Make saved work reliable<\/span>/)
+  assert.match(row, /Verified in isolation\. Next: Review before activation\./)
+  assert.match(row, /<details class="chat__goal-task-meta"><summary>Technical handoff<\/summary>/)
+  assert.ok(row.indexOf('Exact technical condition') > row.indexOf('<summary>Technical handoff</summary>'))
+  assert.ok(row.indexOf('Exact technical outcome') > row.indexOf('<summary>Technical handoff</summary>'))
+  assert.match(row, /Show full text/)
+  assert.doesNotMatch(row, /<span[^>]*>[^<]*<details/)
+
+  const legacy = render(h(Details, { dependencyHistory: [{ ...dependency,
+    outcome: { kind: 'completed', outcome: 'Legacy exact outcome' },
+  }] }))
+  assert.match(legacy, /<span class="chat__goal-task-title">Exact technical condition<\/span>/)
+  assert.match(legacy, /Legacy exact outcome/)
+  assert.match(legacy, /Show full text/)
+  const active = render(h(Details, { dependencies: [{ ...dependency, disposition: null }] }))
+  assert.match(active, /<span class="chat__goal-task-title">Exact technical condition<\/span>/)
+  assert.doesNotMatch(active, /Make saved work reliable|Verified in isolation/)
+})
+
 test('released failed stopped and withdrawn shared work never say completed', () => {
   for (const kind of ['released', 'failed', 'stopped', 'cancelled', 'owner_not_progressing']) {
     const html = render(h(History, { summary: { target_kind: 'claim_acquisition', condition: 'Shared action',

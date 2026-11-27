@@ -22,21 +22,22 @@ export default function DependencyFullText({ dependencyId }) {
     render={text => <span className="peer-note-full">{text}</span>} />
 }
 
-/** A Goal row's condition and outcome, each replaced in place by its whole
- *  text once read. */
+/** A Goal row keeps exact claim texts readable behind its authored summary. */
 export function DependencyRowTexts({ dependency, actions, meta }) {
   const texts = useFullPeerNote(dependency.truncated ? [() => readDependencyTexts(dependency.id)] : [])
   const full = texts.full
-  const report = dependency.outcome?.work_report
+  const report = dependency.target_kind === 'claim_acquisition' && dependency.disposition
+    ? dependency.outcome?.work_report : null
   const evidence = full?.outcome || dependency.outcome?.outcome
   return <>
-    <span className="chat__goal-task-title">{full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition}</span>
+    <span className="chat__goal-task-title">{report?.purpose || (full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition)}</span>
     {actions}
     <span className="chat__goal-task-meta">{meta}</span>
     {report && <span className="chat__goal-task-meta">{report.result}{report.next_step && ` Next: ${report.next_step}`}</span>}
-    {evidence && <details className="chat__goal-task-meta">
+    {(report || evidence) && <details className="chat__goal-task-meta">
       <summary>Technical handoff</summary>
-      <FullNoteText text={evidence} />
+      {report && <><strong>Original work</strong><br /><FullNoteText text={full?.condition || dependency.condition} /></>}
+      {evidence && <>{report && <br />}<strong>Outcome</strong><br /><FullNoteText text={evidence} /></>}
     </details>}
     {dependency.truncated && !full && <ReadFullAction note={texts} noun="text" />}
   </>
