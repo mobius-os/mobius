@@ -5051,16 +5051,6 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
           </button>
           <button
             type="button"
-            className={`shell__rail-action${activeView === 'apps' ? ' shell__rail-action--active' : ''}`}
-            aria-label="Apps shortcut"
-            title="Apps"
-            aria-current={activeView === 'apps' ? 'page' : undefined}
-            onClick={() => navTo('apps')}
-          >
-            <AppsNavIcon aria-hidden="true" />
-          </button>
-          <button
-            type="button"
             className={`shell__rail-action${activeView === 'projects' || activeView === 'project' || activeProjectChatProjectId ? ' shell__rail-action--active' : ''}`}
             aria-label="Projects shortcut"
             title="Projects"
@@ -5068,6 +5058,16 @@ export default function Shell({ onInitialVisualReady, sharedBrowserAccess = null
             onClick={() => navTo('projects')}
           >
             <ProjectsNavIcon aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            className={`shell__rail-action${activeView === 'apps' ? ' shell__rail-action--active' : ''}`}
+            aria-label="Apps shortcut"
+            title="Apps"
+            aria-current={activeView === 'apps' ? 'page' : undefined}
+            onClick={() => navTo('apps')}
+          >
+            <AppsNavIcon aria-hidden="true" />
           </button>
           <button
             type="button"
