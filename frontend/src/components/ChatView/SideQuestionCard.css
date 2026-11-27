@@ -152,7 +152,7 @@
 .side-question__button--primary {
   border-color: var(--accent-fill, var(--accent));
   background: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
 }
 
 /* Deepen rather than brighten: a lighter fill would drop the label below 4.5:1. */

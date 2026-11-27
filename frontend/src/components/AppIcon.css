@@ -6,7 +6,7 @@
   place-items: center;
   overflow: hidden;
   background: var(--app-color, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   font-weight: 750;
 }
 

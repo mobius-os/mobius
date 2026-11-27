@@ -105,8 +105,8 @@ test('DiffView stays generic, semantic, and keyboard-scrollable', () => {
   assert.match(diffStyles, /white-space: pre-wrap/)
   assert.match(diffStyles, /overflow-x: hidden/)
   assert.doesNotMatch(diffStyles, /width: max-content/)
-  assert.match(diffStyles, /var\(--green, #16a34a\)/)
-  assert.match(diffStyles, /var\(--danger, #ef4444\)/)
+  assert.match(diffStyles, /var\(--green\)/)
+  assert.match(diffStyles, /var\(--danger\)/)
 })
 
 

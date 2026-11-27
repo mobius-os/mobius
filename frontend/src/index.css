@@ -70,7 +70,7 @@ body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, dl, dd, figure, blockquote, fieldse
 html,
 body,
 #root {
-  background: var(--bg, #0d0d0d);
+  background: var(--bg);
 }
 
 /* Theme colors are injected server-side into <head> via theme.py.
@@ -216,7 +216,7 @@ html, body, #root {
 .app-route-loading {
   position: fixed;
   inset: 0;
-  background: var(--bg, #0d0d0d);
+  background: var(--bg);
 }
 
 /* Paint the ROOT element with the theme background so it propagates to the
@@ -229,7 +229,7 @@ html, body, #root {
    gap for the root itself and any state where applyTheme's runtime write hasn't
    landed. Uses var(--bg) (already set pre-paint) so there's no theme flash. */
 html {
-  background-color: var(--bg, #0d0d0d);
+  background-color: var(--bg);
 }
 
 /* The shell is fixed chrome: pan normally, but never let page-level pinch zoom
@@ -355,7 +355,7 @@ input, textarea {
    path stays unchanged. */
 input:focus-visible,
 textarea:focus-visible {
-  outline: 2px solid var(--accent, #8b6cf7);
+  outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
@@ -434,8 +434,8 @@ textarea:focus-visible {
    fill, not the brand --accent, so white body text keeps >= 4.5:1 across the
    whole gradient. */
 .chat__text--user {
-  background: linear-gradient(135deg, var(--accent-fill, var(--accent)), color-mix(in srgb, var(--accent) 78%, black));
-  color: #ffffff;
+  background: linear-gradient(135deg, var(--accent-fill), var(--accent-fill-hover));
+  color: var(--accent-fg);
   box-shadow: 0 2px 14px -4px var(--accent-dim);
 }
 
@@ -450,30 +450,30 @@ textarea:focus-visible {
 .chat__text--user .md-inline-code {
   color: inherit;
   background: rgb(0 0 0 / 0.25);
-  border-color: rgb(255 255 255 / 0.18);
+  border-color: color-mix(in srgb, var(--accent-fg) 18%, transparent);
 }
 
 .chat__text--user .md-code-block {
   background: rgb(0 0 0 / 0.32);
-  border-color: rgb(255 255 255 / 0.14);
+  border-color: color-mix(in srgb, var(--accent-fg) 14%, transparent);
 }
 
 .chat__text--user .md-code-lang {
-  color: rgb(255 255 255 / 0.72);
+  color: color-mix(in srgb, var(--accent-fg) 72%, transparent);
 }
 
 .chat__text--user .md-code-copy,
 .chat__text--user .md-code-copy--copied {
   background: rgb(0 0 0 / 0.28);
-  border-color: rgb(255 255 255 / 0.22);
-  color: rgb(255 255 255 / 0.88);
+  border-color: color-mix(in srgb, var(--accent-fg) 22%, transparent);
+  color: color-mix(in srgb, var(--accent-fg) 88%, transparent);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .chat__text--user .md-code-copy:hover,
   .chat__text--user .md-code-copy--copied:hover {
     background: rgb(0 0 0 / 0.42);
-    color: #ffffff;
+    color: var(--accent-fg);
   }
 }
 
@@ -485,12 +485,12 @@ textarea:focus-visible {
 
 .chat__text--user .md-blockquote {
   background: rgb(0 0 0 / 0.14);
-  border-color: rgb(255 255 255 / 0.3);
+  border-color: color-mix(in srgb, var(--accent-fg) 30%, transparent);
 }
 
 .chat__text--user .md-table th,
 .chat__text--user .md-table td {
-  border-color: rgb(255 255 255 / 0.28);
+  border-color: color-mix(in srgb, var(--accent-fg) 28%, transparent);
 }
 
 .chat__text--user .md-table th,
@@ -499,7 +499,7 @@ textarea:focus-visible {
 }
 
 .chat__text--user .md-hr {
-  border-top-color: rgb(255 255 255 / 0.35);
+  border-top-color: color-mix(in srgb, var(--accent-fg) 35%, transparent);
 }
 
 .chat__empty-title {
@@ -513,24 +513,24 @@ textarea:focus-visible {
 /* High-contrast text selection so the highlight is visible on every
    theme (including custom dark themes). The accent-on-text combination
    was ~2.6:1 in dark mode — below AA for selection highlights. The
-   color-mix treatment below matches the user-bubble override logic:
-   a near-white (14% accent tint) background paired with a dark-accent
-   foreground gives ~6:1 contrast on both dark and light themes. */
+   highlight is a translucent accent wash under the text's own colour, so
+   it reads on both dark and light themes without mixing in black/white
+   (~9:1 dark, ~11:1 light with the shipped palettes). */
 ::selection {
-  background: color-mix(in srgb, var(--accent, #8b6cf7) 14%, #fff);
-  color: color-mix(in srgb, var(--accent, #8b6cf7) 78%, #000);
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--text);
 }
 
 /* Your OWN messages sit on the accent-gradient bubble (see
    .chat__text--user), so the accent ::selection above is accent-on-accent
-   — invisible. Invert it just here: a near-white (faint accent tint)
-   highlight with dark-accent text, so the selection clearly pops against
-   the purple bubble while staying on-brand. Scoped to the bubble so the
-   global rule still governs selection everywhere else. */
+   — invisible. Invert it just here: the bubble's own label colour becomes
+   the highlight and the action fill becomes the text, so the selection
+   clearly pops against the purple bubble while staying on-brand. Scoped to
+   the bubble so the global rule still governs selection everywhere else. */
 .chat__text--user::selection,
 .chat__text--user ::selection {
-  background: color-mix(in srgb, var(--accent) 14%, #fff);
-  color: color-mix(in srgb, var(--accent) 78%, #000);
+  background: var(--accent-fg);
+  color: var(--accent-fill);
 }
 
 /* ── Native-feel UI chrome pass ─────────────────────────

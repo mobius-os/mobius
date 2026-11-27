@@ -34,8 +34,8 @@
   background: var(--border-light);
 }
 .agent-relay__signal.is-live {
-  background: var(--green, #2f8b58);
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--green, #2f8b58) 34%, transparent);
+  background: var(--green);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--green) 34%, transparent);
 }
 
 .agent-relay__messages {
@@ -79,7 +79,7 @@
   line-height: 1.38;
 }
 .agent-relay__message--blocker {
-  background: color-mix(in srgb, var(--danger, #b34040) 7%, var(--surface));
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
 }
 .agent-relay__message--finding,
 .agent-relay__message--handoff {

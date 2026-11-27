@@ -31,10 +31,10 @@
   max-width: calc(100% - 24px);
   margin: 0;
   padding: 8px 12px;
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: var(--surface, #171717);
-  color: var(--text, #ececec);
+  background: var(--surface);
+  color: var(--text);
   font-size: 13px;
   box-shadow: 0 6px 24px rgba(0, 0, 0, 0.18);
 }

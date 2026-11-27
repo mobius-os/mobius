@@ -6,6 +6,8 @@
  * takes, kept here so they are tested rather than eyeballed.
  */
 
+import { openerThemeToken } from '../utils/authWindow.js'
+
 /** Statuses after which a purchase will not change again on its own. */
 const SETTLED = new Set(['paid', 'rejected', 'expired', 'needs_review'])
 
@@ -65,8 +67,13 @@ export function openStripeWindow() {
   }
   try {
     popup.document.title = 'Opening Stripe…'
-    popup.document.body.innerHTML =
-      '<p style="font:16px system-ui,sans-serif;padding:28px;color:#555">Opening Stripe…</p>'
+    // A blank page outside Möbius: borrow the opener's live theme tokens.
+    popup.document.body.style.margin = '0'
+    popup.document.body.style.background = openerThemeToken('--bg')
+    popup.document.body.style.color = openerThemeToken('--muted')
+    popup.document.body.style.fontFamily = openerThemeToken('--font')
+    popup.document.body.style.fontSize = '16px'
+    popup.document.body.innerHTML = '<p style="padding:28px;margin:0">Opening Stripe…</p>'
   } catch {
     // A browser may forbid writing into it; the window still works.
   }

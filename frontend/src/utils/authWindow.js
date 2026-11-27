@@ -4,6 +4,16 @@
 // once it arrives. The caller owns the handle and must close it on every path
 // that never navigates, or the owner is left with a blank tab.
 
+/** The live value of a Möbius theme token on this page, for painting a blank
+ *  window Möbius opens (which has no theme of its own); '' when unavailable. */
+export function openerThemeToken(name) {
+  try {
+    return window.getComputedStyle(window.document.documentElement).getPropertyValue(name).trim()
+  } catch {
+    return ''
+  }
+}
+
 export function reserveAuthWindow(title = 'Opening sign-in...') {
   if (typeof window === 'undefined' || typeof window.open !== 'function') {
     return null
@@ -14,11 +24,13 @@ export function reserveAuthWindow(title = 'Opening sign-in...') {
     if (!authWindow) return null
     try {
       authWindow.document.title = title
+      // The reserved tab is a blank page outside Möbius, so it borrows the
+      // opener's live theme tokens instead of fixed colours.
       authWindow.document.body.style.margin = '0'
-      authWindow.document.body.style.fontFamily = 'system-ui, sans-serif'
-      authWindow.document.body.style.background = '#0d0d0d'
-      authWindow.document.body.style.color = '#d4d4d8'
-      authWindow.document.body.innerHTML = '<main style="min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;text-align:center"><div><h1 style="font-size:20px;margin:0 0 8px">Opening sign-in...</h1><p style="margin:0;color:#a1a1aa">You can come back to Möbius when this is done.</p></div></main>'
+      authWindow.document.body.style.fontFamily = openerThemeToken('--font')
+      authWindow.document.body.style.background = openerThemeToken('--bg')
+      authWindow.document.body.style.color = openerThemeToken('--text')
+      authWindow.document.body.innerHTML = '<main style="min-height:100vh;display:grid;place-items:center;padding:24px;box-sizing:border-box;text-align:center"><div><h1 style="font-size:20px;margin:0 0 8px">Opening sign-in...</h1><p style="margin:0;opacity:.72">You can come back to Möbius when this is done.</p></div></main>'
     } catch {
       // Some browsers block writes to the temporary page; the window itself is enough.
     }

@@ -147,7 +147,7 @@ export function makeSplit() {
       'background:transparent',
     ].join(';')
     const bar = document.createElement('div')
-    bar.style.cssText = 'width:40px;height:4px;border-radius:2px;background:var(--border,rgba(128,128,128,.5))'
+    bar.style.cssText = 'width:40px;height:4px;border-radius:2px;background:var(--border)'
     handle.appendChild(bar)
 
     // Update aria-valuenow (chat fraction %).

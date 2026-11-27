@@ -166,7 +166,7 @@
   border-radius: 17px;
   background:
     linear-gradient(145deg, color-mix(in srgb, var(--app-color, var(--accent)) 80%, white 8%), var(--app-color, var(--accent)));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
   font-size: 17px;
   font-weight: 750;
   letter-spacing: -0.025em;

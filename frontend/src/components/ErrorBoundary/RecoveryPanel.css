@@ -1,6 +1,6 @@
 .recovery-panel__title {
   margin: 0;
-  color: var(--text, #ececec);
+  color: var(--text);
   font-size: 20px;
   line-height: 1.3;
   font-weight: 600;
@@ -15,13 +15,13 @@
 }
 
 .recovery-panel__body {
-  color: var(--muted, #aaa);
+  color: var(--muted);
   line-height: 1.5;
 }
 
 .recovery-panel--boundary .recovery-panel__body {
   margin: 0 0 16px;
-  color: var(--text, #ececec);
+  color: var(--text);
   font-size: 14px;
   opacity: 0.8;
 }
@@ -32,11 +32,11 @@
 }
 
 .recovery-panel--standalone .recovery-panel__title {
-  color: var(--text, #fff);
+  color: var(--text);
 }
 
 .recovery-panel__details {
-  color: var(--muted, #a8a8a8);
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -56,14 +56,14 @@
 }
 
 .recovery-panel__details summary:focus-visible {
-  outline: 2px solid var(--accent, #8b6cf7);
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 
 .recovery-panel__detail {
   margin: 10px 0 0;
   overflow: auto;
-  color: color-mix(in srgb, var(--danger, #f87171) 78%, var(--text, #ececec));
+  color: color-mix(in srgb, var(--danger) 78%, var(--text));
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   line-height: 1.5;
@@ -76,18 +76,18 @@
   max-height: 8rem;
   padding: 10px 12px;
   border-radius: 8px;
-  background: color-mix(in srgb, var(--danger, #f87171) 12%, transparent);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
 }
 
 .recovery-panel--standalone .recovery-panel__detail {
   max-height: 180px;
   padding: 12px;
   border-radius: 10px;
-  background: color-mix(in srgb, var(--bg, #000) 82%, transparent);
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
 }
 
 .recovery-panel__status {
-  color: color-mix(in srgb, var(--danger, #f87171) 78%, var(--text, #ececec));
+  color: color-mix(in srgb, var(--danger) 78%, var(--text));
   font-size: 13px;
   line-height: 1.5;
 }
@@ -124,9 +124,9 @@
   align-items: center;
   justify-content: center;
   min-height: 44px;
-  border: 1px solid var(--border, rgba(255, 255, 255, 0.14));
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--text, #ececec);
+  color: var(--text);
   font-family: var(--font, inherit);
   text-decoration: none;
   cursor: pointer;
@@ -142,9 +142,9 @@
 
 .recovery-panel--standalone .recovery-panel__button {
   padding: 0 15px;
-  border-color: var(--border, #333);
+  border-color: var(--border);
   border-radius: 11px;
-  color: var(--text, #fff);
+  color: var(--text);
   font-family: var(--font, system-ui, sans-serif);
   font-size: 13px;
   font-weight: 600;
@@ -157,29 +157,29 @@
 }
 
 .recovery-panel__button:focus-visible {
-  outline: 2px solid var(--accent, #8b6cf7);
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
 }
 
 .recovery-panel--standalone .recovery-panel__button:focus-visible {
-  outline-color: var(--accent, #a78bfa);
+  outline-color: var(--accent);
 }
 
 .recovery-panel__button--primary {
-  border-color: color-mix(in srgb, var(--accent, #8b6cf7) 82%, #000);
-  background: color-mix(in srgb, var(--accent, #8b6cf7) 82%, #000);
-  color: var(--accent-fg, #fff);
+  border-color: var(--accent-fill);
+  background: var(--accent-fill);
+  color: var(--accent-fg);
 }
 
 @media (hover: hover) and (pointer: fine) {
   .recovery-panel__button:hover {
-    border-color: color-mix(in srgb, var(--text, #ececec) 42%, transparent);
-    background: color-mix(in srgb, var(--text, #ececec) 8%, transparent);
+    border-color: color-mix(in srgb, var(--text) 42%, transparent);
+    background: color-mix(in srgb, var(--text) 8%, transparent);
   }
 
   .recovery-panel__button--primary:hover {
-    border-color: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
-    background: color-mix(in srgb, var(--accent, #8b6cf7) 74%, #000);
+    border-color: var(--accent-fill-hover);
+    background: var(--accent-fill-hover);
   }
 }
 

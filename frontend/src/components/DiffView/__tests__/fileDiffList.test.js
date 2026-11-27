@@ -218,8 +218,8 @@ test('canonical styles keep code on one readable scroll axis', () => {
     /\.file-diff-list__basename\s*\{[^}]*min-width: 0;[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;/,
   )
   assert.doesNotMatch(DIFF_VIEWER_STYLES, /\.file-diff-list__panel \.diff-view/)
-  assert.match(DIFF_VIEWER_STYLES, /var\(--green, #16a34a\)/)
-  assert.match(DIFF_VIEWER_STYLES, /var\(--danger, #ef4444\)/)
+  assert.match(DIFF_VIEWER_STYLES, /var\(--green\)/)
+  assert.match(DIFF_VIEWER_STYLES, /var\(--danger\)/)
 })
 
 test('style injection is SSR-safe and idempotent', () => {

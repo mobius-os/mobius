@@ -112,7 +112,7 @@
 
 .project-menu__popover button:hover,
 .project-menu__popover button:focus-visible { background: var(--surface); }
-.project-menu__popover .project-menu__danger { color: var(--danger, #c43d3d); }
+.project-menu__popover .project-menu__danger { color: var(--danger); }
 
 .project-menu__scrim { display: none; }
 .project-actions__popover {
@@ -183,13 +183,13 @@
 }
 .project-actions__error {
   margin: 0 9px 5px;
-  color: var(--danger, #c43d3d);
+  color: var(--danger);
   font-size: 11px;
 }
 .project-actions__confirm { display: grid; gap: 2px; }
 .project-actions__confirm p {
   margin: 3px 9px;
-  color: var(--danger, #c43d3d);
+  color: var(--danger);
   font-size: 11px;
 }
 .project-actions__confirm .project-actions__delete { font-weight: 650; }
@@ -208,12 +208,12 @@
   padding: 0 13px;
   border: 0;
   border-radius: 9px;
-  color: var(--accent-fg, white);
+  color: var(--accent-fg);
   background: var(--accent-fill, var(--accent));
   font-weight: 600;
   cursor: pointer;
 }
-.projects-error { margin: 10px clamp(12px, 2vw, 20px); color: var(--danger, #c43d3d); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.projects-error { margin: 10px clamp(12px, 2vw, 20px); color: var(--danger); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .projects-directory__scroll > .projects-error { margin-left: 0; }
 .projects-empty {
   min-height: 170px;
@@ -314,7 +314,7 @@
   background: var(--bg);
   box-shadow: 0 0 0 2px var(--accent-dim);
 }
-.projects-collection__rename label small { color: var(--danger, #c43d3d); font-size: 10px; }
+.projects-collection__rename label small { color: var(--danger); font-size: 10px; }
 .projects-collection__rename > button {
   min-height: 34px;
   padding: 0 10px;
@@ -326,7 +326,7 @@
 }
 .projects-collection__rename > button[type="submit"] {
   border-color: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, white);
+  color: var(--accent-fg);
   background: var(--accent-fill, var(--accent));
 }
 .project-workspace__bar {
@@ -500,7 +500,7 @@
   font-weight: 600;
   cursor: pointer;
 }
-.project-inline-create button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, white); background: var(--accent-fill, var(--accent)); }
+.project-inline-create button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg); background: var(--accent-fill, var(--accent)); }
 
 .project-actions--context-only { position: absolute; inset: 0 auto auto 0; width: 0; height: 0; }
 .project-preview { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface); }
@@ -509,10 +509,10 @@
 .project-preview--asset { padding: 14px; overflow: auto; }
 .project-preview--asset img { max-width: 100%; max-height: 100%; margin: auto; object-fit: contain; }
 .project-preview--asset iframe { min-height: 100%; border-radius: 8px; }
-.project-pdf { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #2a2a2a; }
-.project-pdf__toolbar { min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 9px; border-bottom: 1px solid rgba(255, 255, 255, .1); color: #f4f4f4; background: #202020; font-size: 12px; }
+.project-pdf { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--surface-2); }
+.project-pdf__toolbar { min-height: 38px; display: flex; align-items: center; justify-content: center; gap: 9px; border-bottom: 1px solid var(--border-light); color: var(--text); background: var(--surface); font-size: 12px; }
 .project-pdf__toolbar button { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; color: inherit; background: transparent; cursor: pointer; }
-.project-pdf__toolbar button:hover:not(:disabled) { background: rgba(255, 255, 255, .1); }
+.project-pdf__toolbar button:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 10%, transparent); }
 .project-pdf__viewport { flex: 1; min-height: 0; overflow: auto; display: flex; align-items: flex-start; justify-content: center; padding: 14px; }
 .project-pdf__viewport canvas { display: block; max-width: 100%; background: white; box-shadow: 0 4px 16px rgba(0, 0, 0, .28); }
 .project-document__empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 28px; color: var(--muted); text-align: center; }
@@ -606,8 +606,8 @@
   justify-content: space-between;
   gap: 14px;
   padding: 9px 12px;
-  border-bottom: 1px solid color-mix(in srgb, var(--danger, #c43d3d) 24%, var(--border-light));
-  background: color-mix(in srgb, var(--danger, #c43d3d) 6%, var(--bg));
+  border-bottom: 1px solid color-mix(in srgb, var(--danger) 24%, var(--border-light));
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg));
 }
 .project-finder__conflict > div:first-child { min-width: 0; display: grid; gap: 2px; }
 .project-finder__conflict strong { font-size: 11px; }
@@ -624,7 +624,7 @@
   font-weight: 650;
   cursor: pointer;
 }
-.project-finder__conflict button:first-child { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); }
+.project-finder__conflict button:first-child { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg); background: var(--accent-fill, var(--accent)); }
 
 /* ── Finder ─────────────────────────────────────────────────────────────────── */
 .project-finder {
@@ -745,7 +745,7 @@
 .project-finder__commit > label { color: var(--text); font-size: 11px; font-weight: 700; }
 .project-finder__commit > div { display: flex; gap: 7px; }
 .project-finder__commit input { min-width: 0; flex: 1; min-height: 38px; padding: 7px 9px; border: 1px solid var(--border-light); border-radius: 8px; color: var(--text); background: var(--bg); font: inherit; }
-.project-finder__commit button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--accent-fg, #fff); background: var(--accent-fill, var(--accent)); font: inherit; font-size: 11px; font-weight: 700; }
+.project-finder__commit button { min-height: 38px; padding: 7px 10px; border: 0; border-radius: 8px; color: var(--accent-fg); background: var(--accent-fill, var(--accent)); font: inherit; font-size: 11px; font-weight: 700; }
 .project-finder__commit small { color: var(--muted); font-size: 10px; }
 .project-finder__changes[open] > summary { color: var(--text); background: var(--surface); }
 .project-finder__change-list {
@@ -929,7 +929,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   font-weight: 600;
   cursor: pointer;
 }
-.project-finder__rename button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg, white); background: var(--accent-fill, var(--accent)); }
+.project-finder__rename button[type="submit"] { border-color: var(--accent-fill, var(--accent)); color: var(--accent-fg); background: var(--accent-fill, var(--accent)); }
 
 .project-finder__pane-head {
   flex: 0 0 auto;
@@ -944,8 +944,8 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 .project-finder__pane-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .project-finder__pane-head small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 10px; }
 .project-finder__diff-total { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font: 600 10px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.project-finder__diff-total b { color: var(--green, #188653); font: inherit; }
-.project-finder__diff-total i { color: var(--danger, #c43d3d); font: inherit; font-style: normal; }
+.project-finder__diff-total b { color: var(--green); font: inherit; }
+.project-finder__diff-total i { color: var(--danger); font: inherit; font-style: normal; }
 .project-finder__pane-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 7px; }
 .project-finder__pane-actions button {
   display: inline-flex;
@@ -1015,7 +1015,7 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
 }
 .project-finder__live-edit textarea { padding: 14px; }
 .project-finder__live-preview iframe { flex: 1; width: 100%; min-height: 0; border: 0; background: white; }
-.project-finder__live-preview > p { margin: auto; padding: 24px; color: var(--danger, #c43d3d); font-size: 12px; }
+.project-finder__live-preview > p { margin: auto; padding: 24px; color: var(--danger); font-size: 12px; }
 .project-markdown__scroll,
 .project-finder__live-preview:has(.project-markdown) { overflow: auto; }
 .project-markdown__scroll { flex: 1; min-width: 0; min-height: 0; }
@@ -1193,11 +1193,11 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   white-space: nowrap;
 }
 .artifact-pill--idle { color: var(--muted); background: var(--surface); }
-.artifact-pill--building { color: var(--accent-text, var(--accent)); background: var(--accent-dim); }
-.artifact-pill--ok { color: #157a4a; background: color-mix(in srgb, #157a4a 16%, transparent); }
-.artifact-pill--ready { color: #fff; background: #157a4a; }
-.artifact-pill--stale { color: #8a5a00; background: color-mix(in srgb, #c98a00 18%, transparent); }
-.artifact-pill--error { color: var(--danger, #c43d3d); background: color-mix(in srgb, var(--danger, #c43d3d) 16%, transparent); }
+.artifact-pill--building { color: var(--accent-text); background: var(--accent-dim); }
+.artifact-pill--ok { color: var(--green-text); background: color-mix(in srgb, var(--green) 16%, transparent); }
+.artifact-pill--ready { color: var(--accent-fg); background: var(--green-fill); }
+.artifact-pill--stale { color: var(--warning-text); background: color-mix(in srgb, var(--warning) 18%, transparent); }
+.artifact-pill--error { color: var(--danger-text); background: color-mix(in srgb, var(--danger) 16%, transparent); }
 
 /* ── Artifact workspace (its own tab) ───────────────────────────────────────── */
 .artifact-workspace {
@@ -1356,8 +1356,8 @@ button.project-finder__change:hover { color: var(--text); background: var(--surf
   top: calc(clamp(14px, 3vw, 24px) + var(--line-index) * 1.6em);
   height: 1.6em;
   pointer-events: none;
-  border-left: 3px solid #188653;
-  background: color-mix(in srgb, #188653 10%, transparent);
+  border-left: 3px solid var(--green);
+  background: color-mix(in srgb, var(--green) 10%, transparent);
 }
 
 /* Projects operate at a readable density without changing the surrounding shell. */

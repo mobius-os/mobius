@@ -161,7 +161,7 @@
 .settings-keys-activity .settings-item__title { font-weight: 400; }
 .settings-keys-activity .settings-item__trail { font-size: 12.5px; white-space: nowrap; }
 .settings-keys__refused { color: var(--danger-text, var(--danger)); }
-.settings-keys__warn { color: var(--warning-text, var(--warning, #b7791f)); }
+.settings-keys__warn { color: var(--warning-text, var(--warning)); }
 
 /* Forms: a panel under a row, a form row inside a list, or the new-key card. */
 .settings-keys-form { display: grid; gap: 14px; }
@@ -169,7 +169,7 @@
 .settings-keys-form--card { gap: 18px; padding: 18px; }
 .settings-keys-form__switches { display: grid; gap: 14px; padding: 14px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 
-.settings__btn.settings-keys__danger { background: var(--danger); border-color: var(--danger); color: #fff; }
+.settings__btn.settings-keys__danger { background: var(--danger-fill); border-color: var(--danger-fill); color: var(--accent-fg); }
 
 @container settings (max-width: 400px) {
   .settings-item-panel.settings-keys-panel { padding-left: 14px; }

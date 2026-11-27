@@ -2861,16 +2861,16 @@ function makeChat({ appId, getToken, storage }) {
 			controlsShell = document.createElement("div");
 			controlsShell.style.cssText = "width:100%;height:100%;min-height:0;display:flex;flex-direction:column;";
 			const chrome = document.createElement("div");
-			chrome.style.cssText = "display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 8px;border-bottom:1px solid rgba(148,163,184,.28);background:rgba(248,250,252,.94);";
+			chrome.style.cssText = "display:flex;align-items:center;gap:6px;flex:0 0 auto;padding:6px 8px;border-bottom:1px solid var(--border-light);background:var(--surface);";
 			selectEl = document.createElement("select");
 			selectEl.setAttribute("aria-label", "Chat");
-			selectEl.style.cssText = "min-width:0;flex:1 1 auto;height:28px;border:1px solid rgba(148,163,184,.55);border-radius:6px;background:#fff;color:#111827;font:500 12px system-ui,sans-serif;padding:0 26px 0 8px;";
+			selectEl.style.cssText = "min-width:0;flex:1 1 auto;height:28px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);color:var(--text);font:500 12px var(--font);padding:0 26px 0 8px;";
 			newChatButton = document.createElement("button");
 			newChatButton.type = "button";
 			newChatButton.textContent = "+";
 			newChatButton.title = "New chat";
 			newChatButton.setAttribute("aria-label", "New chat");
-			newChatButton.style.cssText = "width:28px;height:28px;flex:0 0 28px;border:1px solid rgba(148,163,184,.55);border-radius:6px;background:#fff;color:#111827;font:600 18px/1 system-ui,sans-serif;display:grid;place-items:center;cursor:pointer;";
+			newChatButton.style.cssText = "width:28px;height:28px;flex:0 0 28px;border:1px solid var(--border);border-radius:6px;background:var(--surface-2);color:var(--text);font:600 18px/1 var(--font);display:grid;place-items:center;cursor:pointer;";
 			onChatSelectChange = () => {
 				switchToChat(selectEl.value).catch(() => {});
 			};
@@ -3331,7 +3331,7 @@ function makeSplit() {
 			"background:transparent"
 		].join(";");
 		const bar = document.createElement("div");
-		bar.style.cssText = "width:40px;height:4px;border-radius:2px;background:var(--border,rgba(128,128,128,.5))";
+		bar.style.cssText = "width:40px;height:4px;border-radius:2px;background:var(--border)";
 		handle.appendChild(bar);
 		function updateAria() {
 			handle.setAttribute("aria-valuenow", String(Math.round((1 - ratio) * 100)));

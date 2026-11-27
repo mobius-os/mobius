@@ -7,7 +7,7 @@
   inset: 0;
   z-index: 899;
   pointer-events: auto;
-  background: color-mix(in srgb, var(--bg, #0d0d0d) 46%, transparent);
+  background: color-mix(in srgb, var(--bg) 46%, transparent);
   -webkit-backdrop-filter: blur(3px) saturate(1.1);
   backdrop-filter: blur(3px) saturate(1.1);
   animation: wt-fade-in .5s ease both;
@@ -19,9 +19,8 @@
   z-index: 900;
   inset: 0;
   margin: auto;
-  --wt-accent-ink: color-mix(in srgb, var(--accent, #8b6cf7) 55%, var(--text, #e4e4e7));
-  --wt-on-accent: #0d0d0d;
-  --wt-control-border: color-mix(in srgb, var(--text, #e4e4e7) 50%, var(--border, #252b36));
+  --wt-accent-ink: color-mix(in srgb, var(--accent) 55%, var(--text));
+  --wt-control-border: color-mix(in srgb, var(--text) 50%, var(--border));
   --wt-ease: cubic-bezier(.16, 1, .3, 1);
   width: min(880px, calc(100vw - 48px));
   /* One height for every screen, so the card never jumps between them. */
@@ -34,9 +33,9 @@
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
-  color: var(--text, #e4e4e7);
-  background: var(--surface, #14181f);
-  border: 1px solid var(--border, #252b36);
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
   border-radius: 20px;
   box-shadow: 0 28px 70px rgba(0, 0, 0, .5), 0 4px 14px rgba(0, 0, 0, .25);
   animation: wt-arrive 480ms var(--wt-ease) both;
@@ -50,17 +49,17 @@
 .wt__brand { display: flex; align-items: center; min-width: 0; gap: 10px; margin-right: auto; font-size: 15px; }
 .wt__brand img { flex: none; width: 28px; height: 28px; border-radius: 50%; }
 .wt__brand strong { font-weight: 800; letter-spacing: -.02em; }
-.wt__brand span { padding-left: 10px; border-left: 1px solid var(--border, #252b36); color: var(--muted, #a1a1aa); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
-.wt__count { color: var(--muted, #a1a1aa); font: 600 12px var(--mono, monospace); white-space: nowrap; }
-.wt__close { width: 34px; height: 34px; display: grid; place-items: center; flex: none; padding: 0; border: 0; border-radius: 10px; color: var(--muted, #a1a1aa); background: transparent; font: inherit; font-size: 23px; cursor: pointer; }
-.wt__close:hover { color: var(--text, #e4e4e7); background: var(--surface-2, #1a1f28); }
+.wt__brand span { padding-left: 10px; border-left: 1px solid var(--border); color: var(--muted); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
+.wt__count { color: var(--muted); font: 600 12px var(--mono, monospace); white-space: nowrap; }
+.wt__close { width: 34px; height: 34px; display: grid; place-items: center; flex: none; padding: 0; border: 0; border-radius: 10px; color: var(--muted); background: transparent; font: inherit; font-size: 23px; cursor: pointer; }
+.wt__close:hover { color: var(--text); background: var(--surface-2); }
 
 .wt__bars { position: relative; z-index: 2; flex: none; display: flex; gap: 4px; padding: 0 24px; }
-.wt__bars button { position: relative; flex: 1; height: 3px; padding: 0; border: 0; border-radius: 3px; background: var(--border, #252b36); cursor: pointer; overflow: hidden; }
+.wt__bars button { position: relative; flex: 1; height: 3px; padding: 0; border: 0; border-radius: 3px; background: var(--border); cursor: pointer; overflow: hidden; }
 .wt__bars button::after { content: ""; position: absolute; inset: -14px -1px; }
-.wt__bars button::before { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--accent, #8b6cf7) 45%, var(--border, #252b36)); transform: scaleX(0); transform-origin: 0 50%; transition: transform .35s var(--wt-ease) var(--wt-bar-delay, 0ms), background .35s var(--wt-bar-delay, 0ms); }
+.wt__bars button::before { content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--accent) 45%, var(--border)); transform: scaleX(0); transform-origin: 0 50%; transition: transform .35s var(--wt-ease) var(--wt-bar-delay, 0ms), background .35s var(--wt-bar-delay, 0ms); }
 .wt__bars .is-seen::before, .wt__bars .is-current::before { transform: scaleX(1); }
-.wt__bars .is-current::before { background: var(--accent, #8b6cf7); }
+.wt__bars .is-current::before { background: var(--accent); }
 
 .wt__slide { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 24px 24px; animation: wt-slide-in .5s var(--wt-ease) both; }
 .wt__slide.is-forward { --wt-dx: 28px; }
@@ -72,16 +71,16 @@
 .wt__slide h2 { position: relative; max-width: none; margin: 0 0 12px; font-size: clamp(32px, 4.6vw, 46px); font-weight: 800; line-height: 1.02; letter-spacing: -.055em; overflow-wrap: anywhere; }
 /* Announce each title to assistive tech; show a quiet location cue only when the browser calls for visible focus. */
 .wt__slide h2:focus { outline: none; }
-.wt__slide h2:focus-visible::before { content: ''; position: absolute; left: -14px; top: .08em; bottom: .12em; width: 3px; border-radius: 3px; background: var(--accent, #8b6cf7); }
-.wt__lead { max-width: 88ch; margin: 0 0 16px; color: var(--muted, #a1a1aa); font-size: clamp(15.5px, 1.9vw, 17px); line-height: 1.5; font-weight: 500; }
+.wt__slide h2:focus-visible::before { content: ''; position: absolute; left: -14px; top: .08em; bottom: .12em; width: 3px; border-radius: 3px; background: var(--accent); }
+.wt__lead { max-width: 88ch; margin: 0 0 16px; color: var(--muted); font-size: clamp(15.5px, 1.9vw, 17px); line-height: 1.5; font-weight: 500; }
 
-.wt__footer { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border, #252b36); }
+.wt__footer { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 16px 24px; border-top: 1px solid var(--border); }
 .wt__footer button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 10px 20px; border-radius: 12px; font: inherit; font-size: 14px; font-weight: 700; cursor: pointer; transition: filter .2s, transform .15s; }
 .wt__footer button:active { transform: scale(.97); }
 .wt__footer button:hover { filter: brightness(1.1); }
-.wt__back { border: 1px solid var(--border, #252b36); color: var(--text, #e4e4e7); background: var(--surface-2, #1a1f28); }
-.wt__next { min-width: 140px; border: 1px solid var(--accent, #8b6cf7); color: var(--wt-on-accent); background: var(--accent, #8b6cf7); }
-.wt__card button:focus-visible, .wt__card input:focus-visible, .wt__card summary:focus-visible, .wt__card a:focus-visible { outline: 2px solid var(--accent, #8b6cf7); outline-offset: 2px; }
+.wt__back { border: 1px solid var(--border); color: var(--text); background: var(--surface-2); }
+.wt__next { min-width: 140px; border: 1px solid var(--accent-fill); color: var(--accent-fg); background: var(--accent-fill); }
+.wt__card button:focus-visible, .wt__card input:focus-visible, .wt__card summary:focus-visible, .wt__card a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---------- phones: fills the screen with a margin so the blur still shows around it ---------- */
 @media (max-width: 700px) {

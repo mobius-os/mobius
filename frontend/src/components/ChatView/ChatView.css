@@ -763,9 +763,9 @@
   display: inline-block;
   margin-right: 9px;
   padding: 1px 7px;
-  border: 1px solid rgb(255 255 255 / 22%);
+  border: 1px solid color-mix(in srgb, var(--accent-fg) 22%, transparent);
   border-radius: 999px;
-  background: rgb(255 255 255 / 14%);
+  background: color-mix(in srgb, var(--accent-fg) 14%, transparent);
   font-size: 10px;
   font-weight: 750;
   line-height: 1.55;
@@ -957,7 +957,7 @@
 .chat__resume {
   border-color: var(--accent-fill, var(--accent));
   background: var(--accent-fill, var(--accent));
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
 }
 .chat__resume:hover:not(:disabled) {
   border-color: var(--accent-fill-hover, var(--accent-hover, var(--accent)));
@@ -2670,9 +2670,9 @@
 }
 
 .chat__offline-note--error {
-  border-color: color-mix(in srgb, var(--danger, #b42318) 28%, var(--border-light));
-  color: var(--danger, #b42318);
-  background: color-mix(in srgb, var(--danger, #b42318) 7%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--border-light));
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 7%, var(--surface));
   text-align: center;
 }
 
@@ -2707,7 +2707,7 @@
 }
 
 .chat__history-strip--warn {
-  border-color: color-mix(in srgb, var(--warning, #d8922f) 45%, var(--border-light));
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--border-light));
 }
 
 .chat__history-strip-text {
@@ -3003,7 +3003,7 @@
 
 .chat__send {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
+  color: var(--accent-fg);
 }
 
 .chat__send:hover:not(:disabled) {
@@ -3055,7 +3055,7 @@
    pill geometry as Send/Stop so the slot doesn't reflow on swap. */
 .chat__steer {
   background: var(--accent); /* CONTRACT: vivid opaque accent fill */
-  color: #fff;
+  color: var(--accent-fg);
 }
 .chat__steer:hover { background: var(--accent-hover); /* CONTRACT: vivid opaque accent on hover */ }
 
@@ -3098,7 +3098,7 @@
 .chat__question-nudge:hover,
 .chat__resume-nudge:hover {
   background: var(--accent-fill, var(--accent)); /* CONTRACT: opaque accent action fill */
-  color: var(--accent-fg, #fff);
+  color: var(--accent-fg);
 }
 .chat__question-nudge:active,
 .chat__resume-nudge:active { transform: scale(0.96); }
@@ -3306,7 +3306,7 @@
   background-color: color-mix(in srgb, var(--accent) 75%, transparent) !important;
   background-image: none;
   border-color: var(--accent);
-  color: #fff;
+  color: var(--accent-fg);
   /* Keep the .chat__plus backdrop-filter blur — purple frosted
      glass instead of a flat opaque purple disc. */
   box-shadow: none;
@@ -3413,13 +3413,12 @@
   height: 30px;
   border-radius: 8px;
   background: var(--surface-2); /* CONTRACT: opaque hover/raised fill, slightly above --surface */
-  border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
   display: grid;
   place-items: center;
   color: var(--text); /* CONTRACT: high-contrast text on opaque fill */
   flex-shrink: 0;
 }
-[data-theme="light"] .composer-popover__row-icon { border-color: rgba(15, 18, 25, 0.10); }
 
 .composer-popover__row-main {
   flex: 1;
@@ -3604,7 +3603,7 @@
 }
 
 .chat__attach-card--error {
-  border-color: rgba(248, 113, 113, 0.55);
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
 }
 
 .chat__attach-card-preview-error {
@@ -3665,7 +3664,7 @@
   place-items: center;
   font-size: 10px;
   font-weight: 700;
-  color: #fff;
+  color: var(--accent-fg);
   letter-spacing: 0.06em;
   position: relative;
 }
@@ -4833,7 +4832,7 @@ details[open] > summary > .chat__panel-chevron { transform: rotate(90deg); }
 .chat__goal-history--cancelled { --lifecycle-tone: var(--muted); }
 .chat__goal-history-reason { color: var(--text); font-size: 12px; line-height: 1.4; white-space: pre-wrap; }
 .chat__wait-history { --lifecycle-tone: var(--accent); }
-.chat__wait-history--attention { --lifecycle-tone: var(--warning, #d8922f); }
+.chat__wait-history--attention { --lifecycle-tone: var(--warning); }
 .chat__wait-history--stopped { --lifecycle-tone: var(--muted); }
 /* A wake cause opens the answer it started, so its gap sits below it. */
 .chat__wait-history--lead { margin-top: 0; margin-bottom: 10px; }
