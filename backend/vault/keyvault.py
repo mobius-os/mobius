@@ -943,6 +943,19 @@ class SecretEchoes:
   pattern: re.Pattern
   longest: int
 
+  @property
+  def spans_lines(self) -> bool:
+    """Whether an echo can contain a newline.
+
+    The pattern is escaped literals in groups joined by ``|``, with letters
+    folded only within ASCII, so it can match a newline only where its source
+    holds one. Every escaped form is printable ASCII, hex and base64 are too,
+    and UTF-8 encodes nothing but a newline itself to a 0x0A byte. What is
+    left is a key containing a newline (a PEM private key, say) or one whose
+    UTF-16 has a 0x0A byte (U+0A00 to U+0AFF, any U+xx0A such as U+010A).
+    """
+    return b"\n" in self.pattern.pattern
+
 
 def _key_echoes(value: str) -> tuple[list[bytes], int]:
   """The alternatives matching one key's echoes, and how long an echo can be."""
@@ -1002,22 +1015,32 @@ class StreamRedactor:
   contain: holding back only text that could begin the key would let a site
   echoing a caller's guesses reveal, by when each guess arrives, which ones
   begin the key. Everything before that tail is final and goes out at once.
+
+  When no echo of the key can contain a newline, everything up to the last
+  newline is final as well, so an event on a long-lived stream (server-sent
+  events end in a blank line) goes out when it is complete rather than when
+  the next one arrives. Where that cut falls depends on the key only through
+  ``spans_lines``, never on whether what has arrived matches it.
   """
 
   def __init__(self, echoes: SecretEchoes, replacement: bytes = REDACTED) -> None:
     self.echoes = echoes
     self.replacement = replacement
     self.hold = max(echoes.longest - 1, 0)
+    self.release_lines = not echoes.spans_lines
     self.pending = b""
 
   def feed(self, data: bytes) -> bytes:
     data = self.pending + data
     cut = len(data) - self.hold
+    if self.release_lines:
+      cut = max(cut, data.rfind(b"\n") + 1)
     if cut <= 0:
       self.pending = data
       return b""
     # From any start before ``cut`` the longest echo fits in what has arrived,
-    # so these matches are the ones whole-body redaction would find.
+    # or the echo would have to cross a newline, so these matches are the
+    # ones whole-body redaction would find.
     out, position = [], 0
     for match in self.echoes.pattern.finditer(data):
       if match.start() >= cut:
