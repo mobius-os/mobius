@@ -170,7 +170,7 @@ def stage_follow_claim(db: Session, claim: models.AgentWorkClaim, *,
 
 
 def stage_stamp_claim_outcome(db: Session, row: models.AgentWorkClaim,
-                              kind: str, outcome: str) -> int:
+                              kind: str, outcome: str, *, work_report: dict | None = None) -> int:
   """Stamp every live follower before the claim settlement transaction commits."""
   if kind not in ('completed', 'released', 'owner_deleted'):
     raise ValueError('Invalid claim outcome kind')
@@ -178,6 +178,7 @@ def stage_stamp_claim_outcome(db: Session, row: models.AgentWorkClaim,
   payload = {
     'kind': kind, 'work_key': row.work_key, 'summary': row.summary,
     'outcome': outcome, 'source_chat_id': row.owner_chat_id,
+    **({'work_report': work_report} if work_report is not None else {}),
     'source_chat_title': (db.query(models.Chat.title).filter(
       models.Chat.id == row.owner_chat_id).scalar() or row.owner_chat_id),
   }

@@ -91,10 +91,10 @@ export function goalDependencyOutcomeLabel(dependency) {
   const label = {
     cancelled: 'Stopped', superseded: 'Replaced', source_deleted: 'The chat was deleted',
     completed: 'Work completed', released: 'Work handed back', owner_deleted: 'The chat was deleted',
+    failed: 'Work failed', stopped: 'Work stopped',
     owner_not_progressing: 'Work interrupted',
   }[kind] || 'Waiting ended with this Goal'
-  const detail = dependency?.outcome?.outcome
-  return detail ? `${label} · ${detail}` : label
+  return label
 }
 
 export function goalDependencyHref(dependency) {

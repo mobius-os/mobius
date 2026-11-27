@@ -138,3 +138,49 @@ test('only active owner details expose a quiet exact-edge stop control', () => {
   assert.match(withdrawn, /You stopped following this/)
   assert.doesNotMatch(withdrawn, /You chose|Continues automatically/)
 })
+
+
+test('legacy work evidence is disclosed, never concatenated into the collapsed receipt', () => {
+  const evidence = 'Commit deadbeef; isolated only, not live. '.repeat(80)
+  const summary = { id: 'work', target_kind: 'claim_acquisition', condition: 'Technical condition',
+    source_chat_title: 'Repair', source_chat_id: 'source', outcome: { kind: 'completed', outcome: evidence } }
+  const html = render(h(History, { summary }))
+  const collapsed = html.match(/<summary[^>]*>(.*?)<\/summary>/s)[1]
+  assert.match(collapsed, /Work completed/)
+  assert.match(collapsed, /Work this Goal was waiting for/)
+  assert.match(collapsed, /From Repair/)
+  assert.doesNotMatch(collapsed, /deadbeef|Technical condition|installed|live/)
+  assert.ok(html.indexOf(evidence) > html.indexOf('</summary>'))
+  assert.match(html, /Technical handoff|not completion of the whole Goal/)
+  assert.match(html, /Open chat · Repair/)
+  assert.doesNotMatch(html, /<details[^>]* open/)
+})
+
+test('authored work reports show purpose, result and next step without inventing installation state', () => {
+  for (const report of [
+    { purpose: 'Make saves reliable', result: 'Verified in isolation; not live.', next_step: 'Review before activation.' },
+    { purpose: 'Compare travel options', result: 'Three routes compared.' },
+  ]) {
+    const html = render(h(History, { summary: { target_kind: 'claim_acquisition', condition: 'Exact action',
+      source_chat_title: 'Research', outcome: { kind: 'completed', work_report: report, outcome: 'Full evidence' } } }))
+    const collapsed = html.match(/<summary[^>]*>(.*?)<\/summary>/s)[1]
+    assert.ok(collapsed.includes(report.purpose))
+    assert.ok(collapsed.includes(report.result))
+    if (report.next_step) assert.ok(collapsed.includes(`Next: ${report.next_step}`))
+    else assert.doesNotMatch(collapsed, /Next:|installed|activation|live/)
+    assert.doesNotMatch(collapsed, /Full evidence/)
+  }
+})
+
+test('released failed stopped and withdrawn shared work never say completed', () => {
+  for (const kind of ['released', 'failed', 'stopped', 'cancelled', 'owner_not_progressing']) {
+    const html = render(h(History, { summary: { target_kind: 'claim_acquisition', condition: 'Shared action',
+      outcome: { kind, outcome: 'Evidence' } } }))
+    assert.doesNotMatch(html, /Work completed/)
+    assert.match(html, /Technical handoff/)
+  }
+  const html = render(h(History, { summary: { target_kind: 'claim_acquisition', disposition: 'withdrawn',
+    outcome: { kind: 'completed', outcome: 'Source completed after withdrawal' } } }))
+  assert.match(html, /You stopped following this/)
+  assert.doesNotMatch(html, /Work completed/)
+})

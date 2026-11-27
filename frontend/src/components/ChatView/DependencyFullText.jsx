@@ -2,7 +2,6 @@
 import { api, jsonOrThrow } from '../../api/client.js'
 import PeerNoteBody, { FullNoteText, ReadFullAction } from './PeerNoteBody.jsx'
 import useFullPeerNote from './hooks/useFullPeerNote.js'
-import { goalDependencyOutcomeLabel } from './goalProgress'
 
 async function readDependencyTexts(dependencyId) {
   return jsonOrThrow(await api.chatWaits.dependencyText(dependencyId), 'Could not load the full text')
@@ -28,12 +27,17 @@ export default function DependencyFullText({ dependencyId }) {
 export function DependencyRowTexts({ dependency, actions, meta }) {
   const texts = useFullPeerNote(dependency.truncated ? [() => readDependencyTexts(dependency.id)] : [])
   const full = texts.full
+  const report = dependency.outcome?.work_report
+  const evidence = full?.outcome || dependency.outcome?.outcome
   return <>
     <span className="chat__goal-task-title">{full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition}</span>
     {actions}
-    <span className="chat__goal-task-meta">{full?.outcome
-      ? <FullNoteText text={goalDependencyOutcomeLabel({ ...dependency, outcome: { ...dependency.outcome, outcome: full.outcome } })} />
-      : meta}</span>
+    <span className="chat__goal-task-meta">{meta}</span>
+    {report && <span className="chat__goal-task-meta">{report.result}{report.next_step && ` Next: ${report.next_step}`}</span>}
+    {evidence && <details className="chat__goal-task-meta">
+      <summary>Technical handoff</summary>
+      <FullNoteText text={evidence} />
+    </details>}
     {dependency.truncated && !full && <ReadFullAction note={texts} noun="text" />}
   </>
 }

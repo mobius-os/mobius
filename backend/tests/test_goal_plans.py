@@ -1850,3 +1850,23 @@ def test_a_missing_plan_task_names_a_few_tasks_and_counts_the_rest(db, monkeypat
   with pytest.raises(goal_plans.GoalPlanError) as refused:
     goal_plans.helper_plan_task(db, "chat", "missing")
   assert "t0009 and 490 more (500 in all)" in str(refused.value)
+
+
+def test_goal_update_route_carries_exact_reader_reports_into_claim_settlement(client, owner_token, db):
+  from app.agent_work_claims import claim_work
+
+  _, chat_id = _active_goal(client, owner_token, db)
+  owner = db.query(models.Owner).first()
+  key = "test:goal-report"
+  claim_work(db, owner_id=owner.id, chat_id=chat_id, run_id="goal-root",
+             work_key=key, summary="Compare exact routes")
+  report = {"purpose": "Compare routes", "result": "Three options compared."}
+  response = _update(client, db, chat_id, {
+    "complete": True, "finished_claims": [key], "claim_reports": {key: report},
+  })
+  assert response.status_code == 200, response.text
+  db.expire_all()
+  claim = db.query(models.AgentWorkClaim).filter_by(work_key=key).one()
+  assert claim.completed_at is not None
+  assert claim.work_report == report
+  assert db.get(models.ChatGoal, "goal-1").result is None

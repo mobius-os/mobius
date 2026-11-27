@@ -8,6 +8,7 @@ import hashlib
 import re
 import uuid
 
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -22,6 +23,15 @@ from app.goal_dependency_sources import stage_follow_claim, stage_stamp_claim_ou
 
 # `#` and `+` appear naturally in PR references such as `mobius-os/mobius#1365`.
 WORK_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9:._/@#+-]{2,255}$")
+
+
+class WorkReport(BaseModel):
+  """Author-supplied reader summary, separate from full technical evidence."""
+
+  model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+  purpose: str = Field(min_length=1, max_length=160)
+  result: str = Field(min_length=1, max_length=280)
+  next_step: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 def clean_work_key(value: str) -> str:
@@ -131,6 +141,7 @@ def _serialize(db: Session, row: models.AgentWorkClaim, state: str) -> dict:
     "takeover_reason": claim_text(row.takeover_reason, row.work_key, "takeover_reason"),
     "completed_at": row.completed_at.isoformat() if row.completed_at else None,
     "outcome": claim_text(row.outcome, row.work_key, "outcome"),
+    "work_report": row.work_report,
   }
   if state == "held_by_peer":
     result["next_action"] = (
@@ -295,6 +306,7 @@ def claim_work(
       models.AgentWorkClaim.takeover_reason: None,
       models.AgentWorkClaim.released_at: None,
       models.AgentWorkClaim.outcome: None,
+      models.AgentWorkClaim.work_report: None,
       models.AgentWorkClaim.acquisition_id: uuid.uuid4().hex,
       models.AgentWorkClaim.claimed_at: now,
       models.AgentWorkClaim.updated_at: now,
@@ -463,6 +475,7 @@ _DELETED_OWNER_OUTCOME = "Owning chat was deleted before this action completed."
 
 def _stage_settle(
   db: Session, row: models.AgentWorkClaim, *, complete: bool, outcome: str,
+  work_report: dict | None = None,
 ) -> ReleasedClaim | None:
   """Settle one still-open claim in the caller's txn, fenced by revision.
 
@@ -481,6 +494,7 @@ def _stage_settle(
     models.AgentWorkClaim.released_at.is_(None),
   ).update({
     models.AgentWorkClaim.outcome: outcome,
+    models.AgentWorkClaim.work_report: work_report,
     models.AgentWorkClaim.updated_at: now,
     models.AgentWorkClaim.revision: previous_revision + 1,
     (
@@ -493,7 +507,7 @@ def _stage_settle(
   stage_stamp_claim_outcome(
     db, row, ("completed" if complete else
               "owner_deleted" if outcome == _DELETED_OWNER_OUTCOME else "released"),
-    outcome,
+    outcome, work_report=work_report,
   )
   db.expire(row)
   return ReleasedClaim(
@@ -565,6 +579,7 @@ def _goal_outcome(
 def stage_settle_goal_claims(
   db: Session, *, chat_id: str, goal_id: str, status: str,
   result: str | None = None, finished_keys: Iterable[str] = (),
+  claim_reports: dict[str, dict] | None = None,
 ) -> list[ReleasedClaim]:
   """Settle one ended Goal's still-open claims in the caller's transaction.
 
@@ -594,7 +609,8 @@ def stage_settle_goal_claims(
     models.AgentWorkClaim.released_at.is_(None),
   ).all():
     complete, outcome = _goal_outcome(status, result, row.work_key in finished)
-    item = _stage_settle(db, row, complete=complete, outcome=outcome)
+    item = _stage_settle(db, row, complete=complete, outcome=outcome,
+                         work_report=(claim_reports or {}).get(row.work_key) if complete else None)
     if item is not None:
       settled.append(item)
   db.flush()
@@ -695,7 +711,9 @@ def finish_work(
   work_key: str,
   outcome: str,
   release: bool,
+  work_report: dict | None = None,
 ) -> dict:
+  report = WorkReport.model_validate(work_report).model_dump(exclude_none=True) if work_report is not None else None
   key = clean_work_key(work_key)
   clean_outcome = outcome.strip()
   if not clean_outcome:
@@ -714,7 +732,7 @@ def finish_work(
   if (
     row.completed_at is None and row.released_at is None
     and _stage_settle(
-      db, row, complete=not release, outcome=clean_outcome,
+      db, row, complete=not release, outcome=clean_outcome, work_report=report,
     ) is None
   ):
     db.rollback()

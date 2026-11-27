@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
+from app.agent_work_claims import WorkReport
 from app.broadcast import get_broadcast
 from app.database import get_db
 from app.deps import (
@@ -243,6 +244,7 @@ class GoalUpdateRequest(BaseModel):
   cancel: str | None = Field(default=None, min_length=1)
   defer: str | None = Field(default=None, min_length=1)
   finished_claims: list[str] = Field(default_factory=list)
+  claim_reports: dict[str, WorkReport] = Field(default_factory=dict)
 
   @field_validator("complete", mode="before")
   @classmethod
@@ -259,6 +261,8 @@ class GoalUpdateRequest(BaseModel):
       self.complete, self.cannot_complete, self.cancel, self.defer, self.next_action,
     )) > 1:
       raise ValueError("Choose one outcome, deferral, or next action.")
+    if self.claim_reports.keys() - set(self.finished_claims):
+      raise ValueError("Claim reports must name only finished_claims.")
     if self.finished_claims and self.complete is None:
       raise ValueError("Only a completion can name finished claims.")
     return self
@@ -456,6 +460,7 @@ async def update_goal(
           cannot_complete=(body.cannot_complete.model_dump() if body.cannot_complete else None),
           cancel=body.cancel, defer=body.defer,
           finished_claims=body.finished_claims,
+          claim_reports={key: report.model_dump(exclude_none=True) for key, report in body.claim_reports.items()},
         )
         db.refresh(goal)
     except (GoalPlanError, GoalPlanConflict) as exc:
