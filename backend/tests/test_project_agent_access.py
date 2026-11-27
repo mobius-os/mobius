@@ -337,6 +337,10 @@ def test_a_private_project_keeps_its_own_git_settings(tmp_path):
   assert marker.exists()
 
 
+_needs_rooms = pytest.mark.skipif(not _rooms_available(), reason="host cannot build rooms")
+
+
+@_needs_rooms
 @pytest.mark.parametrize("key", ["core.fsmonitor", "core.hooksPath"])
 def test_a_shared_projects_planted_git_command_never_runs(tmp_path, key):
   repo, marker = _repo(tmp_path / "p"), tmp_path / "ran"
@@ -371,27 +375,6 @@ def test_a_shared_projects_git_runs_its_programs_inside_a_room(tmp_path):
     except project_git.GitProjectError:
       pass
   assert not (outside / "marker").exists()
-
-
-def test_a_shared_projects_settings_that_run_programs_stop_github_sync(tmp_path):
-  repo = _repo(tmp_path / "p")
-  subprocess.run(["git", "-C", str(repo), "config", "filter.x.clean", "cat"], check=True)
-  command = None
-  with project_git.untrusted_settings(True), pytest.raises(
-    project_git.GitProjectError, match="filter.x.clean",
-  ):
-    command = project_git._git(repo, "fetch", "origin")
-  assert command is None
-
-
-def test_without_rooms_every_shared_git_command_is_checked(tmp_path, monkeypatch):
-  monkeypatch.setattr(project_git, "_rooms_available", lambda: False)
-  repo = _repo(tmp_path / "p")
-  subprocess.run(["git", "-C", str(repo), "config", "diff.x.textconv", "cat"], check=True)
-  with project_git.untrusted_settings(True), pytest.raises(project_git.GitProjectError):
-    project_git.project_status(repo)
-  # The owner's private use of the same repository is untouched.
-  assert project_git.project_status(repo)["available"] is not False
 
 
 @pytest.mark.parametrize("failure", ["timeout", "not json", '{"reasons": []}'])
@@ -447,23 +430,6 @@ def test_the_git_panel_of_a_shared_project_treats_its_settings_as_untrusted(
   assert seen == [False, True]
 
 
-def test_settings_kept_beside_the_repository_settings_are_checked_too(tmp_path, monkeypatch):
-  """A repository's config.worktree is its own setting too."""
-  monkeypatch.setattr(project_git, "_rooms_available", lambda: False)
-  repo = _repo(tmp_path / "p")
-  subprocess.run(["git", "-C", str(repo), "config", "extensions.worktreeConfig", "true"], check=True)
-  subprocess.run(["git", "-C", str(repo), "config", "--worktree", "filter.x.clean", "cat"], check=True)
-  with project_git.untrusted_settings(True), pytest.raises(project_git.GitProjectError):
-    project_git.project_status(repo)
-
-
-def test_github_sync_refuses_settings_that_reroute_the_sign_in(tmp_path):
-  repo = _repo(tmp_path / "p")
-  subprocess.run(["git", "-C", str(repo), "config", "http.proxy", "http://198.51.100.1:8080"], check=True)
-  with project_git.untrusted_settings(True), pytest.raises(project_git.GitProjectError, match="http.proxy"):
-    project_git._git(repo, "push", "origin", "main")
-
-
 @pytest.mark.skipif(not _rooms_available(), reason="host cannot build rooms")
 def test_one_shared_projects_git_room_ignores_settings_left_in_its_home(tmp_path):
   repo = _repo(tmp_path / "p")
@@ -471,3 +437,141 @@ def test_one_shared_projects_git_room_ignores_settings_left_in_its_home(tmp_path
   with project_git.untrusted_settings(True):
     argv = project_git._git(repo, "status")
   assert "GIT_CONFIG_GLOBAL=/dev/null" in argv and argv.index("--") < argv.index("env")
+
+
+def test_without_rooms_no_agent_runs_so_shared_git_runs_as_usual(tmp_path, monkeypatch):
+  monkeypatch.setattr(project_git, "_rooms_available", lambda: False)
+  repo = _repo(tmp_path / "p")
+  with project_git.untrusted_settings(True):
+    assert project_git._git(repo, "status") == ["git", "-C", str(repo), "status"]
+
+
+@_needs_rooms
+def test_a_shared_project_never_runs_network_git_on_its_own_repository(tmp_path):
+  repo = _repo(tmp_path / "p")
+  for command in ("fetch", "push", "pull", "ls-remote"):
+    with project_git.untrusted_settings(True), pytest.raises(project_git.GitProjectError):
+      project_git._git(repo, command, "origin")
+
+
+def _github(monkeypatch, *, fetched: str | None = None) -> list:
+  """Stand in for GitHub: record each network command the scratch repository
+  runs, and for a fetch land ``fetched`` as origin/main there."""
+  from app import github_contribution_git as contribution_git
+  real, calls = contribution_git._run_cmd, []
+
+  def run(argv, **kwargs):
+    if not any(arg.startswith("https://github.com/") for arg in argv):
+      return real(argv, **kwargs)
+    calls.append((argv, kwargs["env"]))
+    if "fetch" in argv and fetched:
+      # GitHub has one branch, main, at ``fetched``; --prune drops the rest.
+      scratch = Path(argv[2])
+      env = contribution_git._git_env(scratch)
+      listed = real(["git", "-C", str(scratch), "for-each-ref", "--format=%(refname)",
+                     "refs/remotes/origin/"], cwd=scratch, env=env).stdout.split()
+      for ref in listed:
+        real(["git", "-C", str(scratch), "update-ref", "-d", ref], cwd=scratch, env=env)
+      real(["git", "-C", str(scratch), "update-ref", "refs/remotes/origin/main", fetched],
+           cwd=scratch, env=env)
+    return subprocess.CompletedProcess(argv, 0, "", "")
+
+  monkeypatch.setattr(contribution_git, "_run_cmd", run)
+  return calls
+
+
+def _connected(path: Path) -> Path:
+  repo = _repo(path)
+  subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                  "https://github.com/owner/project.git"], check=True)
+  return repo
+
+
+def _head(repo: Path) -> str:
+  return subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                        capture_output=True, text=True, check=True).stdout.strip()
+
+
+@_needs_rooms
+def test_a_local_push_address_planted_in_a_shared_project_never_receives_the_push(
+  tmp_path, monkeypatch,
+):
+  """The room could point origin's push address at a repository it made, whose
+  receiving hook would run as the server when the owner presses Push."""
+  repo, marker = _connected(tmp_path / "p"), tmp_path / "ran"
+  trap = repo / ".git" / "x.git"
+  subprocess.run(["git", "init", "-q", "--bare", str(trap)], check=True)
+  (trap / "hooks" / "post-receive").write_text(f"#!/bin/sh\necho ran > {marker}\n")
+  (trap / "hooks" / "post-receive").chmod(0o755)
+  subprocess.run(["git", "-C", str(repo), "config", "remote.origin.pushurl", str(trap)], check=True)
+  calls = _github(monkeypatch)
+  context = project_git._owned_context(repo)
+  with project_git.untrusted_settings(True):
+    project_git._push_origin(context, _head(repo), "main")
+  assert not marker.exists()
+  [(argv, env)] = calls
+  assert "https://github.com/owner/project.git" in argv and "origin" not in argv
+  assert env["GIT_CONFIG_NOSYSTEM"] == "1" and env["GIT_ALLOW_PROTOCOL"] == "https"
+  assert str(repo) not in argv[2]
+  # The push is recorded in the project, and the trap was never used.
+  assert _head(repo) == subprocess.run(
+    ["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/main"],
+    capture_output=True, text=True, check=True).stdout.strip()
+  # The same push in a private project goes where the owner's settings say.
+  project_git._push_origin(context, _head(repo), "main")
+  assert marker.exists()
+
+
+@_needs_rooms
+def test_a_submodule_command_planted_in_a_shared_project_never_runs_on_fetch(
+  tmp_path, monkeypatch,
+):
+  """Fetching could recurse into a submodule whose own settings name a
+  command; the project's settings are never read outside a room."""
+  repo, marker = _connected(tmp_path / "p"), tmp_path / "ran"
+  sub = _repo(tmp_path / "sub")
+  subprocess.run(["git", "-C", str(repo), "-c", "protocol.file.allow=always",
+                  "submodule", "add", "-q", str(sub), "sub"], check=True)
+  subprocess.run(["git", "-C", str(repo), "commit", "-qm", "sub"], check=True)
+  modules = repo / ".git" / "modules" / "sub"
+  subprocess.run(["git", "-C", str(modules), "config", "remote.origin.url", "ssh://example.com/x"], check=True)
+  subprocess.run(["git", "-C", str(modules), "config", "core.sshCommand",
+                  f"sh -c 'echo ran > {marker}'"], check=True)
+  subprocess.run(["git", "-C", str(repo), "config", "fetch.recurseSubmodules", "yes"], check=True)
+  calls = _github(monkeypatch, fetched=_head(repo))
+  with project_git.untrusted_settings(True):
+    project_git._fetch_origin(project_git._owned_context(repo))
+  assert not marker.exists() and len(calls) == 1
+  # What GitHub sent reached the project, through the room.
+  assert subprocess.run(["git", "-C", str(repo), "rev-parse", "refs/remotes/origin/main"],
+                        capture_output=True, text=True, check=True).stdout.strip() == _head(repo)
+
+
+@_needs_rooms
+def test_a_fetch_drops_branches_github_no_longer_has(tmp_path, monkeypatch):
+  repo = _connected(tmp_path / "p")
+  subprocess.run(["git", "-C", str(repo), "update-ref", "refs/remotes/origin/gone", _head(repo)], check=True)
+  _github(monkeypatch, fetched=_head(repo))
+  with project_git.untrusted_settings(True):
+    project_git._fetch_origin(project_git._owned_context(repo))
+  refs = subprocess.run(["git", "-C", str(repo), "for-each-ref", "--format=%(refname)", "refs/remotes/origin/"],
+                        capture_output=True, text=True, check=True).stdout.split()
+  assert refs == ["refs/remotes/origin/main"]
+
+
+def test_a_shared_project_on_an_apps_source_reads_it_only(client, auth, db):
+  """App Git (Apply, updates) runs there with the folder's own settings, so its
+  agent must not be able to write .git; members still edit it."""
+  from app.project_agent_access import SHARED_APP_SOURCE_ROLE
+  project = _project(client, auth)
+  row = db.get(models.Project, project["id"])
+  _share(client, auth, project["id"])
+  assert project_agent_access.role_for(db, row) == SHARED_ROLE
+  from app.routes.projects import _project_root
+  app = models.App(name="Notes", description="", jsx_source="", compiled_path="",
+                   source_dir=str(_project_root(row)), slug="notes-src")
+  db.add(app)
+  db.commit()
+  assert project_agent_access.role_for(db, row) == SHARED_APP_SOURCE_ROLE
+  assert SHARED_APP_SOURCE_ROLE.spec.data == "read"
+

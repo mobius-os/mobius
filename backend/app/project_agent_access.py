@@ -25,8 +25,9 @@ project it never starts a program the repository's settings name
 
 Not covered yet: the project's builds, and an app Apply from a linked app's
 project, still run as the backend user on files the agent (or a member)
-wrote. Running them in rooms follows app jobs and services, the next step
-named in #2154.
+wrote. Running them, and app Git, in rooms follows app jobs and services, the
+next step named in #2154; until then an agent in a shared project on an app's
+source folder can read it but not change it.
 """
 
 from __future__ import annotations
@@ -41,6 +42,11 @@ log = logging.getLogger(__name__)
 # Every agent chat of a shared project: the project's files, the web and
 # questions to the owner; nothing else.
 SHARED_ROLE = AgentRole("edit", ("ask", "web"), "")
+# A shared project on an installed app's source folder reads it only: Möbius's
+# app Git (Apply, updates, rebuild checks; ``app_git``) runs in that folder as
+# the backend user with the repository's own settings, so an agent that could
+# write its ``.git`` could start a program there. Members edit it as usual.
+SHARED_APP_SOURCE_ROLE = AgentRole("read", ("ask", "web"), "")
 
 
 def is_shared(db: Any, project_id: str) -> bool:
@@ -52,26 +58,25 @@ def is_shared(db: Any, project_id: str) -> bool:
   ).first() is not None
 
 
-def shares_folder(db: Any, root: Any) -> bool:
-  """Whether a shared project works on this folder (an app's source folder
-  can be a linked app project's root)."""
-  from pathlib import Path
-  from app import models
-  from app.routes.projects import _project_root
-  target = Path(root).resolve()
-  projects = db.query(models.Project).filter(models.Project.deleted_at.is_(None)).all()
-  return any(
-    _project_root(project).resolve() == target and is_shared(db, project.id)
-    for project in projects
-  )
-
-
 def role_for(db: Any, project: Any) -> AgentRole | None:
   """The role a project's agents run confined by: None (full access) while
   the project is private."""
   if project is None or not is_shared(db, project.id):
     return None
-  return SHARED_ROLE
+  return SHARED_APP_SOURCE_ROLE if _on_app_source(db, project) else SHARED_ROLE
+
+
+def _on_app_source(db: Any, project: Any) -> bool:
+  from pathlib import Path
+  from app import models
+  from app.routes.projects import _project_root
+  root = _project_root(project).resolve()
+  return any(
+    Path(source).resolve() == root
+    for (source,) in db.query(models.App.source_dir).filter(
+      models.App.deleted_at.is_(None), models.App.source_dir.isnot(None),
+    )
+  )
 
 
 def grant(db: Any, project: Any) -> str | None:

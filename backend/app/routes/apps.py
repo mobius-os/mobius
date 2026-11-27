@@ -3,7 +3,6 @@
 import asyncio
 import base64
 import binascii
-import contextlib
 import functools
 import io
 import json
@@ -357,18 +356,6 @@ async def move_app_source_path(
     }
 
 
-@contextlib.contextmanager
-def _app_source_git(db: Session, root: Path):
-  """Möbius's Git in an app's source folder, which a shared project may work
-  on: its settings are then untrusted (``project_git``)."""
-  from app import project_agent_access
-  try:
-    with project_git.untrusted_settings(project_agent_access.shares_folder(db, root)):
-      yield
-  except project_git.GitProjectError as exc:
-    raise HTTPException(409, str(exc)) from exc
-
-
 @router.get("/{app_id}/source/git/status")
 def get_app_source_git_status(
   app_id: int,
@@ -376,8 +363,7 @@ def get_app_source_git_status(
   db: Session = Depends(get_db),
 ):
   _app, root = _app_source_root(db, app_id)
-  with _app_source_git(db, root):
-    return project_git.project_status(root, visibility=_APP_SOURCE_VISIBILITY)
+  return project_git.project_status(root, visibility=_APP_SOURCE_VISIBILITY)
 
 
 @router.get("/{app_id}/source/git/diff")
@@ -389,18 +375,17 @@ def get_app_source_git_diff(
 ):
   _app, root = _app_source_root(db, app_id)
   target = _resolve_app_source_path(root, path)
-  with _app_source_git(db, root):
-    if not target.is_file():
-      relative = target.relative_to(root).as_posix()
-      deleted = any(row["path"] == relative and row["status"] == "deleted"
-                    for row in project_git.project_status(
-                      root, visibility=_APP_SOURCE_VISIBILITY,
-                    )["changes"])
-      if not deleted:
-        raise HTTPException(404, "File not found.")
-    return project_git.project_file_diff(
-      root, target, visibility=_APP_SOURCE_VISIBILITY,
-    )
+  if not target.is_file():
+    relative = target.relative_to(root).as_posix()
+    deleted = any(row["path"] == relative and row["status"] == "deleted"
+                  for row in project_git.project_status(
+                    root, visibility=_APP_SOURCE_VISIBILITY,
+                  )["changes"])
+    if not deleted:
+      raise HTTPException(404, "File not found.")
+  return project_git.project_file_diff(
+    root, target, visibility=_APP_SOURCE_VISIBILITY,
+  )
 
 
 def _safe_to_rmtree_source(
