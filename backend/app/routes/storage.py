@@ -48,7 +48,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.resource_access import recheck_app_identity
-from app import activity, app_cron, fs_locks, models
+from app import activity, fs_locks, models
 from app.config import get_settings
 from app.database import get_db
 from app import storage_io
@@ -314,28 +314,6 @@ def _resolve(base: Path, rel: str) -> Path:
         status_code=400, detail="Symlinks are not allowed in storage paths."
       )
   return resolved
-
-
-def _reject_app_schedule_state(
-  principal: Principal, base: Path, resolved: Path,
-) -> None:
-  """Keep app principals out of the platform-owned schedule declaration.
-
-  The owner's schedule (``choice.json`` and ``init-cron.sh``) lives under
-  ``schedule/`` in the app's data tree (``app_cron.schedule_state_dir``), and
-  reconciliation trusts it. An app that could replace or delete it would
-  replace the owner's cadence or timezone with its own. Decide on the resolved
-  path, the same one the route serves, so ``./schedule`` is no way around it.
-  The owner keeps full access.
-  """
-  if principal.app_id is None:
-    return
-  parts = resolved.resolve().relative_to(base.resolve()).parts
-  if parts and parts[0] == app_cron.SCHEDULE_STATE_DIRNAME:
-    raise HTTPException(
-      status_code=403,
-      detail="The schedule folder belongs to the platform; use the schedule API.",
-    )
 
 
 # Text MIME types that are safe to read as UTF-8.
@@ -725,7 +703,6 @@ def read_app_file(
   data_dir = get_settings().data_dir
   base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  _reject_app_schedule_state(principal, base, file_path)
   # is_file() (not exists()) so a directory path 404s cleanly instead of
   # reaching _serve_file, which would try to read a directory and 500
   #.
@@ -792,8 +769,6 @@ async def move_app_file(
   base = Path(data_dir) / "apps" / str(app_id)
   src = _resolve(base, body.from_path)
   dst = _resolve(base, body.to)
-  _reject_app_schedule_state(principal, base, src)
-  _reject_app_schedule_state(principal, base, dst)
   async with fs_locks.app_storage_lock(app_id):
     recheck_app_identity(db, app_id, expected_nonce)
     if not src.exists():
@@ -851,7 +826,6 @@ async def delete_app_folder(
   data_dir = get_settings().data_dir
   base = Path(data_dir) / "apps" / str(app_id)
   target = _resolve(base, path)
-  _reject_app_schedule_state(principal, base, target)
   async with fs_locks.app_storage_lock(app_id):
     recheck_app_identity(db, app_id, expected_nonce)
     if target.resolve() == base.resolve():
@@ -892,7 +866,6 @@ async def write_app_file(
   data_dir = get_settings().data_dir
   base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  _reject_app_schedule_state(principal, base, file_path)
   content, stored_mime = await _decode_write_body(request, file_path)
   if_match = request.headers.get("if-match")
   if_none_match = request.headers.get("if-none-match")
@@ -948,7 +921,6 @@ async def delete_app_file(
   data_dir = get_settings().data_dir
   base = Path(data_dir) / "apps" / str(app_id)
   file_path = _resolve(base, path)
-  _reject_app_schedule_state(principal, base, file_path)
   # Serialize with this app's uninstall + re-verify, under the per-app lock,
   # that this is still the SAME app (token_nonce unchanged), exactly like
   # write_app_file: a delayed DELETE for a reused SQLite id could otherwise
@@ -1229,7 +1201,6 @@ def list_app_dir(
   # non-empty prefix goes through the same containment + traversal
   # checks every file path does.
   dir_path = base if prefix == "" else _resolve(base, prefix)
-  _reject_app_schedule_state(principal, base, dir_path)
   if not dir_path.is_dir():
     return {"entries": [], "next_cursor": None}
   # Resolve each file's stored MIME from its sidecar so the listing reports
