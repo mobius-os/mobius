@@ -8,6 +8,19 @@ on an existing key they replace only what is given.
 
   store-key.py NAME [--header NAME [--prefix TEXT] | --query NAME]
                [--site HOST[:METHODS[:PATHS]]]... [--no-agents] [--replace]
+  store-key.py NAME --part PART[:plain|:secret[:LABEL]]... (--basic USER PASS | --slots JSON | --recipe JSON)
+               [--site ...]... [--no-agents] [--replace]
+
+  With --part, the key has several parts: each is read from the input field
+  of the same name (one card field per part, so part names are lowercase
+  letters, digits and _), secret unless marked plain (an id, a username, a
+  region: shown in Settings and not redacted). On an existing key a part keeps
+  its secrecy unless :plain or :secret says otherwise. A label follows a
+  second colon: account:plain:Account SID, token:secret:Auth token. --basic
+  sends two parts as "Authorization: Basic"; --slots takes the vault's slot
+  list as JSON, e.g. '[{"type": "header", "name": "X-Id", "template": "{id}"}]'.
+  --recipe takes any whole send recipe as JSON, such as an aws_sigv4 or
+  jwt_bearer one. On an existing key, --part replaces only the parts it names.
 
   --site api.example.com:GET,POST:/v1/*,/v2/*   (methods default to GET,
   paths to /*). Without --header or --query a new key is sent as
@@ -83,12 +96,35 @@ def _value(raw: dict) -> str:
   return ""
 
 
+def _parts(raw: dict, specs: list[str]) -> list[dict] | None:
+  """The parts named by ``--part`` with their values from the input, or None
+  when one is missing or empty."""
+  parts = []
+  for spec in specs:
+    name, _, rest = spec.partition(":")
+    kind, _, label = rest.partition(":")
+    value = raw.get(name)
+    if not isinstance(value, str) or not value.strip():
+      return None
+    part = {"name": name, "value": value.strip()}
+    if kind in ("plain", "secret"):
+      part["secret"] = kind == "secret"
+    if label:
+      part["label"] = label
+    parts.append(part)
+  return parts
+
+
 def main(argv: list[str] | None = None) -> int:
   parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
   parser.add_argument("name")
   slot = parser.add_mutually_exclusive_group()
   slot.add_argument("--header")
   slot.add_argument("--query")
+  slot.add_argument("--basic", nargs=2, metavar=("USER_PART", "PASSWORD_PART"))
+  slot.add_argument("--slots")
+  slot.add_argument("--recipe")
+  parser.add_argument("--part", action="append", default=[])
   parser.add_argument("--prefix")
   parser.add_argument("--site", action="append", default=[])
   parser.add_argument("--agents", action="store_true", help=argparse.SUPPRESS)  # the default
@@ -96,10 +132,12 @@ def main(argv: list[str] | None = None) -> int:
   parser.add_argument("--replace", action="store_true")
   args = parser.parse_args(argv)
   try:
-    value = _value(json.load(sys.stdin))
+    raw = json.load(sys.stdin)
+    parts = _parts(raw, args.part) if args.part else None
+    value = None if args.part else _value(raw)
   except (ValueError, AttributeError):
     return 2
-  if not value:
+  if not (parts or value):
     return 2
   try:
     status, listing = _call("GET", "/keys")
@@ -115,6 +153,13 @@ def main(argv: list[str] | None = None) -> int:
       inject = {"type": "header", "name": args.header, "prefix": args.prefix or ""}
     elif args.query:
       inject = {"type": "query", "name": args.query}
+    elif args.basic:
+      inject = {"type": "basic", "username": args.basic[0], "password": args.basic[1]}
+    elif args.slots or args.recipe:
+      try:
+        inject = {"type": "slots", "slots": json.loads(args.slots)} if args.slots else json.loads(args.recipe)
+      except ValueError:
+        return 2
     grants = dict(existing["grants"]) if existing else {"apps": [], "agents": True, "sites": []}
     if args.site:
       grants["sites"] = [_site(s) for s in args.site]
@@ -122,7 +167,8 @@ def main(argv: list[str] | None = None) -> int:
       grants["agents"] = True
     if args.no_agents:
       grants["agents"] = False
-    body = {"value": value, "inject": inject, "grants": grants}
+    body = {"parts": parts} if parts else {"value": value}
+    body.update(inject=inject, grants=grants)
     if existing:
       # Only the key as it was read: never a change made since.
       body["revision"] = existing.get("revision", 0)

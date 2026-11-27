@@ -64,18 +64,102 @@ export function slotShown(request) {
   return request.sets_inject ? request.inject : null
 }
 
-/** What Allow sends: exactly what the card shows, and a new key's value. */
+/**
+ * What Allow sends: exactly what the card shows, and a new key's value. A new
+ * key the request lists several parts for takes ``value`` as a map of part
+ * name to pasted text, one per field on the card.
+ */
 export function approvalBody(request, value) {
   const body = { ticket: request.ticket, sites: request.sites || [] }
-  if (!request.key_exists) return { ...body, value, inject: slotShown(request) }
+  if (!request.key_exists) {
+    const pasted = newKeyParts(request) ? { parts: value } : { value }
+    return { ...body, ...pasted, inject: slotShown(request) }
+  }
   return request.sets_inject ? { ...body, inject: request.inject } : body
 }
 
-export function sentAs(inject) {
+/** The parts a new key is pasted as on its card, or null for one value. */
+export function newKeyParts(request) {
+  return !request.key_exists && Array.isArray(request.parts) && request.parts.length ? request.parts : null
+}
+
+/** Whether every part of a multi-part paste has text. */
+export function partsFilled(parts, values) {
+  return parts.every(part => String(values?.[part.name] || '').trim())
+}
+
+/** A saved key's parts; a key listed before parts existed has its one value. */
+export function keyParts(key) {
+  return Array.isArray(key.parts) && key.parts.length
+    ? key.parts
+    : [{ name: 'value', label: '', secret: true, multiline: Boolean(key.multiline) }]
+}
+
+export function partLabel(part) {
+  return part.label || part.name
+}
+
+/**
+ * How a key is sent, as the card's Details show it after "Sent as". Parts are
+ * named by their labels when ``parts`` lists them.
+ */
+export function sentAs(inject, parts = []) {
+  const label = name => {
+    const part = (parts || []).find(item => item.name === name)
+    return part ? partLabel(part) : name
+  }
   if (!inject) return 'Authorization: Bearer …'
-  return inject.type === 'query'
-    ? `?${inject.name}=…`
-    : `${inject.name}: ${inject.prefix || ''}…`
+  if (inject.type === 'query') return `?${inject.name}=…`
+  if (inject.type === 'basic') return `Authorization: Basic (${label(inject.username)} and ${label(inject.password)})`
+  if (inject.type === 'aws_sigv4') return `an AWS signature (${inject.service}, region ${inject.region})`
+  if (inject.type === 'jwt_bearer') {
+    const exchange = inject.exchange?.kind
+    if (exchange === 'google') return `a Google access token for ${inject.claims?.scope || 'its scope'}`
+    if (exchange === 'github') return `a GitHub App token for installation ${inject.exchange.installation_id}`
+    const alg = inject.alg || 'RS256'
+    return inject.claims?.aud ? `a token signed ${alg} for ${inject.claims.aud}` : `a token signed ${alg}, issued by ${inject.claims?.iss}`
+  }
+  if (inject.type === 'slots') {
+    return inject.slots.map(slot => {
+      if (slot.type === 'header') return `${slot.name}: ${slot.template.replace(/\{([^}]+)\}/g, (_, name) => `{${label(name)}}`)}`
+      if (slot.type === 'query') return `?${slot.name}={${label(slot.part)}}`
+      return `${slot.format === 'form' ? 'form' : 'JSON'} field ${slot.field}={${label(slot.part)}}`
+    }).join(' · ')
+  }
+  return `${inject.name}: ${inject.prefix || ''}…`
+}
+
+/**
+ * Everything a signed token says, for a card that would let an app or agent
+ * mint it: its claims (a ``sub`` acts as that user), key id and exchange.
+ * Null for any other recipe.
+ */
+export function tokenClaims(inject) {
+  if (inject?.type !== 'jwt_bearer') return null
+  const claims = Object.entries(inject.claims || {}).map(([name, value]) => `${name} ${value}`)
+  const exchange = inject.exchange?.kind === 'google' ? 'exchanged with Google'
+    : inject.exchange?.kind === 'github' ? `exchanged with GitHub for installation ${inject.exchange.installation_id}`
+      : 'sent as it is'
+  return [...claims, ...(inject.key_id ? [`key id ${inject.key_id}`] : []), exchange].join(' · ')
+}
+
+/**
+ * What really limits a request the vault signs with an AWS access key: the
+ * sites limit which buckets and objects it reaches, but what it may do there
+ * is whatever the key's own policy allows. Null for any other recipe.
+ */
+export function signedRequestLimit(inject) {
+  if (inject?.type !== 'aws_sigv4') return null
+  return "Signed with your storage access key: the sites above limit which buckets it reaches, but the key's own "
+    + 'policy decides what a signed request may do there. Give that key only the buckets and actions this needs.'
+}
+
+/** What the paste step says about parts that aren't secret. */
+export function plainPartsNote(parts) {
+  const plain = (parts || []).filter(part => !part.secret).map(partLabel)
+  if (!plain.length) return null
+  const names = plain.length === 1 ? plain[0] : `${plain.slice(0, -1).join(', ')} and ${plain[plain.length - 1]}`
+  return `${names} ${plain.length === 1 ? "isn't" : "aren't"} secret: shown as typed and not hidden from answers. Paste only what is meant to be seen there.`
 }
 
 /** Hosts in plain words: "a", "a and b", "a, b and c", "a, b and 2 more". */
@@ -294,7 +378,9 @@ export function requestWording(request, names) {
     keptSlot: !slot && request.inject_kept ? { kept: request.key_inject, asked: request.inject } : null,
     says: `${who} says:`,
     denyNote: `Not now is a no: ${asked} can't ask for ${key} again until you let it in Settings › Keys.`,
-    pasteTitle: hosts ? `Paste your ${hosts} key` : 'Paste the key',
+    pasteTitle: newKeyParts(request)
+      ? (hosts ? `Paste the parts of your ${hosts} key` : 'Paste the parts of the key')
+      : (hosts ? `Paste your ${hosts} key` : 'Paste the key'),
     pasteNote: `Saved as “${key}”. You'll find it in Settings › Keys.`,
   }
   const otherApp = subject.savedBy && {

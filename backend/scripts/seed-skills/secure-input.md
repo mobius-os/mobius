@@ -69,7 +69,25 @@ instead of writing your own: `["python3",
 for a site, ask the owner with the `request_key` tool and they approve that
 site on its card (below). Add `--site api.example.com:GET,POST:/v1/*` only when the
 owner told you where the key goes. The owner then sees and manages it in
-Settings › Keys. It never replaces a key
+Settings › Keys. A service that needs more than one token (a username and
+password, an id plus a secret, a secret in the request body) is one key with
+several parts: give the card one field per part (field and part names are
+lowercase letters, digits and `_`) and add `--part NAME` for each
+(`--part NAME:plain:LABEL` for an id or username that isn't secret,
+`--part NAME:secret:LABEL` to label a secret one), then
+`--basic USER_PART PASSWORD_PART` or `--slots JSON` (header templates such as
+`Token {id}:{secret}`, query parameters, or JSON or form body fields). Ask for
+such a key with `request_key`'s `parts` and a matching `inject`. Read one part
+with `?part=NAME`. For services that sign requests or mint tokens, the vault
+does it and the secret never leaves: S3-compatible storage (S3, R2, B2, MinIO;
+service `s3`, the only AWS service the vault signs for) uses an `aws_sigv4`
+recipe, and the access key's own policy is what limits a signed request; a
+Google service account (its JSON file as one part, with `claims.scope`), a
+GitHub App (its PEM, `claims.iss` and an installation id) or a direct signed
+token use `jwt_bearer`. Pass the recipe
+to `store-key.py` with `--recipe JSON`; when asking with `request_key`
+instead, mark a key-file part `multiline` in its `parts`. Secret parts sent by
+these recipes are at least eight characters. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
 consumer's receipt does not say why and the submitted value is discarded, so
 before opening the card check `mapi /api/keys` for the name; if it exists,

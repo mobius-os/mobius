@@ -116,6 +116,8 @@ class KeyRequest(BaseModel):
   reason: str = Field(min_length=1, max_length=300)
   sites: list[dict] = Field(default_factory=list, max_length=20)
   inject: dict | None = None
+  # The parts a new key is pasted as (names, labels, secrecy; never values).
+  parts: list[dict] | None = Field(default=None, max_length=8)
   message: ClosingMessage = None
 
 

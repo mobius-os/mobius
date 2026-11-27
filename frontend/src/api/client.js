@@ -1164,7 +1164,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
     revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-    reveal: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/value`),
+    reveal: (name, part) => apiFetch(`/keys/${encodeURIComponent(name)}/value${part && part !== 'value' ? `?part=${encodeURIComponent(part)}` : ''}`),
     approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',
       body: JSON.stringify(body),
