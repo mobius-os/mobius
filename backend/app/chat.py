@@ -6521,6 +6521,8 @@ async def _run_chat_impl_with_db(
   if provider_id == "mobius":
     if not agent_settings["model"] or not provider.declaration["models"]:
       raise ValueError("This Möbius model is unavailable. Refresh models and choose a current model.")
+  elif isinstance(provider, AppModelProvider) and not agent_settings["model"]:
+    raise ValueError("This app model is unavailable. Refresh models and choose a current model.")
 
   # Helpers inherit this admission's resolved selection, not mutable global
   # preferences or another turn using the same provider host.

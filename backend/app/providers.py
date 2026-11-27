@@ -549,9 +549,9 @@ def snapshot_chat_agent_settings(
 
   A provider-specific creator (app chat, delegation, unattended follow-up)
   supplies its own fallback model so it can never manufacture a model-less
-  chat. Unknown future model ids remain valid for their declared provider, just
-  as they do in ``effective_agent_settings``; known cross-provider ids fail
-  instead of being silently rewritten.
+  chat. Native providers may accept unknown future IDs; service-owned and
+  app-declared catalogues require current membership. Known cross-provider
+  IDs fail instead of being silently rewritten.
   """
   sync_app_model_providers(data_dir)
   if provider not in PROVIDERS:
@@ -568,7 +568,7 @@ def snapshot_chat_agent_settings(
   effective = effective_agent_settings(
     data_dir, overrides or None, provider=provider, file_layer=file_layer,
   )
-  if provider == "mobius" and chosen_model and not effective.get("model"):
+  if isinstance(PROVIDERS[provider], (MobiusProvider, AppModelProvider)) and chosen_model and not effective.get("model"):
     return None
   chosen_model = effective.get("model") or fallback_model
   if not isinstance(chosen_model, str) or not chosen_model.strip():
@@ -1582,6 +1582,8 @@ class AppModelProvider(BaseProvider):
     return self.declaration["models"]
 
   def resolve_selection(self, model, effort):
+    if model is not None and model not in {row["id"] for row in self.declaration["models"]}:
+      return None, None
     # An effort inherited from another provider (Claude's ultracode or xhigh,
     # a level this model lacks) is not sent: the provider's own default
     # applies. A model with no declared levels takes the provider's scale.

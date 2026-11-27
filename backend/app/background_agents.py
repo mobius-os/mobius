@@ -224,5 +224,8 @@ def resolve_background_chat_choice(
     data_dir, provider, model=model, effort=choice.get("effort"),
   )
   if selection is None:
-    raise RuntimeError("Background provider resolved no explicit model")
+    raise RuntimeError(
+      f"Background model {model or '(none)'} is unavailable for {provider}; "
+      "choose a current model."
+    )
   return {"provider": provider, "agent_settings": selection}

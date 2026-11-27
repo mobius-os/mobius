@@ -3927,6 +3927,11 @@ def _add_app_chat(
     )
   except ValueError as exc:
     raise HTTPException(status_code=422, detail=str(exc)) from exc
+  if agent_settings is None:
+    raise HTTPException(
+      status_code=422,
+      detail="The selected model is unavailable. Refresh models and choose a current model.",
+    )
   chat = chat_writer.create_chat(
     id=str(uuid.uuid4()),
     title=body.title or "New chat",
