@@ -56,8 +56,6 @@ export function restartCardStatusDetail(action) {
   if (!isRestartCardAction(action)) return ''
   if (action.observation?.observed_at) {
     const continuation = ({
-      restoring_edits: 'Automatic continuation is paused while Möbius restores work saved during the update.',
-      restart_required: 'Automatic continuation is paused: restored changes need another approved restart to load.',
       pending: 'The chat is waiting to continue. The agent still needs to check which changes loaded.',
       delivered: 'The chat resumed to check which changes loaded.',
       cancelled: 'This card is no longer waiting to resume the chat. Detecting a restart does not confirm which changes loaded.',

@@ -205,10 +205,10 @@ test('closed Restart card explains the outcome without dead controls', () => {
 })
 
 
-test('observed restart explains the hold without granting or revoking the offered action', () => {
+test('observed restart explains the pending continuation without granting or revoking the offered action', () => {
   const current = {
     ...action, version: 2, cancel_option_id: undefined,
-    observation: { observed_at: '2025-01-01T12:00:00Z', continuation: 'restart_required' },
+    observation: { observed_at: '2025-01-01T12:00:00Z', continuation: 'pending' },
   }
   const html = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'chat', questionId: 'observed-question', platformAction: current,
@@ -216,7 +216,7 @@ test('observed restart explains the hold without granting or revoking the offere
     disabled: false,
   }))
   assert.match(html, /Möbius restarted/)
-  assert.match(html, /restored changes need another approved restart/)
+  assert.match(html, /The chat is waiting to continue/)
   assert.match(html, /Restart now will restart Möbius again/)
   assert.match(html, /Restart again, or reply below/)
   assert.match(html, />Restart now</)
@@ -246,9 +246,9 @@ test('observed restart receipt survives a written response and retains its text'
 })
 
 
-test('observation distinguishes restoring work, waiting, and delivered continuation', () => {
+test('observation distinguishes waiting, delivered, and cancelled continuation', () => {
   for (const [continuation, copy] of [
-    ['restoring_edits', /while Möbius restores work/],
+    ['cancelled', /no longer waiting to resume/],
     ['pending', /waiting to continue/],
     ['delivered', /chat resumed to check/],
   ]) {
@@ -263,7 +263,7 @@ test('observation distinguishes restoring work, waiting, and delivered continuat
 test('a replayed original question cannot erase its authoritative restart receipt', () => {
   const old = { type: 'question', question_id: 'q', questions, platform_action: action }
   const observed = { ...old, platform_action: { ...action, observation: {
-    observed_at: '2025-01-01T12:00:00Z', continuation: 'restart_required',
+    observed_at: '2025-01-01T12:00:00Z', continuation: 'pending',
   } } }
   assert.deepEqual(carryDurableBlockState([old], [observed])[0], observed)
 })

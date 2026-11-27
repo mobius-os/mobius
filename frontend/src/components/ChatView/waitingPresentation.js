@@ -94,25 +94,19 @@ export function resourcePausePresentation(block, handoff = null) {
   const next = resource ? null : clockLabel(pauseTiming(block?.pause).checkAt)
   const limit = ['rate_limit', 'usage_limit', 'limit'].includes(kind)
   const automatic = handoff?.kind === 'automatic' && handoff.reason === kind
-  const restoring = handoff?.kind === 'automatic' && handoff.reason === 'restoring_edits'
-  const restart = handoff?.kind === 'recovery' && handoff.reason === 'restart_required'
   const blocked = handoff && handoff.kind !== 'automatic'
-  const manual = !restoring && (!!blocked || ((kind === 'model_capacity' || limit) && !automatic))
+  const manual = !!blocked || ((kind === 'model_capacity' || limit) && !automatic)
   return {
     manual,
     summary: resource ? resource.summary
       : limit ? 'Provider usage limit' : 'Model capacity',
-    next: restoring ? 'restoring local work'
-      : restart ? 'server restart needed'
-      : handoff?.kind === 'owner_input' ? 'answer needed'
+    next: handoff?.kind === 'owner_input' ? 'answer needed'
       : manual
       ? 'manual recovery' : next ? `checks again ${next}` : 'checks again automatically',
     owner: resource ? 'Möbius resource monitor' : 'Provider availability',
     pressure: resource ? resource.pressure
       : limit ? 'Provider usage limit reached' : 'Model capacity unavailable',
-    wakeUp: restoring ? 'Möbius is restoring local work; this chat continues after that work is restored and loaded'
-      : restart ? 'Waiting for a server restart to load restored work; use the saved Restart card'
-      : blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'
+    wakeUp: blocked && handoff.kind === 'owner_input' ? 'Answer the saved card before this chat can continue'
       : blocked && resource ? 'Automatic resource recovery is blocked; inspect the saved recovery card'
       : kind === 'model_capacity' && !automatic ? 'Automatic retries are unavailable; choose another model and Resume'
       : limit && !automatic ? handoff?.reason === 'manual_resume'
@@ -128,8 +122,6 @@ export function resourcePausePresentation(block, handoff = null) {
 }
 
 const RESUME_BLOCKERS = {
-  platform_restart: ['waiting for platform restart', 'Complete the pending platform restart; this chat resumes after restored code loads'],
-  restoring_edits: ['restoring local work', 'Möbius is restoring local work before this chat can resume'],
   owner_input: ['waiting for your answer', 'Answer the saved card in this chat; the result remains saved until then'],
   restart: ['waiting for restart', 'Use the pending Restart card; a ready restart releases this follow-up'],
   provider_park: ['waiting for agent availability', 'The existing agent recovery hold must clear before this chat can resume'],

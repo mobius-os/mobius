@@ -1550,9 +1550,7 @@ const DrawerRow = memo(function DrawerRow({
   const recovery = kind === 'chat' && item.handoff?.kind === 'recovery'
   const onHold = kind === 'chat' && item.handoff?.kind === 'on_hold'
   const ownerRequired = needsOwnerInput || (kind === 'chat' && item.handoff?.kind === 'owner_input')
-  const recoveryLabel = item.handoff?.reason === 'restart_required'
-    ? 'Server restart needed to load restored work'
-    : item.handoff?.reason === 'restart_manual'
+  const recoveryLabel = item.handoff?.reason === 'restart_manual'
     ? 'Restart recovery needs Resume'
     : item.handoff?.reason === 'model_retry_exhausted'
       ? 'Model retries exhausted; choose another model and Resume'

@@ -140,7 +140,6 @@ function AssistantReply({
               autoResumeError={tail ? messageProps.autoResumeError : ''}
               onAutoResumeChange={tail ? messageProps.onAutoResumeChange : undefined}
               limitResetElapsed={tail && messageProps.limitResetElapsed}
-              continuationWait={tail ? messageProps.continuationWait : null}
               handoff={tail ? messageProps.handoff : null}
               recoveryCredit={tail ? messageProps.recoveryCredit : null}
               pendingQuestionRef={pendingQuestionRef}

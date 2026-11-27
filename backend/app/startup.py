@@ -453,8 +453,8 @@ async def _complete_platform_swap(context: StartupContext) -> None:
   except platform_update.BootTransactionError:
     raise  # This task's failure reason: never resume on an unplaced checkout.
   except Exception:
-    # Anything else stays best effort, as before: resumes remain held while
-    # the swap's late edits are not loaded (``late_edits_pending``).
+    # Anything else stays best effort, as before: the swap record stays, so
+    # every turn is told its late edits may not be loaded yet.
     context.logger.exception("platform update swap could not be finished")
     return
   if outcome:

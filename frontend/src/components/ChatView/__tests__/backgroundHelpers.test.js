@@ -141,22 +141,6 @@ test('resource card promises only the backend-confirmed park recovery', () => {
   }).wakeUp, /blocked/)
 })
 
-for (const kind of ['model_capacity', 'rate_limit', 'memory', 'storage']) {
-  test(`${kind} recovery reports platform restoration instead of a model workaround`, () => {
-    const block = { pause: { kind } }
-    const restoring = resourcePausePresentation(block, { kind: 'automatic', reason: 'restoring_edits' })
-    assert.equal(restoring.manual, false)
-    assert.equal(restoring.next, 'restoring local work')
-    assert.match(restoring.wakeUp, /restor/)
-    assert.doesNotMatch(restoring.wakeUp, /choose another model|unavailable/)
-    const restart = resourcePausePresentation(block, { kind: 'recovery', reason: 'restart_required' })
-    assert.equal(restart.manual, true)
-    assert.equal(restart.next, 'server restart needed')
-    assert.match(restart.wakeUp, /server restart/)
-    assert.doesNotMatch(restart.wakeUp, /choose another model/)
-  })
-}
-
 test('helper count alone cannot promise an automatic executor', () => {
   assert.equal(classifyChatHandoff({}), 'none')
 })

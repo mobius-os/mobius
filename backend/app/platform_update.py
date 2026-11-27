@@ -4045,11 +4045,7 @@ def bind_update_operation(
 
 
 def late_edits_pending() -> bool:
-  """Whether edits made on the previous source still await their merge back.
-
-  Automatic chat resumes wait for this, so no agent resumes on a checkout
-  that is missing its own recent edits.
-  """
+  """Whether edits made on the previous source still await merge-back."""
   record = read_prepared_update()
   return (
     record is not None and record["state"] == "swapped"
@@ -5245,7 +5241,8 @@ def _continue_parked_resolution(
   ):
     # The committed late edits are resolved; the uncommitted ones saved at
     # the swap still follow, exactly as boot merges them after a clean
-    # committed part. Chats stay held, so nothing else edits live meanwhile.
+    # committed part. Other chats can still edit live meanwhile; the later
+    # carried merge below reconciles their work against this answer.
     late = app_git.merge_refs(repo, late_working, committed, merge_base=source)
     if late.status == "conflict":
       keep_candidate()
@@ -6879,6 +6876,7 @@ async def finish_platform_overlay_update(
     raise PlatformUpdateError("platform_update_in_progress")
   loop = asyncio.get_running_loop()
   admitted: asyncio.Future = loop.create_future()
+  operation_started = False
 
   def settle_admission(outcome) -> None:
     if admitted.done():
@@ -6889,6 +6887,8 @@ async def finish_platform_overlay_update(
       admitted.set_result(outcome)
 
   def admit_from_worker(progress: PlatformUpdateProgress) -> None:
+    nonlocal operation_started
+    operation_started = True
     loop.call_soon_threadsafe(settle_admission, progress)
 
   async def own() -> PlatformUpdateProgress:
@@ -6913,6 +6913,14 @@ async def finish_platform_overlay_update(
       )
       raise
     settle_admission(progress)
+    if operation_started and progress["result"] == "conflict":
+      try:
+        await _notify_reconflicted_resolver(progress["plan_id"])
+      except Exception:
+        log.exception(
+          "could not notify platform resolver of new conflict %s",
+          progress["plan_id"],
+        )
     return progress
 
   def report(task: asyncio.Task) -> None:
@@ -6929,6 +6937,76 @@ async def finish_platform_overlay_update(
   task.add_done_callback(report)
   _overlay_finish_task = _OverlayFinishTask(target_sha, admitted, task)
   return await asyncio.shield(admitted)
+
+
+_RECONFLICT_NOTICE_PATHS = 40
+
+
+async def _notify_reconflicted_resolver(operation_id: str) -> bool:
+  """Give the conflict-flag owner one durable turn for this finish operation."""
+  from app import models
+  from app import chat_queue
+  from app.chat_start import start_programmatic_chat_continuation
+  from app.chat_writer import AppendPending, await_ack, get_writer
+  from app.database import SessionLocal
+
+  current = platform_update_progress()
+  if current["plan_id"] != operation_id or current["result"] != "conflict":
+    return False
+  flag = _read_conflict_flag()
+  if not flag or not flag.get("chat_id"):
+    return False
+  with SessionLocal() as db:
+    chat = _bound_resolver_chat(db, flag)
+    if chat is None:
+      return False
+    source = db.query(models.ChatRun).filter(
+      models.ChatRun.chat_id == chat.id,
+    ).order_by(models.ChatRun.started_at.desc(), models.ChatRun.id.desc()).first()
+    if source is None:
+      return False
+    # The notice is fresh, goal-less work (its kind does not continue a
+    # logical root); the writer only requires the root to be this chat's.
+    chat_id, root_id = chat.id, source.root_run_id or source.id
+  paths = [str(path) for path in flag.get("paths") or []]
+  listed = ", ".join(paths[:_RECONFLICT_NOTICE_PATHS]) or "(read the candidate)"
+  if len(paths) > _RECONFLICT_NOTICE_PATHS:
+    listed += f", and {len(paths) - _RECONFLICT_NOTICE_PATHS} more"
+  candidate = str((flag.get("overlay") or {}).get("worktree") or "")
+  content = (
+    "The platform overlay finish ended with a NEW conflict. Re-read the "
+    "current unmerged paths and conflict markers in the candidate; do not "
+    "reuse the prior conflict list or answer. Current paths: "
+    + listed
+    + f". Candidate: `{candidate}`. Resolve and stage the current answer, "
+    "run affected tests, then submit a new overlay finish. "
+    + _overlay_finish_instructions(str(flag.get("upstream") or ""))
+  )
+  token = "platform-conflict-" + operation_id
+  started = await start_programmatic_chat_continuation(
+    chat_id=chat_id, root_run_id=root_id, run_token=token,
+    content=content, continuation_id=token, reason="platform_update_conflict",
+    message_kind="platform_update_conflict", hidden=True,
+  )
+  if started:
+    return True
+  with SessionLocal() as db:
+    if db.get(models.ChatRun, token) is not None:
+      return False
+  # A live turn, an open owner question, or a restart or provider hold won
+  # admission. Queue the notice durably behind that fence, like a Wait result;
+  # the pending sweep or the next turn promotes it. AppendPending deduplicates
+  # its stable cid across retries.
+  async with chat_queue.get_lock(chat_id):
+    await await_ack(get_writer().submit(AppendPending(
+      chat_id=chat_id, run_token="",
+      user_msg={
+        "role": "user", "content": content, "ts": int(time.time() * 1000),
+        "cid": token, "hidden": True, "kind": "platform_update_conflict",
+      },
+      initiated_by_app_id=None,
+    )))
+  return True
 
 
 def _reconcile_lock_held() -> bool:
@@ -7135,7 +7213,14 @@ def _overlay_finish_instructions(target_sha: str) -> str:
     "deadline 3600 seconds, then end the turn: it resumes here when the "
     "operation ends. If the deadline passes while it is still `active`, "
     "repeat the request (it joins) and declare the wait again. Then read "
-    "`mapi /api/platform/update-progress`. Its `result` is the outcome. "
+    "`mapi /api/platform/update-progress` and match its `plan_id` to the "
+    "latest finish operation you submitted; an older plan's terminal "
+    "`result` does not describe your latest finish. Read "
+    "`mapi /api/platform/status` too: its `unfinished_update`, "
+    "`conflict_paths`, and `needs_restart` are authoritative for what "
+    "remains now. Do not request a restart because an old plan says "
+    "`conflict` when current status shows the update is finished. For the "
+    "matching plan, `result` is its outcome. "
     "`phase: failed` carries the `error`, and nothing was retried. With a "
     "changed staged answer, just finish again. To run the same answer "
     "again, because Möbius stopped or restarted, or because you fixed a "
@@ -7177,21 +7262,26 @@ def _platform_conflict_resolver_message(
       "Include non-conflicting files and deletions. Use tests from both input "
       "snapshots as evidence of intended behavior; adapt tests when needed "
       "without dropping their protections. Verify the affected contracts from "
-      "both sides in the candidate (`scripts/wt-pytest.sh <tests>`); passing "
+      "both sides in the candidate (`scripts/wt-pytest.sh <tests>` for Python; "
+      "`scripts/wt-npm.sh run -s <test-script>` for frontend). These "
+      "worktree runners share the main checkout's installed dependencies, "
+      "including `node_modules`; do not run bare npm in the candidate. Passing "
       "only the tests left after resolution does not prove preservation.\n\n"
     )
   if overlay and overlay.get("replay"):
     return (
       "Möbius just finished a platform update. Edits made on the previous "
       "version while it was being finished overlap it in: " + files + ". "
-      "Paused chats resume once a restart loads these edits.\n\n"
+      "Other chats may continue while these edits are merged back; each must "
+      "verify its own files before relying on them.\n\n"
       f"Resolve the marked files in `{overlay.get('worktree')}`, keeping "
       "both the update and the intent of those edits.\n\n"
       + review + "Stage the resolved files, then "
       + _overlay_finish_instructions(str(overlay.get("target") or target_sha))
       + "It merges your answer into the live checkout with the normal build "
       "and import checks. If `result` is `conflict`, newer live edits "
-      "overlap your answer; resolve the fresh markers and finish again. When "
+      "overlap your answer; re-read the CURRENT unmerged paths and fresh "
+      "markers in the candidate, then resolve and finish again. When "
       "it is `updated`, request a restart so the server loads the merged "
       "edits."
     )
@@ -7210,7 +7300,9 @@ def _platform_conflict_resolver_message(
         "Preserve the intended local behavior and the incoming upstream "
         "behavior, including both sides' tests. "
         "Stage the resolved files, run the tests covering them from the "
-        "candidate (`scripts/wt-pytest.sh <tests>`), then "
+        "candidate (`scripts/wt-pytest.sh <tests>` for Python or "
+        "`scripts/wt-npm.sh run -s <test-script>` for frontend; both share "
+        "the main checkout's installed dependencies), then "
       )) + _overlay_finish_instructions(
         str(overlay.get("target") or target_sha),
       ) + "It commits "

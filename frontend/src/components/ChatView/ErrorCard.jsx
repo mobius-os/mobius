@@ -96,7 +96,6 @@ export function refusalActionSentence({ switchModel = false, freshSession = fals
 export default function ErrorCard({
   block,
   autoResume = false,
-  continuationWait = null,
   manualRecovery = false,
   resetElapsed = false,
   recoveryCredit = null,
@@ -105,15 +104,8 @@ export default function ErrorCard({
   children,
 }) {
   const vm = errorCardViewModel(block)
-  // A retry deadline cannot promise progress while platform recovery holds
-  // automatic admission. This live status never rewrites the original error.
-  const platformHold = !block.pause?.manual && (vm.modelCapacity || vm.parked || vm.resourceWait || block.pause?.kind === 'restart') && (
-    continuationWait === 'restart_required' || continuationWait === 'restoring_edits'
-  )
   const recoveryTitle = vm.providerRefusal
     ? 'This model declined to continue'
-    : platformHold
-    ? (continuationWait === 'restart_required' ? 'Waiting for a server restart' : 'Waiting for the platform update')
     : vm.modelCapacity
     ? !manualRecovery
       ? (vm.checkLabel ? `Trying again ${vm.checkLabel}` : 'Trying again shortly')
@@ -127,14 +119,6 @@ export default function ErrorCard({
     : null
   const recoveryCopy = vm.providerRefusal
     ? ['Its safety check stopped this turn, so retrying the same conversation on this model usually fails again. Your work is saved.', refusalActionSentence(refusalActions || {})].filter(Boolean).join(' ')
-    : platformHold
-    ? block.pause?.kind === 'restart'
-      ? continuationWait === 'restart_required'
-        ? 'Waiting for a server restart to load the restored work. This chat will continue after those changes are loaded.'
-        : 'Waiting for the update to restore unfinished work. This chat will continue once that work is restored and loaded.'
-      : (continuationWait === 'restart_required'
-      ? 'Your work is saved. Automatic retries are paused until a server restart loads the restored work. Möbius will retry after those changes are loaded.'
-      : 'Your work is saved. Automatic retries are paused while the update restores unfinished work. Möbius will retry once that work is restored and loaded.')
     : vm.modelCapacity
     ? !manualRecovery
       ? 'Your work is safe. Möbius will retry with increasing pauses, up to five times. If the model stays busy, you can choose another model and Resume.'
@@ -189,10 +173,10 @@ export default function ErrorCard({
         ) : vm.benign ? (
           <>
             <div className="chat__recovery-title chat__recovery-title--paused">
-              {platformHold ? recoveryTitle : vm.resourceWait && manualRecovery ? 'Recovery needed' : vm.label}
+              {vm.resourceWait && manualRecovery ? 'Recovery needed' : vm.label}
             </div>
             <div className="chat__recovery-copy">
-              {platformHold ? recoveryCopy : vm.credits
+              {vm.credits
                 ? creditsCopy(block.pause?.provider)
                 : vm.modelCapacityExhausted
                 ? 'Five automatic retries were used. Choose another model, then Resume to continue your saved work.'

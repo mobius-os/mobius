@@ -253,7 +253,7 @@ def project_handoff(*, owner_input: bool, running: bool, waits: list[dict],
     )}
   if park["kind"] == "automatic" or helper_count > 0 or any(
     not wait.get("delivery_pending") or wait.get("resume_blocker") in {
-      None, "platform_restart", "restoring_edits", "provider_park", "live_turn",
+      None, "provider_park", "live_turn",
     }
     for wait in waits
   ):
