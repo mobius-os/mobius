@@ -27,7 +27,8 @@ def test_smoke_resolves_real_provider_configuration_offline(db, tmp_path, monkey
     for method in ("check_auth", "ensure_auth", "fetch_models", "build_env"):
       monkeypatch.setattr(cls, method, forbidden)
 
-  expected = {"claude", "codex", "mobius"}
+  # Gemini is built in, like Claude, Codex and Möbius.
+  expected = {"claude", "codex", "gemini", "mobius"}
   if configured:
     app = models.App(
       name="Smoke provider", slug="smoke-provider", description="",

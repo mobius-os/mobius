@@ -209,8 +209,8 @@ def test_app_token_can_list_models(client, owner_token):
   })
   assert r.status_code == 200
   body = r.json()
-  # Möbius is platform-owned, so it is listed without any app installed.
-  assert set(body["providers"]) == {"claude", "codex", "mobius"}
+  # Möbius and Gemini are platform-owned, so they are listed without any app installed.
+  assert set(body["providers"]) == {"claude", "codex", "gemini", "mobius"}
   for entries in body["providers"].values():
     for entry in entries:
       assert set(entry) >= {"id", "label", "provider", "available"}
