@@ -22,7 +22,7 @@ def _request(peer: str, *forwarded: str) -> Request:
 
 def test_visitors_behind_the_proxy_are_counted_by_the_address_it_reports():
   assert rate_limit_client(_request(PROXY_PEER, "203.0.113.7")) == "203.0.113.7"
-  assert rate_limit_client(_request("10.1.2.3", "2001:db8::5")) == "2001:db8::5"
+  assert rate_limit_client(_request("10.1.2.3", "2001:db8::5")) == "2001:db8::/64"
 
 
 def test_the_proxy_appended_entry_wins_over_one_the_visitor_sent():
@@ -35,9 +35,20 @@ def test_the_proxy_appended_entry_wins_over_one_the_visitor_sent():
 
 def test_a_public_peer_cannot_choose_its_own_bucket():
   assert rate_limit_client(_request(PUBLIC_PEER, "198.51.100.1")) == PUBLIC_PEER
-  # A dual-stack listener reports an IPv4 client as an IPv4-mapped address.
+  # A dual-stack listener reports an IPv4 client as an IPv4-mapped address,
+  # counted as that IPv4 client.
   mapped = f"::ffff:{PUBLIC_PEER}"
-  assert rate_limit_client(_request(mapped, "198.51.100.1")) == mapped
+  assert rate_limit_client(_request(mapped, "198.51.100.1")) == PUBLIC_PEER
+
+
+def test_an_ipv6_visitor_is_counted_by_its_64():
+  """One connection is given a whole /64; counting each address would give
+  it a fresh budget for every guess."""
+  a, b = "2001:db8:1:2::a", "2001:db8:1:2:ffff::b"
+  assert rate_limit_client(_request(PROXY_PEER, a)) == rate_limit_client(_request(PROXY_PEER, b))
+  assert rate_limit_client(_request(PROXY_PEER, "2001:db8:1:3::a")) != rate_limit_client(_request(PROXY_PEER, a))
+  # A visitor reaching the app directly over IPv6 too.
+  assert rate_limit_client(_request("2606:4700::1")) == rate_limit_client(_request("2606:4700::2")) == "2606:4700::/64"
 
 
 @pytest.mark.parametrize("forwarded", [(), ("",), ("not-an-address",), ("203.0.113.7:443",)])
@@ -109,3 +120,34 @@ def test_a_strangers_failed_logins_never_lock_the_owner_out(client, owner_token)
   # The stranger stays locked out; the owner, elsewhere, signs in.
   assert login("198.51.100.1", "testpassword123") == 429
   assert login("203.0.113.7", "testpassword123") == 200
+
+
+def test_addresses_from_one_ipv6_64_share_the_login_limit_and_cooldown(client, owner_token):
+  """Rotating through one /64 must not escape the sign-in limit or the
+  failed-login cooldown."""
+  from app.routes.auth import _limiter
+
+  behind_proxy = TestClient(client.app, client=(PROXY_PEER, 40000))
+
+  def login(visitor: str, password: str = "wrong") -> int:
+    return behind_proxy.post(
+      "/api/auth/token",
+      data={"username": "test", "password": password},
+      headers={"X-Forwarded-For": visitor},
+    ).status_code
+
+  _limiter.reset()
+  _limiter.enabled = True
+  try:
+    statuses = [login(f"2001:db8:1:2::{n:x}") for n in range(1, 7)]
+    assert statuses[:5] == [401] * 5 and statuses[5] == 429
+  finally:
+    _limiter.enabled = False
+    _limiter.reset()
+  # The cooldown too: failures from many addresses in one /64 add up.
+  statuses = [login(f"2001:db8:1:2::{n:x}") for n in range(1, 32)]
+  assert statuses[-1] == 429
+  assert login("2001:db8:1:2::abcd", "testpassword123") == 429
+  # The owner, on another network, still signs in.
+  assert login("203.0.113.7", "testpassword123") == 200
+

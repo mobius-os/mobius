@@ -173,16 +173,29 @@ def rate_limit_client(request: HTTPConnection) -> str:
   publicly routable peer is the visitor itself and its headers are ignored, so
   a client on the internet cannot pick its own bucket. Only ``request.client``
   stays the raw peer, so loopback checks elsewhere never depend on this.
+
+  An IPv6 visitor is counted by its /64: one connection is routinely given a
+  whole /64, so a per-address bucket would hand it a fresh budget for every
+  address. An IPv4-mapped address is counted as the IPv4 address it carries.
   """
   peer = request.client.host if request.client else "127.0.0.1"
   try:
-    if ipaddress.ip_address(peer).is_global:
-      return peer
+    address = ipaddress.ip_address(peer)
   except ValueError:
     return peer
-  forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
-  claimed = forwarded.rsplit(",", 1)[-1].strip()
-  try:
-    return str(ipaddress.ip_address(claimed))
-  except ValueError:
-    return peer
+  if not address.is_global:
+    forwarded = ",".join(request.headers.getlist("x-forwarded-for"))
+    claimed = forwarded.rsplit(",", 1)[-1].strip()
+    try:
+      address = ipaddress.ip_address(claimed)
+    except ValueError:
+      pass
+  return _visitor(address)
+
+
+def _visitor(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> str:
+  if address.version == 6:
+    if address.ipv4_mapped is not None:
+      return str(address.ipv4_mapped)
+    return str(ipaddress.ip_network(f"{address}/64", strict=False))
+  return str(address)
