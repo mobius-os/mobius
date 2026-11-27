@@ -155,43 +155,64 @@ function KeyForm({ connection, switching, onConnected, onCancel }) {
   )
 }
 
-/** One other way to connect: a row with its button, opening its form in place. */
-function MethodRow({ title, detail, action, open, onOpen, children }) {
+function Chevron() {
   return (
-    <div className="gemini-connection__row">
-      <div className="gemini-connection__head">
-        <div>
+    <svg className="gemini-connection__chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+      <path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+/** An expandable row: a title and detail that open its content in place. */
+function Disclosure({ title, detail, open, onToggle, children }) {
+  return (
+    <div className={`gemini-disclosure${open ? ' gemini-disclosure--open' : ''}`}>
+      <button type="button" className="gemini-disclosure__head" aria-expanded={open} onClick={onToggle}>
+        <span>
           <span className="gemini-connection__label">{title}</span>
-          <span className="pa__muted gemini-connection__detail">{detail}</span>
-        </div>
-        {!open && <button type="button" className={OUTLINE} onClick={onOpen}>{action}</button>}
-      </div>
-      {open && children}
+          {detail && <span className="pa__muted gemini-connection__detail">{detail}</span>}
+        </span>
+        <Chevron />
+      </button>
+      {open && <div className="gemini-disclosure__body">{children}</div>}
     </div>
   )
 }
 
-/** The ways to connect other than ``active``; keys open their form, Google its sign-in. */
-function OtherMethods({ active, open, setOpen, done }) {
-  const verb = active ? 'Switch' : 'Add key'
+/** The two keys as expandable rows; one opens at a time, the one in use is left out. */
+function KeyChoices({ active, done }) {
+  const [open, setOpen] = useState(null)
   return (
-    <>
-      {active && active !== 'google_cloud' && (
-        <MethodRow
-          title="Sign in with Google" detail="Billed to a Google Cloud project you choose"
-          action="Switch" open={open === 'google_cloud'} onOpen={() => setOpen('google_cloud')}
-        >
-          <GoogleCloudSignIn onConnected={done} onCancel={() => setOpen(null)} />
-        </MethodRow>
-      )}
+    <div className="gemini-disclosures">
       {GEMINI_CONNECTIONS.filter(connection => connection.id !== active).map(connection => (
-        <MethodRow
-          key={connection.id} title={`Use an ${connection.label}`} detail={connection.detail}
-          action={verb} open={open === connection.id} onOpen={() => setOpen(connection.id)}
+        <Disclosure
+          key={connection.id} title={connection.label} detail={connection.detail}
+          open={open === connection.id} onToggle={() => setOpen(open === connection.id ? null : connection.id)}
         >
           <KeyForm connection={connection} switching={Boolean(active)} onConnected={done} onCancel={() => setOpen(null)} />
-        </MethodRow>
+        </Disclosure>
       ))}
+    </div>
+  )
+}
+
+/** Everything but the connection in use: the Google sign-in and the keys, each expandable. */
+function OtherMethods({ active, done }) {
+  const [open, setOpen] = useState(null)
+  const toggle = (id) => setOpen(open === id ? null : id)
+  return (
+    <>
+      {active !== 'google_cloud' && (
+        <Disclosure
+          title="Sign in with Google" detail="Google Cloud (Agent Platform), billed to a project you choose"
+          open={open === 'google'} onToggle={() => toggle('google')}
+        >
+          <GoogleCloudSignIn onConnected={done} onCancel={() => setOpen(null)} />
+        </Disclosure>
+      )}
+      <Disclosure title="Connect with an API key" detail="AI Studio key or Agent Platform key" open={open === 'keys'} onToggle={() => toggle('keys')}>
+        <KeyChoices active={active} done={done} />
+      </Disclosure>
     </>
   )
 }
@@ -224,8 +245,7 @@ function Reconnect({ active, done, onCancel }) {
 
 function Connected({ active, onConnected, onDisconnected }) {
   const [view, setView] = useState('manage')
-  const [open, setOpen] = useState(null)
-  const done = () => { setView('manage'); setOpen(null); onConnected?.() }
+  const done = () => { setView('manage'); onConnected?.() }
   if (view === 'reconnect') return <Reconnect active={active} done={done} onCancel={() => setView('manage')} />
   if (view === 'disconnect') {
     return <DisconnectConfirm active={active} onCancel={() => setView('manage')} onDisconnected={onDisconnected} />
@@ -241,22 +261,24 @@ function Connected({ active, onConnected, onDisconnected }) {
         onClick={() => setView(view === 'others' ? 'manage' : 'others')}
       >
         <span>Other ways to connect</span>
-        <svg className="gemini-connection__chevron" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
-          <path d="M4.5 2.5 8 6l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <Chevron />
       </button>
-      {view === 'others' && <OtherMethods active={active} open={open} setOpen={setOpen} done={done} />}
+      {view === 'others' && <OtherMethods active={active} done={done} />}
     </div>
   )
 }
 
 function NotConnected({ onConnected }) {
-  const [open, setOpen] = useState(null)
-  const done = () => { setOpen(null); onConnected?.() }
+  const [keysOpen, setKeysOpen] = useState(false)
   return (
     <div className="gemini-connection">
-      <GoogleCloudSignIn onConnected={done} />
-      <OtherMethods active={null} open={open} setOpen={setOpen} done={done} />
+      <GoogleCloudSignIn onConnected={onConnected} />
+      <Disclosure
+        title="Connect with an API key instead" detail="AI Studio key or Agent Platform key"
+        open={keysOpen} onToggle={() => setKeysOpen(!keysOpen)}
+      >
+        <KeyChoices active={null} done={onConnected} />
+      </Disclosure>
     </div>
   )
 }

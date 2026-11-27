@@ -17,18 +17,18 @@ function render(props = {}) {
 
 const text = html => html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ')
 
-test('not connected: Sign in with Google leads, the two keys are alternatives', () => {
+test('not connected: Sign in with Google (Google Cloud) leads, keys fold under one row', () => {
   const html = text(render())
-  assert.match(html, /Sign in with Google Billed to a Google Cloud project you choose/)
-  assert.match(html, /Use an AI Studio key Google AI Studio Add key/)
-  assert.match(html, /Use an Agent Platform key Google Cloud project · Gemini Enterprise Agent Platform Add key/)
+  assert.match(html, /Sign in with Google .*Google AI Pro and Ultra include monthly Cloud credits/)
+  assert.match(html, /Connect with an API key instead AI Studio key or Agent Platform key/)
+  assert.doesNotMatch(html, /Where should Gemini run|AI Studio API key|Save and connect/, 'no AI Studio sign-in; keys stay folded until opened')
   assert.doesNotMatch(html, /Connected|Disconnect|Reconnect/)
 })
 
 test('connected: Reconnect and Disconnect… sit together, other ways fold away', () => {
   const html = text(render({ active: 'agent_platform' }))
   assert.match(html, /Reconnect Disconnect… Other ways to connect/)
-  assert.doesNotMatch(html, /Use an AI Studio key|Add key|Switch/, 'the other ways stay folded until opened')
+  assert.doesNotMatch(html, /Sign in with Google|API key/, 'the other ways stay folded until opened')
 })
 
 test('each key is kept from agents and allowed only on its own Gemini endpoints', () => {
