@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 
 import {
   appTileLabel,
+  appTileMarker,
   buildDrawerSections,
   findDrawerMenuItem,
   nextPendingPinnedAt,
@@ -145,7 +146,16 @@ test('an empty archive is an empty Archived section', () => {
   assert.deepEqual(result.archived, [])
 })
 
-// Screen readers hear the same status the Apps-row dot shows.
+// An Apps-row icon carries one marker in one corner; the state that asks the
+// most of the owner wins.
+test('an Apps-row icon shows its single most important status marker', () => {
+  assert.equal(appTileMarker(), null)
+  assert.equal(appTileMarker({ fresh: true }), 'new')
+  assert.equal(appTileMarker({ building: true, fresh: true }), 'building')
+  assert.equal(appTileMarker({ needsYou: true, building: true, fresh: true }), 'needs')
+})
+
+// Screen readers hear the status the Apps-row marker shows, plus building.
 test('an Apps-row icon is announced with the status its dot shows', () => {
   assert.equal(appTileLabel('Notes'), 'Notes')
   assert.equal(appTileLabel('Notes', { needsYou: true, fresh: true }), 'Notes, needs you')

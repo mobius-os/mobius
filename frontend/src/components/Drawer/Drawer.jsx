@@ -1910,11 +1910,6 @@ const DrawerRow = memo(function DrawerRow({
         {kind === 'app' && (
           <AppIcon item={item} label={label} className="drawer__app-icon" />
         )}
-        {/* Status dot. Sits before the text so the user's eye
-            picks it up alongside the label rather than at the row's
-            edge (where the pin lives). aria-label exposes the state. */}
-        <DrawerStatusMarker {...{ ownerRequired, streaming, waiting, onHold, recovery,
-          recoveryLabel, failed, building, attentionDot }} holdReason={item.handoff?.hold_reason} />
         <span className={`drawer__item-text${badgeLabel ? ' drawer__item-text--unread' : ''}`}>{label}</span>
         {badgeLabel && (
           // The app's own unread count (see appBadge.js).
@@ -1922,6 +1917,13 @@ const DrawerRow = memo(function DrawerRow({
             {badgeLabel}
           </span>
         )}
+        {/* Status marker trails the title in a fixed-width slot, so every
+            title starts at the same edge and markers line up in one column.
+            aria-label on the marker exposes the state. */}
+        <span className="drawer__status-slot">
+          <DrawerStatusMarker {...{ ownerRequired, streaming, waiting, onHold, recovery,
+            recoveryLabel, failed, building, attentionDot }} holdReason={item.handoff?.hold_reason} />
+        </span>
       </button>
       {projectChip && (
         // A sibling of the row button (never nested — a button inside a button is

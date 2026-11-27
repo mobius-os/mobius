@@ -5,7 +5,7 @@ import AppIcon from '../AppIcon.jsx'
 import InlineRenameInput from './InlineRenameInput.jsx'
 import useItemMenuGestures, { itemMenuPlacement } from './useItemMenuGestures.js'
 import { drawerNameMaxLength } from './drawerRename.js'
-import { appTileLabel, reconcileStripOrder, wheelRowScrollDelta } from './drawerInformationArchitecture.js'
+import { appTileLabel, appTileMarker, reconcileStripOrder, wheelRowScrollDelta } from './drawerInformationArchitecture.js'
 import { PRESS_DRAG_HOLD_MS } from '../Shell/dragController.js'
 
 const STORAGE_KEY = 'mobius.drawer.appsExpanded'
@@ -78,6 +78,7 @@ function DrawerAppTile({
     }
   }, [drawerRowGesturesRef, gestureKey])
 
+  const marker = appTileMarker({ needsYou, fresh, building })
   return (
     <button
       ref={buttonRef}
@@ -105,9 +106,7 @@ function DrawerAppTile({
       onKeyDown={openMenuFromKey}
     >
       <AppIcon item={app} label={name} className="drawer__apps-card-icon" />
-      {needsYou && <span className="drawer__apps-card-dot drawer__apps-card-dot--needs" aria-hidden="true" />}
-      {!needsYou && fresh && <span className="drawer__apps-card-dot drawer__apps-card-dot--new" aria-hidden="true" />}
-      {building && <span className="drawer__apps-card-dot drawer__apps-card-dot--building" aria-hidden="true" />}
+      {marker && <span className={`drawer__apps-card-dot drawer__apps-card-dot--${marker}`} aria-hidden="true" />}
     </button>
   )
 }

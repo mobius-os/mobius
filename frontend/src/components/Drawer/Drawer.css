@@ -507,6 +507,16 @@
   text-overflow: ellipsis;
 }
 
+/* Trailing status column: one fixed width so markers of different shapes
+   centre on the same vertical line. Collapses when there is no marker. */
+.drawer__status-slot {
+  flex: 0 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.drawer__status-slot:empty { display: none; }
+
 .drawer__item-text--unread {
   font-weight: 600;
 }
@@ -887,7 +897,7 @@
 
 /* ── Row status dots ───────────────────────────────── */
 
-/* 6px accent dot in front of a row label. Marks chats whose agent
+/* 6px accent dot in a row's trailing status column. Marks chats whose agent
    is mid-turn so a user switching to another chat still sees the
    background build progressing in the drawer.
 
@@ -909,7 +919,6 @@
   flex-shrink: 0;
   width: 6px;
   height: 6px;
-  margin-right: 2px;
   border-radius: 50%;
   background: var(--accent);
 }
@@ -921,15 +930,14 @@
   flex: 0 0 8px;
   width: 8px;
   height: 8px;
-  margin-right: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--accent);
 }
 
-/* The owner-input handoff is the one diamond-shaped row marker; it leads the
-   title so it reads as "you are needed here". */
+/* The owner-input handoff is the one diamond-shaped row marker, so it reads
+   as "you are needed here" without relying on colour. */
 .drawer__attention-diamond {
   display: inline-block;
   flex-shrink: 0;
@@ -944,7 +952,6 @@
    handoff. Mixing it toward --text preserves 3:1+ contrast against the drawer
    in both built-in themes without adding a second custom-theme token. */
 .drawer__owner-input-dot {
-  margin-right: 2px;
   color: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
 }
 
@@ -963,7 +970,6 @@
   box-sizing: border-box;
   width: 6px;
   height: 6px;
-  margin-right: 2px;
   border-radius: 50%;
   background: transparent;
   border: 1.5px solid var(--green);
@@ -980,7 +986,6 @@
   box-sizing: border-box;
   width: 6px;
   height: 6px;
-  margin-right: 2px;
   border-radius: 50%;
   background: var(--danger);
 }
@@ -994,7 +999,6 @@
   justify-content: center;
   width: 10px;
   height: 10px;
-  margin-right: 0;
   color: var(--text);
   border: 1px solid var(--text-dim);
   border-radius: 2px;
@@ -1201,19 +1205,36 @@
   font-size: 15px;
 }
 
+/* One status marker per app tile, top-right, speaking the chat rows' symbol
+   vocabulary: purple disc = building, amber diamond = needs you, green ring =
+   new. A --bg halo separates it from the icon artwork. */
 .drawer__apps-card-dot {
   position: absolute;
-  top: 2px;
-  right: 2px;
-  width: 9px;
-  height: 9px;
+  top: 1px;
+  right: 1px;
+  width: 13px;
+  height: 13px;
   border-radius: 50%;
-  border: 2px solid var(--bg);
-  box-sizing: content-box;
+  background: var(--bg);
+  display: grid;
+  place-items: center;
 }
-.drawer__apps-card-dot--needs,
-.drawer__apps-card-dot--new { background: var(--accent); }
-.drawer__apps-card-dot--building { left: 2px; right: auto; background: var(--green, #3fb950); }
+.drawer__apps-card-dot::after {
+  content: "";
+  box-sizing: border-box;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.drawer__apps-card-dot--building::after { background: var(--accent); }
+.drawer__apps-card-dot--new::after { border: 1.5px solid var(--green); }
+.drawer__apps-card-dot--needs::after {
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 1px;
+  transform: rotate(45deg);
+  background: color-mix(in srgb, var(--owner-input, #f59e0b) 60%, var(--text));
+}
 
 /* App name label above the hovered / keyboard-focused icon. It lives in the
    section, outside the scrolling row, so the row is never clipped around it
