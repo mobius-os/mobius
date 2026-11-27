@@ -50,3 +50,34 @@ test('diagnostic redaction preserves ordinary hashes, prose, and long symbols', 
   const diagnostic = `Build ${commit} failed in ${symbol} while rendering the recovery screen.`
   assert.equal(redactDiagnosticText(diagnostic), diagnostic)
 })
+
+test('diagnostic redaction removes secret_key-style assignments', () => {
+  for (const [input, expected] of [
+    ['SECRET=hunter2-value', 'SECRET=[redacted]'],
+    ['SECRET_KEY=hunter2-value', 'SECRET_KEY=[redacted]'],
+    ['STRIPE_SECRET_KEY=whsec-hunter2-value', 'STRIPE_SECRET_KEY=[redacted]'],
+    ['{"secret_key": "hunter2-value"}', '{"secret_key": "[redacted]"}'],
+    ['SIGNING_KEY=hunter2-value', 'SIGNING_KEY=[redacted]'],
+  ]) assert.equal(redactDiagnosticText(input), expected)
+  // An unquoted value ends at the existing query-string delimiters (#, &).
+  assert.match(
+    redactDiagnosticText('MOBIUS_SECRET_KEY=Zq3!x9@Lp0#mK7$vB2%nW8^cR5&tY1*h'),
+    /^MOBIUS_SECRET_KEY=\[redacted\]/,
+  )
+})
+
+test('diagnostic redaction removes camelCase-prefixed secret names', () => {
+  for (const name of ['stripeSecretKey', 'webhookSecret', 'jwtSecret', 'githubToken', 'sessionToken']) {
+    assert.equal(
+      redactDiagnosticText(`{"${name}":"hunter2-value"}`),
+      `{"${name}":"[redacted]"}`,
+    )
+  }
+})
+
+test('diagnostic redaction keeps ordinary key names', () => {
+  const diagnostic = 'Each child in a list should have a unique key prop; primary_key=id; sort_key=name; ' +
+    'cache_key=user; idempotency_key=retry; max_tokens=100; input_tokens=20; monkey=banana; secretary=Ann; ' +
+    'the tokens= field'
+  assert.equal(redactDiagnosticText(diagnostic), diagnostic)
+})

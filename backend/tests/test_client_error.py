@@ -113,6 +113,27 @@ def test_client_error_scrubs_every_field_before_activity_retention(client, owner
         assert "[redacted]" in errs[0][field]
 
 
+def test_client_error_retention_redacts_secret_key_names_a_stale_client_sent(client, owner_token):
+    """A client that skipped its own scrubbing still cannot persist these."""
+    app_id = _make_app(client, owner_token)
+    token = _app_token(client, owner_token, app_id)
+    r = client.post(
+        "/api/client-error",
+        json={
+            "message": "boom STRIPE_SECRET_KEY=whsec-hunter2 SIGNING_KEY=sign-hunter2",
+            "stack": '{"secret_key": "key-hunter2", "stripeSecretKey": "camel-hunter2"}',
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 204, r.text
+
+    errs = [e for e in _activity_lines() if e.get("ev") == "app_error"]
+    assert len(errs) == 1
+    retained = json.dumps(errs[0])
+    for secret in ("whsec-hunter2", "sign-hunter2", "key-hunter2", "camel-hunter2"):
+        assert secret not in retained
+
+
 def test_owner_shell_error_records_no_app_id(client, owner_token):
     # An error reported with the owner JWT (the shell, not an app iframe)
     # must NOT carry an app_id, or it would pollute a real app's last_5_errors.
