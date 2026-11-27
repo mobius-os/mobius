@@ -621,7 +621,7 @@
         }
       } catch (e) {}
     }
-    if (!bg) bg = '#0d0d0d';
+    if (!bg) bg = '#000000';
     if (!mode) mode = 'dark';
     if (css) {
       // Match applyTheme.js: pull CSS @import-url rules out of the body and
@@ -720,7 +720,7 @@
        style applied after this one replaces these values by source order. */
     @layer mobius-defaults {
     :where(:root) {
-      --bg: #0d0d0d; --surface: #171717; --surface-2: #212121;
+      --bg: #000000; --surface: #171717; --surface-2: #212121;
       --border: #2a2a2a; --border-light: #1f1f1f;
       --text: #ececec; --muted: #a8a8a8;
       --accent: #8b6cf7; --accent-hover: #7c5ce6;
@@ -732,9 +732,9 @@
       --accent-text: #957cf8; --danger-text: #f87171;
       --green-text: #10b981; --warning-text: #d8922f;
       --accent-fill: #7c5ce6; --accent-fill-hover: #7053cf;
-      --danger-fill: #dc2626; --green-fill: #047857;
-      --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-      --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+      --danger-fill: #dc2626; --green-fill: #047857; --warning-fill: #d8922f;
+      --font: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
     }
     /* Mode-aware fallback (defense in depth). Gated on data-theme="light" (zero specificity, inside the same defaults layer, so the served theme still wins),
        set by the pre-paint <head> script (shared IIFE) from the owner's persisted
@@ -745,7 +745,7 @@
        default. Mirrors theme.py's light palette (_LIGHT_DEFAULTS and its roles;
        backend/tests/test_theme_roles.py enforces the parity). */
     :where(:root[data-theme="light"]) {
-      --bg: #f0eeeb; --surface: #ffffff; --surface-2: #e8e6e2;
+      --bg: #ffffff; --surface: #ffffff; --surface-2: #e8e6e2;
       --border: #d4d1cc; --border-light: #e2dfdb;
       --text: #1c1b1a; --muted: #6b6864;
       --accent-dim: rgba(139, 108, 247, 0.08);
@@ -784,9 +784,9 @@
     /* html must be opaque too (body already is): an inner scroller overscrolling
        on Android otherwise reveals the transparent root as a warm color-scheme
        tint behind app content. Same theme token, so no visible change otherwise. */
-    html { background: var(--bg, #0d0d0d); }
+    html { background: var(--bg, #000000); }
     body {
-      background: var(--bg, #0d0d0d);
+      background: var(--bg, #000000);
       color: var(--text);
       font-family: var(--font);
       font-size: 14px;

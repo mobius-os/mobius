@@ -16,7 +16,7 @@
     max(24px, env(safe-area-inset-right))
     max(24px, env(safe-area-inset-bottom))
     max(24px, env(safe-area-inset-left));
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #ececec);
 }
 

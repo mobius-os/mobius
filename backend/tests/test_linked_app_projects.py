@@ -124,8 +124,8 @@ def test_theme_source_preserves_raw_text_and_distinguishes_empty_missing_and_def
   defaults = [palettes, {'name': 'default-theme.css', 'content': DEFAULT_THEME}]
   assert client.get(url, headers=auth).json() == {'files': defaults}
   # The reference lists both complete palettes.
-  assert ':root[data-theme="dark"] {\n  --bg: #0d0d0d;' in palettes['content']
-  assert ':root[data-theme="light"] {\n  --bg: #f0eeeb;' in palettes['content']
+  assert ':root[data-theme="dark"] {\n  --bg: #000000;' in palettes['content']
+  assert ':root[data-theme="light"] {\n  --bg: #ffffff;' in palettes['content']
   assert palettes['content'].count('--accent-fill-hover:') == 2
   raw = '\r\n/* untouched source */\r\n:root { --bg: #123456; }\r\n'
   theme_path.write_bytes(raw.encode('utf-8'))

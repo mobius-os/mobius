@@ -43,7 +43,7 @@ const STYLE_ID = 'mobius-theme'
 const FONT_LINK_ATTR = 'data-theme-font'
 const SLOT_ID = '__mobius-theme__'
 const STORE_KEY = 'mobius-theme'
-const DEFAULT_BG = '#0d0d0d'
+const DEFAULT_BG = '#000000'
 const DEFAULT_MODE = 'dark'
 
 export function colorSchemeMetaContent(mode) {
@@ -309,7 +309,7 @@ export const PREPAINT_SRC = `(function () {
         }
       } catch (e) {}
     }
-    if (!bg) bg = '#0d0d0d';
+    if (!bg) bg = '#000000';
     if (!mode) mode = 'dark';
     if (css) {
       // Match applyTheme.js: pull CSS @import-url rules out of the body and

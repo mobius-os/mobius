@@ -357,7 +357,7 @@ test('resolveTheme: 2) mobius-theme when no slot', () => {
 
 test('resolveTheme: 3) dark default when nothing present', () => {
   const t = resolveTheme(ctx())
-  assert.deepEqual(t, { bg: '#0d0d0d', mode: 'dark' })
+  assert.deepEqual(t, { bg: '#000000', mode: 'dark' })
 })
 
 test('resolveTheme infers mode when the stored mode is missing', () => {
@@ -375,7 +375,7 @@ test('resolveTheme tolerates malformed slot JSON (falls through)', () => {
 test('resolveTheme guards a non-hex bg in the slot', () => {
   dom.slotNodes.set('__mobius-theme__', { textContent: JSON.stringify({ bg: 'evil', mode: 'light' }) })
   const t = resolveTheme(ctx())
-  assert.equal(t.bg, '#0d0d0d')  // falls back to default bg, keeps slot mode
+  assert.equal(t.bg, '#000000')  // falls back to default bg, keeps slot mode
   assert.equal(t.mode, 'light')
 })
 

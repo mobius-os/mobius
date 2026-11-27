@@ -70,7 +70,7 @@ body, h1, h2, h3, h4, h5, h6, p, ul, ol, li, dl, dd, figure, blockquote, fieldse
 html,
 body,
 #root {
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
 }
 
 /* Theme colors are injected server-side into <head> via theme.py.
@@ -84,8 +84,8 @@ body,
    owner --font/--mono -- unlayered or in an owner layer -- always wins. */
 @layer mobius-defaults {
   :where(:root) {
-    --font: 'Inter', 'Inter Fallback', system-ui, -apple-system, sans-serif;
-    --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', monospace;
+    --font: -apple-system, BlinkMacSystemFont, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --mono: 'JetBrains Mono', 'JetBrains Mono Fallback', ui-monospace, 'SF Mono', Menlo, Consolas, 'Roboto Mono', 'Liberation Mono', monospace;
   }
 }
 
@@ -216,7 +216,7 @@ html, body, #root {
 .app-route-loading {
   position: fixed;
   inset: 0;
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
 }
 
 /* Paint the ROOT element with the theme background so it propagates to the
@@ -224,12 +224,12 @@ html, body, #root {
    Android gesture/navigation bar in edge-to-edge mode (viewport-fit=cover,
    Chrome 135+). Without an explicit root background, that strip falls back to
    the UA's `color-scheme: dark` canvas colour (~#121316), a hair lighter than
-   --bg (#0d0d0d) — which reads as a faint, uniform, every-screen tint on the
+   --bg (#000000) — which reads as a faint, uniform, every-screen tint on the
    gesture bar. body's inline background covers the first paint; this closes the
    gap for the root itself and any state where applyTheme's runtime write hasn't
    landed. Uses var(--bg) (already set pre-paint) so there's no theme flash. */
 html {
-  background-color: var(--bg, #0d0d0d);
+  background-color: var(--bg, #000000);
 }
 
 /* The shell is fixed chrome: pan normally, but never let page-level pinch zoom

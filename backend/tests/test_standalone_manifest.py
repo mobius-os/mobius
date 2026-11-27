@@ -446,3 +446,21 @@ def test_standalone_host_is_platform_code_and_its_icons_are_not(client, owner_to
   icon = client.get(f"/apps/{app['slug']}/icon-192.png")
   assert icon.status_code == 200
   assert icon.headers["content-security-policy"] == _INERT_CONTENT_CSP
+
+
+def test_theme_color_meta_is_matched_by_pattern(client, owner_token, tmp_path, monkeypatch):
+  """A different default colour in index.html must not make the standalone
+  host answer 503 "out of sync": the meta tag is matched by pattern, like the
+  icon link, not by its exact default value."""
+  index = standalone_routes._frontend_index_path()
+  html = index.read_text(encoding="utf-8")
+  changed = re.sub(r'<meta\s+name="theme-color"[^>]*>',
+                   '<meta name="theme-color" content="#123456" />', html, count=1)
+  assert changed != html
+  index.write_text(changed, encoding="utf-8")
+
+  app = _create_app(client, owner_token, "Pattern")
+  shell = client.get(f"/apps/{app['slug']}/")
+  assert shell.status_code == 200
+  assert 'content="#123456"' not in shell.text
+  assert shell.text.count('<meta name="theme-color"') == 1

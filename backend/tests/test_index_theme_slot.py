@@ -77,7 +77,7 @@ def test_index_slot_filled_with_valid_json(client, static_index):
   slot = _extract_slot(html)
   bundle = json.loads(slot)
   assert set(bundle) == {"css", "bg", "mode"}
-  assert bundle["bg"] == "#0d0d0d"
+  assert bundle["bg"] == "#000000"
   assert bundle["mode"] == "dark"
   assert ":root" in bundle["css"]
 

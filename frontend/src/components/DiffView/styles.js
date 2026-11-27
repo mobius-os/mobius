@@ -9,7 +9,7 @@ export const DIFF_VIEWER_STYLES = `
   box-sizing: border-box;
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 8px;
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #ececec);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11.5px;
@@ -137,7 +137,7 @@ export const DIFF_VIEWER_STYLES = `
   overflow: hidden;
   border: 1px solid var(--border, #2a2a2a);
   border-radius: 10px;
-  background: var(--bg, #0d0d0d);
+  background: var(--bg, #000000);
   color: var(--text, #ececec);
 }
 

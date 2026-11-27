@@ -349,7 +349,10 @@
     row-gap: 8px;
     padding-right: 14px;
   }
-  .settings-provider-summary__icon { grid-area: icon; width: 32px; height: 32px; }
+  /* The icon spans both rows and sits in their middle, like the drag handle
+     beside it and the Accounts avatars; on the first row alone it lined up
+     with the title and looked misaligned against the centred handle. */
+  .settings-provider-summary__icon { grid-column: 1; grid-row: 1 / -1; align-self: center; width: 32px; height: 32px; }
   .settings-provider-summary__copy { grid-area: copy; }
   .settings-provider-summary > .settings-badge { grid-area: trail; }
   .settings-provider-summary > .settings-meter--compact { grid-area: meter; width: 100%; }
