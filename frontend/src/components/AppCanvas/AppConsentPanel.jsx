@@ -38,7 +38,7 @@ export default function AppConsentPanel({ appId, appName, request }) {
         return
       }
       if (!res.ok) throw new Error(String(res.status))
-      await appQueries.consent.invalidate(queryClient, appId)
+      await appQueries.consent.changed(queryClient, appId)
       await appQueries.token.invalidate(queryClient, appId)
       await appQueries.list.invalidate(queryClient)
     } catch {
