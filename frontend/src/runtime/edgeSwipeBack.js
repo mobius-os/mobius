@@ -1,8 +1,9 @@
 // Swipe right from the frame's left edge to go back.
 //
-// Only hosts that know the device has no system back gesture (an installed iOS
-// web app) turn this on, and only for a frame whose left edge is the screen's
-// edge, never one beside a pane divider or sidebar. The gesture has no idea of
+// Only a host that knows the device has no system back gesture of its own may
+// turn this on (hostEdgeSwipeBack in the shell; none does yet), and only for a
+// frame whose left edge is the screen's edge, never one beside a pane divider
+// or sidebar. A nested iframe never gets it. The gesture has no idea of
 // its own about pages: navigation.js decides whether there is a level to leave
 // and runs the same back as moebius:nav-back does for the top entry.
 

@@ -1950,13 +1950,14 @@ Unknown future statuses should be treated like failure. `handle.ready` remains
 as a compatibility promise (`true` only for `owned`), but its historical
 `false` folded all other outcomes together. New code should use `outcome`.
 
-Where the device has no system back gesture (Möbius or an app installed as an
-iPhone or iPad web app), the runtime also gives every owned `nav.open` level an
-edge swipe: a swipe right from the app's left edge does exactly what system
+The runtime can also give every owned `nav.open` level an edge swipe, but
+Möbius turns it on for no device yet, so keep a visible Back for nested views. Where a host
+turns it on, a swipe right from the app's left edge does exactly what system
 Back does for the newest level, so it runs that level's `onBack`. It stays off
 while a modal dialog is open (`<dialog open>`, or `role="dialog"` with
-`aria-modal="true"`) and beside a pane divider. Do not build your own
-edge-swipe Back.
+`aria-modal="true"`) and beside a pane divider, and a nested iframe inside the
+app never receives it. Do not build your own edge-swipe Back: where the system
+already has one, one swipe would go back twice.
 
 ### Android back-preview — host-mediated back protocol
 

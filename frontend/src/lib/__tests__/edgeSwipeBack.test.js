@@ -7,6 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { makeNav } from '../../../public/mobius-runtime.js'
+import { hostEdgeSwipeBack } from '../../utils/installPlatform.js'
 
 const NATIVE_DIALOG = 'dialog[open]'
 const ARIA_DIALOG = '[role="dialog"][aria-modal="true"]'
@@ -191,5 +192,20 @@ test('the swipe is off until the host says there is no system back gesture', asy
     host(true)
     swipe(doc)
     assert.deepEqual(backed, ['detail'])
+  })
+})
+
+// iOS may give an installed web app its own edge back swipe, so the runtime's
+// would make one swipe go back twice. Until a real device shows otherwise, the
+// shell leaves the edge to the system everywhere.
+test('the shell turns the swipe on nowhere yet, so the edge stays the system\'s', async () => {
+  assert.equal(hostEdgeSwipeBack(), false)
+  await withFrame(async ({ doc, backed, openLevel, host, pops }) => {
+    host(hostEdgeSwipeBack())
+    await openLevel('detail')
+    assert.deepEqual(doc.listening('touchstart'), [])
+    swipe(doc)
+    assert.deepEqual(backed, [])
+    assert.equal(pops(), 0)
   })
 })

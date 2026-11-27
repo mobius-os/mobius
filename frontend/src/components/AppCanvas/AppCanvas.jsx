@@ -210,7 +210,9 @@ function AppFileExportDialog({ appName, themeColor, request, onCancel, onConfirm
 //      (deliberate playback the drawer still controls). covered holds the same
 //      work while the modal drawer is over a frame that stays painted.
 //      edgeSwipeBack lets the visible frame's runtime turn a swipe from its
-//      left edge into Back for its top nav entry (no system back gesture).
+//      left edge into Back for its top nav entry (hostEdgeSwipeBack decides;
+//      no host turns it on yet). app-frame.html does not forward it, so a
+//      nested iframe never gets the swipe.
 //
 //   3d. {type: 'moebius:app-activity'}                     parent → frame
 //      The shell saw new activity for this app, or its system stream reopened
@@ -463,8 +465,9 @@ const AppCanvas = forwardRef(function AppCanvas({
   // honestly not hidden, but app-frame.html holds its sound and animation
   // frames, the same as leaving does.
   covered = false,
-  // The host has no system back gesture and this frame's left edge is the
-  // screen's, so the runtime turns an edge swipe into Back (edgeSwipeBack.js).
+  // The host has no system back gesture of its own and this frame's left edge
+  // is the screen's, so the runtime turns an edge swipe into Back
+  // (edgeSwipeBack.js). No host sets it yet: see hostEdgeSwipeBack.
   edgeSwipeBack = false,
   // Whether this canvas asks its app's key requests over it
   // (AppKeyRequestCard): only the owner's own shell does.
