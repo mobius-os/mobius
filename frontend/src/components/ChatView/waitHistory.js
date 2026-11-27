@@ -37,9 +37,13 @@ export function waitWokeItsAnswer(summary) {
 export function waitHistoryViewModel(summary) {
   if (summary?.target_kind) {
     const kicker = goalDependencyOutcomeLabel(summary)
-    return { condition: summary.condition, kicker, tone: 'dependency',
-      ariaLabel: `Waiting ended: ${summary.condition}. ${kicker}`,
-      metadata: summary.delivery_pending ? 'Result saved · follow-up pending' : null }
+    const isWork = summary.target_kind === 'claim_acquisition'
+    const report = isWork ? summary.outcome?.work_report : null
+    const condition = isWork ? (report?.purpose || 'Work this Goal was waiting for') : summary.condition
+    return { condition, kicker, tone: 'dependency', report,
+      ariaLabel: `${isWork ? 'Cross-chat work dependency' : 'Waiting ended'}: ${condition}. ${kicker}`,
+      metadata: [isWork && `From ${summary.source_chat_title || 'another chat'}`,
+        summary.delivery_pending && 'Result saved · follow-up pending'].filter(Boolean).join(' · ') || null }
   }
   const condition = waitConditionLabel(summary?.description)
   const settledOutcome = OUTCOMES[summary?.status]

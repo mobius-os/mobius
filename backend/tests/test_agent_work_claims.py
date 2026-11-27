@@ -2062,3 +2062,103 @@ def test_settled_dependency_history_shows_long_claim_texts_in_part(db):
     assert shown["condition"] == "S" * CLAIM_SUMMARY_CHARS
     assert shown["outcome"]["outcome"] == "O" * CLAIM_TEXT_CHARS
     assert shown["truncated"] is True
+
+
+@pytest.mark.parametrize("release", [False, True])
+def test_work_report_survives_exact_settlement_separate_from_technical_evidence(db, release):
+  from app.goal_dependencies import dependency_summary, dependency_full_texts, dependency_notice
+
+  owner, first, second = _fixture(db)
+  key = "test:reader-report"
+  claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+             work_key=key, summary="Technical work condition")
+  claim_work(db, owner_id=owner.id, chat_id=second.id, run_id="claim-run-second",
+             work_key=key, summary="Follow")
+  evidence = "Exact technical evidence. " * 400
+  report = {"purpose": "Make saved work reliable", "result": "Verified in isolation; not live.",
+            "next_step": "Review before deciding whether to activate."}
+  result = finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+                       outcome=evidence, release=release, work_report=report)
+  assert result["work_report"] == report
+  db.expire_all()
+  claim = db.query(models.AgentWorkClaim).one()
+  dependency = db.query(models.GoalDependency).one()
+  assert claim.work_report == report and claim.outcome == evidence.strip()
+  assert dependency.outcome_json["kind"] == ("released" if release else "completed")
+  for foreign in (True, False):
+    projected = dependency_summary(db, dependency, include_foreign_context=foreign)
+    assert projected["outcome"]["work_report"] == report
+    assert projected["truncated"] is True
+    assert dependency_full_texts(db, dependency, include_foreign_context=foreign)["outcome"] == evidence.strip()
+  assert '"work_report"' in dependency_notice(dependency)
+  # A repeated finish cannot rewrite the first report or its exact receipt.
+  finish_work(db, owner_id=owner.id, chat_id=first.id, work_key=key,
+              outcome="Different evidence", release=release,
+              work_report={"purpose": "Other", "result": "Other"})
+  assert db.query(models.AgentWorkClaim).one().work_report == report
+  assert db.query(models.GoalDependency).one().outcome_json["work_report"] == report
+  if release:
+    claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first",
+               work_key=key, summary="New attempt")
+    assert db.query(models.AgentWorkClaim).one().work_report is None
+    assert db.query(models.GoalDependency).one().outcome_json["work_report"] == report
+
+
+@pytest.mark.parametrize("report", [
+  {"purpose": "", "result": "Done"}, {"purpose": "p" * 161, "result": "Done"},
+  {"purpose": "Read", "result": "r" * 281},
+  {"purpose": "Read", "result": "Done", "next_step": "n" * 201},
+  {"purpose": "Read", "result": "Done", "installed": True},
+])
+def test_work_report_rejects_unbounded_or_invented_contract_fields(db, report):
+  owner, first, _ = _fixture(db)
+  with pytest.raises(ValueError):
+    finish_work(db, owner_id=owner.id, chat_id=first.id, work_key="test:report",
+                outcome="Evidence", release=False, work_report=report)
+  assert db.query(models.AgentWorkClaim).count() == 0
+
+
+def test_goal_completion_atomically_projects_exact_claim_report_without_a_second_goal_summary(db):
+  from app.goals import update_goal_record
+  from app.goal_plans import GoalPlanConflict
+  from app.goal_dependencies import dependency_summary
+
+  _, first, _ = _owned_goal_claim(db)
+  run = db.get(models.ChatRun, "claim-run-first")
+  goal = db.get(models.ChatGoal, "claim-goal-first")
+  report = {"purpose": "Improve saved work", "result": "Verified in isolation; not live.",
+            "next_step": "Review the candidate."}
+  update_goal_record(db, run, goal, 1, complete=True,
+                     finished_claims=[KEY], claim_reports={KEY: report})
+  row = _claim_row(db)
+  assert row.work_report == report
+  assert row.outcome == "Owning Goal completed."
+  dependency = db.query(models.GoalDependency).one()
+  assert dependency_summary(db, dependency)["outcome"]["work_report"] == report
+  db.refresh(goal)
+  assert goal.result is None
+  update_goal_record(db, run, goal, goal.revision, complete=True,
+                     finished_claims=[KEY], claim_reports={KEY: report})
+  with pytest.raises(GoalPlanConflict, match="report cannot change"):
+    update_goal_record(db, run, goal, goal.revision, complete=True,
+      finished_claims=[KEY], claim_reports={KEY: {**report, "result": "Different result"}})
+  assert _claim_row(db).work_report == report
+
+
+def test_goal_report_cannot_mark_an_unnamed_or_unfinished_claim_successful(db):
+  from app.goals import update_goal_record
+  from app.goal_plans import GoalPlanError
+
+  _, _, _ = _owned_goal_claim(db)
+  run = db.get(models.ChatRun, "claim-run-first")
+  goal = db.get(models.ChatGoal, "claim-goal-first")
+  report = {"purpose": "Improve saves", "result": "Verified"}
+  for kwargs in (
+    {"complete": True, "claim_reports": {KEY: report}},
+    {"cancel": "Owner cancelled", "finished_claims": [KEY], "claim_reports": {KEY: report}},
+  ):
+    with pytest.raises(GoalPlanError):
+      update_goal_record(db, run, goal, 1, **kwargs)
+    assert _claim_row(db).completed_at is None
+    assert _claim_row(db).work_report is None
+  assert db.get(models.ChatGoal, goal.id).status == "open"

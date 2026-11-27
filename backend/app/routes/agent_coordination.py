@@ -29,6 +29,7 @@ from app.agent_coordination import (
   visible_peer_messages,
 )
 from app.agent_work_claims import (
+  WorkReport,
   pending_transfer_notices,
   claim_work,
   finish_work,
@@ -102,6 +103,7 @@ class AgentWorkClaimFinish(BaseModel):
   work_key: str = Field(min_length=3, max_length=256)
   outcome: str = Field(min_length=1)
   release: bool = False
+  work_report: WorkReport | None = None
 
 
 @router.post("/work-claims", dependencies=[Depends(reject_cross_site)])
@@ -185,6 +187,7 @@ async def finish_current_work(
       work_key=body.work_key,
       outcome=body.outcome,
       release=body.release,
+      work_report=body.work_report.model_dump(exclude_none=True) if body.work_report else None,
     )
   except ValueError as exc:
     raise HTTPException(409, str(exc)) from exc

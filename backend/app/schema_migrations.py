@@ -7416,6 +7416,17 @@ def _add_channel_feeds(eng) -> None:
         "BOOLEAN NOT NULL DEFAULT 0"
       ))
 
+def _add_claim_work_report(eng) -> None:
+  """Keep legacy evidence unchanged; only new reports have reader summaries."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "agent_work_claims" not in inspector.get_table_names():
+    return
+  if "work_report" not in {c["name"] for c in inspector.get_columns("agent_work_claims")}:
+    with eng.begin() as conn:
+      conn.execute(text("ALTER TABLE agent_work_claims ADD COLUMN work_report JSON"))
+
 
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
@@ -7549,6 +7560,7 @@ _SCHEMA_MIGRATIONS = (
   ("0108_chat_pending_revision", _add_chat_pending_revision),
   ("0109_channel_feeds", _add_channel_feeds),
   ("0110_schedule_state_out_of_app_data", _move_schedule_state_out_of_app_data),
+  ("0111_claim_work_report", _add_claim_work_report),
 )
 
 

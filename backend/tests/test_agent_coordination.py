@@ -2696,3 +2696,21 @@ def test_a_retry_delivers_an_interrupt_only_while_it_is_undelivered(client, auth
   assert len(started) == 1
   assert db.query(models.AgentCoordinationMessage).filter(
     models.AgentCoordinationMessage.send_id == "lost").count() == 1
+
+
+def test_finish_route_persists_authored_work_report_without_rewriting_evidence(client, auth, db, monkeypatch):
+  from app import goal_dependencies
+  _claim_owner_and_follower(db)
+  async def no_delivery():
+    return None
+  monkeypatch.setattr(goal_dependencies, "deliver_pending_dependencies", no_delivery)
+  report = {"purpose": "Compare options", "result": "Three options compared.", "next_step": "Choose a route."}
+  response = client.post("/api/agent-coordination/work-claims/finish",
+    headers=_top_level_auth(db, "claim-owner", "claim-owner-run"),
+    json={"work_key": CLAIM_KEY, "outcome": "Detailed comparison evidence", "work_report": report})
+  assert response.status_code == 200, response.text
+  assert response.json()["work_report"] == report
+  claim, _ = _claim_and_notices(db)
+  assert claim.work_report == report
+  assert claim.outcome == "Detailed comparison evidence"
+  assert db.query(models.GoalDependency).one().outcome_json["work_report"] == report

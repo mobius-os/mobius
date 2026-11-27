@@ -344,7 +344,7 @@ def dependency_summary(db, row, *, include_foreign_context=True, bounded=True):
   safe_outcome = _shared_outcome(row.outcome_json)
   if not include_foreign_context and safe_outcome is not None:
     safe_outcome = {key: value for key, value in outcome.items()
-      if key in {"kind", "summary", "answers", "outcome"}}
+      if key in {"kind", "summary", "answers", "outcome", "work_report"}}
   summary = {"id": row.id, "target_kind": row.target_kind,
     "condition": condition, "source_chat_id": source_id,
     "source_question_id": row.target_question_id if include_foreign_context else None,

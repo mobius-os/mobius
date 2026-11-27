@@ -120,6 +120,7 @@
     "0107_app_install_id": "e8e734ce545aa3d36730c324ea656cb2ae2aea9b11eb25975fc9950d32c6b034",
     "0108_chat_pending_revision": "3b00f74a78f05521779ac6585866ba8d8b357cf67f62b98065dc261ea93bc0b7",
     "0109_channel_feeds": "303c5153a2b788c1533aee335ae8109826c395b0a5d4236bc8843aa8c6e9e83f",
-    "0110_schedule_state_out_of_app_data": "1943e2301ba344c5576dbd9bcf6d498c4daf63eee463b69ec8eb49f6f67302a1"
+    "0110_schedule_state_out_of_app_data": "1943e2301ba344c5576dbd9bcf6d498c4daf63eee463b69ec8eb49f6f67302a1",
+    "0111_claim_work_report": "599292f4d9837cf538091480fa1f6113e3349d55272bcbb6459c01945f261dfc"
   }
 }

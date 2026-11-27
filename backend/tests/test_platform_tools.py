@@ -2011,3 +2011,38 @@ def test_helper_uses_service_retirement_mapping_only_for_its_provider(monkeypatc
     'replacements': {'mobius': {'retired': 'active'}},
   })
   assert control._helper_selection({}) == ('mobius', 'active', 'low')
+
+
+def test_work_report_tool_keeps_reader_summary_separate_from_uncapped_evidence(monkeypatch):
+  control = _control_module()
+  definition = control._TOOL_DEFINITIONS["finish_agent_work"]
+  properties = definition["inputSchema"]["properties"]
+  assert "maxLength" not in properties["outcome"]
+  report_schema = properties["work_report"]
+  assert report_schema["required"] == ["purpose", "result"]
+  assert set(report_schema["properties"]) == {"purpose", "result", "next_step"}
+  assert "does not imply installed" in definition["description"]
+  calls = []
+  monkeypatch.setattr(control, "_agent_api_call",
+    lambda method, path, body: calls.append((method, path, body)) or {"state": "completed"})
+  payload = {"work_key": "test:report", "outcome": "Technical evidence" * 1000,
+             "work_report": {"purpose": "Compare options", "result": "Three options compared."}}
+  control._call_finish_agent_work(payload)
+  assert calls == [("POST", "/api/agent-coordination/work-claims/finish", payload)]
+
+
+def test_goal_completion_exposes_the_same_exact_work_report_contract(monkeypatch):
+  control = _control_module()
+  properties = control._TOOL_DEFINITIONS['update_goal']['inputSchema']['properties']
+  report_schema = properties['claim_reports']['additionalProperties']
+  assert report_schema == control._TOOL_DEFINITIONS['finish_agent_work']['inputSchema']['properties']['work_report']
+  calls = []
+  monkeypatch.setattr(control, '_update_goal', lambda arguments: calls.append(arguments) or 'Saved')
+  payload = {'complete': True, 'finished_claims': ['test:report'],
+             'claim_reports': {'test:report': {'purpose': 'Compare routes', 'result': 'Compared.'}}}
+  control._call_update_goal(payload)
+  assert calls == [payload]
+  from app.routes.goal_plans import GoalUpdateRequest
+  assert GoalUpdateRequest.model_validate(payload).claim_reports['test:report'].result == 'Compared.'
+  with pytest.raises(ValueError):
+    GoalUpdateRequest.model_validate({**payload, 'finished_claims': []})

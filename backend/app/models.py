@@ -1811,6 +1811,7 @@ class AgentWorkClaim(Base):
   released_at = Column(DateTime, nullable=True)
   completed_at = Column(DateTime, nullable=True)
   outcome = Column(Text, nullable=True)
+  work_report = Column(JSON, nullable=True)
 
 
 class AgentWorkClaimRevocation(Base):

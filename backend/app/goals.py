@@ -507,7 +507,8 @@ def _unseen_goal_result_queries(db, run, goal):
 
 def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
-                       cancel=None, defer=None, tasks=None, finished_claims=()):
+                       cancel=None, defer=None, tasks=None, finished_claims=(),
+                       claim_reports=None):
   # Completion may also file the chat. Take the drawer lock before the first
   # Goal write, in the same order as an owner's archive transaction.
   if complete is not None:
@@ -517,19 +518,20 @@ def update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
         db, run, goal, expected_revision, checkpoint=checkpoint,
         next_action=next_action, complete=complete,
         cannot_complete=cannot_complete, cancel=cancel, defer=defer,
-        tasks=tasks, finished_claims=finished_claims,
+        tasks=tasks, finished_claims=finished_claims, claim_reports=claim_reports,
       )
   return _update_goal_record(
     db, run, goal, expected_revision, checkpoint=checkpoint,
     next_action=next_action, complete=complete,
     cannot_complete=cannot_complete, cancel=cancel, defer=defer,
-    tasks=tasks, finished_claims=finished_claims,
+    tasks=tasks, finished_claims=finished_claims, claim_reports=claim_reports,
   )
 
 
 def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
                        next_action=None, complete=None, cannot_complete=None,
-                       cancel=None, defer=None, tasks=None, finished_claims=()):
+                       cancel=None, defer=None, tasks=None, finished_claims=(),
+                       claim_reports=None):
   from app.goal_plans import (
     GoalPlanConflict, GoalPlanError, named_ids, normalize_tasks, staged_task_edits,
   )
@@ -541,6 +543,11 @@ def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   outcomes = [complete is not None, cannot_complete is not None, cancel is not None]
   if sum(outcomes + [defer is not None, next_action is not None]) > 1:
     raise GoalPlanError("Choose one Goal outcome, deferral, or next action")
+  from app.agent_work_claims import WorkReport
+  reports = {key: WorkReport.model_validate(report).model_dump(exclude_none=True)
+             for key, report in (claim_reports or {}).items()}
+  if reports.keys() - set(finished_claims):
+    raise GoalPlanError("Claim reports must name only finished_claims")
   if finished_claims and complete is None:
     raise GoalPlanError("Only verified completion may name finished claims")
   status = ("completed" if complete is not None else
@@ -584,6 +591,13 @@ def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
       ).all()}
       if set(finished_claims) - completed_keys:
         raise GoalPlanError("A replay cannot finish new work claims")
+    if reports:
+      saved_reports = {row.work_key: row.work_report for row in db.query(models.AgentWorkClaim).filter(
+        models.AgentWorkClaim.owner_chat_id == goal.chat_id,
+        models.AgentWorkClaim.work_key.in_(reports),
+      ).all()}
+      if any(saved_reports.get(key) != report for key, report in reports.items()):
+        raise GoalPlanConflict("A settled work report cannot change")
     return {"goal_id": goal.id, "status": goal.status, "revision": goal.revision}
   if goal.status != "open":
     raise GoalPlanConflict("Goal is not open")
@@ -698,6 +712,7 @@ def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
     stage_settle_goal_claims(
       db, chat_id=goal.chat_id, goal_id=goal.id, status=values["status"],
       result=outcome_text or defer_reason, finished_keys=finished_claims,
+      claim_reports=reports,
     )
   if status is not None:
     from app.activity_position import record_activity_position

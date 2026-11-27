@@ -2,7 +2,6 @@
 import { api, jsonOrThrow } from '../../api/client.js'
 import PeerNoteBody, { FullNoteText, ReadFullAction } from './PeerNoteBody.jsx'
 import useFullPeerNote from './hooks/useFullPeerNote.js'
-import { goalDependencyOutcomeLabel } from './goalProgress'
 
 async function readDependencyTexts(dependencyId) {
   return jsonOrThrow(await api.chatWaits.dependencyText(dependencyId), 'Could not load the full text')
@@ -23,17 +22,23 @@ export default function DependencyFullText({ dependencyId }) {
     render={text => <span className="peer-note-full">{text}</span>} />
 }
 
-/** A Goal row's condition and outcome, each replaced in place by its whole
- *  text once read. */
+/** A Goal row keeps exact claim texts readable behind its authored summary. */
 export function DependencyRowTexts({ dependency, actions, meta }) {
   const texts = useFullPeerNote(dependency.truncated ? [() => readDependencyTexts(dependency.id)] : [])
   const full = texts.full
+  const report = dependency.target_kind === 'claim_acquisition' && dependency.disposition
+    ? dependency.outcome?.work_report : null
+  const evidence = full?.outcome || dependency.outcome?.outcome
   return <>
-    <span className="chat__goal-task-title">{full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition}</span>
+    <span className="chat__goal-task-title">{report?.purpose || (full?.condition ? <FullNoteText text={full.condition} /> : dependency.condition)}</span>
     {actions}
-    <span className="chat__goal-task-meta">{full?.outcome
-      ? <FullNoteText text={goalDependencyOutcomeLabel({ ...dependency, outcome: { ...dependency.outcome, outcome: full.outcome } })} />
-      : meta}</span>
+    <span className="chat__goal-task-meta">{meta}</span>
+    {report && <span className="chat__goal-task-meta">{report.result}{report.next_step && ` Next: ${report.next_step}`}</span>}
+    {(report || evidence) && <details className="chat__goal-task-meta">
+      <summary>Technical handoff</summary>
+      {report && <><strong>Original work</strong><br /><FullNoteText text={full?.condition || dependency.condition} /></>}
+      {evidence && <>{report && <br />}<strong>Outcome</strong><br /><FullNoteText text={evidence} /></>}
+    </details>}
     {dependency.truncated && !full && <ReadFullAction note={texts} noun="text" />}
   </>
 }

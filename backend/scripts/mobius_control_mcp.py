@@ -680,7 +680,7 @@ def _goal_report(payload: dict[str, Any], *, full: bool) -> str:
 
 
 def _call_update_goal(arguments: dict[str, Any]) -> str:
-  allowed = {"tasks", "next_action", "complete", "cannot_complete", "cancel", "defer", "finished_claims", "goal_id"}
+  allowed = {"tasks", "next_action", "complete", "cannot_complete", "cancel", "defer", "finished_claims", "claim_reports", "goal_id"}
   unknown = set(arguments) - allowed
   if unknown:
     raise ValueError(f"update_goal does not take: {', '.join(sorted(unknown))}")
@@ -959,7 +959,7 @@ def _call_claim_agent_work(arguments: dict[str, Any]) -> dict:
 
 
 def _call_finish_agent_work(arguments: dict[str, Any]) -> dict:
-  allowed = {"work_key", "outcome", "release"}
+  allowed = {"work_key", "outcome", "release", "work_report"}
   if not {"work_key", "outcome"}.issubset(arguments) or not set(arguments).issubset(allowed):
     raise ValueError("finish_agent_work needs work_key and outcome")
   return _agent_api_call("POST", "/api/agent-coordination/work-claims/finish", arguments)
@@ -1607,6 +1607,17 @@ def _call_app_screenshot(arguments: dict[str, Any]) -> ToolContent:
     {"type": "text", "text": shot.get("note") or "This is the app as the owner sees it."},
   ])
 
+_WORK_REPORT_SCHEMA = {
+  "type": "object", "additionalProperties": False,
+  "required": ["purpose", "result"],
+  "properties": {
+    "purpose": {"type": "string", "minLength": 1, "maxLength": 160},
+    "result": {"type": "string", "minLength": 1, "maxLength": 280},
+    "next_step": {"type": "string", "minLength": 1, "maxLength": 200},
+  },
+}
+
+
 
 _TOOL_DEFINITIONS = {
   CHECKPOINT_CHAT_TOOL: {
@@ -2237,6 +2248,10 @@ _TOOL_DEFINITIONS = {
                    "description": "Owner-called-off reason, not an unreachable-work shortcut."},
         "defer": {"type": "string", "minLength": 1,
                   "description": "Reason for a manual hold on the owner's choice, after independent authorized work is done. Disables automatic continuation until a later owner request; not for waiting on a restart, decision, dependency or helper. Register that exact handoff instead. Tasks may share this atomic call; do not combine with next_action or outcomes."},
+        "claim_reports": {
+          "type": "object", "additionalProperties": _WORK_REPORT_SCHEMA,
+          "description": "Optional owner-facing reports keyed by exact finished_claims work_key. Supply brief purpose, actual result and optional next_step; never infer live or installed state. Technical evidence stays in task results and the claim outcome. Not a second whole-Goal summary.",
+        },
         "finished_claims": {
           "type": "array", "items": {"type": "string"},
           "description": (
@@ -2483,7 +2498,11 @@ _TOOL_DEFINITIONS = {
       "finished_claims completes the claims the Goal performed and "
       "releases the rest (for example, a declined approval), and Stop, "
       "dismissal, or chat deletion releases them. Call it to settle earlier "
-      "or for claims taken outside a Goal."
+      "or for claims taken outside a Goal. Supply work_report in plain language "
+      "for the owner: brief purpose, actual result, and next_step when needed. "
+      "Keep technical handoff evidence in outcome. State limitations or live "
+      "status only when known; completed work does not imply installed changes. "
+      "Goal completion can instead carry claim_reports keyed by finished_claims."
     ),
     "inputSchema": {
       "type": "object", "additionalProperties": False,
@@ -2492,6 +2511,7 @@ _TOOL_DEFINITIONS = {
         "work_key": {"type": "string", "minLength": 3, "maxLength": 256},
         "outcome": {"type": "string", "minLength": 1},
         "release": {"type": "boolean"},
+        "work_report": _WORK_REPORT_SCHEMA,
       },
     },
   },

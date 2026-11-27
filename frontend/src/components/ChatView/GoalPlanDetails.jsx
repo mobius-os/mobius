@@ -138,7 +138,7 @@ export default function GoalPlanDetails({ plan, holdReason = null, dependencies 
           const settled = !!dependency.disposition
           return <div role="listitem" key={dependency.id} className="chat__goal-task">
             <Clock width={14} height={14} aria-hidden="true" />
-            <span className="chat__goal-task-copy">
+            <div className="chat__goal-task-copy">
               <DependencyRowTexts dependency={dependency}
                 actions={<span className="chat__dependency-actions">
                   <DependencyLink dependency={dependency} onInternalNav={onInternalNav} />
@@ -150,7 +150,7 @@ export default function GoalPlanDetails({ plan, holdReason = null, dependencies 
                   : SOURCE_RECOVERY_BLOCKERS.has(dependency.resume_blocker)
                     ? `This work needs recovery in ${dependency.source_chat_title || 'the other chat'}`
                     : dependency.automatic ? 'Continues automatically' : 'Saved until you continue this Goal'} />
-            </span>
+            </div>
           </div>
         })}
       </div>}
