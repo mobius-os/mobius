@@ -394,6 +394,41 @@ def test_without_rooms_every_shared_git_command_is_checked(tmp_path, monkeypatch
   assert project_git.project_status(repo)["available"] is not False
 
 
+@pytest.mark.parametrize("failure", ["timeout", "not json", '{"reasons": []}'])
+def test_a_room_check_that_cannot_run_refuses_shared_git_and_is_asked_again(
+  tmp_path, monkeypatch, failure,
+):
+  """Only the host's own answer means "no rooms"; one transient failure must
+  not take shared projects out of their rooms until the next restart."""
+  project_git._rooms_available.cache_clear()
+  answers = [
+    subprocess.TimeoutExpired("fence", 10) if failure == "timeout" else failure,
+    '{"available": false}',
+  ]
+
+  def answer(command, **kwargs):
+    if "--check" not in command:
+      return real_run(command, **kwargs)
+    reply = answers.pop(0)
+    if isinstance(reply, BaseException):
+      raise reply
+    return subprocess.CompletedProcess(command, 0, stdout=reply, stderr="")
+
+  real_run = subprocess.run
+  monkeypatch.setattr(project_git.subprocess, "run", answer)
+  try:
+    repo = _repo(tmp_path / "p")
+    with project_git.untrusted_settings(True), pytest.raises(
+      project_git.GitProjectError, match="confine",
+    ):
+      project_git._git(repo, "status")
+    with project_git.untrusted_settings(True):
+      assert project_git._git(repo, "status")[0] == "git"
+    assert not answers
+  finally:
+    project_git._rooms_available.cache_clear()
+
+
 def test_the_git_panel_of_a_shared_project_treats_its_settings_as_untrusted(
   client, auth, db, monkeypatch,
 ):

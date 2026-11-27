@@ -139,14 +139,20 @@ _FENCE = Path(__file__).resolve().parent.parent / "scripts" / "mobius_fence.py"
 
 @functools.cache
 def _rooms_available() -> bool:
+  """Only the host's own answer means "no rooms". A check that cannot run
+  refuses the command instead, and is not cached, so one transient failure
+  cannot take shared projects out of their rooms until the next restart."""
   try:
     answer = subprocess.run(
       [sys.executable, "-I", str(_FENCE), "--check"],
       stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=10,
     )
-    return json.loads(answer.stdout).get("available") is True
-  except (OSError, subprocess.SubprocessError, ValueError):
-    return False
+    available = json.loads(answer.stdout).get("available")
+  except (OSError, subprocess.SubprocessError, ValueError, AttributeError) as exc:
+    raise GitProjectError("Möbius could not check whether this host can confine Git.") from exc
+  if not isinstance(available, bool):
+    raise GitProjectError("Möbius could not check whether this host can confine Git.")
+  return available
 
 
 def _room_home(repo: str) -> str:
