@@ -673,7 +673,7 @@ test.describe('SSE streaming (real React path)', () => {
       'Read /data/apps/test/index.jsx',
     )
     await expect(tool.locator('[data-tool-kind="files"]')).toHaveCount(1)
-    await expect(tool.locator('.chat__tool-spin')).toHaveCount(0)
+    await expect(tool.locator('.spinner')).toHaveCount(0)
   })
 
   test('16b. Near-foot activity expansion holds its header while descendants churn', async ({ page }) => {

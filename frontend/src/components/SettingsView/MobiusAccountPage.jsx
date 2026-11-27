@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import {
-  ArrowRotateCw,
   ArrowUpRight,
   Camera,
   ChevronDown,
@@ -44,6 +43,7 @@ import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
 import { showsCreditsRow, walletGlance } from '../../lib/creditsWallet.js'
 import { closeAuthWindow, navigateAuthWindow } from '../../utils/authWindow.js'
 import LauncherSideSection from './LauncherSideSection.jsx'
+import Spinner from '../ui/Spinner.jsx'
 import './SettingsPage.css'
 import './MobiusAccountPage.css'
 
@@ -59,10 +59,6 @@ const json = body => ({
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 })
-
-function Spinner({ size = 14 }) {
-  return <ArrowRotateCw className="mobius-account__spin" width={size} height={size} aria-hidden="true" />
-}
 
 /* A protected deployment action: always a link to the signed-in account
    dashboard, never a local mutation. Without a dashboard address the action
@@ -154,7 +150,7 @@ function SignInSection({ onSignedIn, reconnecting }) {
             <span className="settings-item__icon mobius-account__provider-mark"><Mark /></span>
             <span className="settings-item__body"><span className="settings-item__title">{label}</span></span>
             <span className="settings-item__trail">
-              {pending === id ? <Spinner /> : <ArrowUpRight width={16} height={16} aria-hidden="true" />}
+              {pending === id ? <Spinner size={14} /> : <ArrowUpRight width={16} height={16} aria-hidden="true" />}
             </span>
           </button>
         ))}
@@ -350,7 +346,7 @@ function ProfileSection({ identity }) {
             </span>
             <span className="settings-item__trail">
               <button type="button" className="settings__btn settings__btn--outline settings__btn--sm mobius-account__btn" disabled={uploading} onClick={() => fileRef.current?.click()}>
-                {uploading ? <><Spinner /> Uploading…</> : <><Camera width={14} height={14} aria-hidden="true" />{profile.avatar_url ? 'Change' : 'Upload'}</>}
+                {uploading ? <><Spinner size={14} /> Uploading…</> : <><Camera width={14} height={14} aria-hidden="true" />{profile.avatar_url ? 'Change' : 'Upload'}</>}
               </button>
               <input ref={fileRef} type="file" accept={AVATAR_TYPES.join(',')} hidden onChange={upload} />
             </span>
@@ -993,7 +989,7 @@ function RailwayRows({ railway, connect, onReconnectAccount }) {
         </span>
         <span className="settings-item__trail">
           <button type="button" className="settings__btn settings__btn--sm mobius-account__btn" disabled={connect.connecting} onClick={() => connect.connect(false)}>
-            {connect.connecting ? <><Spinner /> Connecting…</> : railway.connection ? 'Reconnect' : 'Connect'}
+            {connect.connecting ? <><Spinner size={14} /> Connecting…</> : railway.connection ? 'Reconnect' : 'Connect'}
           </button>
         </span>
       </div>
@@ -1014,7 +1010,7 @@ function RailwayRows({ railway, connect, onReconnectAccount }) {
           <p className="settings-item-panel__text">Disconnecting Railway needs your sign-in on the account dashboard.</p>
           <div className="settings-actions">
             <button type="button" className="settings__btn settings__btn--outline settings__btn--sm mobius-account__btn" disabled={connect.connecting} onClick={() => connect.connect(true, railway.connection.account)}>
-              {connect.connecting ? <><Spinner /> Connecting…</> : 'Change account'}
+              {connect.connecting ? <><Spinner size={14} /> Connecting…</> : 'Change account'}
             </button>
             <a className="settings__btn settings__btn--outline settings__btn--sm mobius-account__btn" href="https://railway.com/workspace/plans" target="_blank" rel="noopener noreferrer" aria-label="Manage your Railway plan (opens in a new tab)">
               Railway plan<ArrowUpRight width={13} height={13} aria-hidden="true" />

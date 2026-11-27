@@ -1,0 +1,61 @@
+/* Spinner — the one loading ring for the whole shell (see Spinner.jsx).
+   Change the look, speed or motion fallbacks here and every spinner follows.
+   The ring is a conic-gradient arc on a faint track, hollowed by a radial
+   mask: plain background painting, so it needs no border tricks and stays
+   crisp at any size. */
+
+.spinner {
+  --spinner-size: 1em;
+  --spinner-color: currentColor;
+  --_thickness: clamp(1.5px, var(--spinner-size) / 8, 3px);
+
+  display: inline-block;
+  flex: none;
+  inline-size: var(--spinner-size);
+  block-size: var(--spinner-size);
+  border: 0;
+  border-radius: 50%;
+  appearance: none;
+  vertical-align: middle;
+  background: conic-gradient(
+    var(--spinner-color) 0 90deg,
+    color-mix(in srgb, var(--spinner-color) 22%, transparent) 0
+  );
+  mask-image: radial-gradient(
+    farthest-side,
+    transparent calc(100% - var(--_thickness)),
+    black calc(100% - var(--_thickness))
+  );
+  animation: spinner-turn 0.8s linear infinite;
+}
+
+.spinner--accent { --spinner-color: var(--accent, #8b6cf7); }
+
+/* The native indeterminate bar must not paint over the ring. Separate rules:
+   one unknown vendor pseudo-element drops a whole selector list. */
+.spinner::-webkit-progress-bar { display: none; background: none; }
+.spinner::-webkit-progress-value { display: none; background: none; }
+.spinner::-moz-progress-bar { display: none; background: none; }
+
+@keyframes spinner-turn { to { rotate: 1turn; } }
+
+/* Slow the turn rather than stop it: a frozen arc reads as a broken partial
+   ring, not as "working". !important is required to escape the global
+   reduced-motion clamp in index.css (`* { animation-duration: 1ms
+   !important; animation-iteration-count: 1 !important }`); this class
+   selector outranks that universal one. */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation-duration: 6s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* Forced colors drop background gradients, which would erase the ring.
+   Keep the painting and draw it in a system colour instead. */
+@media (forced-colors: active) {
+  .spinner {
+    forced-color-adjust: none;
+    --spinner-color: CanvasText;
+  }
+}

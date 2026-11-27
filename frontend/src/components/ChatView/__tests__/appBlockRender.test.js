@@ -139,7 +139,7 @@ test('Confirm is disabled without the complete app list or while an event awaits
   assert.match(locked, /class="md-app-block__cancel" disabled="">Not now/)
   assert.match(locked, /class="md-app-block__action" disabled="">Confirm/)
   assert.match(controls(live({ busy: true, disabled: true, label: 'Sending…' })),
-    /disabled="" aria-busy="true"[^>]*><span class="md-app-block__spinner" aria-hidden="true"><\/span>Sending…/)
+    /disabled="" aria-busy="true"[^>]*><progress class="spinner"[^>]*><\/progress>Sending…/)
   assert.equal(controls(live({ hidden: true })), '')
 })
 
@@ -366,9 +366,9 @@ test('the app reports each row\'s status, link and note, and the header says wha
 test('a busy row shows a spinner pill; a busy action shows a spinner in its disabled button', () => {
   const html = rowView({ title: 'Sending 2 changes', items: [{ intent: 'open:a', status: 'Sending', busy: true }, { intent: 'open:b', busy: true }],
     actions: [{ key: 'send-batch:sel-1', label: 'Sending…', busy: true, disabled: true }] })
-  assert.match(html, /<span class="md-app-block__pill is-neutral"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Sending<\/span>/)
-  assert.match(html, /<span class="md-app-block__pill is-neutral"><span class="md-app-block__spinner" aria-hidden="true"><\/span><span class="md-app-block__sr-only">Working<\/span><\/span>/)
-  assert.match(html, /<button type="button" class="md-app-block__action" disabled="" aria-busy="true" title="Sending…"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Sending…<\/button>/)
+  assert.match(html, /<span class="md-app-block__pill is-neutral"><progress class="spinner"[^>]*><\/progress>Sending<\/span>/)
+  assert.match(html, /<span class="md-app-block__pill is-neutral"><progress class="spinner"[^>]*><\/progress><span class="md-app-block__sr-only">Working<\/span><\/span>/)
+  assert.match(html, /<button type="button" class="md-app-block__action" disabled="" aria-busy="true" title="Sending…"><progress class="spinner"[^>]*><\/progress>Sending…<\/button>/)
 })
 
 test('while the app\'s list is confirming, saved rows and their live state are not shown', () => {
@@ -478,7 +478,7 @@ test('app rows replace the saved rows, facts and item controls, with no conversa
 
 test('a live title carries a state mark: spinner, check or exclamation mark, none when neutral', () => {
   assert.match(appRowsView({ title: 'Sending 2', titleBusy: true, rows: [] }),
-    /<header><span class="md-app-block__title-mark is-neutral is-busy" aria-hidden="true"><span class="md-app-block__spinner"><\/span><\/span><strong>Sending 2<\/strong>/)
+    /<header><span class="md-app-block__title-mark is-neutral is-busy" aria-hidden="true"><progress class="spinner"[^>]*><\/progress><\/span><strong>Sending 2<\/strong>/)
   assert.match(appRowsView({ title: '2 pull requests opened', titleTone: 'success', rows: [] }),
     /<span class="md-app-block__title-mark is-success" aria-hidden="true"><svg/)
   assert.match(appRowsView({ title: '1 needs a fix', titleTone: 'attention', rows: [] }),
@@ -571,7 +571,7 @@ test('a drawn ask is the block\'s one action, with the host\'s own label; the ap
 test('after a tap the ask waits, and says why only to assistive technology', () => {
   // Requesting is in flight (busy, no settled class); asked and already are settled.
   const sending = askView('sending')
-  assert.match(sending, /is-ask is-requesting" disabled="" aria-busy="true" aria-describedby="[^"]+"><span class="md-app-block__spinner" aria-hidden="true"><\/span>Requesting…/)
+  assert.match(sending, /is-ask is-requesting" disabled="" aria-busy="true" aria-describedby="[^"]+"><progress class="spinner"[^>]*><\/progress>Requesting…/)
   assert.doesNotMatch(sending, /is-settled/)
   assert.match(sending, /<span class="md-app-block__sr-only" role="status"><\/span>/, 'nothing is announced while the request is in flight')
   const asked = askView('asked')

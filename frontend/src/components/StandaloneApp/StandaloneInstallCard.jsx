@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
+import Spinner from '../ui/Spinner.jsx'
 import {
   getInstallObservedSnapshot,
   getInstallPromptSnapshot,
@@ -205,7 +206,7 @@ export default function StandaloneInstallCard({ app, forceOpen, onClose }) {
             </div>
             {warming && (
               <div className="standalone-install__warming" role="status">
-                <span className="standalone-install__spinner" aria-hidden="true" />
+                <Spinner size={18} tone="accent" />
                 <span>
                   Getting one-tap install ready — this can take a moment on a
                   first visit.

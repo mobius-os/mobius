@@ -2,6 +2,7 @@
 
 import { ChatTemporary, X } from '@openai/apps-sdk-ui/components/Icon'
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
+import Spinner from '../ui/Spinner.jsx'
 import './SideQuestionCard.css'
 
 /**
@@ -33,7 +34,7 @@ export default function SideQuestionCard({ sideQuestion, onAdd, onClose, onRetry
       <div className="side-question__answer" role="status" aria-live="polite">
         {status === 'asking' && (
           <span className="side-question__thinking">
-            <span className="side-question__spinner" aria-hidden="true" />
+            <Spinner size={12} tone="accent" />
             Asking a temporary copy of this chat…
           </span>
         )}

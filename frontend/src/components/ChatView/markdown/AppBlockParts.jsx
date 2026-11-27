@@ -8,6 +8,7 @@ import { sharedBrowserShellHref } from '../../../lib/sharedBrowserWorkspace.js'
 import { openInternalLink } from '../internalLink.js'
 import { openExistingChat } from '../../../lib/appChatNavigation.js'
 import { appBlockHref, transcriptHostRequest } from './appBlock.js'
+import Spinner from '../../ui/Spinner.jsx'
 import './AppBlock.css'
 
 export const AppCanvas = lazy(() => import('../../AppCanvas/AppCanvas.jsx'))
@@ -74,7 +75,7 @@ export function ExternalLinks({ links, context = '' }) {
 export function StatusPill({ status, tone = 'neutral', busy = false }) {
   if (!status && !busy) return null
   return <span className={`md-app-block__pill is-${tone}`}>
-    {busy ? <span className="md-app-block__spinner" aria-hidden="true" /> : null}
+    {busy ? <Spinner size={12} /> : null}
     {status || <span className="md-app-block__sr-only">Working</span>}</span>
 }
 
@@ -94,7 +95,7 @@ function ItemState({ live, title = '', linksInFooter = false }) {
 export function TitleMark({ tone = 'neutral', busy = false }) {
   if (!busy && !['success', 'accent', 'attention', 'danger'].includes(tone)) return null
   return <span className={`md-app-block__title-mark is-${busy ? 'neutral is-busy' : tone}`} aria-hidden="true">
-    {busy ? <span className="md-app-block__spinner" />
+    {busy ? <Spinner size={14} />
       : tone === 'success' || tone === 'accent' ? <Check width={14} height={14} />
         : <span className="md-app-block__title-mark-alert">!</span>}</span>
 }

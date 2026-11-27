@@ -70,6 +70,7 @@ import {
   initSwapState, reduceSwap, compareVersions, INCOMING_SWAP_TIMEOUT_MS,
 } from '../../lib/previewSwapState.js'
 import { GlobeOffRealTimeSearch } from '@openai/apps-sdk-ui/components/Icon'
+import Spinner from '../ui/Spinner.jsx'
 import './AppCanvas.css'
 
 const AppKeyRequestCard = lazy(() => import('./AppKeyRequestCard.jsx'))
@@ -359,7 +360,7 @@ function readDeviceInsets() {
 function CanvasLoadingBrand({ appName }) {
   return (
     <>
-      <div className="canvas-loading__spinner" />
+      <Spinner size={30} tone="accent" />
       {appName && <div className="canvas-loading__name">{appName}</div>}
       <div className="canvas-loading__skeleton" aria-hidden="true">
         <div className="canvas-loading__bar canvas-loading__bar--head" />
