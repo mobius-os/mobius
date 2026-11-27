@@ -39,7 +39,7 @@ export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
   const status = statusQuery.data || null
   const summary = remoteSyncPresentation(status)
   const actions = remoteSyncActions(status)
-  useEffect(() => { setPushReview(false) }, [status?.head, status?.ahead, status?.behind, status?.dirty])
+  useEffect(() => { setPushReview(false) }, [status?.head, status?.push_branch, status?.ahead, status?.behind, status?.dirty])
 
   async function prepare() {
     if (busy) return
@@ -96,7 +96,7 @@ export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
         ? await api.projects.fetchRemote(project.id)
         : action === 'pull'
           ? await api.projects.pullRemote(project.id, status.head)
-          : await api.projects.pushRemote(project.id, status.head)
+          : await api.projects.pushRemote(project.id, status.head, status.push_branch)
       const next = await jsonOrThrow(response, `${action} failed:`)
       await statusQuery.refetch()
       await Promise.all([
@@ -158,7 +158,7 @@ export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
                   <button type="button" className="is-primary" disabled={!!busy || !actions.push} aria-expanded={pushReview} onClick={() => setPushReview(true)}><ArrowUp size={14} />{busy === 'push' ? 'Pushing…' : 'Review & push'}</button>
                 </div>
                 {pushReview && <div className="project-git__push-review" role="group" aria-label="Confirm GitHub push">
-                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.branch}</code>. Uncommitted files and generated build output stay local.</p></div>
+                  <div><strong>Publish {status.ahead} {status.ahead === 1 ? 'commit' : 'commits'}?</strong><p>Destination: <code>{status.repository}:{status.push_branch}</code>. Uncommitted files and generated build output stay local.</p></div>
                   <div><button type="button" disabled={!!busy} onClick={() => setPushReview(false)}>Cancel</button><button type="button" className="is-primary" disabled={!!busy} onClick={() => void run('push')}>{busy === 'push' ? 'Pushing…' : `Push ${status.ahead}`}</button></div>
                 </div>}
                 </details>

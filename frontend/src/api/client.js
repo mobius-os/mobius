@@ -1457,10 +1457,14 @@ export const api = {
         method: 'POST', body: JSON.stringify({ expected_head: expectedHead || null }),
       },
     ),
-    pushRemote: (projectId, expectedHead) => apiFetch(
+    pushRemote: (projectId, expectedHead, expectedPushBranch) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/git/push`, {
         method: 'POST',
-        body: JSON.stringify({ expected_head: expectedHead || null, confirmed: true }),
+        body: JSON.stringify({
+          expected_head: expectedHead || null,
+          expected_push_branch: expectedPushBranch || null,
+          confirmed: true,
+        }),
       },
     ),
     readFile: (projectId, path, { download = false, signal } = {}) => apiFetch(

@@ -232,6 +232,8 @@ class ProjectRemoteAction(BaseModel):
 
 class ProjectRemotePush(ProjectRemoteAction):
   confirmed: bool = False
+  # The origin branch the owner saw in the confirmation (``push_branch``).
+  expected_push_branch: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ProjectChatCreate(BaseModel):
@@ -2574,7 +2576,9 @@ def push_project_git_remote(
   _require_project_github_connection()
   try:
     return {
-      **project_git.push_project(_project_root(project), body.expected_head),
+      **project_git.push_project(
+        _project_root(project), body.expected_head, body.expected_push_branch,
+      ),
       "github_connected": True,
     }
   except project_git.GitProjectError as exc:
