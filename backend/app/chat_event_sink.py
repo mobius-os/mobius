@@ -229,6 +229,7 @@ def active_sink_memory_diagnostics(*, include_payloads: bool = True) -> list[dic
 def steered_into_turn_event(
   stored_messages: list[dict],
   *,
+  pending_revision: int,
   assistant_message_id: str | None = None,
   sealed_items: list[dict] | None = None,
   next_assistant_message_id: str | None = None,
@@ -250,9 +251,13 @@ def steered_into_turn_event(
   path publishes NOTHING at arrival — the 202's own `pending_messages` is what
   keeps the accepted row visible until the cut, so there is no second channel
   reconciling the same tray.
+
+  ``pending_revision`` is the queue revision this cut committed, so the client
+  ignores any queue list read before it.
   """
   return {
     "type": "steered_into_turn",
+    "pending_revision": pending_revision,
     "messages": [
       {
         **copy.deepcopy(msg),
@@ -357,9 +362,11 @@ class ChatEventSink:
     run_token: str | None = None,
     *,
     agent_activity_binding: AgentActivityBinding = EMPTY_AGENT_ACTIVITY_BINDING,
+    provider_id: str | None = None,
   ):
     self.bc = bc
     self.chat_id = chat_id
+    self.provider_id = provider_id
     # Exact manifest-declared app commands this turn may decorate. Resolve once
     # while the caller's DB session is live; provider turns can run for hours.
     self._agent_activity_binding = agent_activity_binding
@@ -1208,7 +1215,14 @@ class ChatEventSink:
           )
           if blk is not None:
             turn_end_receipt_id = _turn_end_receipt_id(blk.get("output"))
-      output_reduced = self._reduce_tool_output(event)
+      if event.get("output_delta") is True:
+        # One piece is not the tool's full output, so never stash it under the
+        # tool's id. The reducer keeps only a bounded tail; bound the wire too.
+        output_reduced = False
+        if isinstance(event.get("content"), str):
+          event["content"] = event["content"][-TOOL_OUTPUT_INLINE_THRESHOLD:]
+      else:
+        output_reduced = self._reduce_tool_output(event)
       if not output_reduced and event.get("output_exit_code") is None:
         exit_code = tool_output_exit_code(full_tool_output)
         if exit_code is not None:
@@ -1506,12 +1520,17 @@ class ChatEventSink:
           self._publish_activity_frontier()
           raise
       user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
+      from app.chat_steering import active_model_for_chat
       ack = get_writer().submit(
         AppendSteeredUserMessage(
           chat_id=self.chat_id,
           run_token="",
           user_msgs=user_msgs,
           consume_pending_cids=consume_pending_cids,
+          active_model=(
+            active_model_for_chat(self.chat_id, self.provider_id)
+            if self.provider_id else None
+          ),
         )
       )
       return await _await_ack(ack)
@@ -1539,6 +1558,7 @@ class ChatEventSink:
     try:
       self.bc.publish(steered_into_turn_event(
         stored_messages,
+        pending_revision=stored_result["pending_revision"],
         assistant_message_id=sealed_message_id,
         sealed_items=sealed_items,
         next_assistant_message_id=self.assistant_message_id,
@@ -1747,12 +1767,18 @@ async def commit_steer_cut(
     return await commit(user_msg, consume_pending_cids)
 
   user_msgs = user_msg if isinstance(user_msg, list) else [user_msg]
+  from app.runner_registry import RunnerKind, registry
+  handles = [handle for kind in (RunnerKind.CLAUDE_SDK, RunnerKind.CODEX_SDK)
+             if (handle := registry.get_handle(chat_id, kind)) is not None]
   ack = get_writer().submit(
     AppendSteeredUserMessage(
       chat_id=chat_id,
       run_token="",
       user_msgs=user_msgs,
       consume_pending_cids=consume_pending_cids,
+      # Out-of-band fallback has no owning sink/provider; fail closed if two
+      # stale cross-provider handles coexist rather than guess a model.
+      active_model=getattr(handles[0], "model", None) if len(handles) == 1 else None,
     )
   )
   stored_result = await _await_ack(ack)
@@ -1762,7 +1788,9 @@ async def commit_steer_cut(
     if not isinstance(stored_messages, list) or not stored_messages:
       stored_messages = user_msgs
     try:
-      raw_bc.publish(steered_into_turn_event(stored_messages))
+      raw_bc.publish(steered_into_turn_event(
+        stored_messages, pending_revision=stored_result["pending_revision"],
+      ))
     except Exception:
       _get_logger().exception(
         "publishing the fallback steer cut failed chat_id=%s; the split "

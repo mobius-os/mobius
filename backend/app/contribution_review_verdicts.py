@@ -20,6 +20,7 @@ from fastapi import HTTPException
 
 from app import chat_queue, models, settled, contribution_review_runs as reviews
 from app import contribution_pr_facts as pr_facts, contribution_review_public as public
+from app import contribution_review_lifecycle as review_lifecycle
 from app.contribution_errors import ContributionSubmitError
 from app.decision_cards import fence_owner
 from app.github_connection import _github_connection_transaction
@@ -43,19 +44,22 @@ def proposed_event(outcome) -> str:
   return EVENTS[outcome["state"]]
 
 
-def propose(outcome, target) -> dict:
-  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment."""
+def propose(outcome, target, moved_to="") -> dict:
+  """One immutable proposal: the verdict's exact wording and the same findings as a plain comment.
+
+  ``moved_to`` names the head the PR has since moved to, for a review of an older version the owner chose to send
+  anyway: the wording says so, and submitting accepts that PR at any head (see submit)."""
   event = proposed_event(outcome)
   proposal_id = uuid.uuid4().hex
   # The marker is part of the frozen wording: GitHub's body limit is applied to
   # exactly what will be posted, so submitting can never overflow it.
   marker = f"<!-- mobius-review:{proposal_id} -->"
-  body = public.review_comment_body(outcome, marker=marker, event=event)
-  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT")
+  body = public.review_comment_body(outcome, marker=marker, event=event, moved_to=moved_to)
+  comment_body = public.review_comment_body(outcome, marker=marker, event="COMMENT", moved_to=moved_to)
   return {"id": proposal_id, "state": "proposed", "event": event, "marker": marker, "body": body,
           "body_sha256": _sha256(body), "comment_body": comment_body, "comment_body_sha256": _sha256(comment_body),
           "head_sha": target["head_sha"], "reviewed_base_sha": outcome.get("reviewed_base_sha"),
-          "proposed_at": reviews.utc_now_iso()}
+          "proposed_at": reviews.utc_now_iso(), **({"moved_to": moved_to} if moved_to else {})}
 
 
 def _sent_as(saved: dict, event: str | None) -> dict:
@@ -112,21 +116,21 @@ def _arm(db, row, item_key, proposal_id, authorize, event=None):
   return armed["verdict_proposal"]
 
 
-def _preflight(gh, cwd, row, target):
+def _preflight(gh, cwd, row, target, read_pull):
   actor = reviews.read(gh, cwd, "user")
   if str(actor.get("id") or "") != row.github_actor_id:
     raise HTTPException(409, "The connected GitHub account changed. Nothing was posted.")
-  _, pull = reviews.current_pull(gh, cwd, target)
+  _, pull = read_pull(gh, cwd, target)
   if pull.get("state") != "open" or pull.get("merged"):
     raise HTTPException(409, "The pull request is no longer open. Nothing was posted.")
   if own_pull(row, pull):
     raise HTTPException(409, "GitHub does not allow a verdict on your own pull request. Nothing was posted.")
 
 
-async def _prove_target(gh, cwd, row, target):
-  """Read-only proof of actor, open PR, exact head and authorship; a failed read proves non-dispatch."""
+async def _prove_target(gh, cwd, row, target, read_pull):
+  """Read-only proof of actor, open PR, head (per ``read_pull``) and authorship; a failed read proves non-dispatch."""
   try:
-    await asyncio.to_thread(_preflight, gh, cwd, row, target)  # unsettled: read-only (actor, PR head and author proof)
+    await asyncio.to_thread(_preflight, gh, cwd, row, target, read_pull)  # unsettled: read-only (actor, PR head and author proof)
   except (ContributionSubmitError, subprocess.SubprocessError, OSError, ValueError) as exc:
     raise HTTPException(409, "GitHub could not confirm this pull request. Nothing was posted.") from exc
 
@@ -139,7 +143,12 @@ def _persist_result(db, row, item_key, proposal_id, result):
   fields.update({k: v for k, v in (("review_id", receipt.get("id")), ("url", receipt.get("url"))) if v is not None})
   if result.reason:
     fields["summary"] = result.reason
-  _settle(db, row, item_key, proposal_id, fields)
+  if result.state == "unknown":
+    _settle(db, row, item_key, proposal_id, fields)
+  else:
+    # The clock may have marked this same proposal `unknown` while the request was still in flight:
+    # what its own dispatcher then learns for certain (a review id, a refusal) is the better fact.
+    _settle_unconfirmed(db, row, item_key, proposal_id, fields)
 
 
 async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, event=None):
@@ -147,15 +156,19 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, 
 
   Returns its settled receipt; its ``event`` is what was actually sent.
   """
+  # A proposal made for a review of an older version (moved_to) is sent against the commit it covered, so the PR may be at
+  # any head; every other proposal still needs the PR at exactly the head it was proposed for.
+  saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
+  read_pull = reviews.moved_pull if saved.get("id") == proposal_id and saved.get("moved_to") else reviews.current_pull
   async with _github_connection_transaction():
-    await _prove_target(gh, cwd, row, target)
+    await _prove_target(gh, cwd, row, target, read_pull)
     async with chat_queue.get_transition_lock(f"review-admission:{row.id}"):
       armed = _arm(db, row, item_key, proposal_id, authorize, event)
       # Admission and the reservation's database fence can both wait, so the
       # proof above may be stale. Repeat it now that the dispatch is reserved;
       # anything that ends before the post is a definite non-dispatch.
       try:
-        await _prove_target(gh, cwd, row, target)
+        await _prove_target(gh, cwd, row, target, read_pull)
       except BaseException as exc:
         summary = str(exc.detail) if isinstance(exc, HTTPException) else "The request ended before anything was posted."
         _settle(db, row, item_key, proposal_id, {"state": "not_dispatched", "summary": summary})
@@ -178,6 +191,8 @@ async def submit(db, row, item_key, target, proposal_id, *, gh, cwd, authorize, 
 
 
 NEVER_SENT = "This verdict was never sent to GitHub, so nothing is waiting on you."
+NO_ANSWER = ("GitHub did not answer within 5 minutes. This verdict is not sent again; "
+             "it is only read back from GitHub.")
 DISMISSED = "You dismissed this verdict. GitHub never confirmed it and nothing more will be sent."
 
 
@@ -187,7 +202,9 @@ def _settle_unconfirmed(db, row, item_key, proposal_id, fields):
     saved = current.get("verdict_proposal") or {}
     if saved.get("id") != proposal_id or saved.get("state") not in {"posting", "unknown"}:
       return None
-    return {**current, "verdict_proposal": {**saved, **fields}}
+    # The clock's "no answer" line stops being true once an answer arrives.
+    kept = {k: v for k, v in saved.items() if not (k == "summary" and v == NO_ANSWER and "summary" not in fields)}
+    return {**current, "verdict_proposal": {**kept, **fields}}
   reviews.save_effect_outcome(db, row, item_key, apply)
 
 
@@ -213,6 +230,26 @@ def settle_observed(db, row, item_key, proposal, review, *, complete_scan, read_
   _settle_unconfirmed(db, row, item_key, proposal["id"], fields)
 
 
+def answer_overdue(proposal: dict | None, now: int) -> dict | None:
+  """A posting verdict that never got an answer, as the unconfirmed verdict it now is; None while it may still land.
+
+  The request that armed it ends within its own timeouts, so a proposal still `posting` after the machine's
+  5 minutes lost its answer (the process died, say). It becomes `unknown`: read back from GitHub, never
+  resent, and the owner can discard it. The marker search that can settle it is `settle_observed`.
+
+  The 5 minutes start when the proposal is armed (`submitted_at`), which is before the second proof read
+  and the dispatch. Under a very slow GitHub the flip can therefore come first: the request that is still
+  in flight records its own definitive result over it (a review id, or a refusal after the post), and a post
+  that never reports back is read back by `settle_observed`. A proof that fails before the post can no longer
+  settle `not_dispatched` (an `unknown` verdict is refused that), so the owner discards it. Safe: nothing is
+  ever resent.
+  """
+  vector = review_lifecycle.verdict_timeout(proposal, now) if proposal else None
+  if vector is None:
+    return None
+  return {**proposal, "state": "unknown", "summary": NO_ANSWER, review_lifecycle.KEY: vector}
+
+
 def dismiss(db, row, item_key, proposal_id):
   """The owner's word that an unconfirmed verdict is not worth waiting on.
 
@@ -221,7 +258,7 @@ def dismiss(db, row, item_key, proposal_id):
   """
   saved = ((row.outcomes_json or {}).get(item_key) or {}).get("verdict_proposal") or {}
   if saved.get("id") != proposal_id or saved.get("state") != "unknown":
-    raise HTTPException(409, "Only a verdict GitHub never confirmed can be dismissed. Refresh to see its result.")
+    raise HTTPException(409, "Only a verdict GitHub never confirmed can be discarded. Refresh to see its result.")
   _settle_unconfirmed(db, row, item_key, proposal_id,
                       {"state": "not_dispatched", "summary": DISMISSED, "dismissed_at": reviews.utc_now_iso()})
 

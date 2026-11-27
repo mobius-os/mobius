@@ -40,6 +40,7 @@ export function remoteSyncPresentation(status) {
   if (status.diverged) return { tone: 'warn', title: 'Local and GitHub history diverged', copy: 'Review the branches outside this fast-forward flow before publishing.' }
   if (status.dirty) return { tone: 'warn', title: 'Commit local changes first', copy: 'Only reviewed commits are pushed; working files stay private.' }
   if (status.ahead && status.behind) return { tone: 'warn', title: 'Review both directions', copy: `${status.ahead} outgoing · ${status.behind} incoming` }
+  if (status.ahead && !status.push_branch) return { tone: 'warn', title: 'No GitHub branch to push to', copy: 'Switch to a branch that tracks a branch on the connected repository before publishing.' }
   if (status.ahead) return { tone: 'ready', title: `${status.ahead} ${status.ahead === 1 ? 'commit' : 'commits'} ready to push`, copy: 'Review the list below, then publish explicitly.' }
   if (status.behind) return { tone: 'info', title: `${status.behind} ${status.behind === 1 ? 'commit' : 'commits'} ready to pull`, copy: 'Your clean project can fast-forward safely.' }
   return { tone: 'ready', title: 'Up to date', copy: 'Local history and the tracked GitHub branch match.' }
@@ -50,7 +51,7 @@ export function remoteSyncActions(status) {
   return {
     fetch: connected,
     pull: connected && !!status.behind && !status.dirty && !status.diverged,
-    push: connected && !!status.ahead && !status.behind && !status.dirty && !status.diverged,
+    push: connected && !!status.push_branch && !!status.ahead && !status.behind && !status.dirty && !status.diverged,
   }
 }
 

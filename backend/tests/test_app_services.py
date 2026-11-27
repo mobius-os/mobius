@@ -2300,14 +2300,23 @@ async def test_decode_estimates_cover_measured_allocation_peaks(shape):
     print(f"{shape} {direction}: {len(raw)} bytes, decode peak {decode_peak} <= {estimate}")
     del value
   # The parsed tree alone, measured away from the event loop's own allocations.
+  # tracemalloc traces every thread, so count only the blocks the stdlib
+  # json package allocated and still holds (its C scanner runs under
+  # json/decoder.py, the pure-Python one in json/scanner.py), not what
+  # another thread did meanwhile.
   gc.collect()
   tracemalloc.start()
   try:
     value = json.loads(raw)
-    tree = tracemalloc.get_traced_memory()[0]
+    snapshot = tracemalloc.take_snapshot()
   finally:
     tracemalloc.stop()
-  assert tree <= retained
+  package = os.path.join(os.path.dirname(json.__file__), "*")
+  parsed = snapshot.filter_traces([tracemalloc.Filter(True, package)])
+  tree = sum(trace.size for trace in parsed.traces)
+  del snapshot, parsed
+  # The filter must still see the value: at least its top-level object.
+  assert sys.getsizeof(value) <= tree <= retained
   assert rendered == JSONResponse(value).body
   assert app_services._admitted_exchange_cost == 0
 
@@ -3317,28 +3326,40 @@ print(json.dumps({"body": {"length": len(value)}}))
   app = _service_app(db, access="public", service_bytes=service, max_bytes=60 * 1024 * 1024)
   raw = b'"' + escape * ((4 * 1024 * 1024) // len(escape)) + b'"'
   expected = len(json.loads(raw))
+  # Each beat records wall-clock and event-loop-thread CPU time. The CPU gap
+  # is the work other tasks did before the heartbeat ran again, which a
+  # loaded runner's descheduling does not inflate: its floor is the one
+  # json.loads of the whole text (about 30 ms), while one unyielding 4 MiB
+  # scan takes 0.2-0.4 s. The wall gap still catches a step that blocks
+  # without burning loop CPU (a sleep, a GIL-holding thread).
   beats = []
   running = True
 
   async def heartbeat():
     while running:
-      beats.append(time.monotonic())
+      beats.append((time.monotonic(), time.thread_time()))
       await asyncio.sleep(0.01)
 
-  beat = asyncio.create_task(heartbeat())
-  try:
-    await asyncio.sleep(0.02)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+  async with httpx.AsyncClient(transport=httpx.ASGITransport(app=application), base_url="http://test") as http:
+    # The app's first request builds its routes and opens the database once;
+    # that one-time setup is not the scan this measures.
+    warmup = await http.post(f"/api/app-services/{app.slug}/echo", content=b'"x"')
+    assert warmup.json() == {"length": 1}
+    beat = asyncio.create_task(heartbeat())
+    try:
+      await asyncio.sleep(0.02)
       response = await http.post(f"/api/app-services/{app.slug}/echo", content=raw)
-    await asyncio.sleep(0.02)
-  finally:
-    running = False
-    await beat
+      await asyncio.sleep(0.02)
+    finally:
+      running = False
+      await beat
   assert response.status_code == 200
   assert response.json() == {"length": expected}
-  gap = max(b - a for a, b in zip(beats, beats[1:]))
-  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {gap:.4f}s")
-  assert gap < 0.2, "bounded scanner monopolized the event loop for an escaped scalar"
+  wall = max(b[0] - a[0] for a, b in zip(beats, beats[1:]))
+  cpu = max(b[1] - a[1] for a, b in zip(beats, beats[1:]))
+  print(f"Actual public 4 MiB {escape!r} scalar maximum 10ms heartbeat gap: {wall:.4f}s wall, {cpu:.4f}s CPU")
+  assert cpu < 0.1, "bounded scanner monopolized the event loop for an escaped scalar"
+  assert wall < 0.2, "the event loop was blocked for an escaped scalar"
   assert app_services._admitted_exchange_cost == app_services._public_ingress_cost == 0
 
 

@@ -108,6 +108,28 @@ def get_vapid_claims() -> dict:
 
 
 _DELIVERY_TIMEOUT_SECONDS = 10
+# Push services refuse an encrypted request over 4096 bytes. aes128gcm adds an
+# 86-byte header, a padding delimiter and a 16-byte tag around the plaintext.
+_WEB_PUSH_MAX_PLAINTEXT_BYTES = 4096 - 86 - 1 - 16
+
+
+def _web_push_data(payload: dict) -> str:
+  """Serialize compactly, shortening body then title so the request fits."""
+  from app.push_relay import fit_text
+
+  def encode(title: str, body: str) -> str:
+    fitted = dict(payload)
+    if "title" in payload:
+      fitted["title"] = title
+    if payload.get("body") is not None:
+      fitted["body"] = body
+    return json.dumps(fitted, ensure_ascii=False, separators=(",", ":"))
+
+  title, body = fit_text(
+    str(payload.get("title") or ""), str(payload.get("body") or ""),
+    lambda t, b: len(encode(t, b).encode()), _WEB_PUSH_MAX_PLAINTEXT_BYTES,
+  )
+  return encode(title, body)
 
 
 def send_push(subscription_info: dict, payload: dict) -> bool:
@@ -127,7 +149,7 @@ def send_push(subscription_info: dict, payload: dict) -> bool:
     # avoids the PEM-vs-raw-key parsing ambiguity in from_string().
     webpush(
       subscription_info=subscription_info,
-      data=json.dumps(payload),
+      data=_web_push_data(payload),
       vapid_private_key=_vapid,
       vapid_claims=get_vapid_claims(),
       content_encoding="aes128gcm",

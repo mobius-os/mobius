@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import create_engine, text
 
 from app import chat as chat_mod
-from app import chat_queue, models, schemas
+from app import chat_queue, models
 from app import schema_migrations as migrations
 from app.broadcast import create_broadcast, remove_broadcast
 from app.chat_writer import StartTurn, get_writer
@@ -42,8 +42,13 @@ class _Provider:
 async def _run_turn(
   monkeypatch, provider_id: str, provider_name: str, *, retired: bool,
   delegated: bool = False, session_id: str | None = "old-session",
+  stored_handover: str | None = None,
 ):
   chat_id = f"retired-{provider_id}-{retired}-{delegated}"
+  switch_rows = [{
+    "role": "assistant", "kind": "compaction", "handover": "direct",
+    "content": stored_handover, "ts": 3,
+  }] if stored_handover else []
   with SessionLocal() as setup:
     setup.add(models.Owner(username="owner", hashed_password="unused", provider=provider_id))
     setup.add(create_chat(
@@ -52,6 +57,7 @@ async def _run_turn(
       messages=[
         {"role": "user", "content": "Fix the broker polling.", "ts": 1},
         {"role": "assistant", "content": "The broker fix is committed.", "ts": 2},
+        *switch_rows,
       ],
     ))
     setup.commit()
@@ -105,7 +111,7 @@ async def _run_turn(
     monkeypatch.setattr(claude_sdk_runner, "_resumable", lambda *_a, **_k: True)
 
   run_token = f"rt-{chat_id}"
-  get_writer().submit(StartTurn(
+  started = get_writer().submit(StartTurn(
     chat_id=chat_id, run_token=run_token,
     user_msg={"role": "user", "content": "Carry on.", "ts": 3, "cid": f"m-{chat_id}"},
     title_source="Carry on.", default_provider=provider_id,
@@ -113,11 +119,7 @@ async def _run_turn(
   create_broadcast(chat_id)
   try:
     await chat_mod._run_chat_impl(
-      messages=[
-        schemas.ChatMessage(role="user", content="Fix the broker polling."),
-        schemas.ChatMessage(role="assistant", content="The broker fix is committed."),
-        schemas.ChatMessage(role="user", content="Carry on."),
-      ] if delegated else [schemas.ChatMessage(role="user", content="Carry on.")],
+      messages=started["history"],
       chat_id=chat_id, session_id=session_id, provider_id=provider_id,
       run_token=run_token,
     )
@@ -142,8 +144,27 @@ async def test_a_retired_session_starts_fresh_with_the_chats_own_history(
   assert "<resumed_context>" in call["user_message"]
   assert "The broker fix is committed." in call["user_message"]
   assert call["user_message"].rstrip().endswith("Carry on.")
+  # The request is sent once, after the history it continues, not inside it.
+  assert call["user_message"].count("Carry on.") == 1
   # Its provider sees a first turn, so it also gets the first-turn context.
   assert "<agent_experience>" in (call.get("system_prompt") or call.get("skill_text") or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("provider_id", "provider_name"), PROVIDERS)
+async def test_a_retired_session_after_a_provider_switch_gets_one_handover(
+  monkeypatch, provider_id, provider_name,
+):
+  """The reseed is built from the chat's current saved state, so replaying the
+  switch's stored copy beside it would hand the same context over twice."""
+  call = await _run_turn(
+    monkeypatch, provider_id, provider_name, retired=True,
+    stored_handover="STORED COPY OF THE SWITCH HANDOVER",
+  )
+  assert "<resumed_context>" in call["user_message"]
+  assert "The broker fix is committed." in call["user_message"]
+  assert "<compacted_chat>" not in call["user_message"]
+  assert "STORED COPY OF THE SWITCH HANDOVER" not in call["user_message"]
 
 
 @pytest.mark.asyncio
@@ -283,7 +304,7 @@ def test_reseed_drops_leaked_write_frames_from_replies_only(db):
   ])
   db.add(chat)
   db.commit()
-  block = _build_resumed_context(chat)
+  block = _build_resumed_context(chat, history_rows=4)
   replies = block.split("Why do replies show <MOBIUS_WRITE ... />?", 1)[1]
   assert "MOBIUS_WRITE" not in replies and "write-1" not in replies
   assert "Fixed the broker." in replies and "Done." in replies and "Saved." in replies

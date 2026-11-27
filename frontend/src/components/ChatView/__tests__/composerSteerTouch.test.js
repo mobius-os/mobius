@@ -153,7 +153,7 @@ test('a held queue turns the idle primary action into one empty Send of the queu
   )
   assert.match(
     chatView,
-    /if \(Array\.isArray\(serverQueue\)\) pendingQueue\.hydrate\(serverQueue\)[\s\S]*?if \(!stoppedCleanly\) return/,
+    /if \(Array\.isArray\(serverQueue\.pending\)\) \{\s*pendingQueue\.hydrate\(serverQueue\.pending, \{ revision: serverQueue\.revision \}\)[\s\S]*?if \(!stoppedCleanly\) return/,
     'every Stop shows the queue the server settled, even when the interrupt failed',
   )
 })

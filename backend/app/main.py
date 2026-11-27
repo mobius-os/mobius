@@ -78,7 +78,7 @@ from app.response_policy import (
 )
 from app.storage_io import ParentIsFile, atomic_write
 from app.account_browser_access import SharedAccessError
-from app import activity, models, stall_recorder, tracing
+from app import activity, launcher_side, models, stall_recorder, tracing
 # providers and push are on the agent's write surface; deferred into
 # lifespan with try/except so a SyntaxError in either doesn't prevent
 # uvicorn boot. See the
@@ -108,7 +108,7 @@ from app.routes import (
   owner_approvals_router,
   media_router,
   local_services_router, notifications_router, notify_router, proxy_router, push_router,
-  location_router,
+  channels_router, location_router,
   screen_control_router,
   shared_folders_router,
   public_apps_router,
@@ -122,6 +122,7 @@ from app.routes import (
   app_secrets_compat_router,
   projects_router,
   project_copies_router,
+  project_handle_invites_router,
   shared_apps_router,
   router_import_failures,
 )
@@ -1168,6 +1169,7 @@ app.include_router(storage_router)
 app.include_router(fs_router)
 app.include_router(projects_router)
 app.include_router(project_copies_router)
+app.include_router(project_handle_invites_router)
 app.include_router(shared_apps_router)
 app.include_router(chat_router)
 app.include_router(chat_continuity_router)
@@ -1219,6 +1221,7 @@ app.include_router(reviewer_router)
 app.include_router(identity_router)
 app.include_router(credits_router)
 app.include_router(push_router)
+app.include_router(channels_router)
 app.include_router(notifications_router)
 app.include_router(debug_router)
 app.include_router(theme_router)
@@ -1257,6 +1260,10 @@ def health(response: Response):
     # Served source can be newer than the running image. The account service
     # accepts this baked capability only when the marker belongs to this boot.
     "container_replacement_handoff": None,
+    # Where this instance sends people to sign in: public, and what the staging
+    # phone app checks before it opens a workspace. None with local sign-in or
+    # while a switch to the other launcher waits for its restart.
+    "issuer": launcher_side.published_issuer(),
   }
   from app.deployment_control import managed_cutover_ready
   from app.platform_update import BOOT_PROTOCOL, image_activates_updates

@@ -43,6 +43,8 @@ os.environ["MOEBIUS_SKIP_BOOTSTRAP"] = "1"
 # A test started in a managed container must neither adopt its live account
 # nor call its root-owned broker. Managed-login tests opt in with local fakes.
 os.environ["MOBIUS_SSO_ISSUER"] = ""
+# A server on a developer's staging side exports this to its children.
+os.environ["MOBIUS_IDENTITY_ISSUER"] = ""
 os.environ["MOBIUS_SSO_INSTANCE_ID"] = ""
 os.environ["MOBIUS_IDENTITY_BROKER_SOCKET"] = f"{_tmp}/no-identity-broker.sock"
 # Restart admission asks the image's baked checkout for its package verdict;

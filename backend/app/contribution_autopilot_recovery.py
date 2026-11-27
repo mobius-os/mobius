@@ -111,7 +111,13 @@ async def _recover_one(app_id: int, record_id: str) -> bool:
 
 
 async def recover_resolved_blocks() -> int:
-  """Join the existing recovery pass; no new timer or background agent."""
+  """Join the existing recovery pass; no new timer or background agent.
+
+  The same pass mirrors rounds whose lease expired onto their ledger records, so a crashed
+  round stops reading as "responding" without waiting for another transition.
+  """
+  await autopilot.mirror_reclaimed_leases()
+
   def blocked_records():
     with SessionLocal() as db:
       return db.query(

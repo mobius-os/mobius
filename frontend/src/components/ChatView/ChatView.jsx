@@ -28,11 +28,12 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
-import { api, apiFetch, getAuthHeaders, getToken, isSharedBrowserAuth, jsonOrThrow, BASE } from '../../api/client.js'
+import { api, apiFetch, getAuthHeaders, getToken, isSharedBrowserAuth, jsonOrThrow, BASE, chatPath } from '../../api/client.js'
 import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
   chatQueries,
+  modelQueries,
   settingsQueries,
 } from '../../hooks/queries.js'
 import useStreamConnection from './useStreamConnection.js'
@@ -82,6 +83,7 @@ import {
 import useSystemEventStream from '../../hooks/useSystemEventStream.js'
 import usePendingQueue from './hooks/usePendingQueue.js'
 import useResume from './hooks/useResume.js'
+import { previousVisibleMessage } from './recoveryCard.js'
 import { sendRecoveryResume } from './helperRecovery.js'
 import useBridgePartial from './hooks/useBridgePartial.js'
 import useTranscriptState from './hooks/useTranscriptState.js'
@@ -894,6 +896,7 @@ export default function ChatView({
   // cid preservation).
   const pendingQueue = usePendingQueue(cached?.pending_messages || [], {
     chatId, principalKey: outboxPrincipalKey(getToken()),
+    initialRevision: cached?.pending_revision,
   })
   const { acknowledgeLocalAnswers, localAnswerIntents } = pendingQueue
   useEffect(() => {
@@ -1437,7 +1440,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
-        `/chats/${chatId}?limit=20&compact=1`,
+        `${chatPath(chatId)}?limit=20&compact=1`,
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
@@ -1548,6 +1551,7 @@ export default function ChatView({
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: data.pending_messages || [],
+        pending_revision: data.pending_revision,
         pending_question_id: data.pending_question_id || null,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: data.active_assistant_message_id || null,
@@ -1563,7 +1567,9 @@ export default function ChatView({
       // dropped even while the agent turn is still running; preserving them
       // creates ghost queue chips that cannot be fast-forwarded.
       if (!preserveLocalTurn) {
-        pendingQueue.hydrateFromTranscript(data.pending_messages || [], data.messages || [])
+        pendingQueue.hydrateFromTranscript(
+          data.pending_messages || [], data.messages || [], data.pending_revision,
+        )
       }
       const runtime = {
         running: !!data.running,
@@ -1637,7 +1643,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const read = () => (
-        apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+        apiFetch(`${chatPath(chatId)}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
           .then(res => jsonOrThrow(res, 'Runtime refresh failed'))
       )
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
@@ -1751,6 +1757,7 @@ export default function ChatView({
         handoff: data.handoff || null,
         goal: runtimeGoal,
         pending_messages: serverPending,
+        pending_revision: data.pending_revision,
         pending_question_id: pendingQuestionId,
         ...(adoptAssistantOwner ? {
           activeAssistantMessageId: runtime.activeAssistantMessageId,
@@ -1762,7 +1769,7 @@ export default function ChatView({
       // (localAuthoritative, above) — the optimistic queue + confirmQueued
       // own it during a turn; hydrate only when the stream is dead.
       if (!localAuthoritative) {
-        pendingQueue.hydrate(serverPending)
+        pendingQueue.hydrate(serverPending, { revision: data.pending_revision })
       }
       // A question closes SSE replay by design: nothing can arrive before the
       // owner answers. If this view missed that event, read the compact detail
@@ -1879,6 +1886,7 @@ export default function ChatView({
     patchQuestionAnswers,
     lastReadAtRef: streamLastReadAtRef,
   } = useStreamConnection(chatId, {
+    onOwnerSendAccepted: () => { void modelQueries.prefs.invalidate(queryClient) },
     onCatchUpSettled: acceptInitialStreamCatchUp,
     onConnectionLost: () => {
       // Browser transport ownership is uncertain here: the backend turn may
@@ -1978,6 +1986,10 @@ export default function ChatView({
     },
     onNeedsRefresh: fetchMessages,
     onQueuedTurnStarting: ({ ts, message } = {}) => {
+      // Queue promotion, not enqueue, is when an owner row's actual model is
+      // known and the backend updates recency. A non-owner head just causes a
+      // harmless fresh read.
+      void modelQueries.prefs.invalidate(queryClient)
       setActiveAssistantMessageId(null)
       // A queued message is being promoted into its OWN run — the rail's
       // run-start boundary for queue drains. useStreamConnection fires this
@@ -1990,9 +2002,10 @@ export default function ChatView({
       const serverRows = Array.isArray(message?._messages)
         ? message._messages.map(stripInternalUserMessageFields).filter(Boolean)
         : null
+      const promotedAt = { revision: message?._pending_revision }
       const localPromoted = Array.isArray(consumedCids)
-        ? pendingQueue.promoteManyByCid(consumedCids)
-        : pendingQueue.promoteAll()
+        ? pendingQueue.promoteManyByCid(consumedCids, promotedAt)
+        : pendingQueue.promoteAll(undefined, promotedAt)
       const continuationRows = serverRows?.length ? serverRows : localPromoted
       // The pin intent was stamped at submit under the queued row's cid; the
       // backend echoes those cids back as _consumed_cids (or the promoted row
@@ -2018,6 +2031,7 @@ export default function ChatView({
       assistantMessageId,
       nextAssistantMessageId,
       sealedItems,
+      pendingRevision,
     }) => {
       // The steer's transcript split has COMMITTED (fired for both providers,
       // including when Stop is pressed with a queued message): the backend has
@@ -2099,7 +2113,7 @@ export default function ChatView({
       // The rows have now genuinely left `chat.pending_messages`, so retire the
       // tray entries the deferred-cut window kept durably queued but hidden.
       // The cut is the one place that owns the hand-off for both providers.
-      pendingQueue.completeByCid(steeredMessages.map(cidOf))
+      pendingQueue.completeByCid(steeredMessages.map(cidOf), { revision: pendingRevision })
       forgetSendIntent({ cidList: steeredMessages.map(cidOf) })
       // This event is the backend's authoritative transcript commit. Refresh
       // the shell's chat list here so a deferred steer advances drawer recency
@@ -2669,7 +2683,9 @@ export default function ChatView({
       // Activation can follow an offline/restart replay whose delivery receipt
       // was missed while this pane was hidden. The validated detail/cache
       // transcript, not just an empty runtime queue, owns that cid's handoff.
-      pendingQueue.hydrateFromTranscript(runtime.pending_messages || [], authoritativeMessages)
+      pendingQueue.hydrateFromTranscript(
+        runtime.pending_messages || [], authoritativeMessages, runtime.pending_revision,
+      )
       retireUnownedRuntimeStream({
         running,
         pendingQuestionId: runtime.pending_question_id,
@@ -2706,7 +2722,7 @@ export default function ChatView({
 
       if (activationCacheReusable && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
-          `/chats/${chatId}/runtime`,
+          `${chatPath(chatId)}/runtime`,
           'CHAT_RUNTIME_FAILED',
         )
         // A terminal background refresh can win while this tiny runtime read is
@@ -2735,7 +2751,7 @@ export default function ChatView({
           ? `&anchor=${encodeURIComponent(activationAnchorKey)}`
           : ''
         runtime = await requestJson(
-          `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
+          `${chatPath(chatId)}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
         const runtimeAnchorMatch = anchorMatchIn(runtime)
@@ -2801,6 +2817,7 @@ export default function ChatView({
             runtime.active_assistant_message_id || null,
           goal: runtimeGoal,
           pending_messages: runtime.pending_messages || [],
+          pending_revision: runtime.pending_revision,
           pending_question_id: runtime.pending_question_id || null,
           waits: runtime.waits || [],
           background_helpers: normalizeBackgroundHelpers(
@@ -3107,7 +3124,7 @@ export default function ChatView({
       retry.attempts += 1
     }
     apiFetch(
-      `/chats/${chatId}?limit=20&before=${before}&compact=1`,
+      `${chatPath(chatId)}?limit=20&before=${before}&compact=1`,
       { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
@@ -3229,7 +3246,9 @@ export default function ChatView({
   // turn from mount, so its first promote appends a fresh assistant.
   function adoptStartedQueueTurn(result, fallbackRow = null) {
     const consumed = result.message?._consumed_cids
-    if (Array.isArray(consumed)) pendingQueue.promoteManyByCid(consumed)
+    if (Array.isArray(consumed)) {
+      pendingQueue.promoteManyByCid(consumed, { revision: result.message._pending_revision })
+    }
     const rows = startedMessagesFromResponse(result) || (fallbackRow ? [fallbackRow] : null)
     if (rows) commitMessages(prev => appendMessageBatch(prev, rows))
     onMessageStartRef.current?.()
@@ -3492,6 +3511,7 @@ export default function ChatView({
             ts: ackTs ?? queuedMsg.ts,
             position: result.position,
             serverMsg: canonicalPending,
+            revision: result.pending_revision,
           })
           if (!canonicalPending) {
             // Older backends acknowledge only {ts, position}. Hydrate
@@ -3524,19 +3544,11 @@ export default function ChatView({
           } else if (result.cut_deferred) {
             // The transcript split waits for provider acknowledgement, so the
             // row is STILL queued server-side and its tray entry stays.
-            // Resolve THIS send's own row and nothing else: confirm it by cid
-            // against the server's echoed entry (which carries the durable ts
-            // fast-forward needs).
-            //
-            // Not `hydrate(result.pending_messages)`: that list is a snapshot
-            // taken at steer time, and a wholesale reconcile against it is
-            // wrong in both directions. It would DROP a row queued and
-            // confirmed while this 202 was in flight (absent from the snapshot,
-            // no longer in-flight), and it would RESURRECT this row if the
-            // runner's cut landed first (the cut retires the tray entry, then
-            // the snapshot puts it back while it is already inline). Confirming
-            // one cid is a no-op once the cut has retired it, so the two can
-            // land in either order.
+            // Resolve THIS send's own row: confirm it by cid against the
+            // server's echoed entry (which carries the durable ts fast-forward
+            // needs), at the echoed list's revision so an older list cannot
+            // drop it. Confirming one cid is a no-op once the cut has retired
+            // it, so the response and the cut can land in either order.
             const serverRow = Array.isArray(result.pending_messages)
               ? result.pending_messages.find(m => cidOf(m) === queuedMsg.cid)
               : null
@@ -3544,6 +3556,7 @@ export default function ChatView({
               ts: serverRow?.ts ?? queuedMsg.ts,
               position: serverRow?.position,
               serverMsg: serverRow,
+              revision: result.pending_revision,
             })
             // Its cid-keyed intent remains beside the durable queued row until
             // the cut consumes both, regardless of response/event order.
@@ -3775,7 +3788,9 @@ export default function ChatView({
         }
         if (result.started) {
           if (Array.isArray(result.message?._consumed_cids)) {
-            pendingQueue.promoteManyByCid(result.message._consumed_cids)
+            pendingQueue.promoteManyByCid(result.message._consumed_cids, {
+              revision: result.message._pending_revision,
+            })
           }
           // The pin already landed at submit for this same cid.
           const startedMessages = startedMessagesFromResponse(result)
@@ -4372,7 +4387,7 @@ export default function ChatView({
     goalClearInFlightRef.current = true
     setGoalClearError('')
     try {
-      const res = await apiFetch(`/chats/${chatId}/goal`, {
+      const res = await apiFetch(`${chatPath(chatId)}/goal`, {
         method: 'DELETE',
         body: JSON.stringify({ goal_id: goalId }),
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
@@ -4436,12 +4451,13 @@ export default function ChatView({
     onRefresh: refreshResume,
     blocked: resumeBlocked,
   })
-  // A provider refusal is answered by changing the request, not by retrying
-  // it: the card reuses the composer's model picker and the /compact handoff.
-  // Stable references keep MsgContent's memo intact.
+  // A provider refusal, usage limit or credits pause is answered by changing
+  // the request, not by retrying it: the card reuses the composer's model
+  // picker, and a refusal also the /compact handoff. Stable references keep
+  // MsgContent's memo intact.
   const runCompactCommandRef = useRef(null)
   runCompactCommandRef.current = runCompactCommand
-  const handleRefusalModelChoice = useCallback(() => {
+  const handleChooseModel = useCallback(() => {
     setModelSelectionRequest(request => request + 1)
   }, [])
   const handleRefusalFreshSession = useCallback(() => {
@@ -4511,18 +4527,19 @@ export default function ChatView({
     }
     forgetSendIntent({ cid })
     try {
-      const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
+      const res = await apiFetch(`${chatPath(chatId)}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
-      await jsonOrThrow(res, 'Queued-message cancellation failed')
+      const data = await jsonOrThrow(res, 'Queued-message cancellation failed')
+      pendingQueue.cancelByCid(cid, { revision: data.pending_revision })
     } catch {
       // A failed response is ambiguous: the DELETE may still have committed.
       // Read server truth, but restore only this operation's row so an older
       // response cannot overwrite unrelated queue mutations.
       try {
         const res = await apiFetch(
-          `/chats/${chatId}/runtime`,
+          `${chatPath(chatId)}/runtime`,
           { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
         )
         const data = await jsonOrThrow(res, 'Queue refresh failed')
@@ -4569,7 +4586,7 @@ export default function ChatView({
     if (!getDeliveryReadySnapshot()) return 'waiting'
     try {
       const res = await apiFetch(
-        `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
+        `${chatPath(chatId)}/pending/${encodeURIComponent(cid)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -4582,7 +4599,9 @@ export default function ChatView({
         // This edit confirms only its own row, not the pre-cut snapshot of
         // siblings. A concurrent steer must not be undone by that old list.
         const serverMsg = data.pending_messages.find(row => cidOf(row) === cid)
-        if (serverMsg) pendingQueue.confirmQueued(cid, { serverMsg })
+        if (serverMsg) {
+          pendingQueue.confirmQueued(cid, { serverMsg, revision: data.pending_revision })
+        }
         return 'saved'
       }
       // updated:false — a racing promotion or cancel already pulled this row
@@ -4615,7 +4634,7 @@ export default function ChatView({
       forgetAllSendIntents()
 
       let stoppedCleanly = false
-      // The server's queue as of the latest runtime read after a Stop request.
+      // The latest runtime read after a Stop request that carried the queue.
       let serverQueue = null
       const requestStopOnce = async () => {
         const stopRes = await fetch(`${BASE}/api/chat/stop`, {
@@ -4639,10 +4658,13 @@ export default function ChatView({
       }
       const confirmStopIdle = async () => {
         try {
-          const res = await apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: 5000 })
+          const res = await apiFetch(`${chatPath(chatId)}/runtime`, { timeoutMs: 5000 })
           if (!res.ok) return { failed: true, running: null }
           const data = await res.json()
-          return { failed: false, running: data?.running, pending: data?.pending_messages }
+          return {
+            failed: false, running: data?.running,
+            pending: data?.pending_messages, revision: data?.pending_revision,
+          }
         } catch {
           return { failed: true, running: null }
         }
@@ -4660,7 +4682,7 @@ export default function ChatView({
           break
         }
         const confirmation = await confirmStopIdle()
-        if (Array.isArray(confirmation.pending)) serverQueue = confirmation.pending
+        if (Array.isArray(confirmation.pending)) serverQueue = confirmation
         stoppedCleanly = stopConfirmedIdle({
           stopSucceeded: requestSucceeded,
           confirmRunning: confirmation.running,
@@ -4681,8 +4703,10 @@ export default function ChatView({
       // interrupt failed. Show its queue either way: an idle one lets the
       // composer offer to send the held rows, and a turn still running must
       // not keep promising rows that no longer send after it.
-      if (!serverQueue) serverQueue = (await confirmStopIdle()).pending
-      if (Array.isArray(serverQueue)) pendingQueue.hydrate(serverQueue)
+      if (!serverQueue) serverQueue = await confirmStopIdle()
+      if (Array.isArray(serverQueue.pending)) {
+        pendingQueue.hydrate(serverQueue.pending, { revision: serverQueue.revision })
+      }
       // The SDK interrupt timed out (handle.stop()'s 2s bound — see
       // claude_sdk_runner.stop): the runner is still alive and the backend
       // left the registry entry + broadcast intact for the runner's own
@@ -4856,7 +4880,7 @@ export default function ChatView({
           // them at the authoritative cut.
         } else if (Array.isArray(result.pending_messages)) {
           // Compatibility with an older immediate-cut backend.
-          pendingQueue.hydrate(result.pending_messages)
+          pendingQueue.hydrate(result.pending_messages, { revision: result.pending_revision })
         } else {
           // A backend that echoes no queue at all: remove exactly the steered
           // cids.
@@ -5690,7 +5714,7 @@ export default function ChatView({
     loadingLatestRef.current = true
     const generation = fetchGenRef.current
     try {
-      const response = await apiFetch(`/chats/${chatId}?limit=20&compact=1`, {
+      const response = await apiFetch(`${chatPath(chatId)}?limit=20&compact=1`, {
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
       if (!response.ok) return
@@ -6073,7 +6097,7 @@ export default function ChatView({
       onQuestionSubmitIntent={prepareQuestionSubmission}
       onQuestionSubmitCancel={cancelQuestionSubmission}
       onResume={activeAssistantIsStreaming && active ? undefined : handleResume}
-      onRefusalModelChoice={showPicker ? handleRefusalModelChoice : undefined}
+      onChooseModel={showPicker ? handleChooseModel : undefined}
       onRefusalFreshSession={canStartFreshSession ? handleRefusalFreshSession : undefined}
       canContinueAnyway={canStartFreshSession}
       helperChat={!!helperDelegationId}
@@ -6095,6 +6119,7 @@ export default function ChatView({
       resumeCardRef={resumeCardRef}
       isStreaming={continuingRun || (active && activeAssistantIsStreaming)}
       isLastMsg={last}
+      previousMsg={last ? previousVisibleMessage(peerTimeline.messages, tail.index) : null}
       // Each complete answer keeps its own footer; only one the running turn
       // is still writing, or briefly the one it is leaving, has no controls.
       footer={groupFooter?.state ?? null}
@@ -6635,7 +6660,6 @@ export default function ChatView({
           sendFailure={sendFailure}
           notice={compactionNotice(
             serverCompactingKind || (preparingCompaction ? 'compact' : null),
-            { sendBlockedBySwitch: providerSwitching },
           )}
           submissionBlocked={
             (!activationSettled && !activationFailed)
@@ -6682,7 +6706,7 @@ export default function ChatView({
                    a message and getting a reply in the same session
                    would skip the cross-provider handoff confirmation:
                    the user could flip Claude ↔ Codex mid-chat without
-                   preparing the incoming provider's context. */
+                   confirming that the new provider starts a fresh session. */
                 hasAssistantTurns={
                   (chatInfo?.has_assistant_turns ?? false)
                   || messages.some(m => m.role === 'assistant')

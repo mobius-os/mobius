@@ -13,12 +13,13 @@ export async function installSteerQueueFixture(page, chat) {
       content: 'I am checking the footer behavior.', ts: Date.now() - 9000,
       blocks: [{ type: 'text', content: 'I am checking the footer behavior.' }] }
     const state = window.__steerFixture = {
-      pending: [steered, sibling], messages: [initial, before],
+      pending: [steered, sibling], revision: 1, messages: [initial, before],
       patchRequested: false, steerRequested: false,
     }
     const runtime = () => ({
       running: true, run_id: 'steer-repro-run', run_status: 'running',
       runtime_revision: 1000000000, pending_messages: state.pending,
+      pending_revision: state.revision,
       pending_question_id: null, waits: [], background_helpers: [], goal: null,
       active_assistant_message_id: state.steerRequested ? 'steer-repro-a2' : before.id,
     })
@@ -48,10 +49,11 @@ export async function installSteerQueueFixture(page, chat) {
         const edited = { ...sibling, content: JSON.parse(init.body).content }
         state.patchRequested = true
         state.pending = [steered, edited]
+        const revision = ++state.revision
         // The server captured this list before the steer; delay only its delivery.
         return new Promise(resolve => {
           state.releasePatch = () => resolve(json({
-            updated: true, pending_messages: [steered, edited],
+            updated: true, pending_messages: [steered, edited], pending_revision: revision,
           }))
         })
       }
@@ -61,14 +63,16 @@ export async function installSteerQueueFixture(page, chat) {
           throw new Error('Fixture blocks unexpected sends')
         }
         state.steerRequested = true
+        const listed = { pending: state.pending, revision: state.revision }
         state.pending = state.pending.filter(row => row.cid !== steered.cid)
+        state.revision += 1
         state.messages = [initial, before, { ...steered, steered: true }]
-        emit({ type: 'steered_into_turn', messages: [steered],
+        emit({ type: 'steered_into_turn', pending_revision: state.revision, messages: [steered],
           assistant_message_id: before.id, sealed_items: before.blocks,
           next_assistant_message_id: 'steer-repro-a2', items: [] })
         emit({ type: 'text', content: 'I received your steer and will check the earlier answers.' })
         return json({ status: 'steered', cut_deferred: true,
-          pending_messages: [steered, sibling] })
+          pending_messages: listed.pending, pending_revision: listed.revision })
       }
       // This fixture must never invoke a real provider or change owner data.
       if (url.pathname.startsWith('/api/') && !['GET', 'HEAD'].includes(method)) {

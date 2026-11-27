@@ -132,6 +132,7 @@ function AssistantReply({
               isStreaming={active && isStreaming}
               isActiveAnswer={active}
               isLastMsg={tail && isLastMsg}
+              previousMsg={tail ? messageProps.previousMsg : null}
               onResume={tail ? messageProps.onResume : undefined}
               autoResumeEnabled={tail && messageProps.autoResumeEnabled}
               autoResumeAvailable={tail && messageProps.autoResumeAvailable}

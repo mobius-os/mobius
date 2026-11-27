@@ -6,7 +6,7 @@
    tapped), so opening a chat with a long autonomous run reads nothing extra,
    and it runs only as far back as the owner's last message. */
 import { useCallback, useEffect, useState } from 'react'
-import { apiFetch, jsonOrThrow } from '../../../api/client.js'
+import { apiFetch, jsonOrThrow, chatPath } from '../../../api/client.js'
 import { stretchTail } from '../messageCopy.js'
 import { projectSettledSteerContinuations } from '../steerContinuity.js'
 
@@ -47,7 +47,7 @@ export function useStretchPrefix(chatId, before, { timeoutMs, request = apiFetch
   useEffect(() => {
     if (!key || wanted !== key || loaded) return undefined
     const controller = new AbortController()
-    const fetchPage = cursor => request(`/chats/${chatId}?limit=${PAGE_SIZE}&before=${cursor}&compact=1`, {
+    const fetchPage = cursor => request(`${chatPath(chatId)}?limit=${PAGE_SIZE}&before=${cursor}&compact=1`, {
       timeoutMs, signal: controller.signal,
     }).then(response => jsonOrThrow(response, 'Earlier messages failed to load'))
     readStretchStart(fetchPage, before)

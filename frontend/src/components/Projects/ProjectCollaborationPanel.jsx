@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import AtSign from 'lucide-react/dist/esm/icons/at-sign.mjs'
 import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
+import Link2 from 'lucide-react/dist/esm/icons/link-2.mjs'
 import Crown from 'lucide-react/dist/esm/icons/crown.mjs'
 import Eye from 'lucide-react/dist/esm/icons/eye.mjs'
 import Pencil from 'lucide-react/dist/esm/icons/pencil.mjs'
@@ -33,7 +35,10 @@ function initials(name) {
 function ProjectLiveCollaboration({ project }) {
   const queryClient = useQueryClient()
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [inviteVia, setInviteVia] = useState('link')
   const [inviteeName, setInviteeName] = useState('')
+  const [inviteeHandle, setInviteeHandle] = useState('')
+  const [sentInvite, setSentInvite] = useState(null)
   const [inviteRole, setInviteRole] = useState('editor')
   const [createdInvite, setCreatedInvite] = useState(null)
   const [busy, setBusy] = useState('')
@@ -70,8 +75,19 @@ function ProjectLiveCollaboration({ project }) {
   async function createInvite(event) {
     event.preventDefault()
     if (busy) return
-    setBusy('invite'); setError(''); setCopied(false)
+    setBusy('invite'); setError(''); setCopied(false); setSentInvite(null)
     try {
+      if (inviteVia === 'handle') {
+        const sent = await jsonOrThrow(await api.projects.sendHandleInvite({
+          project_id: project.id, handle: inviteeHandle.trim(), role: inviteRole,
+        }), 'Invitation failed:')
+        setSentInvite(sent)
+        setCreatedInvite(null)
+        setInviteeHandle('')
+        setInviteOpen(false)
+        await collaborationQuery.refetch()
+        return
+      }
       const invite = await jsonOrThrow(await api.projects.createInvite(project.id, {
         invitee_name: inviteeName.trim() || null,
         role: inviteRole,
@@ -129,7 +145,7 @@ function ProjectLiveCollaboration({ project }) {
   }
 
   return <>
-    <p className="project-sharing__description">Edit the same project together. People join with your invitation link—no GitHub account or Möbius of their own needed.</p>
+    <p className="project-sharing__description">Edit the same project together. Send a private link that works without a GitHub account or a Möbius of their own, or invite someone by their Möbius @handle.</p>
           {linkedProjectAppId(project) && <p className="project-collab__empty">Share the app’s source files here. Only the owner can update the installed app; access to its data is separate.</p>}
           <section aria-labelledby="project-people-heading">
             <div className="project-collab__section-head"><h3 id="project-people-heading">People</h3><span>Private · {members.length} {members.length === 1 ? 'person' : 'people'}</span></div>
@@ -146,13 +162,25 @@ function ProjectLiveCollaboration({ project }) {
               </div>
             ))}
 
-            {!inviteOpen ? <button type="button" className="project-collab__invite-toggle" onClick={() => { setInviteOpen(true); setCreatedInvite(null); setError('') }}><UserPlus size={15} /> Invite someone</button> : <form className="project-collab__invite" onSubmit={createInvite}>
-              <label>Who is this for?<input autoFocus value={inviteeName} maxLength={128} placeholder="Name (optional)" onChange={event => setInviteeName(event.target.value)} /></label>
+            {!inviteOpen ? <button type="button" className="project-collab__invite-toggle" onClick={() => { setInviteOpen(true); setCreatedInvite(null); setSentInvite(null); setError('') }}><UserPlus size={15} /> Invite someone</button> : <form className="project-collab__invite" onSubmit={createInvite}>
+              <div className="project-collab__invite-via" role="radiogroup" aria-label="How to invite">
+                <button type="button" role="radio" aria-checked={inviteVia === 'link'} onClick={() => setInviteVia('link')}><Link2 size={13} /> Private link</button>
+                <button type="button" role="radio" aria-checked={inviteVia === 'handle'} onClick={() => setInviteVia('handle')}><AtSign size={13} /> Möbius @handle</button>
+              </div>
+              {inviteVia === 'handle'
+                ? <label>Their Möbius @handle<input autoFocus value={inviteeHandle} maxLength={40} placeholder="@friend" autoCapitalize="none" autoCorrect="off" spellCheck={false} onChange={event => setInviteeHandle(event.target.value)} /><small className="project-collab__invite-hint">They’ll get a notification and can accept from their Projects.</small></label>
+                : <label>Who is this for?<input autoFocus value={inviteeName} maxLength={128} placeholder="Name (optional)" onChange={event => setInviteeName(event.target.value)} /></label>}
               <fieldset className="project-collab__invite-roles"><legend>Access</legend><div role="radiogroup" aria-label="Invitation access">
                 {SHARE_ROLES.map(({ name, Icon, copy }) => { const value = name.toLowerCase(); return <button key={name} type="button" role="radio" aria-checked={inviteRole === value} onClick={() => setInviteRole(value)}><Icon size={14} /><span><strong>{name}</strong><small>{copy}</small></span></button> })}
               </div></fieldset>
-              <div><button type="submit" disabled={busy === 'invite'}>{busy === 'invite' ? 'Creating…' : 'Create invitation'}</button><button type="button" onClick={() => { setInviteOpen(false); setCreatedInvite(null) }}>Cancel</button></div>
+              <div><button type="submit" disabled={busy === 'invite' || (inviteVia === 'handle' && !inviteeHandle.trim().replace(/^@/, ''))}>{busy === 'invite' ? (inviteVia === 'handle' ? 'Sending…' : 'Creating…') : (inviteVia === 'handle' ? 'Send invitation' : 'Create invitation')}</button><button type="button" onClick={() => { setInviteOpen(false); setCreatedInvite(null) }}>Cancel</button></div>
             </form>}
+
+            {sentInvite && <div className="project-collab__invite-result" role="status">
+              {sentInvite.delivery === 'unconfirmed'
+                ? <><strong>Couldn’t confirm @{sentInvite.handle} received it</strong><p>The invitation may still have arrived, so it stays under Pending invitations. Revoke it there if they don’t see it.</p></>
+                : <><strong>Invitation sent to @{sentInvite.handle}</strong><p>It’s waiting in their Möbius notifications and Projects. They’ll appear under People when they accept.</p></>}
+            </div>}
 
             {createdInvite && <div className="project-collab__invite-result" role="status">
               <strong>Invitation ready</strong><p>Send this private link to {createdInvite.invitee_name || 'your collaborator'}. It works once and expires in 7 days.</p>

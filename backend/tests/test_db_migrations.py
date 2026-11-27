@@ -77,6 +77,20 @@ def _migration_versions_before(target: str) -> list[str]:
   return versions[:versions.index(target)]
 
 
+def _insert_bare_chat(eng, chat_id, **values):
+  """A chats row as an earlier release writes it: the current ORM would also
+  insert (and return) columns that release's table does not have yet."""
+  row = {"id": chat_id, **values}
+  with eng.begin() as conn:
+    for _cid, name, kind, notnull, default, pk in conn.execute(text("PRAGMA table_info(chats)")):
+      if notnull and default is None and not pk and name not in row:
+        row[name] = 0 if kind.upper() in ("BOOLEAN", "INTEGER") else (
+          "[]" if kind.upper() == "JSON" else "")
+    conn.execute(text(
+      f"INSERT INTO chats ({', '.join(row)}) VALUES ({', '.join(':' + n for n in row)})"
+    ), row)
+
+
 def test_previous_release_database_upgrades_to_current_orm(tmp_path):
   """The real boot order must close every ORM gap on an existing install.
 
@@ -145,9 +159,7 @@ def test_transcript_rows_run_after_the_chat_note_migrations(tmp_path, monkeypatc
   monkeypatch.setenv("DATA_DIR", str(tmp_path))
   assert "## Summary\nshort" in note.read_text(encoding="utf-8")
   assert not (tmp_path / "backups" / "chat-notes-before-0083").exists()
-  with Session(eng) as db:
-    db.add(create_chat(id="kept", title="Kept", messages=[{"role": "user", "content": "old"}]))
-    db.commit()
+  _insert_bare_chat(eng, "kept", title="Kept")
   with eng.begin() as conn:  # The previous release writes only the legacy value.
     conn.execute(text("UPDATE chats SET messages = :m WHERE id = 'kept'"),
                  {"m": json.dumps([{"role": "user", "content": "previous"}])})
@@ -1892,6 +1904,8 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0105_autopilot_push_mode",
     "0106_browser_grant_full_access",
     "0107_app_install_id",
+    "0108_chat_pending_revision",
+    "0109_channel_feeds",
   ]
   assert second == first
 
@@ -1919,11 +1933,10 @@ def test_app_install_ids_are_backfilled_distinct_and_never_change(tmp_path, monk
     with sqlite3.connect(db_path) as connection:
       connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
   eng = create_engine(f"sqlite:///{db_path}")
-  versions = [version for version, _migration in migrations._SCHEMA_MIGRATIONS]
-  assert versions[-1] == "0107_app_install_id"
+  previous = len(_migration_versions_before("0107_app_install_id"))
   if start == "schema_0013":
     models.Base.metadata.create_all(bind=eng)
-    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:-1])
+    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:previous])
     run_migrations(eng)  # The previous release's ledger, then its apps.
     monkeypatch.undo()
     assert "install_id" not in {c["name"] for c in inspect(eng).get_columns("apps")}
@@ -1955,6 +1968,41 @@ def test_app_install_ids_are_backfilled_distinct_and_never_change(tmp_path, monk
   with pytest.raises(IntegrityError):
     with eng.begin() as conn:
       conn.execute(text("UPDATE apps SET install_id = :taken WHERE id = 2"), {"taken": first[1]})
+  eng.dispose()
+
+
+@pytest.mark.parametrize("start", ["fresh", "schema_0013"])
+def test_chat_pending_revision_starts_at_zero_after_fresh_and_frozen_upgrade(
+  tmp_path, monkeypatch, start,
+):
+  """Every chat, one written before the column existed included, starts its
+  queue revision at 0; a crash retry of the migration changes nothing."""
+  db_path = tmp_path / "pending-revision.db"
+  if start == "schema_0013":
+    with sqlite3.connect(db_path) as connection:
+      connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  if start == "schema_0013":
+    previous = len(_migration_versions_before("0108_chat_pending_revision"))
+    monkeypatch.setattr(migrations, "_SCHEMA_MIGRATIONS", migrations._SCHEMA_MIGRATIONS[:previous])
+    run_migrations(eng)  # The previous release's ledger.
+    monkeypatch.undo()
+    assert "pending_revision" not in {c["name"] for c in inspect(eng).get_columns("chats")}
+    _insert_bare_chat(eng, "earlier", title="Earlier", pending_messages='[{"cid": "q"}]')
+  run_migrations(eng)
+  migrations._add_chat_pending_revision(eng)  # Idempotent on a crash retry.
+
+  assert "0108_chat_pending_revision" in {
+    row["version"] for row in schema_migration_history(eng)
+  }
+  assert migrations.mapped_schema_gaps(eng) == []
+  with Session(eng) as db:
+    db.add(create_chat(id="later", title="Later"))
+    db.commit()
+    revisions = {chat.id: chat.pending_revision for chat in db.query(models.Chat)}
+  assert set(revisions.values()) == {0}
+  assert ("earlier" in revisions) is (start == "schema_0013")
   eng.dispose()
 
 
@@ -4981,3 +5029,35 @@ def test_shared_peer_note_bodies_migration_is_additive_and_idempotent(tmp_path):
     assert conn.execute(text(
       "SELECT body, body_id FROM agent_coordination_messages"
     )).one() == ("Old body", None)
+
+
+def test_existing_channels_keep_copying_notifications_after_the_feeds_upgrade(tmp_path):
+  """A channel made before feeds existed keeps copying notifications and does
+  not start accepting posts; a crash retry of the migration changes nothing."""
+  db_path = tmp_path / "channel-feeds.db"
+  with sqlite3.connect(db_path) as connection:
+    connection.executescript(PREVIOUS_RELEASE_SCHEMA.read_text(encoding="utf-8"))
+    # The channel table as the previous release created it.
+    connection.executescript(
+      "CREATE TABLE notification_channels ("
+      "id VARCHAR(64) PRIMARY KEY, owner_id INTEGER NOT NULL, kind VARCHAR(16) NOT NULL, "
+      "label VARCHAR(80) NOT NULL, url_encrypted TEXT NOT NULL, url_hint VARCHAR(200) NOT NULL, "
+      "app_ids JSON, include_body BOOLEAN NOT NULL, created_at DATETIME NOT NULL, "
+      "last_sent_at DATETIME, last_error VARCHAR(300));"
+      "INSERT INTO notification_channels (id, owner_id, kind, label, url_encrypted, url_hint, "
+      "include_body, created_at) VALUES ('earlier', 1, 'slack', 'Slack', 'x', 'h', 0, "
+      "'2026-11-01 00:00:00');"
+    )
+  eng = create_engine(f"sqlite:///{db_path}")
+  models.Base.metadata.create_all(bind=eng)
+  run_migrations(eng)
+  migrations._add_channel_feeds(eng)  # Idempotent on a crash retry.
+
+  assert "0109_channel_feeds" in {row["version"] for row in schema_migration_history(eng)}
+  assert migrations.mapped_schema_gaps(eng) == []
+  with eng.connect() as conn:
+    row = conn.execute(text(
+      "SELECT copy_notifications, accept_posts FROM notification_channels WHERE id = 'earlier'"
+    )).one()
+  assert tuple(row) == (1, 0)
+  eng.dispose()

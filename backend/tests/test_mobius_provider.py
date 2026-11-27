@@ -205,14 +205,13 @@ def test_no_effort_model_patch_clears_old_effort_and_rejects_new_effort(
 def test_no_effort_model_provider_switch_omits_effort(
   client, auth, chat, db, monkeypatch,
 ):
-  from app import compaction
+  from app import transcript_rows
   _no_effort_catalogue(monkeypatch)
   chat.agent_settings_json = {"model": "claude-opus-4-8", "effort": "high"}
+  transcript_rows.replace_all(
+    db, chat, [{"role": "user", "content": "Keep this context", "ts": 1}],
+  )
   db.commit()
-  async def summary(_messages, **kwargs):
-    assert kwargs["effort"] is None
-    return "Handoff"
-  monkeypatch.setattr(compaction, "summarize_chat", summary)
   rejected = client.post(f"/api/chats/{chat.id}/provider-switch", headers=auth, json={
     "provider": "mobius", "switch_id": "bad-effort",
     "agent_settings_json": {"model": "no-effort", "effort": "medium"},

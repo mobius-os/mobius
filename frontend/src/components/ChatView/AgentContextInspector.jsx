@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, chatPath } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 // Same marked + DOMPurify markdown pipeline used by MsgContent.
 import { StandardMarkdown } from './markdown/BlockRenderer.jsx'
@@ -317,7 +317,7 @@ export default function AgentContextInspector({ chatId, onClose }) {
 
     async function load() {
       try {
-        const res = await apiFetch(`/chats/${chatId}/agent-context`, {
+        const res = await apiFetch(`${chatPath(chatId)}/agent-context`, {
           signal: controller.signal,
         })
         if (!res.ok) {

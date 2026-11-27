@@ -34,10 +34,11 @@ import shutil
 import stat
 import time
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any, Callable
 
-from app import workspace_files
+from app import project_git, workspace_files
 from app.project_templates import linked_app_id
 from app.terminal_output import strip_terminal_noise
 from app.timeutil import now_naive_utc
@@ -85,14 +86,32 @@ def _now_iso() -> str:
 
 
 def slug_artifact_id(name: str) -> str:
-  """Derive a valid artifact id from a display name."""
-  lowered = (name or "").lower()
+  """Derive a valid artifact id from a display name.
+
+  Accents are folded (NFKD, combining marks dropped) so a Latin-script title
+  reads as itself and one visible title gives one id whether it arrived NFC
+  or NFD. ASCII titles keep the ids they always had.
+  """
+  title = unicodedata.normalize("NFC", name or "").lower()
+  folded = "".join(
+    ch for ch in unicodedata.normalize("NFKD", title)
+    if not unicodedata.combining(ch)
+  )
   slug = "".join(
-    ch if (ch.isalnum() or ch in "-_") else "-" for ch in lowered
+    ch if (ch.isalnum() or ch in "-_") else "-" for ch in folded
   ).strip("-_")
   while "--" in slug:
     slug = slug.replace("--", "-")
-  return (slug or "artifact")[:64]
+  slug = (slug or "artifact")[:64]
+  if slug.isascii():
+    return slug
+
+  # Folding cannot represent every letter (CJK, Đ). Replace what remains with
+  # an ASCII stem plus a stable suffix of the whole title, so distinct titles
+  # that reduce to the same stem do not all register as the same result.
+  suffix = hashlib.sha256(title.encode("utf-8")).hexdigest()[:12]
+  stem = re.sub(r"[^a-z0-9_-]+", "-", slug)[:64 - 1 - len(suffix)].strip("-_")
+  return f"{stem or 'artifact'}-{suffix}"
 
 
 def _clean_artifact_type(value: Any) -> dict[str, Any] | None:
@@ -236,7 +255,7 @@ def source_fingerprint(root: Path) -> str | None:
     dirnames[:] = sorted(
       name for name in dirnames
       if name not in workspace_files.GIT_METADATA_NAMES
-      and not (base == root and name == "artifacts")
+      and not (base == root and name in project_git.PROJECT_VISIBILITY.hidden_root_dirs)
     )
     for name in sorted(filenames):
       path = base / name
@@ -250,7 +269,10 @@ def source_fingerprint(root: Path) -> str | None:
       if count > _FINGERPRINT_MAX_FILES:
         return None
       rel = path.relative_to(root).as_posix()
-      digest.update(f"{rel}\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
+      # POSIX names may contain undecodable bytes that Python round-trips as
+      # surrogate escapes. Hash those original bytes, just like UTF-8 names.
+      digest.update(os.fsencode(rel))
+      digest.update(f"\0{info.st_size}\0{info.st_mtime_ns}\n".encode())
   return digest.hexdigest()
 
 

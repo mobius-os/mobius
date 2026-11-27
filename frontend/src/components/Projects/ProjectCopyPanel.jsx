@@ -2,8 +2,8 @@
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Copy } from '@openai/apps-sdk-ui/components/Icon'
-import { formatDateTime } from '../../lib/dateTimeFormat.js'
-import { copyByteLabel, copyDate, projectCopyRequest, selectedCopyPaths } from '../../lib/projectCopies.js'
+import { formatDateTime, parseApiTimestamp } from '../../lib/dateTimeFormat.js'
+import { copyByteLabel, projectCopyRequest, selectedCopyPaths } from '../../lib/projectCopies.js'
 import './ProjectCopy.css'
 
 export default function ProjectCopyPanel({ project }) {
@@ -69,7 +69,7 @@ export default function ProjectCopyPanel({ project }) {
       {shares.isPending && <p role="status">Loading links…</p>}
       {shares.isError && <div role="alert"><p>{shares.error.message}</p><button onClick={() => shares.refetch()}>Try again</button></div>}
       {(shares.data || []).map(share => {
-        const ended = share.revoked_at || copyDate(share.expires_at).getTime() <= Date.now()
+        const ended = share.revoked_at || parseApiTimestamp(share.expires_at) <= Date.now()
         return <div key={share.id} className="project-copy__share"><div><strong>Created {formatDateTime(share.created_at)}</strong><small>{share.revoked_at ? 'Stopped' : ended ? 'Expired' : `Expires: ${formatDateTime(share.expires_at)}`}</small></div>
           {!ended && (confirmStop === share.id ? <div><p>Stop new copies from this link? Existing copies won’t change.</p><button disabled={!!busy} onClick={() => stop(share.id)}>Stop link</button><button disabled={!!busy} onClick={() => setConfirmStop('')}>Keep link</button></div> : <button disabled={!!busy} onClick={() => setConfirmStop(share.id)}>Stop sharing</button>)}
         </div>

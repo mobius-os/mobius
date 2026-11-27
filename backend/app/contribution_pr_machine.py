@@ -9,10 +9,17 @@ places and in that corpus together.
 
 Facts use the app's keys (role, author, head, lifecycle, checks, mergeable,
 permission, reviews[{by, state, commit, bot, sameWork}], reviewers[{by, state, commit, bot}], myReview,
-openThreads, job, result, outbox, readComplete). A fact that could not be read is 'unknown'
+openThreads, job, result, outbox, readComplete, reviewRequested, heldReview). A fact that could not be read is 'unknown'
 (or readComplete is False) and never enables anything that needs it. `reviewers` is the platform's
 own list of everyone's newest review, writers or not: it only widens who the Ask actions may name, and is
-absent in the app's facts and in the shared corpus (then the askable pool is the people in `reviews`).
+absent in the app's facts and in the shared corpus (then the askable pool is the people in `reviews`). A deleted
+account (GitHub's "ghost") and a dismissed review name nobody to ask, here and in the app.
+Two things the app's machine reads that this machine's facts cannot produce, so they are not here and no case can
+cover them: an outbox that was sent but not confirmed for another head (the app keeps it, and it blocks Merge and agent
+jobs; the platform's facts carry `outbox: None`, and `derive` drops any outbox of another head), and
+``gate: review_required`` (the app keeps "Ready to merge" off and words the PR's checks; the platform never reads it).
+`queued` is True while GitHub's merge queue holds this exact head: the PR is then in the merge queue (GitHub's step, not
+yours) and Merge is off. The app reads it too (its PR query asks for the queue entry).
 A review's state is APPROVED or CHANGES_REQUESTED (a person's standing opinion)
 or COMMENTED (their newest review, only when it is a plain comment: evidence
 that they looked, never an opinion). `sameWork` is the fact reader's proof, on
@@ -29,11 +36,14 @@ The rules, in plain words:
     PR's own change the same: a merge of the base is a new commit, not new work.
     That words the PR's standing and its highlighted next step (not_ready_to_merge);
     it does not switch your own Merge off: GitHub's merge rules refuse what cannot
-    land. The agent's own unattended merge has no tap behind it, so it still asks it.
+    land. The one exception is rights: an account GitHub says can only read or triage
+    the repository gets Merge stopped, with that reason. The agent's own unattended
+    merge has no tap behind it, so it still asks it.
   - Only four things stop an action of yours, each where it matters: the PR cannot be
     read and it is closed or merged (every action); an agent is already working on it
     (an agent job, Take over, Merge, Open for review, Back to draft, Close); something
-    sent to GitHub is not confirmed (an agent job, Take over, Merge). Ask for re-review,
+    sent to GitHub is not confirmed (an agent job, Take over, Merge); and for Merge alone, an
+    account with only read or triage access. Ask for re-review,
     Ask for approval and Request review check only the first, since a note or a review
     request races nothing. An action tied to a thing waits for that thing (a draft to
     send, a person to ask, a result to set aside). Asking works for anyone who reviewed or commented
@@ -46,7 +56,13 @@ The rules, in plain words:
     plain comment never lifts a change request on GitHub, and a PR that needs an
     approval does not get one from it. Anyone who commented on this version can
     be asked to approve.
+  - GitHub drops a review request when its reviewer reviews, so a request listed again beside your review of this
+    version means the author asked you again: it is your turn, whatever your review said (``reviewRequested``, True
+    only when GitHub lists the connected account among the requested reviewers of someone else's PR).
   - One agent job per PR at a time.
+  - Your own approval of an older commit counts for this version when the fact reader proved the work the same
+    (``sameWork`` on ``myReview``), like anyone's. A review you kept private never lifts a change request of yours
+    that stands on GitHub (a ``result`` fact the platform never carries, so only the app reaches that rule).
 Pure: no I/O. Reason strings are shown to the owner verbatim (the server's 409).
 """
 from __future__ import annotations
@@ -143,6 +159,15 @@ def _other_reason(review: dict, head) -> str:
   return "commented_here" if here else "commented_older"
 
 
+KNOWN_STATES = ("APPROVED", "CHANGES_REQUESTED", "COMMENTED")
+
+
+def _nameable(review: dict) -> bool:
+  """Someone an Ask can name: not a deleted account (GitHub's "ghost") and a review in a state the notes can word
+  (a dismissed one names nobody). The app's `askableReview`, so both machines ask the same people."""
+  return not _same(review.get("by"), "ghost") and review.get("state") in KNOWN_STATES
+
+
 def _askable(people: list[dict], standing: dict, others: list[dict], head) -> list[dict]:
   """Who could be asked to look at this version: everyone who reviewed or commented, except those whose approval
   already counts for it. ``reason`` is what is true of them (it words the public note), ``commit`` the version
@@ -150,24 +175,30 @@ def _askable(people: list[dict], standing: dict, others: list[dict], head) -> li
   def has(names: list[str], name: str) -> bool:
     return any(_same(other, name) for other in names)
 
+  eligible = [review for review in people if _nameable(review)]
   reasons = (("changes_here", "CHANGES_REQUESTED", standing["changes_at_head"]),
              ("looked_again", "CHANGES_REQUESTED", standing["looked_again"]),
              ("commented_here", "COMMENTED", standing["commented_only"]),
              ("changes_older", "CHANGES_REQUESTED", standing["changes_older"]),
              ("approved_older", "APPROVED", standing["approved_older"]))
   askable = []
-  for name in _names(people, lambda review: True):
+  for name in _names(eligible, lambda review: True):
     if has(standing["approved_at_head"], name):
       continue
     reason, state = next(((why, kind) for why, kind, names in reasons if has(names, name)), ("commented_older", "COMMENTED"))
-    theirs = [r for r in people if _same(r.get("by"), name)]
-    review = next((r for r in theirs if r.get("state") == state), theirs[0] if theirs else None)  # a state beyond the three (a dismissed one) still names its commit
+    review = next((r for r in eligible if _same(r.get("by"), name) and r.get("state") == state), None)
     askable.append({"by": name, "reason": reason, "commit": (review or {}).get("commit") or ""})
-  for review in others:
+  for review in filter(_nameable, others):
     if review.get("state") == "APPROVED" and review.get("commit") == head:
       continue  # approved this very version: nothing left to ask, though it never counted toward merging
     askable.append({"by": review.get("by"), "reason": _other_reason(review, head), "commit": review.get("commit") or ""})
   return askable
+
+
+def _held_review(held, head) -> dict | None:
+  """A finished review of another version whose findings were held back, unsent, because the PR moved first."""
+  record = _record(held)
+  return record if record is not None and record.get("head") != head else None
 
 
 def derive(facts: dict) -> dict:
@@ -179,20 +210,25 @@ def derive(facts: dict) -> dict:
   result = _for_this_head(facts.get("result"), head)
   standing = _review_standing(people, head)
   others = _others_who_reviewed(facts, people)
+  # Your own approval counts for this version when it is of this commit or, proved by the fact reader, of the same work.
+  mine_carried = (mine is not None and mine.get("commit") != head and mine.get("state") == "APPROVED"
+                  and mine.get("sameWork") is True)
   return {
     **standing,
     "askable": _askable(people, standing, others, head),
     "approved_by_others": any(r.get("state") == "APPROVED" and r.get("commit") == head for r in others),
     "mine": mine,
-    "mine_at_head": mine is not None and mine.get("commit") == head,
+    "mine_at_head": mine is not None and (mine.get("commit") == head or mine_carried),
+    "mine_carried": mine_carried,
     "result": result,
     "open_findings": result is not None and result.get("outcome") == "findings" and not result.get("setAside"),
     "outbox": _for_this_head(facts.get("outbox"), head),
+    "held_review": _held_review(facts.get("heldReview"), head),
   }
 
 
-def _state(turn: str, label: str, headline: str, next_action: str = "") -> dict:
-  return {"turn": turn, "label": label, "headline": headline, "next": next_action}
+def _state(turn: str, label: str, headline: str, next_action: str = "", waits_on: str = "") -> dict:
+  return {"turn": turn, "label": label, "headline": headline, "next": next_action, "waits_on": waits_on}
 
 
 # Every state. turn: you | agent | other | none. `label` is the short chip on a
@@ -201,6 +237,9 @@ STATES = {
   "merged": _state("none", "Merged", "Merged"),
   "closed": _state("none", "Closed", "Closed"),
   "unknown": _state("you", "Couldn’t read", "Couldn’t read this PR from GitHub. Try again", "retry"),
+  # GitHub's merge queue holds the PR: nobody's step but GitHub's, and Merge is off (it would only be refused).
+  "in_merge_queue": _state("other", "In merge queue", "In the merge queue. GitHub merges it when the queue reaches it",
+                           waits_on="GitHub"),
   "unconfirmed": _state("you", "Not confirmed", "GitHub didn’t confirm what was sent. Check GitHub before trying again", "check_github"),
   "sending": _state("agent", "Sending", "Sending to GitHub…"),
   "to_confirm": _state("you", "Draft to send", "A draft is ready. Read it, then send it or throw it away", "send_draft"),
@@ -213,7 +252,7 @@ STATES = {
   "author.findings": _state("you", "Findings", "Your PR · your check found problems. Fix them or set them aside", "respond"),
   "author.blocked": _state("you", "Checks or conflicts", "Your PR · checks fail or it conflicts. Fix it", "respond"),
   "author.feedback": _state("you", "Feedback to answer", "Your PR · feedback is waiting. Answer every point", "respond"),
-  "author.waiting_rereview": _state("other", "Waiting on re-review", "Your PR · fixes pushed. Waiting on {who} to re-review"),
+  "author.waiting_rereview": _state("other", "Fixes pushed", "Your PR · fixes pushed. Waiting on {who} to review again"),
   "author.looked_again": _state(
     "you", "Looked again · not approved",
     "Your PR · {who} looked again and left a comment, but GitHub still holds their change request. "
@@ -231,16 +270,27 @@ STATES = {
   "reviewer.to_review": _state("you", "To review", "Their PR · your turn: review it", "review"),
   "reviewer.result_ready": _state("you", "Review ready", "Their PR · your review is ready. Send a verdict or keep it private", "draft_verdict"),
   "reviewer.waiting_author": _state("other", "Waiting on {author}", "Their PR · you asked for changes. Waiting on {author}"),
-  "reviewer.re_review": _state("you", "New commits · review again", "Their PR · new commits since your review. Re-review", "review"),
+  "reviewer.re_review": _state("you", "New commits · review again", "Their PR · new commits since your review. Review again", "review"),
+  # GitHub drops a request when its reviewer reviews, so one still listed beside a review of this version was made again.
+  "reviewer.re_requested": _state(
+    "you", "Asked to review again",
+    "Their PR · you reviewed this version and were asked to review it again. Review again", "review"),
   "reviewer.reviewed": _state("none", "Reviewed", "Their PR · you reviewed this version"),
   "reviewer.kept_private": _state("none", "Kept private", "Their PR · you kept your review of this version private"),
-  "reviewer.mergeable": _state("you", "Ready to merge", "Their PR · approved at this version, {green}. Merge it", "merge"),
+  # Someone else's PR is theirs to land: nothing waits on the owner, though Merge stays available.
+  "reviewer.mergeable": _state("none", "Ready to merge", "Their PR · approved at this version, {green}. Landing it is up to them"),
 }
 
 # An approval that only carries over says so: "at this version" would be untrue of it.
 # The comparison only reads added and removed lines, so it claims no more than that.
 CARRIED_APPROVAL_HEADLINE = ("Your PR · approved by {who}, {green}. The lines you added and removed are the "
                              "same as when they approved. Merge it")
+
+# Your own approval that only carries over says so too: "you reviewed this version" would be untrue of it.
+CARRIED_OWN_HEADLINES = {
+  "reviewer.reviewed": "Their PR · your approval still holds: the change is the same as when you approved",
+  "reviewer.mergeable": "Their PR · your approval still holds, {green}. The change is the same as when you approved. Landing it is up to them",
+}
 
 OUTBOX_STATES = {"unconfirmed": "unconfirmed", "sending": "sending", "drafted": "to_confirm"}
 JOB_STATES = {"running": "working", "needs_answer": "needs_answer", "stalled": "stalled"}
@@ -253,6 +303,8 @@ def _state_of(facts: dict, d: dict) -> str:
     return lifecycle
   if lifecycle == "unknown" or facts.get("readComplete") is False:
     return "unknown"
+  if facts.get("queued") is True:
+    return "in_merge_queue"
   outbox_state = OUTBOX_STATES.get((d["outbox"] or {}).get("state"))
   if outbox_state:
     return outbox_state
@@ -300,11 +352,17 @@ def _approved_standing(facts: dict) -> str:
 
 def _reviewer_standing(facts: dict, d: dict) -> str:
   """Your verdict on this version first, then a finished review of this version (a
-  re-review that is done is no longer "new commits"), then an older review of yours."""
+  re-review that is done is no longer "new commits"), then an older review of yours. A review you kept private does
+  not lift the change request you made on GitHub: that request is of an older version and still stands. A request to
+  review again (``reviewRequested``) comes before all of it, except on a draft, which stays its author's to finish."""
+  if d["mine_at_head"] and facts.get("reviewRequested") is True and facts.get("lifecycle") != "draft":
+    return "reviewer.re_requested"
   if d["mine_at_head"] and d["mine"].get("state") == "CHANGES_REQUESTED":
     return "reviewer.waiting_author"
   if d["mine_at_head"]:
     return "reviewer.reviewed" if not_ready_to_merge(facts, d) else "reviewer.mergeable"
+  if (d["result"] or {}).get("setAside") and (d["mine"] or {}).get("state") == "CHANGES_REQUESTED":
+    return "reviewer.re_review"
   if d["result"] is not None:
     return "reviewer.kept_private" if d["result"].get("setAside") else "reviewer.result_ready"
   if d["mine"] is not None:
@@ -317,6 +375,8 @@ CHECK_WORDS = {"pass": "", "none": "", "fail": "Checks are failing.", "pending":
 CONFLICT_WORDS = {"yes": "", "conflict": "It has merge conflicts.",
                   "unknown": "GitHub hasn’t worked out conflicts yet. Try again."}
 JOB_BUSY = "An agent is already working on this PR."
+REVIEW_JOBS = ("review", "review_merge")
+IN_MERGE_QUEUE = "This pull request is already in the merge queue."
 
 
 def _first_reason(*reasons: str) -> str:
@@ -391,8 +451,23 @@ def _take_over_stops(facts: dict, d: dict) -> str:
   return _first_reason(_readable(facts), _still_open(facts), maintainer, _job_idle(facts), _nothing_in_flight(d))
 
 
+def _not_queued(facts: dict) -> str:
+  # `queued`: GitHub's merge queue already holds this exact head, and pressing Merge again would only be refused.
+  return IN_MERGE_QUEUE if facts.get("queued") is True else ""
+
+
+def _lacks_merge_rights(facts: dict) -> str:
+  # GitHub says up front when an account cannot merge here, so Merge stops with that reason instead of spending the owner's
+  # confirmation on a refusal. Only a known permission below Write stops it; an unknown one is left to the merge guard.
+  permission = facts.get("permission")
+  if permission not in ("READ", "TRIAGE"):
+    return ""
+  return f"Merging needs write access to this repository. Your account has {permission.lower()} access."
+
+
 def _merge_stops(facts: dict, d: dict) -> str:
-  return _first_reason(_readable(facts), _still_open(facts), _nothing_in_flight(d), _job_idle(facts))
+  return _first_reason(_readable(facts), _still_open(facts), _not_queued(facts), _lacks_merge_rights(facts),
+                       _nothing_in_flight(d), _job_idle(facts))
 
 
 def _status_stops(facts: dict, d: dict) -> str:
@@ -404,12 +479,17 @@ def _dismiss_guard(facts: dict, d: dict) -> str:
   waiting = _outbox_is(d, "unconfirmed")
   if waiting:
     return waiting
-  return "" if d["outbox"].get("kind") == "verdict" else "Only a verdict can be dismissed."
+  return "" if d["outbox"].get("kind") == "verdict" else "Only a verdict can be discarded."
 
 
 def _draft_verdict_guard(facts: dict, d: dict) -> str:
   reviewed_here = d["result"] is not None and not d["mine_at_head"] and d["outbox"] is None
   return _first_reason(_readable(facts), "" if reviewed_here else "Review this version first.")
+
+
+def _post_at_reviewed_commit_stops(facts: dict, d: dict) -> str:
+  return _first_reason(_readable(facts), _still_open(facts), _job_idle(facts), _nothing_in_flight(d),
+                       "" if d["held_review"] else "No held-back review to post.")
 
 
 def _set_aside_guard(facts: dict, d: dict) -> str:
@@ -430,8 +510,18 @@ def _request_stops(facts: dict, d: dict) -> str:
   return _first_reason(_readable(facts), _still_open(facts))
 
 
-def _ask_approval_title(d: dict) -> str:
+def _ask_approval_title(d: dict, facts: dict) -> str:
   return f"Ask {', '.join(d['approval_from'])} to approve" if d["approval_from"] else "Ask for approval"
+
+
+def _review_title(d: dict, facts: dict) -> str:
+  # The app also words this from an earlier review of another version (``earlier``); the platform's facts never carry one.
+  return "Review again" if d["mine"] is not None or d["result"] is not None else "Review"
+
+
+def _rerun_title(d: dict, facts: dict) -> str:
+  """Starting a stopped job over: a review is reviewed again. Only the app's job fact names its kind."""
+  return "Review again" if (_record(facts.get("job")) or {}).get("kind") in REVIEW_JOBS else "Run it again"
 
 
 def _job_is(state: str, refusal: str) -> Callable[[dict, dict], str]:
@@ -443,26 +533,29 @@ class Action:
   id: str
   by: str  # 'agent' (a job) or 'you' (the owner's own tap, behind a confirm sheet)
   roles: tuple[str, ...]
-  title: str | Callable[[dict], str]
+  title: str | Callable[[dict, dict], str]  # a function reads (derived values, facts)
   when: Callable[[dict, dict], str]  # '' when allowed, otherwise why not
   detail: str = ""
 
 
 BOTH = ("author", "reviewer")
 ACTIONS = (
-  Action("check_my_pr", "agent", ("author",), "Check my PR", _agent_stops, "Private. Nothing is posted."),
+  Action("check_my_pr", "agent", ("author",), "Review", _agent_stops, "Private. Nothing is posted."),
   Action("respond", "agent", ("author",), "Respond to feedback", _agent_stops,
-         "Answers every point, then one approval sheet for the pushes and replies."),
+         "Answers every point, then asks you to approve."),
   Action("finish_it", "agent", ("author",), "Finish it for me", _agent_stops,
-         "Responds, checks and fixes. Stops for your approval before each push."),
-  Action("review", "agent", ("reviewer",), lambda d: "Re-review" if d["mine"] is not None or d["result"] is not None else "Review",
-         _agent_stops, "Private, drafted for you, or posted by the agent if you allow it."),
-  Action("take_over", "agent", ("reviewer",), "Take over", _take_over_stops,
-         "Maintainers only. Needs a reason, and says so on the PR. Each push needs your approval."),
+         "Responds and fixes. Asks before each push."),
+  Action("review", "agent", ("reviewer",), _review_title, _agent_stops,
+         "Private, drafted for you, or posted if you allow it."),
+  Action("take_over", "agent", ("reviewer",), "Take over", _take_over_stops, "Maintainers only. Needs a reason."),
   Action("send_draft", "you", BOTH, "Send…", lambda facts, d: _outbox_is(d, "drafted")),
   Action("check_github", "you", BOTH, "Check GitHub", lambda facts, d: _outbox_is(d, "unconfirmed")),
-  Action("dismiss", "you", BOTH, "Dismiss", _dismiss_guard),
+  Action("dismiss", "you", BOTH, "Discard", _dismiss_guard),
   Action("draft_verdict", "you", ("reviewer",), "Approve, request changes or comment…", _draft_verdict_guard),
+  # Sends the held-back review against the commit it covered, never as a verdict on the new version. It saves the exact
+  # proposal the owner then submits: the platform refuses a formal verdict that is not one saved proposal.
+  Action("post_at_reviewed_commit", "you", ("reviewer",), "Post it anyway", _post_at_reviewed_commit_stops,
+         "Sent against the commit you reviewed, never as a verdict on the new version."),
   Action("set_aside", "you", BOTH, "Set aside…", _set_aside_guard),
   Action("open_for_review", "you", ("author",), "Open for review", _status_stops),
   Action("back_to_draft", "you", ("author",), "Back to draft", _status_stops),
@@ -472,10 +565,10 @@ ACTIONS = (
   Action("ask_approval", "you", ("author",), _ask_approval_title, _ask_stops,
          "Posts one short note on the PR."),
   Action("merge", "you", BOTH, "Merge", _merge_stops),
-  Action("close", "you", BOTH, "Close", _status_stops),
+  Action("close", "you", BOTH, "Close pull request", _status_stops, "Asks you to confirm first."),
   Action("retry", "you", BOTH, "Try again", lambda facts, d: "" if _readable(facts) else "Already up to date."),
   Action("open_job", "you", BOTH, "Answer the agent", _job_is("needs_answer", "No question is waiting.")),
-  Action("rerun_job", "you", BOTH, "Run it again", _job_is("stalled", "Nothing has stalled.")),
+  Action("rerun_job", "you", BOTH, _rerun_title, _job_is("stalled", "Nothing has stalled.")),
 )
 
 
@@ -485,14 +578,20 @@ def _headline_who(key: str, d: dict) -> list[str]:
           "author.commented": d["commented_only"], "author.approval_stale": d["approved_older"], "author.approved": d["approved_at_head"]}.get(key, [])
 
 
+def _template(key: str, d: dict) -> str:
+  """The state's headline, or the carried-over words when the approval it names only carries over."""
+  if d["mine_carried"] and key in CARRIED_OWN_HEADLINES:
+    return CARRIED_OWN_HEADLINES[key]
+  return CARRIED_APPROVAL_HEADLINE if key == "author.approved" and d["carried_only"] else STATES[key]["headline"]
+
+
 def _headline(key: str, facts: dict, d: dict) -> str:
   if facts.get("mergeable") == "yes":
     checks = CHECK_WORDS.get(facts.get("checks")) or "Checks are still running."
   else:
     checks = CONFLICT_WORDS.get(facts.get("mergeable")) or CONFLICT_WORDS["unknown"]
   green = "no checks" if facts.get("checks") == "none" else "checks green"
-  template = CARRIED_APPROVAL_HEADLINE if key == "author.approved" and d["carried_only"] else STATES[key]["headline"]
-  return (template.replace("{who}", ", ".join(_headline_who(key, d)) or "reviewers")
+  return (_template(key, d).replace("{who}", ", ".join(_headline_who(key, d)) or "reviewers")
           .replace("{author}", facts.get("author") or "the author").replace("{checks}", checks)
           .replace("{green}", green))
 
@@ -500,6 +599,8 @@ def _headline(key: str, facts: dict, d: dict) -> str:
 def _waiting_on(key: str, facts: dict, d: dict) -> str:
   if STATES[key]["turn"] != "other":
     return ""
+  if STATES[key]["waits_on"]:
+    return STATES[key]["waits_on"]
   if facts.get("role") == "reviewer":
     return facts.get("author") or "the author"
   return ", ".join(_headline_who(key, d)) or "reviewers"
@@ -507,7 +608,7 @@ def _waiting_on(key: str, facts: dict, d: dict) -> str:
 
 def _action_view(action: Action, facts: dict, d: dict, next_action: str) -> dict:
   reason = action.when(facts, d)
-  title = action.title(d) if callable(action.title) else action.title
+  title = action.title(d, facts) if callable(action.title) else action.title
   return {"id": action.id, "by": action.by, "title": title, "detail": action.detail,
           "enabled": not reason, "reason": reason, "highlighted": action.id == next_action and not reason}
 
@@ -515,7 +616,8 @@ def _action_view(action: Action, facts: dict, d: dict, next_action: str) -> dict
 def decide(facts: dict) -> dict:
   """The one entry point: facts in, where the PR stands and every action for this role out.
 
-  approved_by names who approved this version (carried_from: those of them whose
+  held_review is {reviewed, now} when a finished review of another version was held back unsent because the PR
+  moved (None otherwise); approved_by names who approved this version (carried_from: those of them whose
   approval is of an older commit with the same work, as {by, commit}); looked_again
   who looked at this version and only commented while their change request stands;
   changes_from who holds a change request, of this version or an older one;
@@ -533,7 +635,9 @@ def decide(facts: dict) -> dict:
           "label": state["label"].replace("{author}", facts.get("author") or "the author"),
           "headline": _headline(key, facts, d), "next": state["next"],
           "waiting_on": _waiting_on(key, facts, d), "actions": actions,
-          "approved_by": d["approved_at_head"], "carried_from": d["carried"],
+          "approved_by": d["approved_at_head"],
+          "held_review": {"reviewed": d["held_review"]["head"], "now": facts.get("head")} if d["held_review"] else None,
+          "carried_from": d["carried"],
           "changes_from": [*d["changes_at_head"], *d["changes_older"]],
           "looked_again": d["looked_again"], "approval_from": d["approval_from"],
           "rereview_from": d["rereview"], "askable": d["askable"]}

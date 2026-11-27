@@ -18,6 +18,7 @@
 //   /shell/?app=<id-or-slug>[&intent=...]  → { view: 'canvas', app, intent }
 //   /shell/?chat=<id>[&focus=question]      → { view: 'chat', chatId, focusQuestion }
 //   /shell/?settings[=<section>]            → { view: 'settings', section }
+//   /shell/?projects=1                      → { view: 'projects' }
 //
 // A settings target only navigates. Its section is narrowed to the known ids
 // (settingsSections.js); an unknown one opens Settings with no focus, so a
@@ -29,6 +30,13 @@
 import { settingsSectionOrNull } from './settingsSections.js'
 
 const ID_RE = /^[A-Za-z0-9_-]+$/
+
+/** Whether a link-supplied chat/app id is one safe path segment. Every shell
+ * link entry point (notification, cold deep link, in-chat link, restore)
+ * shares this so none can carry `../` into /api/chats/<id>. */
+export function isShellLinkId(value) {
+  return typeof value === 'string' && ID_RE.test(value)
+}
 // Ids plus the ':' and '.' that namespace an intent's target (see sw.js).
 const INTENT_RE = /^[A-Za-z0-9_.:-]{1,128}$/
 
@@ -79,6 +87,7 @@ export function parseNotificationTarget(target) {
     if (!app && !chat && params.has('settings')) {
       return { view: 'settings', section: settingsSectionOrNull(params.get('settings')) }
     }
+    if (params.get('projects') === '1') return { view: 'projects' }
     return null
   }
 

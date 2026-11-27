@@ -281,6 +281,11 @@ class Chat(Base):
   # are not runnable: test `continuations.has_runnable_pending` when the
   # question is "is work waiting to run", not whether this list is empty.
   pending_messages = Column(JSON, nullable=False, default=list)
+  # Advances in the same commit as every pending_messages write
+  # (chat_writer._replace_pending) and travels with every response that
+  # carries the queue, so a browser can ignore a list older than one it has
+  # already seen.
+  pending_revision = Column(Integer, nullable=False, default=0, server_default="0")
   uploads = Column(JSON, nullable=False, default=list)
   deleted_at = Column(DateTime, nullable=True, default=None)
   session_id = Column(String(128), nullable=True, default=None)
@@ -1635,6 +1640,63 @@ class ProjectInvite(Base):
   )
 
 
+class ReceivedProjectInvite(Base):
+  """A project invitation another Möbius delivered to this owner by handle.
+
+  Its details were confirmed with the sender's own Möbius, which the account
+  directory names as that handle's deployment. The single-use invitation
+  secret, and after acceptance the project-only access token, are sealed.
+  """
+
+  __tablename__ = "received_project_invites"
+
+  id = Column(String(64), primary_key=True)
+  # sha256 of "<from_host>\n<invitation secret>": one row per delivered invite.
+  delivery_key = Column(String(64), nullable=False, unique=True, index=True)
+  from_handle = Column(String(32), nullable=False)
+  from_host = Column(String(253), nullable=False)
+  project_name = Column(String(256), nullable=False)
+  project_type = Column(String(128), nullable=True)
+  role = Column(String(16), nullable=False)
+  invite_secret_sealed = Column(Text, nullable=True)
+  # Saved before the first accept attempt and sent with every retry, so the
+  # sender can repeat its answer if the first one was lost in transit.
+  redeem_key_sealed = Column(Text, nullable=True)
+  received_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  expires_at = Column(DateTime, nullable=False)
+  # pending -> accepted | declined. Removal deletes the row.
+  status = Column(String(16), nullable=False, default="pending", index=True)
+  responded_at = Column(DateTime, nullable=True)
+  remote_project_id = Column(String(64), nullable=True)
+  access_token_sealed = Column(Text, nullable=True)
+  access_expires_at = Column(DateTime, nullable=True)
+
+
+class ProjectInviteRedemption(Base):
+  """Who spent an invitation addressed to an @handle, so a lost answer can be repeated.
+
+  Written in the same transaction that consumes the invitation. Only the
+  invitee's Möbius knows the key, so a retry that presents it gets a fresh
+  pass for the membership it already created, while a leaked secret alone
+  still finds the invitation spent.
+  """
+
+  __tablename__ = "project_invite_redemptions"
+
+  invite_id = Column(
+    String(64), ForeignKey("project_invites.id", ondelete="CASCADE"),
+    primary_key=True,
+  )
+  key_hash = Column(String(64), nullable=False)
+  member_id = Column(
+    String(64), ForeignKey("project_members.id", ondelete="CASCADE"),
+    nullable=False,
+  )
+  # The owner's sign-in epoch at redemption: signing out everywhere ends replay.
+  owner_epoch = Column(Integer, nullable=False)
+  redeemed_at = Column(DateTime, nullable=False)
+
+
 class SharedAppInstance(Base):
   """A pinned project build with its own members and shared runtime data."""
 
@@ -2083,17 +2145,18 @@ class PushDevice(Base):
 
 
 class NotificationChannel(Base):
-  """An outside place owner notifications are copied to (Slack, Discord, …).
+  """An outside place Möbius posts to (Slack, Discord, ntfy, any webhook).
 
-  A channel receives a notification exactly when phones and browsers would
-  get a push: not while the owner is watching its source, never for quiet
-  maintenance notices. ``app_ids`` limits it to those apps' notifications;
-  null means every notification. The webhook URL is itself a credential, so it
-  is stored encrypted (``app.notification_channels``) and never returned;
-  ``url_hint`` names it in Settings. Delivery is best effort, like a push:
-  ``last_*`` records the latest outcome so Settings can show a broken link.
-
-  This is a new table, so ``create_all`` adds it to existing installations.
+  Two feeds can reach a channel. With ``copy_notifications`` it receives an
+  owner notification exactly when phones and browsers would get a push: not
+  while the owner is watching its source, never for quiet maintenance notices;
+  ``app_ids`` limits that to those apps' notifications (null means every one)
+  and ``include_body`` lets the text go along. With ``accept_posts`` the owner,
+  their agents, and the Channels app may also post to it on demand, such as a
+  release note. The webhook URL is itself a credential, so it is stored
+  encrypted (``app.notification_channels``) and never returned; ``url_hint``
+  names it. Delivery is best effort, like a push: ``last_*`` records the latest
+  outcome and ``ChannelDelivery`` the recent ones, so a broken link shows.
   """
 
   __tablename__ = "notification_channels"
@@ -2109,9 +2172,32 @@ class NotificationChannel(Base):
   url_hint = Column(String(200), nullable=False)
   app_ids = Column(JSON, nullable=True)
   include_body = Column(Boolean, nullable=False, default=False)
+  copy_notifications = Column(Boolean, nullable=False, default=True)
+  accept_posts = Column(Boolean, nullable=False, default=False)
   created_at = Column(DateTime, nullable=False, default=now_naive_utc)
   last_sent_at = Column(DateTime, nullable=True)
   last_error = Column(String(300), nullable=True)
+
+
+class ChannelDelivery(Base):
+  """One recent send to a ``NotificationChannel``, for its activity list.
+
+  Only the title is kept, never the text, and only the latest few per channel
+  (``notification_channels.ACTIVITY_KEPT``). ``source`` is ``notification``,
+  ``post`` or ``test``; ``error`` is null when the service accepted it.
+  """
+
+  __tablename__ = "channel_deliveries"
+
+  id = Column(Integer, primary_key=True, autoincrement=True)
+  channel_id = Column(
+    String(64), ForeignKey("notification_channels.id", ondelete="CASCADE"),
+    nullable=False, index=True,
+  )
+  sent_at = Column(DateTime, nullable=False, default=now_naive_utc)
+  source = Column(String(16), nullable=False)
+  title = Column(String(200), nullable=False)
+  error = Column(String(300), nullable=True)
 
 
 class Notification(Base):

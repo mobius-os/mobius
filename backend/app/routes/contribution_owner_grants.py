@@ -50,7 +50,7 @@ REVIEW_EVENTS = {"APPROVE": ("Approve", "an approval"), "REQUEST_CHANGES": ("Req
 QUIET_VERDICTS = {
   "discard": ("Discard the proposed verdict on {pr}", "Discard", "plain",
               "The proposed review is thrown away. Nothing is sent to GitHub."),
-  "dismiss": ("Dismiss the unconfirmed verdict on {pr}", "Dismiss", "plain",
+  "dismiss": ("Discard the unconfirmed verdict on {pr}", "Discard", "plain",
               "Stops waiting for GitHub to confirm it. Nothing is sent to GitHub."),
   "continue_merge": ("Continue the merge of {pr}", "Continue merge", "caution",
                      "The review agent continues the guarded merge of the approval GitHub already holds. "
@@ -148,7 +148,8 @@ async def _describe_status(ask: Ask, name: str) -> dict:
   action = next((a for a in machine.decide(facts)["actions"] if a["id"] == change.machine_action), None)
   if action is None:  # the machine has no words for an action this role does not have
     raise HTTPException(409, machine.action_blocker(facts, change.machine_action))
-  detail = [_fact("What happens", action["detail"])] if action["detail"] else []
+  # The sheet is the confirmation the Close action's own detail ("Asks you to confirm first.") promises.
+  detail = [_fact("What happens", action["detail"])] if action["detail"] and name != "close" else []
   return _sheet(f"{action['title']}: {body.repo}#{body.number}",
                 [*_pull_facts(body, pull), *detail, *_asked_of(body), _standing(facts)], action["title"],
                 "caution" if name in ("close", "ask-approval") else "plain")

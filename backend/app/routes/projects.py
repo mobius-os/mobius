@@ -232,6 +232,8 @@ class ProjectRemoteAction(BaseModel):
 
 class ProjectRemotePush(ProjectRemoteAction):
   confirmed: bool = False
+  # The origin branch the owner saw in the confirmation (``push_branch``).
+  expected_push_branch: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ProjectChatCreate(BaseModel):
@@ -380,6 +382,8 @@ class ArtifactCreate(BaseModel):
   # Optional caller-chosen id; otherwise derived from the name. Validated
   # against the slug charset before it is used as a path component.
   id: str | None = Field(default=None, min_length=1, max_length=64)
+  # Finder builds may reuse a result, but never for another source or builder.
+  reuse_source: bool = False
 
   @field_validator("name")
   @classmethod
@@ -1745,6 +1749,18 @@ def create_project_invite(
   db: Session = Depends(get_db),
 ):
   project = _live_project(db, project_id)
+  return _issue_project_invite(db, project, body.invitee_name, body.role)
+
+
+def _issue_project_invite(
+  db: Session, project: models.Project, invitee_name: str | None, role: str,
+) -> dict[str, Any]:
+  """Create and commit one single-use invitation; return it with its join URL.
+
+  The plain secret exists only in the returned ``join_url``: the link
+  invitation shows it to the owner, and a Möbius-handle invitation delivers it
+  to the invitee's own Möbius.
+  """
   active_count = db.query(models.ProjectInvite).filter(
     models.ProjectInvite.project_id == project.id,
     models.ProjectInvite.revoked_at.is_(None),
@@ -1757,8 +1773,8 @@ def create_project_invite(
   now = now_naive_utc()
   invite = models.ProjectInvite(
     id=str(uuid.uuid4()), project_id=project.id,
-    token_hash=_invite_hash(secret), invitee_name=body.invitee_name,
-    role=body.role, created_at=now, expires_at=now + _INVITE_TTL,
+    token_hash=_invite_hash(secret), invitee_name=invitee_name,
+    role=role, created_at=now, expires_at=now + _INVITE_TTL,
   )
   db.add(invite)
   db.commit()
@@ -2307,13 +2323,14 @@ def list_project_files(
     raise HTTPException(400, "Path is not a directory.")
 
   # `artifacts/` at the root is managed build output surfaced above the source
-  # tree, not a second editable copy of the same result.
+  # tree, not a second editable copy of the same result. Git review hides the
+  # same folder, so the tree and the change list agree on what is source.
   return workspace_files.list_entries(
     root, directory,
     path=path,
     recursive=recursive,
     hidden_dirs=workspace_files.GIT_METADATA_NAMES,
-    hidden_root_dirs=frozenset({"artifacts"}),
+    hidden_root_dirs=project_git.PROJECT_VISIBILITY.hidden_root_dirs,
   )
 
 
@@ -2560,7 +2577,9 @@ def push_project_git_remote(
   _require_project_github_connection()
   try:
     return {
-      **project_git.push_project(_project_root(project), body.expected_head),
+      **project_git.push_project(
+        _project_root(project), body.expected_head, body.expected_push_branch,
+      ),
       "github_connected": True,
     }
   except project_git.GitProjectError as exc:
@@ -2791,10 +2810,11 @@ def mark_project_artifact_opened(
 async def create_project_artifact(
   project_id: str,
   body: ArtifactCreate,
+  response: Response,
   principal: ProjectPrincipal = Depends(get_project_principal),
   db: Session = Depends(get_db),
 ):
-  """Register a new buildable artifact.
+  """Register a buildable artifact (or reuse the matching result for a Finder build).
 
   Async so its ``artifacts_json`` read-update-commit is ordered on the single
   event loop against a concurrent build's status write — the loop runs this
@@ -2817,7 +2837,24 @@ async def create_project_artifact(
   if not project_builders.ARTIFACT_ID_RE.match(artifact_id):
     raise HTTPException(422, "Invalid artifact id.")
   entries = project_builders.read_artifacts(project)
-  if any(entry.get("id") == artifact_id for entry in entries):
+  by_id = {entry["id"]: entry for entry in entries}
+  if body.reuse_source:
+    preferred = by_id.get(artifact_id)
+    matches = [
+      entry for entry in entries
+      if entry.get("source") == source_rel and entry.get("builder") == body.builder
+    ]
+    if matches:
+      response.status_code = 200
+      return _artifact_view(project, root, preferred if preferred in matches else matches[0])
+    # A preferred ID is only a naming hint. Keep the existing binding intact.
+    stem = artifact_id
+    suffix_number = 2
+    while artifact_id in by_id:
+      suffix = f"-{suffix_number}"
+      artifact_id = stem[:64 - len(suffix)] + suffix
+      suffix_number += 1
+  elif artifact_id in by_id:
     raise HTTPException(409, "An artifact with that id already exists.")
   entry = project_builders.new_artifact_entry(
     artifact_id, body.name, body.builder, source_rel, artifact_type,

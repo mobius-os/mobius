@@ -1,7 +1,6 @@
-// Which chats the server is rebuilding context for (manual compaction or a
-// provider switch). The server owns this window: chat reads report it as
-// `compacting` and the system stream announces each edge as
-// `chat_compaction_changed`. Keeping it in a module store rather than one
+// Which chats the server is compacting. The server owns this window: chat
+// reads report it as `compacting` and the system stream announces each edge
+// as `chat_compaction_changed`. Keeping it in a module store rather than one
 // ChatView's state means a remounted pane, a reloaded tab, or another device
 // still shows that the chat is busy and why a new message is waiting.
 
@@ -32,18 +31,10 @@ export function subscribeChatCompaction(listener) {
   return () => listeners.delete(listener)
 }
 
-// A view that started the provider switch has Send disabled and its settings
-// already say the chat is being prepared, so "will send" would contradict it.
-// Other views and devices can still send, and their message waits; tell them.
-export function compactionNotice(kind, { sendBlockedBySwitch = false } = {}) {
-  if (sendBlockedBySwitch) return null
-  if (kind === 'provider_switch') {
-    return 'Switching this chat’s provider… New messages will send when it finishes.'
-  }
-  if (kind) {
-    return 'Compacting this chat’s context… New messages will send when it finishes.'
-  }
-  return null
+// Tells every view of the chat why a new message is waiting.
+export function compactionNotice(kind) {
+  if (!kind) return null
+  return 'Compacting this chat’s context… New messages will send when it finishes.'
 }
 
 export function resetChatCompactionForTests() {

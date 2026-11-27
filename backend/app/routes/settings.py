@@ -500,9 +500,7 @@ def get_model_prefs(
                "effort": settings["effort"]} if settings.get("model") else None)
   return {
     "hidden_ids": providers.hidden_model_ids(owner.model_prefs_json),
-    "recent_ids": providers.picker_recent_model_ids(
-      owner.model_prefs_json, data_dir,
-    ),
+    "recent_ids": providers.recent_model_ids(owner.model_prefs_json),
     "selected_agent": selected,
   }
 
@@ -541,7 +539,7 @@ def update_model_prefs(
   db.commit()
   return {
     "hidden_ids": hidden,
-    "recent_ids": providers.picker_recent_model_ids(prefs, get_app_settings().data_dir),
+    "recent_ids": providers.recent_model_ids(prefs),
   }
 
 

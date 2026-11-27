@@ -1,20 +1,10 @@
 // Shared compact relative-time formatting for recency labels in the shell.
-import { formatDateTime } from './dateTimeFormat.js'
+import { formatDateTime, parseApiTimestamp } from './dateTimeFormat.js'
 // Coarse on purpose — a list hint, not a clock. Reused by the notification
 // preview and global search so recency reads the same everywhere.
 
-const NAIVE_API_DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/
 const PROJECT_DATE_FORMAT = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
 const PROJECT_RELATIVE_FORMAT = new Intl.RelativeTimeFormat('en', { numeric: 'always' })
-
-// Möbius persists UTC as SQLite-compatible naive datetimes, so API timestamps
-// can arrive without a zone suffix. Browsers otherwise interpret that shape as
-// local wall time, making a fresh update look hours old outside UTC.
-export function parseApiTimestamp(value) {
-  const raw = typeof value === 'string' ? value.trim() : ''
-  if (!raw) return NaN
-  return Date.parse(NAIVE_API_DATETIME.test(raw) ? `${raw}Z` : raw)
-}
 
 // Compact relative timestamp for a row. Falls back to a local date for
 // anything older than a week or unparseable.

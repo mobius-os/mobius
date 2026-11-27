@@ -156,6 +156,42 @@ def test_search_finds_unicode_document_text(db):
   assert "café" in hit["snippet"]
 
 
+@pytest.mark.parametrize("query", ["Réunion", "Re\u0301union"])
+def test_search_matches_canonically_equivalent_titles_and_prose(db, query):
+  title = _make_chat(db, "Re\u0301union", ["unrelated body"])
+  prose = _make_chat(db, "Meeting notes", ["The Re\u0301union is tomorrow."])
+
+  hits = {hit["id"]: hit for hit in chat_search.search(db, query)}
+  assert title.id in hits
+  assert hits[prose.id]["anchor_key"] == "user-1000"
+  assert "\ue000Réunion\ue001" in hits[prose.id]["snippet"]
+
+
+@pytest.mark.parametrize("query", ["한글 제목", "한글 제목"])
+def test_search_considers_both_index_spellings_per_word(db, query):
+  # unicode61 indexes Hangul syllables and their decomposed jamo separately.
+  titles = [
+    _make_chat(db, "한글 제목", ["body"]),
+    _make_chat(db, "한글 제목", ["body"]),
+    _make_chat(db, "한글 제목", ["body"]),
+  ]
+  assert {hit["id"] for hit in chat_search.search(db, query)} == {
+    title.id for title in titles
+  }
+
+
+def test_search_retains_a_word_mixing_composed_and_decomposed_letters(db):
+  title = _make_chat(db, "한글 제목", ["body"])
+  assert [hit["id"] for hit in chat_search.search(db, title.title)] == [title.id]
+
+
+def test_decomposed_latin_query_does_not_add_its_split_spelling_to_fts():
+  # \w+ splits "Re\u0301union" at the accent; a wholly NFD query is already
+  # covered by each word's NFD alternative, so "Re" AND "union" stays out.
+  query = chat_search._fts_query(["R\u00e9union"], "Re\u0301union")
+  assert query == '("R\u00e9union"* OR "Re\u0301union"*)'
+
+
 def test_search_keeps_recent_matches_beyond_the_old_512_chat_cap(db):
   needle = f"completeportable{uuid.uuid4().hex}"
   now = now_naive_utc()
@@ -266,6 +302,22 @@ def test_tool_noise_roles_are_not_indexed(db):
   assert not any(
     r["id"] == c.id for r in chat_search.search(db, "ocelot")
   )
+
+
+def test_search_ignores_the_hidden_upload_manifest(db):
+  # The send path appends this server-only file list to the stored user row;
+  # the owner never sees it, so search must neither match nor show it.
+  manifest = (
+    "\n\n[Files in this session:\n"
+    "- okapibudget.xlsx → /data/chats/c1/uploads/okapibudget.xlsx "
+    "(application/vnd.ms-excel, 2 KB) — attached to this message]"
+  )
+  c = _make_chat(db, "Weekly plan", [f"please summarise the okapi numbers{manifest}"])
+
+  assert c.id not in {r["id"] for r in chat_search.search(db, "okapibudget")}
+  assert c.id not in {r["id"] for r in chat_search.search(db, "attached")}
+  hit = next(r for r in chat_search.search(db, "okapi") if r["id"] == c.id)
+  assert hit["snippet"] == "please summarise the okapi numbers"
 
 
 def test_hidden_transcript_rows_never_surface_and_can_become_visible(db):

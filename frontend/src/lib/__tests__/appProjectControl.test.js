@@ -219,6 +219,26 @@ test('Pages imports its eligible source and opens the linked Project, exposing o
   assert.deepEqual(h.opened, [linked])
 })
 
+test('a completed Pages import opens from its receipt without needing the Projects list', async () => {
+  const linked = project({
+    id: 'linked',
+    template: { id: 'website', imported_from: { management: 'linked', kind: 'artifact', id: 'site' } },
+  })
+  const h = harness()
+  h.options.app = { id: 9, slug: 'pages' }
+  h.options.client.importSources = async () => response({
+    management: 'linked', artifacts: [{ id: 'site', kind: 'artifact', catalog_app_id: 9 }],
+  })
+  h.options.client.importSource = async () => response(linked)
+  h.options.client.list = async () => { throw new Error('Projects list unavailable') }
+  const created = []
+  h.options.onProjectCreated = row => created.push(row)
+  const result = await handleAppProjectsRequest(h.options, { action: 'import-source', sourceId: 'site' })
+  assert.deepEqual(result, runtimeView(linked))
+  assert.deepEqual(created, [linked])
+  assert.deepEqual(h.opened, [linked])
+})
+
 test('already-managed or foreign sources are hidden and stale import actions cannot mutate', async () => {
   const h = harness()
   h.options.app = { id: 9, slug: 'pages' }

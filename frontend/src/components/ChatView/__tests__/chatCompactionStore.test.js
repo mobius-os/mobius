@@ -26,14 +26,5 @@ test('every view of a chat shares the server rebuild window', () => {
 
 test('the notice explains why a new message is waiting', () => {
   assert.match(compactionNotice('compact'), /Compacting.*send when it finishes/)
-  assert.match(compactionNotice('provider_switch'), /Switching.*send when it finishes/)
   assert.equal(compactionNotice(null), null)
-})
-
-test('the view whose Send the switch blocks shows no contradicting notice', () => {
-  assert.equal(compactionNotice('provider_switch', { sendBlockedBySwitch: true }), null)
-  assert.match(
-    compactionNotice('provider_switch', { sendBlockedBySwitch: false }),
-    /Switching.*send when it finishes/,
-  )
 })

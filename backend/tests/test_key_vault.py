@@ -761,6 +761,22 @@ def test_an_echo_split_across_pieces_is_still_redacted(piece):
   assert DUMMY.encode() not in out and escaped not in out
 
 
+def test_a_rotated_keys_matcher_is_not_kept_in_res_process_wide_cache():
+  import re
+  echoes = kv.secret_echoes("rotating-token-" + "x" * 64, "Bearer rotating-token-" + "x" * 64)
+  assert not any(key[1] == echoes.pattern.pattern for key in re._cache)
+
+
+def test_one_matcher_redacts_a_whole_header_value_before_the_key_inside_it():
+  key = "fake/Key+with/slash0123=="
+  echoes = kv.secret_echoes(key, "Bearer " + key)
+  body = b'{"echo":"Bearer ' + key.replace("/", "\\/").encode() + b'","key":"' + key.encode() + b'"}'
+  assert kv.redact(body, echoes) == b'{"echo":"' + kv.REDACTED + b'","key":"' + kv.REDACTED + b'"}'
+  redactor = kv.StreamRedactor(echoes, b"[gone]")
+  out = b"".join(redactor.feed(body[i:i + 3]) for i in range(0, len(body), 3)) + redactor.finish()
+  assert out == b'{"echo":"[gone]","key":"[gone]"}'
+
+
 @pytest.mark.parametrize("echo", [
   "fake\\/Key+with\\/slash0123==",                       # JSON with escaped slashes
   "fake%2fKey%2bwith%2fslash0123%3d%3d",                   # lowercase percent-encoding

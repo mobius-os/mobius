@@ -115,6 +115,25 @@ def upload_dir(chat_id: str) -> pathlib.Path:
   return pathlib.Path(get_settings().data_dir) / "chats" / chat_id / "uploads"
 
 
+def upload_file(chat_id: str, name: object) -> pathlib.Path | None:
+  """This chat's own file for an upload record's `name`; None if the name leaves it.
+
+  Derived from the chat, never from the record's stored `path`: that is a
+  snapshot that goes stale when a record is copied or a chat folder moves (a
+  branch made before branching re-pointed it still names its source chat's
+  file). Confining the name to this chat's upload folder also means one chat's
+  record can never hand its agent another chat's files.
+  """
+  directory = upload_dir(chat_id)
+  if not isinstance(name, str) or not name:
+    return None
+  try:
+    path = validate_path_within_base(name, directory)
+  except HTTPException:
+    return None
+  return None if path == directory.resolve() else path
+
+
 def remove_upload_files(directory: pathlib.Path, paths: list[pathlib.Path]) -> None:
   """Delete upload files (and image previews), never outside `directory`."""
   for path in paths:

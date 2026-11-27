@@ -481,11 +481,14 @@ physical client pixels so density does not change how far a finger must travel.
 Do not replace the root zoom with `transform: scale(...)`: transforms do not
 relayout the viewport and reintroduce gutters, clipping, and hit-test problems.
 Do not pass shell density into mini-app frames; the browser maps a scaled host
-frame into each app's native document. `currentCSSZoom` is preferred, with
-the document root's computed zoom as the older-browser fallback. The document
-root uses offset geometry because its client dimensions can remain painted-size
-under author zoom. Layout-space unit tests and the desktop-density browser test
-protect this policy.
+frame into each app's native document. WebKit is the exception: it paints that
+document at the host zoom without enlarging the frame's viewport, so an app
+covers only 90% of its pane. Pane-filling app and project-preview frames cancel
+the density under a WebKit-only `@supports` in `Shell.css`. `currentCSSZoom` is
+preferred, with the document root's computed zoom as the older-browser
+fallback. The document root uses offset geometry because its client dimensions
+can remain painted-size under author zoom. Layout-space unit tests and the
+desktop-density browser test protect this policy.
 
 ### Top-level components (`frontend/src/components/`)
 
@@ -1616,10 +1619,10 @@ owns explicit, bounded Claude/Codex delegation from a live chat, including
 provider enable switches, recursion limits and read/write task scope. Installing
 or pausing Subagents therefore does not enable, disable or reconfigure Memory.
 
-### Provider switch (compaction handoff)
+### Provider switch (direct handover)
 
 Sessions are not portable across providers, so switching provider mid-chat uses
-an **incoming-provider handoff**: the composer confirms and POSTs the target
+a **direct handover**: the composer confirms and POSTs the target
 provider, model, effort, and a stable switch id to
 `/chats/{id}/provider-switch`. A successful response is explicitly versioned as
 `provider-switch-v1` and echoes both the switch id and target provider; a generic
@@ -1627,19 +1630,29 @@ provider, model, effort, and a stable switch id to
 remains as a rolling-upgrade bridge for older clients that compact and then
 PATCH the provider.
 
-The incoming provider runs a disposable, tool-free synthesis turn over the complete
-cumulative `## Digest` plus the complete current transcript. Large sources are folded
-through bounded progressive synthesis turns so no middle interval is silently
-omitted. The writer actor then stores that portable brief, changes
+No provider is asked to prepare anything. `direct_handover.py` assembles the
+handover from state Möbius already owns: the chat note's `## Summary` and
+cumulative `## Digest`, then the messages after the digest's verified coverage,
+word for word. A switch therefore takes the same moment whatever the chat's size
+and works while either provider is out of allowance. The handover is bounded: a
+part that does not fit keeps its newest paragraphs and says older ones were left
+out, and the replayed block points at the original messages, so nothing is
+omitted silently. A note without verified coverage contributes its digest beside
+the most recent messages; a chat without a note hands over its most recent
+messages. The writer actor then stores that handover, changes
 provider/settings, clears the outgoing session, and supersedes outgoing
 `parked`/`resume_pending` runs in one conditional transaction; sends, settings
 PATCHes, app-chat PATCHes, and auto-resume share the same per-chat transition lock,
-while a Summary or transcript change invalidates the commit. Provider-switch UI
+while a Digest or transcript change invalidates the commit. Provider-switch UI
 state is keyed by chat outside the keyed `ChatView`, so navigation cannot unlock a
-handoff or lose its idempotent retry id. The brief is replayed into the incoming provider's first
+handoff or lose its idempotent retry id. The handover is replayed into the incoming provider's first
 real turn as a `<compacted_chat>` block, so the new agent continues rather than
 starting cold. Same-provider model swaps skip the handoff because their session
-context is preserved.
+context is preserved. A usage-limit or credits pause offers the switch on its
+card, and the switch row offers the paused turn's own Resume, so interrupted
+work continues on the provider the chat moved to. A session that is lost or
+retired restarts from the same handover (`_build_resumed_context`). `/compact`
+remains the owner's way to have a model condense the context.
 
 ### Staying aligned (enforcement)
 
@@ -1855,6 +1868,7 @@ and ownership semantics without flaky wall-clock thresholds.
 - **Commit-before-ack (strict paths):** the caller's `await` on `QuestionCommit`/`Finalize`/`AnswerQuestion`/`Barrier`/`DrainAndStop` doesn't unblock until the commit succeeds; `PersistTranscript` and `PersistError` are fire-and-forget (submitted without awaiting the ack).
 - **Questions commit-before-broadcast:** a question row is durable before its SSE push fires, so a reconnect's catch-up burst always finds it.
 - **Concurrency invariant:** ack `Future`s are NEVER resolved while a producer lock is held — collect `(ack, value)` under the lock, resolve after release — so even a synchronous done-callback that re-enters `submit()`/`stop()` can't deadlock. Do not move an ack resolution back inside a `with` block.
+- **Queue ordering:** every `pending_messages` write advances `Chat.pending_revision` in the same commit (`_replace_pending`). Every response or event that carries the queue, or acknowledges a queue write (queued send, edit, cancel, steer cut, promotion), carries that revision. The browser keeps the newest revision it has seen and ignores a whole list read at an older one (`usePendingQueue.hydrate`), so a list read before a cancel cannot bring the row back and one read before a confirmed send cannot drop it.
 
 **GUARDRAIL — never write `Chat.messages` / `Chat.live_assistant` / `Chat.pending_messages` directly** from a request handler or SDK runner. SQLite WAL serializes commits but NOT the app-level JSON snapshot READ: two readers both see the pre-write snapshot and one silently overwrites the other (the lost-update race the actor closes). The only justified direct writer is `reconcile_interrupted_chats` (`chat.py`, runs at boot before the actor starts); all runtime writes otherwise pass through the actor.
 

@@ -167,6 +167,8 @@ def test_permission_is_the_strongest_grant_and_an_archived_repository_takes_no_w
   assert pr_facts.permission_of({"permissions": {"admin": True}}) == "ADMIN"
   assert pr_facts.permission_of({"permissions": {"pull": True}}) == "READ"
   assert pr_facts.permission_of({"archived": True, "permissions": {"admin": True}}) == "READ"
+  assert pr_facts.permission_of({}) == "unknown", "a repository that carries no permissions is not read-only"
+  assert pr_facts.permission_of({"permissions": {}}) == "unknown"
 
 
 def test_lifecycle_reads_merged_closed_draft_and_open():
@@ -270,6 +272,21 @@ def test_an_approval_of_an_older_commit_that_could_not_be_proved_the_same_stays_
     assert machine.not_ready_to_merge(found) == "The approval is for an older version."
 
 
+def test_the_accounts_own_approval_of_an_older_commit_carries_the_same_proof_and_reads_as_standing():
+  pull = {**PULL, "number": 7, "user": AUTHOR}
+
+  def read_as_sam(compares):
+    return pr_facts.read_facts(ComparingGitHub(compares), None, TARGET, REPO, pull, actor_id=42, actor_login="Sam",
+                               job=None, checks=read_with(APPROVED_OLD))
+
+  proved = read_as_sam({OLD: WORK, SHA: WORK})
+  assert proved["myReview"] == {"state": "APPROVED", "commit": OLD, "sameWork": True}
+  assert machine.decide(proved)["state"] == "reviewer.mergeable"
+  unproved = read_as_sam({})
+  assert unproved["myReview"]["sameWork"] is None
+  assert machine.decide(unproved)["state"] == "reviewer.re_review"
+
+
 def test_the_base_tip_comes_from_the_callers_target_or_else_from_the_prs_base_branch():
   own = ComparingGitHub({OLD: WORK, SHA: WORK})
   read_facts(own)
@@ -327,3 +344,23 @@ def test_an_approval_at_the_head_by_a_bot_or_by_the_author_does_not_stop_an_olde
     assert found["reviews"][0]["sameWork"] is True
     assert machine.not_ready_to_merge(found) == ""
     assert len(github.reads) == 2
+
+
+def test_a_request_for_the_accounts_review_is_a_fact_only_on_someone_elses_pull_request():
+  """GitHub lists the requested reviewers on the pull request the caller already read: no extra read, and no fact when absent."""
+  theirs = {**PULL, "number": 7, "user": AUTHOR}
+  asked = {**theirs, "requested_reviewers": [{"login": "Someone"}, {"login": "ME"}]}
+  assert facts([], pull=asked).get("reviewRequested") is True
+  assert "reviewRequested" not in facts([], pull=theirs)
+  assert "reviewRequested" not in facts([], pull={**theirs, "requested_reviewers": [{"login": "someone"}], "requested_teams": [{"slug": "me"}]})
+  assert "reviewRequested" not in facts([], pull={**theirs, "requested_reviewers": None})
+  assert "reviewRequested" not in facts([], pull=asked, login="")
+  assert "reviewRequested" not in facts([], pull={**asked, "user": {"id": 42, "login": "me", "type": "User"}}), "an own PR is never a request to you"
+
+
+def test_a_standing_review_of_this_version_beside_a_request_reads_as_a_request_to_review_again():
+  mine = {"state": "APPROVED", "commit": {"oid": SHA}}
+  asked = {**PULL, "number": 7, "user": AUTHOR, "requested_reviewers": [{"login": "me"}]}
+  again = facts([review("me", "APPROVED")], latest=mine, pull=asked)
+  assert machine.decide(again)["state"] == "reviewer.re_requested"
+  assert machine.decide(facts([review("me", "APPROVED")], latest=mine))["state"] != "reviewer.re_requested"

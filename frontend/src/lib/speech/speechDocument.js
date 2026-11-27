@@ -16,14 +16,53 @@ const DEFAULT_MAX_TEXT_CHARS = 50_000
 // generation at (tokens/3 + 2) seconds as a backstop, mirroring the reference.)
 const MAX_SPEAKABLE_CHARS = 200
 
+// Cuts inside a word fall between graphemes, so a combining accent, a flag's
+// two letters or a ZWJ emoji sequence stays whole. An engine without
+// Intl.Segmenter (Firefox before 125) falls back to code points, which still
+// keeps surrogate pairs whole.
+const graphemeSegmenter = (
+  typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function'
+)
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null
+
+function graphemesOf(word) {
+  return graphemeSegmenter
+    ? Array.from(graphemeSegmenter.segment(word), ({ segment }) => segment)
+    : Array.from(word)
+}
+
+// A single word longer than the cap (a long URL) is cut at the cap. Scripts
+// written without spaces (Chinese, Japanese, Thai) reach here as one long
+// "word" and are cut at fixed widths too, not at their own punctuation. A
+// grapheme that alone exceeds the cap (a pathological stack of combining
+// marks) is cut by code point so the cap still holds.
+function cutWord(word, maxChars) {
+  const parts = []
+  let part = ''
+  for (const grapheme of graphemesOf(word)) {
+    for (const unit of grapheme.length > maxChars ? grapheme : [grapheme]) {
+      if (part && part.length + unit.length > maxChars) {
+        parts.push(part)
+        part = ''
+      }
+      part += unit
+    }
+  }
+  if (part) parts.push(part)
+  return parts
+}
+
 // Break a single over-long sentence at its softest interior punctuation
 // (comma, semicolon, colon, dash) so no generation runs past the cap. This is
 // the reference's guard against long comma-heavy sentences — the case that
-// resonates when kept whole. Falls back to a whole-word wrap if a clause is
+// resonates when kept whole. Only punctuation followed by a space, optionally
+// through closing quotes or brackets ("Yes," she), is a clause edge, so 1,234
+// and well-known stay whole. Falls back to a whole-word wrap if a clause is
 // still too long, and only ever cuts mid-word as a last resort.
 function splitClause(sentence, maxChars) {
   if (sentence.length <= maxChars) return [sentence]
-  const clauses = sentence.match(/[^,;:—–-]+(?:[,;:—–-]+|$)/g) || [sentence]
+  const clauses = sentence.split(/(?<=[,;:—–-]["'”’“»)\]]*)\s+/)
   const out = []
   let current = ''
   for (const clause of clauses) {
@@ -44,11 +83,13 @@ function splitClause(sentence, maxChars) {
     if (clause.length <= maxChars) { wrapped.push(clause); continue }
     let line = ''
     for (const word of clause.split(/\s+/)) {
-      if (line && line.length + 1 + word.length > maxChars) {
-        wrapped.push(line)
-        line = word
-      } else {
-        line = line ? `${line} ${word}` : word
+      for (const part of word.length > maxChars ? cutWord(word, maxChars) : [word]) {
+        if (line && line.length + 1 + part.length > maxChars) {
+          wrapped.push(line)
+          line = part
+        } else {
+          line = line ? `${line} ${part}` : part
+        }
       }
     }
     if (line) wrapped.push(line)
@@ -58,12 +99,17 @@ function splitClause(sentence, maxChars) {
 
 // Split at sentence boundaries, sub-split any single sentence longer than the
 // cap on its interior punctuation, then greedily pack the resulting pieces up
-// to the cap so a long paragraph becomes a few short generations. Abbreviation
-// periods (U.S., Mr.) may over-split, which only makes a generation shorter —
-// always safe; under-splitting is what resonates. Never returns an empty list.
+// to the cap so a long paragraph becomes a few short generations. A sentence
+// ends only where . ! or ? is followed by a space, optionally through closing
+// quotes or brackets (locally.) If), so 3.5 and example.com stay whole. Except
+// inside a word longer than the cap, every cut falls on a space of the
+// single-spaced text, so the pieces joined with spaces are the text itself.
+// Abbreviation periods (Mr. Smith) may over-split, which only makes a
+// generation shorter — always safe; under-splitting is what resonates. Never
+// returns an empty list.
 function splitSpeakable(text, maxChars = MAX_SPEAKABLE_CHARS) {
   if (text.length <= maxChars) return [text]
-  const sentences = text.match(/[^.!?]+(?:[.!?]+|$)/g) || [text]
+  const sentences = text.split(/(?<=[.!?]["'”’“»)\]]*)\s+/)
   const chunks = []
   let current = ''
   for (const sentence of sentences) {

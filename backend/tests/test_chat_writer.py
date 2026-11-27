@@ -51,6 +51,30 @@ def test_transcript_columns_have_one_source_owner():
   )
 
 
+def test_every_queue_write_advances_its_revision():
+  """Inside the writer, only `_replace_pending` assigns the queue (and bumps
+  `pending_revision` with it); a bulk UPDATE of the queue bumps it too."""
+  source = Path(__file__).resolve().parents[1] / "app" / "chat_writer.py"
+  tree = ast.parse(source.read_text(encoding="utf-8"))
+  owners = []
+  bulk_writes = []
+  for function in ast.walk(tree):
+    if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+      continue
+    for node in ast.walk(function):
+      if isinstance(node, ast.Assign) and any(
+        isinstance(target, ast.Attribute) and target.attr == "pending_messages"
+        for target in node.targets
+      ):
+        owners.append(function.name)
+      if isinstance(node, ast.Call) and any(
+        keyword.arg == "pending_messages" for keyword in node.keywords
+      ):
+        bulk_writes.append({keyword.arg for keyword in node.keywords})
+  assert owners == ["_replace_pending"]
+  assert bulk_writes and all("pending_revision" in names for names in bulk_writes)
+
+
 class _RecordingSession:
   """Minimal Session stub for the actor's unit tests.
 

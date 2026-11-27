@@ -4,6 +4,7 @@ The DB selection is consent, the bound chat supplies judgment, and GitHub owns
 repository policy. Neither a ledger edit nor a changed PR expands this grant.
 An ambiguous merge receipt is never retried: reconcile read-only or ask the owner.
 """
+import hashlib
 import json
 import re
 import subprocess
@@ -132,12 +133,14 @@ def merge_permission(repo: dict) -> bool:
   )
 
 
-def current_pull(gh, cwd, target):
+def _identical_pull(gh, cwd, target, head_sha):
+  """The selected PR as GitHub shows it now, refused unless it is the same repository, PR, base branch and head
+  repository and branch. ``head_sha`` is the commit it must be at; None accepts any."""
   repo = read(gh, cwd, f"repos/{target['repo']}")
   pull = read(gh, cwd, f"repos/{target['repo']}/pulls/{target['number']}")
   if (repo.get("id") != target["repo_id"]
       or pull.get("node_id") != target["pr_id"]
-      or pull.get("head", {}).get("sha") != target["head_sha"]
+      or (head_sha is not None and pull.get("head", {}).get("sha") != head_sha)
       or pull.get("base", {}).get("ref") != target["base_ref"]
       or (target.get("head_repo_id") is not None and (
         (pull.get("head", {}).get("repo") or {}).get("id") != target["head_repo_id"]
@@ -145,6 +148,16 @@ def current_pull(gh, cwd, target):
         or pull.get("head", {}).get("ref") != target["head_ref"]))):
     raise HTTPException(409, "This pull request no longer matches the approved selection.")
   return repo, pull
+
+
+def current_pull(gh, cwd, target):
+  return _identical_pull(gh, cwd, target, target["head_sha"])
+
+
+def moved_pull(gh, cwd, target):
+  """The same pull request at whatever head it has now: the proof for a review of an older version the owner chose to send
+  anyway. Everything but the head must still match, and the review is posted against the commit it covered."""
+  return _identical_pull(gh, cwd, target, None)
 
 
 def selected_pull(gh, cwd, target):
@@ -178,6 +191,11 @@ MERGE_DISPATCH_WINDOW_SECONDS = 3600
 # ready receipt's armed_at). An attempt without it was armed by an older
 # build, so before this single-worker process loaded.
 _LOADED_AT = time.time()
+
+
+def process_loaded_at() -> float:
+  """Epoch seconds when this process loaded: an attempt that records no arm time was armed before it."""
+  return _LOADED_AT
 
 
 def dispatch_window_closed(armed_at, read_at: float) -> bool:
@@ -376,6 +394,21 @@ def perform_merge(gh, cwd, target, repo, method=None):
 
 def merge_work_key(target):
   return f"github:{target['repo'].lower()}:pr:{target['number']}:{target['head_sha']}:merge"
+
+
+def repair_work_key(target):
+  """The exact branch-push action; GitHub branch names can be cased, non-ASCII or 255 bytes.
+
+  A key that is already valid stays unchanged so saved attempts still match;
+  otherwise the ref becomes a case-sensitive digest of its exact name.
+  """
+  head = f"github:{target['head_repo'].lower()}:branch:"
+  tail = f":{target['head_sha']}:repair"
+  key = head + target["head_ref"] + tail
+  if agent_work_claims.WORK_KEY_RE.fullmatch(key):
+    return key
+  digest = hashlib.sha256(target["head_ref"].encode("utf-8", "surrogatepass")).hexdigest()[:24]
+  return f"{head}ref-sha256-{digest}{tail}"
 
 
 def fence_public_transition(db, row):
@@ -817,6 +850,8 @@ AGENT_SUBMITS_NOTE = ("The owner chose, when starting this review, to let its ve
   "tap: right after you send publish:true the server submits that proposal itself (never on the owner's own PR). "
   "That choice is the owner's approval of this review's verdict, so send it without asking again in chat or "
   "showing the text first. If it could not be sent, it waits for the owner in Contribute; never retry it. ")
+NOT_POSTED_RULE = ("If the reply to /outcomes carries not_posted, nothing was proposed or posted: tell the owner what it "
+  "says, plainly, and end your turn. Do not retry it. ")
 NOTES_ONLY_RULE = ("Ask for changes only when a finding must be fixed before this PR merges. When every finding "
   "is a small note, add \"blocking\": false to that needs_you outcome: the same findings then go out as a plain "
   "comment, not a change request. ")
@@ -856,10 +891,12 @@ def brief(row):
     "reaches GitHub until they submit it in Contribute. Findings that need changes are a REQUEST_CHANGES proposal, "
     "never only a private note. " + NOTES_ONLY_RULE
     + "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
+    + NOT_POSTED_RULE
   ) if verdict else (
     "The owner explicitly opted into one public COMMENT review per head. "
     "Set publish:true only for a deliberate public verdict in /outcomes; the server posts it, never a raw mutation. "
     "Owner questions and blocked work use publish:false (the default) with \"blocked\" and stay private. "
+    + NOT_POSTED_RULE
   )
   public_note = ((
     publish_rule +
@@ -1150,7 +1187,7 @@ def arm_repair(db, row, target, previous, receipt, principal):
   The immutable attempt is committed before I/O. Releasing a claim cannot
   authorize a second push after an ambiguous public outcome.
   """
-  work_key = f"github:{target['head_repo'].lower()}:branch:{target['head_ref']}:{target['head_sha']}:repair"
+  work_key = repair_work_key(target)
   claim = reserve_public_work(db, row, principal, work_key,
     f"Scoped repair of {key(target)} at {target['head_sha'][:12]}.", "Repair")
   if claim["state"] in {"held_by_peer", "completed"}:

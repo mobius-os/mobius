@@ -13,27 +13,49 @@ import os
 import json
 import hashlib
 import tempfile
-import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from app.chat_notes import extract_chat_summary, extract_full_digest, extract_section
+from app.chat_notes import (
+  extract_chat_summary,
+  extract_full_digest,
+  extract_section,
+  is_section_heading,
+)
 
 # Frontmatter written by retired writers (the turn-end publisher and the
 # short-lived journal projection).
 _RETIRED_KEYS = frozenset({
   "source_message_count", "source_messages_sha256", "continuity_version", "revision",
 })
-# Readers split the note on level-two headings, so agent text may not add one.
-_SECTION_HEADING = re.compile(r"^[ \t]*## ", re.MULTILINE)
 
 
 def _as_note_text(value: str) -> str:
-  return _SECTION_HEADING.sub("### ", value.strip())
+  # Readers split lines with str.splitlines(), which also breaks on "\r",
+  # U+2028 and similar. Write only "\n" so a heading cannot hide behind them
+  # and the bound digest fingerprint matches the text readers rebuild. Then
+  # demote every line a reader would take as a section heading, using the
+  # readers' own test, so agent text cannot add or split a section.
+  return "\n".join(
+    "#" + line.lstrip() if is_section_heading(line) else line
+    for line in value.strip().splitlines()
+  )
 
 
 def note_path(data_dir: str | Path, chat_id: str) -> Path:
   return Path(data_dir) / "shared" / "memory" / "chats" / chat_id / "index.md"
+
+
+def read_note(data_dir: str | Path, chat_id: str) -> str:
+  """Return the chat's note text, or "" when it has none that can be read.
+
+  A missing or damaged note must never fail the turn or switch that only
+  wanted its help: the caller continues from the transcript alone.
+  """
+  try:
+    return note_path(data_dir, chat_id).read_text(encoding="utf-8")
+  except (OSError, UnicodeDecodeError):
+    return ""
 
 
 def _split_frontmatter(text: str) -> tuple[list[str], str]:

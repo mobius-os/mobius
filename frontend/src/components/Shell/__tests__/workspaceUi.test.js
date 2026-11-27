@@ -536,6 +536,18 @@ test('completion feedback (SINGLE PULSE): one completion haptic, NO mid-hold ram
   assert.match(logoGestureSrc, /useEffect\(\(\) => \(\) => \{ stopRaf\(\) \}, \[stopRaf\]\)/)
 })
 
+test('ShellBrand shows the Staging badge only on the staging launcher side', () => {
+  assert.match(shellBrand, /api\.platform\.launcherSide\(\)[\s\S]*?setOnStaging\(value\?\.side === 'staging'\)/)
+  assert.match(shellBrand, /\{onStaging && \(\s*<span className="shell__launcher-badge"/)
+  // The bar is the size container; with no room for the label (the 58px rail, or a
+  // sidebar of 304px or less that would meet search and bell) the pill shrinks to a dot.
+  // The query measures the bar's content box (sidebar width minus 25px), so 279px is a 304px sidebar.
+  assert.match(shellCss, /\.shell__bar \{\s*container: shell-bar \/ inline-size;/)
+  assert.match(shellCss, /@container shell-bar \(max-width: 279px\) \{\s*\.shell__launcher-badge \{[^}]*font-size: 0;/)
+  // In the rail the dot sits on the logo's corner; in a narrow sidebar it keeps its own slot.
+  assert.match(shellCss, /\.shell:not\(\.shell--drawer-docked\) \.shell__launcher-badge \{[^}]*position: absolute;/)
+})
+
 test('ShellBrand isolates gesture state and wires the brand ref + Shift+Enter', () => {
   const handler = shell.match(/const handleToggleViewMode = useCallback\(\(cause\) => \{[\s\S]*?\}, \[[^\]]*\]\)/)?.[0] || ''
   // The toggle builds one captured-scene plan and commits the durable world in the

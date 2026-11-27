@@ -6,7 +6,7 @@ import Users from 'lucide-react/dist/esm/icons/users.mjs'
 import {
   api, BASE, clearEphemeralAuthSession, jsonOrThrow, setEphemeralAuthSession,
 } from '../../api/client.js'
-import { queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
+import { buildProjectFileArtifact, queueArtifactBuildsAfterSourceChange } from '../../lib/projectArtifacts.js'
 import ArtifactWorkspace from './ArtifactWorkspace.jsx'
 import ProjectThemeResource from './ProjectThemeResource.jsx'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
@@ -31,6 +31,18 @@ function routeProjectId() {
 
 function sessionKey(projectId) {
   return `mobius:project-session:${projectId}`
+}
+
+// A member's own Möbius opens their accepted project as
+// `/shared/project/<id>#access=<token>`. Move that pass into this tab's
+// session at once so it leaves the address bar and history.
+function adoptHandedAccess(projectId) {
+  try {
+    const match = /^#access=([A-Za-z0-9._-]{20,4096})$/.exec(window.location.hash)
+    if (!projectId || !match) return
+    sessionStorage.setItem(sessionKey(projectId), match[1])
+    window.history.replaceState(null, '', window.location.pathname + window.location.search)
+  } catch { /* the tab falls back to the ordinary expired-session screen */ }
 }
 
 function initials(name) {
@@ -58,6 +70,7 @@ export default function ProjectShare() {
 
   useEffect(() => {
     if (initialProjectId) {
+      adoptHandedAccess(initialProjectId)
       let token = ''
       try { token = sessionStorage.getItem(sessionKey(initialProjectId)) || '' } catch { /* ignore */ }
       if (token) {
@@ -221,13 +234,8 @@ export default function ProjectShare() {
 
   async function buildFileAsArtifact(path, builder) {
     if (!canEdit) return
-    const base = (path.split('/').pop() || path).replace(/\.[^.]+$/, '') || 'output'
-    const id = path.replace(/\.[^.]+$/, '').replace(/[^A-Za-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '').toLowerCase().slice(0, 64) || 'artifact'
     try {
-      const create = await api.projects.createArtifact(projectId, { id, name: base, builder, source: path })
-      if (!create.ok && create.status !== 409) await jsonOrThrow(create, 'Build failed:')
-      await jsonOrThrow(await api.projects.buildArtifact(projectId, id), 'Build failed:')
+      const id = await buildProjectFileArtifact(api.projects, jsonOrThrow, projectId, path, builder)
       await queryClient.invalidateQueries({ queryKey: ['projects', 'artifacts', projectId] })
       setArtifactId(id)
     } catch (cause) {

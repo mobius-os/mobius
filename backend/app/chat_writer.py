@@ -91,6 +91,18 @@ def create_chat(**fields) -> models.Chat:
   transcript_rows.initialize_new(chat, messages)
   return chat
 
+
+def _replace_pending(chat: models.Chat, pending: list) -> int:
+  """Replace the chat's queue and advance its revision in the same commit.
+
+  The only writer of ``pending_messages``. Every response that carries the
+  queue also carries ``pending_revision``, so a browser holding a newer one
+  can ignore a list read before a later cancel, confirm, steer or promotion.
+  """
+  chat.pending_messages = pending
+  chat.pending_revision += 1
+  return chat.pending_revision
+
 # Child of `moebius.chat` (NOT a sibling `moebius.chat_writer`) so the actor's
 # records PROPAGATE to the RotatingFileHandler that `chat_logging.get_logger`
 # attaches
@@ -708,6 +720,9 @@ class StartTurn(_Command):
   user_msg: dict = field(default_factory=dict)
   title_source: str = ""
   default_provider: str = "claude"
+  # Already-resolved settings, frozen when this admitted turn inherits a model.
+  initial_agent_settings: dict | None = None
+  remember_owner_model_use: bool = False
   initiated_by_app_id: int | None = None
   browser_grant_id: str | None = None
   # The rendered recovery control names its exact interrupted physical run.
@@ -1035,6 +1050,7 @@ class AppendSteeredUserMessage(_Command):
   user_msg: dict = field(default_factory=dict)
   user_msgs: list[dict] = field(default_factory=list)
   consume_pending_cids: list[str] = field(default_factory=list)
+  active_model: str | None = None
 
 
 @dataclass
@@ -1249,7 +1265,11 @@ class AuthorizeCheckpoint(_Command):
 
 @dataclass
 class SwitchProviderWithCompaction(_Command):
-  """Atomically append the incoming handoff and change provider/session."""
+  """Atomically append the direct handover and change provider/session.
+
+  ``summary`` is the handover text from ``direct_handover``; it keeps the
+  compaction row's field name because both are replayed the same way.
+  """
 
   chat_id: str = ""
   run_token: str = ""
@@ -2908,10 +2928,13 @@ class ChatWriterActor:
     self, db, chat, *, message_kind: str, result_id: str, resolve_result,
   ) -> None:
     """Remove only notices bound to this exact result's saved ownership."""
-    chat.pending_messages = [message for message in (chat.pending_messages or [])
+    pending = list(chat.pending_messages or [])
+    kept = [message for message in pending
       if not (message.get("kind") == message_kind
         and (target := resolve_result(db, chat.id, message)) is not None
         and target.id == result_id)]
+    if len(kept) != len(pending):
+      _replace_pending(chat, kept)
 
   def _stage_interrupt_unadmitted_carriers(
     self, db, chat, *, tokens: tuple[str, ...], goal_id: str | None, end_reason: str,
@@ -3763,7 +3786,10 @@ class ChatWriterActor:
           ~active_run_exists,
           Chat.updated_at == snap_updated_at,
         )
-        .values(pending_messages=plan.new_pending)
+        .values(
+          pending_messages=plan.new_pending,
+          pending_revision=Chat.pending_revision + 1,
+        )
       )
       if result.rowcount == 1:
         transcript_rows.replace_all(db, chat, plan.new_messages)
@@ -3906,6 +3932,7 @@ class ChatWriterActor:
             "duplicate_location": "pending",
             "message": row,
             "pending": pending,
+            "pending_revision": chat.pending_revision,
             "session_id": chat.session_id,
             "provider": chat.provider,
           }
@@ -3968,6 +3995,12 @@ class ChatWriterActor:
     _require_browser_grant(db, grant_id)
     if not existing:
       chat.provider = cmd.default_provider or "claude"
+    if cmd.initial_agent_settings is not None:
+      from app.chat_visibility import coerce_agent_settings
+      chat.agent_settings_json = {
+        **cmd.initial_agent_settings,
+        **(coerce_agent_settings(chat.agent_settings_json) or {}),
+      }
     # Build the agent history as schemas.ChatMessage objects, exactly as the
     # production initial-send path in routes/chats_stream.py does — run_chat
     # consumes `messages[-1].content` (attribute access), so a raw dict would
@@ -4080,6 +4113,11 @@ class ChatWriterActor:
         if resuming else None
       ),
     ))
+    if cmd.remember_owner_model_use:
+      from app.chat_visibility import coerce_agent_settings
+      self._remember_admitted_owner_model_use(
+        db, (coerce_agent_settings(chat.agent_settings_json) or {}).get("model"),
+      )
     if not _commit_or_rollback(db):
       raise _PersistFailed("StartTurn did not persist")
     if goal_id is not None:
@@ -4438,7 +4476,7 @@ class ChatWriterActor:
       ) from exc
 
     transcript_rows.append_many(db, chat, stored_rows)
-    chat.pending_messages = remaining_pending
+    pending_revision = _replace_pending(chat, remaining_pending)
     chat.live_assistant = {
       "id": cmd.run_token,
       "role": "assistant",
@@ -4510,6 +4548,7 @@ class ChatWriterActor:
         **agent_message,
         "_messages": stored_rows,
         "_consumed_cids": [],
+        "_pending_revision": pending_revision,
       },
       "session_id": chat.session_id,
       "provider": provider,
@@ -5026,7 +5065,7 @@ class ChatWriterActor:
       pending.insert(0, new_msg)
     else:
       pending.append(new_msg)
-    chat.pending_messages = pending
+    _replace_pending(chat, pending)
     claim_uploads(chat, new_msg.get("attachments"))
     # Same commit as the accepted message: see app_chat_scopes.
     admit_scoped_first_turn(db, chat, cmd.scoped_start)
@@ -5144,6 +5183,39 @@ class ChatWriterActor:
       stored_messages.append(new_msg)
     _stamp_provider_batch(stored_messages)
     transcript_rows.append_many(db, chat, stored_messages)
+    # The cut, not the fast-forwarding POST, owns delivery. Prefer the current
+    # durable row's provenance. Stop may have removed it after the route's
+    # queue selection but before this deferred cut: only for a selected cid
+    # missing from pending, use that server-captured row. AppendPending stamped
+    # its owner/app/browser provenance; the route never accepts client-supplied
+    # transcript rows. A duplicate cut has no newly stored cid to promote.
+    stored_cids = {cid_of(msg) for msg in stored_messages}
+    pending_by_cid = {cid_of(row): row for row in pending}
+    captured_by_cid = {}
+    for row in raw_user_msgs:
+      captured_by_cid.setdefault(cid_of(row), row)
+    selected_cids = set(cmd.consume_pending_cids)
+    from app.continuations import continuation_reason
+
+    def admitted_owner_row(cid):
+      row = pending_by_cid.get(cid)
+      if row is None and cid in selected_cids:
+        row = captured_by_cid.get(cid)
+      return bool(
+        row and row.get("_owner_input_at") and not row.get("hidden")
+        and continuation_reason(row) != "question_answer"
+        and row.get("_initiated_by_app_id") is None
+        and row.get("_browser_grant_id") is None
+      )
+
+    if (
+      cmd.active_model and stored_cids
+      and any(admitted_owner_row(cid) for cid in stored_cids)
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    ):
+      self._remember_admitted_owner_model_use(db, cmd.active_model)
     # The steer cut is where a steered helper result reaches its provider, so
     # its delivery is recorded in this same commit.
     from app.delegations import carrier_results, mark_results_delivered
@@ -5154,9 +5226,7 @@ class ChatWriterActor:
       )
     if cmd.consume_pending_cids:
       consumed = set(cmd.consume_pending_cids)
-      chat.pending_messages = [
-        m for m in pending if cid_of(m) not in consumed
-      ]
+      _replace_pending(chat, [m for m in pending if cid_of(m) not in consumed])
     chat.updated_at = datetime.now(UTC)
     chat.activity_at = datetime.now(UTC)
     if not _commit_or_rollback(db):
@@ -5165,6 +5235,7 @@ class ChatWriterActor:
       "stored": stored_messages[-1] if stored_messages else None,
       "stored_messages": stored_messages,
       "pending": list(chat.pending_messages or []),
+      "pending_revision": chat.pending_revision,
     }
 
   def _switch_provider_with_compaction(
@@ -5201,8 +5272,8 @@ class ChatWriterActor:
           "agent_settings_json": chat.agent_settings_json,
         }
 
-    # Visibility can change while the incoming provider synthesizes its
-    # briefing. Recheck at the writer-owned commit boundary so a chat that was
+    # Visibility can change between the route's check and this commit.
+    # Recheck at the writer-owned commit boundary so a chat that was
     # hidden in the meantime never lands a provider mutation. Keep idempotent
     # retries above this gate: an already-committed switch remains reportable
     # even if the chat is hidden later.
@@ -5232,6 +5303,10 @@ class ChatWriterActor:
       "role": "assistant",
       "kind": "compaction",
       "content": cmd.summary,
+      # Saved state handed over as it stands, not a model-written briefing.
+      "handover": "direct",
+      # The replayed block points the incoming provider at these originals.
+      "source_evidence": {"chat_id": chat.id, "message_count": len(messages)},
       "switch_id": cmd.switch_id,
       "request_fingerprint": cmd.request_fingerprint,
       "from_provider": cmd.expected_provider,
@@ -5491,10 +5566,22 @@ class ChatWriterActor:
       pending[index] = updated
       rejected += 1
     if rejected:
-      chat.pending_messages = pending
+      _replace_pending(chat, pending)
       if not _commit_or_rollback(db):
         raise _PersistFailed("RejectBrowserPending did not persist")
     return {"rejected": rejected}
+
+  @staticmethod
+  def _remember_admitted_owner_model_use(db, model_id: str | None) -> None:
+    """Include model recency in the same commit as a new owner-driven run."""
+    if not isinstance(model_id, str) or not model_id.strip():
+      return
+    from app import providers
+    owner = db.query(models.Owner).first()
+    if owner is not None:
+      owner.model_prefs_json = providers.remember_recent_model(
+        owner.model_prefs_json, model_id,
+      )
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
@@ -5567,7 +5654,7 @@ class ChatWriterActor:
     ]
     retired_control = len(runnable) + len(rejected) != len(pending)
     if retired_control or rejected_changed:
-      chat.pending_messages = rejected + runnable
+      _replace_pending(chat, rejected + runnable)
     # Rows a Stop held wait for the owner (`HoldPending`, `ReleaseHeld`):
     # only unheld rows run, unless this is the owner's empty Send.
     if cmd.owner_send:
@@ -5582,6 +5669,7 @@ class ChatWriterActor:
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = transcript_rows.read_all(db, chat)
     from app.continuations import (
+      continuation_reason,
       pending_message_group_key,
       product_result_run_token,
     )
@@ -5667,7 +5755,11 @@ class ChatWriterActor:
       )
       raise _PersistFailed("PromotePending: malformed queue head") from exc
     transcript_rows.append_many(db, chat, stored_messages)
-    chat.pending_messages = rejected + remaining_pending
+    # Event-only, like the Goal fields below: the browser removes the
+    # promoted rows itself and ignores any queue list older than this.
+    returned_promoted["_pending_revision"] = _replace_pending(
+      chat, rejected + remaining_pending,
+    )
     chat_archive.restore_on_accepted_input(chat, cmd.owner_send and cmd.restore_archived)
     assistant_ts = next_message_ts(
       existing + stored_messages + list(chat.pending_messages or [])
@@ -5733,6 +5825,32 @@ class ChatWriterActor:
       goal_objective=goal_objective,
       goal_id=goal_id,
     )
+    # This group's own provenance, not the POST that happened to wake a stale
+    # queue, decides whether it records owner use. Freeze the resolved model
+    # before the runner can observe later global-default edits.
+    owner_model_use = (
+      grant_id is None
+      and any(row.get("_owner_input_at")
+              and row.get("_initiated_by_app_id") is None
+              and not row.get("hidden")
+              and continuation_reason(row) != "question_answer"
+              for row in promoted_group)
+      and not db.query(models.Delegation.id).filter(
+        models.Delegation.child_chat_id == chat.id,
+      ).first()
+    )
+    if owner_model_use:
+      from app import providers
+      from app.chat_visibility import coerce_agent_settings
+      from app.config import get_settings
+      settings = coerce_agent_settings(chat.agent_settings_json) or {}
+      effective = providers.effective_agent_settings(
+        get_settings().data_dir, settings or None, provider=chat.provider,
+      )
+      if not settings.get("model") and effective.get("model"):
+        settings["model"] = effective["model"]
+        chat.agent_settings_json = settings
+      self._remember_admitted_owner_model_use(db, effective.get("model"))
     self._commit_admitted_run_start(
       db, chat, new_run, assistant_ts,
       failure_message="PromotePending did not persist",
@@ -5897,13 +6015,14 @@ class ChatWriterActor:
       raise _PersistFailed("CancelPending: chat not found")
     pending = list(chat.pending_messages or [])
     remaining = [m for m in pending if cid_of(m) != cmd.cid]
+    revision = chat.pending_revision
     if len(remaining) != len(pending):
-      chat.pending_messages = remaining
+      revision = _replace_pending(chat, remaining)
       release_uploads(chat, [m for m in pending if cid_of(m) == cmd.cid])
       chat.updated_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
         raise _PersistFailed("CancelPending did not persist")
-    return {"pending": remaining}
+    return {"pending": remaining, "pending_revision": revision}
 
   def _update_pending(self, db, cmd: UpdatePending) -> dict:
     """Replace one still-queued message's text and preserve its identity.
@@ -5937,12 +6056,13 @@ class ChatWriterActor:
           changed = True
       else:
         next_pending.append(message)
+    revision = chat.pending_revision
     if changed:
-      chat.pending_messages = next_pending
+      revision = _replace_pending(chat, next_pending)
       chat.updated_at = datetime.now(UTC)
       if not _commit_or_rollback(db):
         raise _PersistFailed("UpdatePending did not persist")
-    return {"updated": updated, "pending": next_pending}
+    return {"updated": updated, "pending": next_pending, "pending_revision": revision}
 
   def _hold_pending(self, db, cmd: HoldPending) -> dict:
     """Hold owner-typed queued messages; preserve machine-owned carriers.
@@ -5989,7 +6109,7 @@ class ChatWriterActor:
       # An app's request or a browser guest's message goes with the Stop.
     held = sum(1 for message in kept if message.get("held"))
     if kept != pending:
-      chat.pending_messages = kept
+      _replace_pending(chat, kept)
       if not _commit_or_rollback(db):
         raise _PersistFailed("HoldPending did not persist")
     return {"held": held}
@@ -6001,7 +6121,7 @@ class ChatWriterActor:
     pending = list(chat.pending_messages or [])
     released = sum(1 for row in pending if isinstance(row, dict) and row.get("held"))
     if released:
-      chat.pending_messages = release_holds(pending, datetime.now(UTC).isoformat())
+      _replace_pending(chat, release_holds(pending, datetime.now(UTC).isoformat()))
       chat_archive.restore_on_accepted_input(chat, cmd.restore_archived)
       if not _commit_or_rollback(db):
         raise _PersistFailed("ReleaseHeld did not persist")

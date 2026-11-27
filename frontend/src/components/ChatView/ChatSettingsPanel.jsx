@@ -29,9 +29,10 @@
  * ║   2. CROSS-PROVIDER SWITCHING                                    ║
  * ║      Sessions are not portable between providers (Claude session ║
  * ║      id ≠ Codex thread id), so switching after assistant turns   ║
- * ║      asks for confirmation, then the INCOMING provider prepares  ║
- * ║      its context from the detailed running summary. The briefing,║
- * ║      provider, settings, and cleared session commit atomically.  ║
+ * ║      asks for confirmation, then the server hands the chat over  ║
+ * ║      from its saved digest and recent messages, with no model    ║
+ * ║      call. The handover, provider, settings, and cleared session ║
+ * ║      commit atomically.                                          ║
  * ║      Same-provider model swaps need no handoff.                   ║
  * ║      `hasAssistantTurns` is LIVE-DERIVED in the parent           ║
  * ║      (ChatView): `chatInfo.has_assistant_turns ||                ║
@@ -66,8 +67,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
-import { apiFetch } from '../../api/client.js'
+import { apiFetch, chatPath } from '../../api/client.js'
 import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { authQueries, modelQueries } from '../../hooks/queries.js'
 import { catalogProviders, selectedCatalogModel } from '../../lib/modelCatalog.js'
@@ -92,7 +92,7 @@ import {
   visibleProviderModels,
 } from '../../lib/providerAvailability.js'
 import { detailToMessage } from '../../lib/errorDetail.js'
-import { orderPickerModels, withRecentModel } from '../../lib/modelPickerOrder.js'
+import { orderPickerModels } from '../../lib/modelPickerOrder.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
 import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
 import ModelPickerRow, { providerSetupLink } from './ModelPickerRow.jsx'
@@ -103,7 +103,7 @@ import './ChatSettingsPanel.css'
  *
  *  Rules (matches the codex-review spec):
  *    - Preserve registry order among models with no owner recency. The
- *      flattened picker moves confirmed recent choices ahead of them.
+ *      flattened picker moves recently used models ahead of them.
  *    - Hide entries whose ID appears in `hiddenIds`, UNLESS that ID
  *      is the chat's currently-selected model (`selectedId`). The
  *      currently-selected model is always visible so the user can
@@ -150,10 +150,9 @@ export default function ChatSettingsPanel({
   providerUsage = null,
 }) {
   const [saving, setSaving] = useState(false)
-  const queryClient = useQueryClient()
   const [localError, setLocalError] = useState('')
   const pendingSwitchPreviousRef = useRef(null)
-  // Synchronous guard for the paid atomic handoff. Routine picker writes use
+  // Synchronous guard for the atomic handoff. Routine picker writes use
   // the serialized tail and deliberately remain available while saving.
   const providerSwitchInFlightRef = useRef(false)
   const pendingSwitch = restorableProviderSwitch(
@@ -251,7 +250,7 @@ export default function ChatSettingsPanel({
     setLocalError('')
     const operation = settingsSaveTailRef.current.then(async () => {
       try {
-        const res = await apiFetch(`/chats/${chatId}`, {
+        const res = await apiFetch(chatPath(chatId), {
           method: 'PATCH',
           body: JSON.stringify(body),
         })
@@ -262,11 +261,6 @@ export default function ChatSettingsPanel({
           provider: data.provider,
           effective: data.effective,
         })
-        if (body.agent_settings_json?.model) {
-          queryClient.setQueryData(modelQueries.prefs.key, previous => (
-            withRecentModel(previous, body.agent_settings_json.model)
-          ))
-        }
         return ''
       } catch {
         return 'Network error.'
@@ -279,7 +273,7 @@ export default function ChatSettingsPanel({
       setSaving(false)
     })
     return operation
-  }, [chatId, onChange, queryClient, settingsSaveTailRef])
+  }, [chatId, onChange, settingsSaveTailRef])
 
   const switchProviderWithHandoff = useCallback(async ({
     provider: nextProvider,
@@ -304,7 +298,7 @@ export default function ChatSettingsPanel({
       // the source chat state the handoff follows. Wait for that routine write
       // even if + was closed/reopened while it settled.
       await settingsSaveTailRef.current
-      const res = await apiFetch(`/chats/${chatId}/provider-switch`, {
+      const res = await apiFetch(`${chatPath(chatId)}/provider-switch`, {
         method: 'POST',
         body: JSON.stringify(providerSwitchPayload({
           provider: nextProvider,
@@ -323,7 +317,7 @@ export default function ChatSettingsPanel({
         failProviderSwitch(
           chatId,
           request,
-          detail || 'Could not prepare this chat for the new provider.',
+          detail || 'Could not switch this chat to the new provider.',
         )
         return false
       }
@@ -340,19 +334,16 @@ export default function ChatSettingsPanel({
         return false
       }
       completeProviderSwitch(chatId, request, data)
-      queryClient.setQueryData(modelQueries.prefs.key, previous => (
-        withRecentModel(previous, model)
-      ))
       return true
     } catch {
       failProviderSwitch(
         chatId,
         request,
-        'Network error while preparing the provider switch.',
+        'Network error while switching provider.',
       )
       return false
     }
-  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, queryClient, settingsSaveTailRef])
+  }, [chatId, pendingSwitch, provider, providerStatusQuery.data, settingsSaveTailRef])
 
   const handleEffortChange = useCallback((value) => {
     // Remember this effort under the active provider so a later
@@ -677,7 +668,7 @@ export default function ChatSettingsPanel({
                 disabled={switchBusy || appCrossProvider || !providerConfigured}
                 title={appCrossProvider
                   ? 'App chats keep their original provider. Create a new app chat to use this provider.'
-                  : (isCrossProvider ? 'Prepare this chat and switch providers' : undefined)}
+                  : (isCrossProvider ? 'Switch this chat to this provider' : undefined)}
                 onSelect={() => {
                   if (!appCrossProvider) handlePickModel(m.id, pid, rowEfforts)
                 }}
@@ -701,7 +692,7 @@ export default function ChatSettingsPanel({
               {isPendingRow && (
                 <div className="csp__confirm" role="group" aria-label="Confirm provider switch">
                   <p className="csp__confirm-copy">
-                    {info.label} will prepare its own context from this chat&apos;s history and running summary.
+                    {info.label} continues from this chat&apos;s saved digest and recent messages.
                   </p>
                   <div className="csp__confirm-actions">
                     <button
@@ -710,7 +701,7 @@ export default function ChatSettingsPanel({
                       onClick={handleConfirmProviderSwitch}
                       disabled={switchBusy}
                     >
-                      {switchBusy ? 'Preparing…' : 'Switch provider'}
+                      {switchBusy ? 'Switching…' : 'Switch provider'}
                     </button>
                     <button
                       type="button"
@@ -765,7 +756,7 @@ export default function ChatSettingsPanel({
           )}
           {switchBusy && (
             <p className="csp__note">
-              Preparing this chat for {providerInfoFor(pendingSwitch?.provider, providerStatusQuery.data).label || 'the new provider'}…
+              Switching this chat to {providerInfoFor(pendingSwitch?.provider, providerStatusQuery.data).label || 'the new provider'}…
             </p>
           )}
           {codexSwitchWarning && (

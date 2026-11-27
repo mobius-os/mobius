@@ -281,6 +281,28 @@ def sites_outside(sites: list[dict], requested: list[dict]) -> list[dict]:
   return _vault_rules().sites_outside(sites, requested)
 
 
+def secret_echoes(*values: str):
+  """The vault's matcher for every echo of ``values``, however a site escaped them.
+
+  Building it can take a large part of a second for a long OAuth token, so call
+  it off the event loop. The few most recent matchers are kept, so repeat
+  requests with the same key do not rebuild one, while a rotated token's is soon
+  released.
+  """
+  return _secret_echoes_of(frozenset(values))
+
+
+@functools.lru_cache(maxsize=4)
+def _secret_echoes_of(values: frozenset[str]):
+  return _vault_rules().secret_echoes(*values)
+
+
+def stream_redactor(echoes, replacement: bytes):
+  """The vault's redactor for a body streamed in pieces, so the broker and the
+  vault relay share one hold-back rule."""
+  return _vault_rules().StreamRedactor(echoes, replacement)
+
+
 def stored_slot(inject):
   """A slot as the vault stores it, so one written differently but stored the
   same (spacing around its name, an absent prefix) compares equal; one the
@@ -771,14 +793,21 @@ async def withdraw_request(request_id: str, ticket: str | None) -> None:
 def _give_apps_installation_ids() -> None:
   """Give an installation id to each app row a release without the column
   wrote (one the platform ran after it was added, then left again), once.
-  Everything that names an app to the vault needs it first."""
+  Everything that names an app to the vault needs it first.
+
+  Each row is written only while it still has none, so the import and the
+  naming doing this at once never give one app two ids: the later write
+  changes nothing.
+  """
   import secrets
   from app import models
   from app.database import SessionLocal
   with SessionLocal() as db:
-    unnamed = db.query(models.App).filter(models.App.install_id.is_(None)).all()
-    for app in unnamed:
-      app.install_id = secrets.token_hex(16)
+    unnamed = [app_id for (app_id,) in db.query(models.App.id).filter(models.App.install_id.is_(None))]
+    for app_id in unnamed:
+      db.query(models.App).filter(models.App.id == app_id, models.App.install_id.is_(None)).update(
+        {models.App.install_id: secrets.token_hex(16)}, synchronize_session=False,
+      )
     if unnamed:
       db.commit()
 
@@ -839,16 +868,20 @@ async def _name_app_installs() -> None:
   if not _vault_ever_used():
     return
   attempt = 0
+  # Each kind of trouble is logged the first time it happens, whichever
+  # attempt that is; the retries after it stay quiet.
+  said = set()
+
+  def first_time(kind: str) -> bool:
+    new = kind not in said
+    said.add(kind)
+    return new
   while True:
+    adopted = None
     try:
       if await _vault_answers():
         adopted = await adopt_app_installs()
-        if adopted.get("stamped") or adopted.get("keys") or adopted.get("requests"):
-          log.info("key vault: named installations on %d grant(s) and request(s); withdrew %d key "
-                   "grant(s) and %d request(s) of ids no app holds", adopted["stamped"],
-                   len(adopted["keys"]), adopted["requests"])
-        return
-      if attempt == 0:
+      elif first_time("silent"):
         log.warning("key vault did not answer; naming app installations waits for it")
     except VaultRefused:
       # The vault refuses the call itself: asking again changes nothing until
@@ -857,8 +890,19 @@ async def _name_app_installs() -> None:
                     "can't use their keys until it restarts")
       return
     except (VaultUnavailable, VaultTimeout) as exc:
-      if attempt == 0:
+      if first_time("unavailable"):
         log.warning("key vault: could not name app installations yet (%s); retrying", exc)
+    except Exception:
+      # Anything else (the database, say) may pass too; until it does, apps
+      # from an older store can't use their keys, so keep trying.
+      if first_time("unexpected"):
+        log.exception("key vault: could not name app installations; retrying")
+    if adopted is not None:
+      if adopted.get("stamped") or adopted.get("keys") or adopted.get("requests"):
+        log.info("key vault: named installations on %d grant(s) and request(s); withdrew %d key "
+                 "grant(s) and %d request(s) of ids no app holds", adopted.get("stamped", 0),
+                 len(adopted.get("keys") or []), adopted.get("requests", 0))
+      return
     await asyncio.sleep(_NAME_INSTALLS_RETRY_SECS[min(attempt, len(_NAME_INSTALLS_RETRY_SECS) - 1)])
     attempt += 1
 

@@ -951,6 +951,64 @@
   max-width: 100%;
   margin-top: 8px;
 }
+/* The retry is the main action of a paused card: a solid fill, with the
+   outlined "Switch provider" beside it and the quiet auto-continue choice
+   under both. The container query lets the pair share a narrow card's width. */
+.chat__resume {
+  border-color: var(--accent-fill, var(--accent));
+  background: var(--accent-fill, var(--accent));
+  color: var(--accent-fg, #fff);
+}
+.chat__resume:hover:not(:disabled) {
+  border-color: var(--accent-fill-hover, var(--accent-hover, var(--accent)));
+  background: var(--accent-fill-hover, var(--accent-hover, var(--accent)));
+}
+.chat__recovery-actionbar {
+  container-type: inline-size;
+  display: grid;
+  justify-items: start;
+  gap: 2px;
+  margin-top: 4px;
+}
+.chat__recovery-actionbar > * { max-width: 100%; }
+.chat__recovery-actions--pair {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  gap: 6px 12px;
+  margin-top: 0;
+}
+.chat__recovery-actions .chat__resume { margin-top: 0; }
+@container (inline-size < 22rem) {
+  .chat__recovery-actions--pair {
+    width: 100%;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+}
+.chat__recovery-action--outline {
+  border-color: var(--border);
+  background: transparent;
+  color: var(--text);
+}
+.chat__recovery-action--outline:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--text) 30%, var(--border));
+  background: var(--surface-2);
+}
+.chat__recovery-action--text {
+  padding-inline: 0;
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+}
+.chat__recovery-action--text:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  color: var(--text);
+}
+.chat__recovery-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
 
 /* ── Reasoning lane (reused by the activity stretch) ── */
 
@@ -2461,6 +2519,16 @@
   background: transparent;
   pointer-events: none;
   z-index: 5;
+}
+
+/* Desktop pointers: keep the composer clear of the screen's bottom edge. In a
+   maximized or full-screen window, an auto-hiding OS dock or taskbar slides up
+   when the pointer touches that edge, and an 8px gutter is easy to overshoot
+   while aiming at the pill. Touch devices keep the tighter gutter and the iOS
+   tuck. The foot's measured height carries the extra room into transcript
+   clearance, so the list needs no matching change. */
+@media (hover: hover) and (pointer: fine) {
+  .chat__foot { padding-bottom: 20px; }
 }
 
 /* Bottom fade + gesture-strip fill. A STATIC gradient scrim tuned to the owner's

@@ -94,6 +94,7 @@ owner_grants_router = _load("contribution_owner_grants")
 identity_router = _load("identity")
 credits_router = _load("credits")
 push_router = _load("push")
+channels_router = _load("channels")
 notifications_router = _load("notifications")
 debug_router = _load("debug")
 delegations_router = _load("delegations")
@@ -116,6 +117,7 @@ app_secrets_compat_router = _load("app_secrets_compat")
 browser_access_router = _load("browser_access")
 projects_router = _load("projects")
 project_copies_router = _load("project_copies")
+project_handle_invites_router = _load("project_handle_invites")
 shared_apps_router = _load("shared_apps")
 
 __all__ = [
@@ -160,6 +162,7 @@ __all__ = [
   "identity_router",
   "credits_router",
   "push_router",
+  "channels_router",
   "notifications_router",
   "debug_router",
   "delegations_router",
@@ -182,5 +185,6 @@ __all__ = [
   "browser_access_router",
   "projects_router",
   "project_copies_router",
+  "project_handle_invites_router",
   "shared_apps_router",
 ]

@@ -1,4 +1,5 @@
-import { memo, useRef } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
+import { api, jsonOrThrow } from '../../api/client.js'
 import { useLogoModeGesture } from './useLogoModeGesture.js'
 import { isEditableTarget } from './workspaceOnboarding.js'
 import {
@@ -25,6 +26,16 @@ const ShellBrand = memo(function ShellBrand({
   onToggleNavigation,
 }) {
   const keyboardModeClickRef = useRef(false)
+  // The launcher side is fixed for a whole boot and switching it reloads the
+  // page, so one read per mount is enough. Production shows nothing.
+  const [onStaging, setOnStaging] = useState(false)
+  useEffect(() => {
+    let live = true
+    api.platform.launcherSide().then(jsonOrThrow)
+      .then(value => { if (live) setOnStaging(value?.side === 'staging') })
+      .catch(() => {})
+    return () => { live = false }
+  }, [])
   const logoGesture = useLogoModeGesture({
     onToggleMode,
     brandRef,
@@ -128,6 +139,11 @@ const ShellBrand = memo(function ShellBrand({
           />
         </span>
         <span className="shell__wordmark">Möbius</span>
+        {onStaging && (
+          <span className="shell__launcher-badge" title="Signed in through the staging launcher">
+            Staging
+          </span>
+        )}
       </button>
       <span className="shell__sr-only" role="status" aria-live="polite">
         {builderModeActive ? 'Builder mode' : 'Single screen'}

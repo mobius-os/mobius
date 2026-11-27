@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session, defer
 from app import chat_writer
 from app import (
   activity, app_activity, app_apply, app_badge, app_capability_acceptance,
-  app_git, app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  app_cron, app_git, app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
   git_transfers, icon_cache, models, pending_update, project_git, providers, schemas,
   settled, source_dirs, store_listing_source, workspace_files,
 )
@@ -110,6 +110,7 @@ log = logging.getLogger("mobius.apps")
 _APP_SOURCE_HIDDEN_DIRS = frozenset({
   ".git", ".build", "__pycache__", "dist", "node_modules",
 })
+_APP_SOURCE_VISIBILITY = project_git.SourceVisibility(hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
 
 
 def _require_nondelegated_control(
@@ -362,7 +363,7 @@ def get_app_source_git_status(
   db: Session = Depends(get_db),
 ):
   _app, root = _app_source_root(db, app_id)
-  return project_git.project_status(root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
+  return project_git.project_status(root, visibility=_APP_SOURCE_VISIBILITY)
 
 
 @router.get("/{app_id}/source/git/diff")
@@ -377,11 +378,13 @@ def get_app_source_git_diff(
   if not target.is_file():
     relative = target.relative_to(root).as_posix()
     deleted = any(row["path"] == relative and row["status"] == "deleted"
-                  for row in project_git.project_status(root)["changes"])
+                  for row in project_git.project_status(
+                    root, visibility=_APP_SOURCE_VISIBILITY,
+                  )["changes"])
     if not deleted:
       raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
-    root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+    root, target, visibility=_APP_SOURCE_VISIBILITY,
   )
 
 
@@ -3588,7 +3591,8 @@ async def delete_app_data(
 
   This is a separate, additive action from uninstall: uninstall (delete_app)
   tombstones the row and hides the app; this leaves the app fully live and
-  running, just with an empty `/data/apps/<id>` tree. There is no tombstone and
+  running, just with an empty `/data/apps/<id>` tree (only the schedule
+  declaration under `schedule/` is kept, because cron stays). There is no tombstone and
   no recovery window — a data wipe is what the owner asked for, so unlike the
   reversible uninstall it takes effect immediately.
 
@@ -3645,7 +3649,9 @@ async def delete_app_data(
     # owner asked to erase are still on disk and readable by the still-live app.
     from app import key_vault
     try:
-      await settled.run_settled(_rmtree_strict, storage_dir)
+      # Cron stays, so its durable declaration under schedule/ stays too.
+      with app_cron.preserved_schedule_declaration(app.id):
+        await settled.run_settled(_rmtree_strict, storage_dir)
       # The app's own secrets are its data too (keys it only borrows are not).
       await settled.settle(key_vault.erase_app_keys(app.id), what="App key erase")
     except (OSError, key_vault.VaultUnavailable, key_vault.VaultRefused) as exc:

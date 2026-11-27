@@ -114,3 +114,8 @@ test('saved decision navigation focuses the named card even after answer', () =>
   assert.deepEqual(parseNotificationTarget('/shell/?chat=source&focus=question&question=saved-card'),
     { view: 'chat', chatId: 'source', focusQuestion: true, questionId: 'saved-card' })
 })
+
+test('the Projects list target parses, so a project invitation opens where it waits', () => {
+  assert.deepEqual(parseNotificationTarget('/shell/?projects=1'), { view: 'projects' })
+  assert.equal(parseNotificationTarget('/shell/?projects=yes'), null)
+})

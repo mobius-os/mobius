@@ -1,5 +1,6 @@
 import { useCallback } from 'react'
 import { requestChatQuestionReveal } from '../../lib/chatQuestionReveal.js'
+import { isShellLinkId } from '../../lib/notificationTarget.js'
 import { requestedSettingsSection } from '../../lib/settingsSections.js'
 
 export function findAppForOpenTarget(list, target) {
@@ -55,6 +56,8 @@ export default function useAppIntentNavigation({
     if (app) {
       void openAppWithIntent(app, intent)
     } else if (chat) {
+      // Chat content is untrusted: never navigate a non-id chat.
+      if (!isShellLinkId(chat)) return
       if (url.searchParams.get('focus') === 'question') {
         requestChatQuestionReveal(chat, url.searchParams.get('question'))
       }

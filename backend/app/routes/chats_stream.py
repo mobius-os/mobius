@@ -5,7 +5,6 @@ import json
 import logging
 import time
 from contextlib import nullcontext
-from pathlib import Path as FilePath
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -53,6 +52,8 @@ from app.chat_steering import (
 )
 from app.chat_visibility import coerce_agent_settings
 from app.providers import (
+  PROVIDERS,
+  _fetch_model_entries,
   _load_agent_settings,
   effective_agent_settings,
   owner_default_provider,
@@ -63,7 +64,7 @@ from app.database import get_db
 from app.memory_observability import record_memory_checkpoint_once
 from app.goal_commands import goal_clear_requested
 from app.owner_input import publish_owner_input_changed
-from app.upload_lifecycle import attachment_names, is_draft, sweep_expired_uploads
+from app.upload_lifecycle import attachment_names, is_draft, sweep_expired_uploads, upload_file
 from app.deps import (
   Principal, get_chat_view_principal, get_owner_or_chat_embed_principal,
   get_current_owner, reject_cross_site,
@@ -96,7 +97,7 @@ async def start_queued_owner_continuation(
     return None
   chat = db.get(models.Chat, chat_id)
   db.refresh(chat)
-  if _selected_model_for_chat(chat) is None:
+  if not await _model_available_for_queued_start(chat):
     raise _model_selection_required_conflict()
   if not mark_starting(chat_id):
     raise HTTPException(409, detail="The chat is starting another turn; please try again.")
@@ -303,6 +304,41 @@ def _selected_model_for_chat(
   return model.strip() if isinstance(model, str) and model.strip() else None
 
 
+async def _selected_settings_for_send(
+  chat: models.Chat, provider: str,
+) -> dict | None:
+  """Validate the current catalogue before accepting an owner send.
+
+  Möbius starts with an empty catalogue. Its ordinary settings resolver cannot
+  reject a saved removed ID until discovery has populated the service list.
+  Keep that async read outside the single writer and ahead of transcript,
+  pending, and model-recency admission.
+  """
+  if provider == "mobius":
+    await _fetch_model_entries(get_settings().data_dir, provider)
+  selected = effective_agent_settings(
+    get_settings().data_dir,
+    coerce_agent_settings(chat.agent_settings_json) or None,
+    provider=provider,
+  )
+  model = selected.get("model")
+  if not isinstance(model, str) or not model.strip():
+    return None
+  if provider == "mobius" and model not in {
+    row["id"] for row in PROVIDERS[provider].declaration["models"]
+  }:
+    return None
+  return selected
+
+
+async def _model_available_for_queued_start(chat: models.Chat) -> bool:
+  # Native-provider checks keep their existing side-effect-free contract;
+  # only a cold service catalogue needs discovery before queue promotion.
+  if chat.provider != "mobius":
+    return _selected_model_for_chat(chat) is not None
+  return (await _selected_settings_for_send(chat, "mobius")) is not None
+
+
 def _next_execution_provider(db: Session, chat: models.Chat) -> str:
   """Match the provider the current send path will actually execute on."""
   provider = chat.provider or "claude"
@@ -379,26 +415,6 @@ def _message_persist_unavailable(exc: Exception, *, chat_id: str) -> HTTPExcepti
   )
 
 
-def _safe_upload_path(path_str: str, data_dir: str) -> str | None:
-  """Returns the resolved path if it lives within data_dir, None otherwise.
-
-  Validates upload paths from the DB before passing them to the CLI so a
-  tampered record cannot redirect the agent to read credentials or other
-  sensitive files outside /data/.
-  """
-  try:
-    p = FilePath(path_str).resolve()
-    allowed = FilePath(data_dir).resolve()
-    if not str(p).startswith(str(allowed) + '/'):
-      logging.getLogger(__name__).warning(
-        "Upload path outside data dir, skipping: %s", path_str
-      )
-      return None
-    return str(p)
-  except Exception:
-    return None
-
-
 def _sse(data: dict) -> str:
   """Formats a dict as a Server-Sent Events data line."""
   return f"data: {json.dumps(data)}\n\n"
@@ -414,7 +430,6 @@ def _content_with_uploads(
   answer refers to. Unsent drafts (another card's or the composer's) stay out
   until a message carrying them is admitted.
   """
-  settings = get_settings()
   # Force-steer resends the exact canonical pending-message content. Pending
   # rows already include this hidden upload manifest; appending it again makes
   # steered multi-message turns look duplicated/newline-heavy in the client and
@@ -428,7 +443,7 @@ def _content_with_uploads(
     for f in chat.uploads:
       if is_draft(f) and f.get("name") not in own:
         continue
-      safe = _safe_upload_path(f['path'], settings.data_dir)
+      safe = upload_file(chat.id, f.get('name'))
       if safe is not None:
         safe_entries.append(
           f"- {f['name']} → {safe}"
@@ -468,7 +483,7 @@ def _canonical_question_attachments(
     name = attachment.get("name") if isinstance(attachment, dict) else None
     label = name if isinstance(name, str) and name else "An attached file"
     entry = uploads.get(name) if isinstance(name, str) and name else None
-    if not entry or not _safe_upload_path(entry.get("path"), get_settings().data_dir):
+    if not entry or upload_file(chat.id, name) is None:
       raise HTTPException(
         status_code=409,
         detail=f"{label} is no longer available. Remove it and attach it again.",
@@ -584,6 +599,7 @@ def _answer_delivered_response(chat_id: str) -> JSONResponse:
 def _queued_response(
   new_msg: dict,
   position: int,
+  pending_revision: int,
   *,
   started: bool = False,
   message: dict | None = None,
@@ -600,6 +616,9 @@ def _queued_response(
     # content, so the client must swap to this exact row as soon as the queue
     # POST acks; waiting for a remount/hydrate leaves fast-forward rejected.
     "pending_message": new_msg,
+    # The queue revision this acknowledgement was read at: the client ignores
+    # any queue list older than it, which would not yet contain this row.
+    "pending_revision": pending_revision,
   }
   if started:
     payload["started"] = True
@@ -631,7 +650,7 @@ def _duplicate_send_response(
           "status": "rejected", "message": row, "running": is_chat_running(chat_id),
         })
       if is_chat_running(chat_id):
-        return _queued_response(row, position)
+        return _queued_response(row, position, chat.pending_revision)
       # Preserve the existing stale-queue self-heal: the normal queue branch
       # will idempotently find this cid via AppendPending, then promote the
       # idle queue into exactly one run. A preflight acknowledgement here
@@ -787,7 +806,8 @@ def _steer_enabled(chat: models.Chat) -> bool:
 
 def _steered_response(
   chat_id: str,
-  pending_messages: list[dict] | None = None,
+  pending_messages: list[dict],
+  pending_revision: int,
   *,
   cut_deferred: bool = False,
 ) -> JSONResponse:
@@ -803,9 +823,10 @@ def _steered_response(
   ``steered_into_turn`` cut. This keeps provider I/O outside the route's queue
   lock while preserving an exactly-once durable reserve.
   """
-  payload = {"status": "steered", "chat_id": chat_id}
-  if pending_messages is not None:
-    payload["pending_messages"] = pending_messages
+  payload = {
+    "status": "steered", "chat_id": chat_id,
+    "pending_messages": pending_messages, "pending_revision": pending_revision,
+  }
   if cut_deferred:
     payload["cut_deferred"] = True
   return JSONResponse(status_code=202, content=payload)
@@ -1454,7 +1475,7 @@ async def _send_message_impl(
           detail="The question is no longer accepting answers.",
         )
 
-      if _selected_model_for_chat(chat) is None:
+      if not await _model_available_for_queued_start(chat):
         raise _model_selection_required_conflict()
 
       started_message = None
@@ -1522,7 +1543,7 @@ async def _send_message_impl(
   if body.force_steer and questions.is_waiting(chat_id):
     return _not_steered_response(chat_id)
 
-  # Serialize an ordinary send with the provider-switch synthesis/commit.
+  # Serialize an ordinary send with the provider-switch commit.
   # Whichever request owns the lock first establishes the state the other
   # observes: a send first makes the switch see a busy chat; a switch first
   # makes the send reload and start on the newly committed provider. This
@@ -1539,6 +1560,18 @@ async def _send_message_impl(
       return await _send_message_locked(
         body, chat_id, principal, db, chat, restore_archived,
       )
+
+
+def _owner_model_use_send(principal: Principal, body: schemas.SendMessage) -> bool:
+  """Only a visible, direct human send can change owner picker recency."""
+  return (
+    principal.scope == "owner" and principal.browser is None
+    and is_owner_input_principal(principal)
+    and not body.hidden
+    and not body.answers and not body.selected_options
+    and not body._scoped_start and not body.force_steer
+    and body.continuation not in ("manual", "queue")
+  )
 
 
 async def _send_message_locked(
@@ -1566,9 +1599,8 @@ async def _send_message_locked(
       detail="Only the owner can resume a paused chat.",
     )
   next_execution_provider = _next_execution_provider(db, chat)
-  if _selected_model_for_chat(
-    chat, provider=next_execution_provider,
-  ) is None:
+  selected_settings = await _selected_settings_for_send(chat, next_execution_provider)
+  if selected_settings is None:
     raise _model_selection_required_conflict()
   if body.continuation == "queue":
     return await _send_queue(chat_id, db, principal, restore_archived)
@@ -1668,7 +1700,9 @@ async def _send_message_locked(
       owner_input=is_owner_input_principal(principal),
     )
     db.expire(chat)
-    return _queued_response(new_msg, len(chat.pending_messages or []))
+    return _queued_response(
+      new_msg, len(chat.pending_messages or []), chat.pending_revision,
+    )
 
   # Queue path: agent is running OR stale pending exists from a
   # previous crash. Appending the new send at the END of pending
@@ -1760,12 +1794,8 @@ async def _send_message_locked(
         # then commits + publishes the authoritative cut. Echo the durable
         # queue exactly as it stands so the client can retain the accepted row
         # through this deferred window.
-        stored_result = {
-          "stored_messages": user_msgs,
-          "pending": list(chat.pending_messages or []),
-        }
         return _steered_response(
-          chat_id, stored_result.get("pending"),
+          chat_id, list(chat.pending_messages or []), chat.pending_revision,
           cut_deferred=True,
         )
       if body.force_steer:
@@ -1779,7 +1809,7 @@ async def _send_message_locked(
         )
       except ValueError:
         position = len(remaining)
-      return _queued_response(reserved, position)
+      return _queued_response(reserved, position, chat.pending_revision)
     if body.force_steer:
       return _not_steered_response(chat_id)
 
@@ -1856,6 +1886,7 @@ async def _send_message_locked(
     return _queued_response(
       new_msg,
       position,
+      chat.pending_revision,
       started=started_message is not None,
       message=started_message,
     )
@@ -1872,7 +1903,9 @@ async def _send_message_locked(
       restore_archived=restore_archived,
       owner_input=is_owner_input_principal(principal),
     )
-    return _queued_response(new_msg, len(chat.pending_messages))
+    return _queued_response(
+      new_msg, len(chat.pending_messages), chat.pending_revision,
+    )
 
   # From here until create_task, any exception must discard the
   # starting guard — otherwise the chat_id stays in the set forever and
@@ -1909,6 +1942,13 @@ async def _send_message_locked(
     # in an unrelated chat. Owner-created empty chats deliberately retain the
     # live-default behavior documented by create_chat.
     default_provider = next_execution_provider
+    initial_agent_settings = None
+    if not manual_resume and not _coerce_chat_settings(chat).get("model"):
+      initial_agent_settings = {
+        key: selected_settings[key]
+        for key in ("model", "effort", "effort_by_provider")
+        if key in selected_settings
+      }
 
     ack = get_writer().submit(
       StartTurn(
@@ -1917,6 +1957,8 @@ async def _send_message_locked(
         user_msg=user_msg,
         title_source=body.content,
         default_provider=default_provider,
+        initial_agent_settings=initial_agent_settings,
+        remember_owner_model_use=_owner_model_use_send(principal, body),
         initiated_by_app_id=principal.app_id,
         browser_grant_id=principal.browser_grant_id,
         restore_archived=restore_archived,
@@ -1960,7 +2002,7 @@ async def _send_message_locked(
           position = [cid_of(row) for row in pending].index(cid_of(existing)) + 1
         except ValueError:
           position = len(pending)
-        return _queued_response(existing, position)
+        return _queued_response(existing, position, result["pending_revision"])
       return JSONResponse(
         status_code=200,
         content={
@@ -2059,7 +2101,10 @@ async def cancel_pending_message(
     result = await await_ack(get_writer().submit(
       CancelPending(chat_id=chat_id, run_token="", cid=cid)
     ))
-  return {"pending_messages": result["pending"]}
+  return {
+    "pending_messages": result["pending"],
+    "pending_revision": result["pending_revision"],
+  }
 
 
 @router.patch(
@@ -2114,7 +2159,11 @@ async def update_pending_message(
     )
   )
   result = await await_ack(ack)
-  return {"updated": result["updated"], "pending_messages": result["pending"]}
+  return {
+    "updated": result["updated"],
+    "pending_messages": result["pending"],
+    "pending_revision": result["pending_revision"],
+  }
 
 
 @router.get("/{chat_id}/stream")

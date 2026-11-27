@@ -90,6 +90,23 @@ test('only the cut re-bases the stream, and a replay refetches instead', () => {
   )
 })
 
+test('model prefs refresh at the durable steer cut, not force-steer HTTP acceptance', () => {
+  const cut = sliceBranch(
+    streamSource,
+    "event.type === 'steered_into_turn'",
+    "event.type === 'steer_delivery_failed'",
+  )
+  assert.match(cut, /onOwnerSendAcceptedRef\.current\?\.\(\)/)
+  assert.match(chatViewSource, /onOwnerSendAccepted:[\s\S]*modelQueries\.prefs\.invalidate/)
+  const sendAck = sliceBranch(
+    streamSource,
+    'const data = await res.json()',
+    '// Any parsed 2xx response is authoritative acceptance',
+  )
+  assert.match(sendAck, /data\.status === 'started'/)
+  assert.doesNotMatch(sendAck, /data\.status === 'steered'/)
+})
+
 test('a failed provider settlement restores the durable queued row', () => {
   const streamHandler = sliceBranch(
     streamSource,
@@ -137,7 +154,7 @@ test('the cut hands the steered rows off the tray and into the transcript', () =
   )
   assert.match(
     handler,
-    /pendingQueue\.completeByCid\(steeredMessages\.map\(cidOf\)\)/,
+    /pendingQueue\.completeByCid\(steeredMessages\.map\(cidOf\), \{ revision: pendingRevision \}\)/,
     'the cut is when the rows genuinely leave chat.pending_messages',
   )
 })

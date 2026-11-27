@@ -27,6 +27,36 @@ test('personal preview storage is scoped by project and source path', () => {
   )
 })
 
+test('long preview source paths with the same prefix do not share data', () => {
+  const storage = memoryStorage()
+  const prefix = `sections/${'a'.repeat(120)}/${'b'.repeat(105)}.html`
+  assert.equal(prefix.length, 240)
+  const oldSharedKey = `mobius:project-preview:v1:project-a:${encodeURIComponent(prefix)}`
+  const paths = [prefix, `${prefix}-first.html`, `${prefix}-second.html`]
+  const keys = paths.map(path => projectPreviewStorageKey('project-a', path))
+  applyProjectPreviewStorageRequest(storage, oldSharedKey, {
+    method: 'set', path: 'draft.json', value: 'unattributed',
+  })
+  keys.forEach((key, index) => {
+    assert.equal(applyProjectPreviewStorageRequest(storage, key, {
+      method: 'get', path: 'draft.json',
+    }), null)
+    applyProjectPreviewStorageRequest(storage, key, {
+      method: 'set', path: 'draft.json', value: index,
+    })
+  })
+  assert.deepEqual(keys.map(key => applyProjectPreviewStorageRequest(storage, key, {
+    method: 'get', path: 'draft.json',
+  })), [0, 1, 2])
+  assert.equal(applyProjectPreviewStorageRequest(storage, oldSharedKey, {
+    method: 'get', path: 'draft.json',
+  }), 'unattributed')
+  assert.equal(
+    projectPreviewStorageKey('project-a', 'sections/é.html'),
+    'mobius:project-preview:v1:project-a:sections%2F%C3%A9.html',
+  )
+})
+
 test('personal preview storage supports JSON values without exposing arbitrary keys', () => {
   const storage = memoryStorage()
   const key = projectPreviewStorageKey('project-a', 'index.html')

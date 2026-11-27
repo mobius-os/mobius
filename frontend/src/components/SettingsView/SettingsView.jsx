@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Alert } from '@openai/apps-sdk-ui/components/Alert'
-import { ArrowLeft, Bell, Credits, Folder, Key, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
+import { ArrowLeft, Credits, Folder, Key, Moon, Sun } from '@openai/apps-sdk-ui/components/Icon'
 import GripVertical from 'lucide-react/dist/esm/icons/grip-vertical.mjs'
 import { api, clearQueryCache, clearToken, isSharedBrowserAuth } from '../../api/client.js'
 import { authQueries, modelQueries, settingsQueries, themeQueries } from '../../hooks/queries.js'
@@ -24,7 +24,6 @@ import CodexAuth from '../ProviderAuth/CodexAuth.jsx'
 import ProviderConnection from '../ProviderAuth/ProviderConnection.jsx'
 import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import PlatformUpdates from './PlatformUpdates.jsx'
-import NotificationChannelsPage, { NotificationChannelsSummary } from './NotificationChannels.jsx'
 import ProviderUsage, { UsageMeter } from './ProviderUsage.jsx'
 import ProviderPage from './ProviderPage.jsx'
 import GithubConnection from './GithubConnection.jsx'
@@ -48,7 +47,6 @@ import './SettingsPage.css'
 const MobiusLogo = PROVIDER_INFO.mobius?.Logo
 // The detail pages that are not providers; every other detailPage value is a provider id.
 const SHARED_FOLDERS_PAGE = 'shared-folders'
-const NOTIFICATIONS_ELSEWHERE_PAGE = 'notifications-elsewhere'
 // The key list; each key's page (`key:<name>`, '' for a new key) returns here.
 const KEYS_PAGE = 'keys'
 const MOBIUS_ACCOUNT_PAGE = 'mobius-account'
@@ -281,10 +279,9 @@ export default function SettingsView({
   const keyPage = typeof detailPage === 'string' && detailPage.startsWith('key:') ? detailPage.slice(4) : null
   const sharedFoldersOpen = detailPage === SHARED_FOLDERS_PAGE
   const mobiusAccountOpen = detailPage === MOBIUS_ACCOUNT_PAGE
-  const notificationsElsewhereOpen = detailPage === NOTIFICATIONS_ELSEWHERE_PAGE
   const creditsOpen = detailPage === CREDITS_PAGE
   const keysOpen = detailPage === KEYS_PAGE
-  const selectedProvider = keyPage !== null || keysOpen || sharedFoldersOpen || mobiusAccountOpen || creditsOpen || notificationsElsewhereOpen ? null : detailPage
+  const selectedProvider = keyPage !== null || keysOpen || sharedFoldersOpen || mobiusAccountOpen || creditsOpen ? null : detailPage
   // One wallet for the account page's Credits row and the Credits page: read
   // once per visit, and a checkout keeps being watched across the two pages.
   const wallet = useWallet({ active: active && showOwnerAccounts && (mobiusAccountOpen || creditsOpen) })
@@ -1017,9 +1014,6 @@ export default function SettingsView({
         onClose={() => openDetailPage(KEYS_PAGE)}
       />
     )
-  } else if (notificationsElsewhereOpen) {
-    subhead = <SettingsSubhead title="Notifications elsewhere" mark={<Bell width={20} height={20} />} onBack={closeDetailPage} />
-    detailBody = <NotificationChannelsPage active={active} />
   } else if (sharedFoldersOpen) {
     subhead = <SettingsSubhead title="Shared folders" mark={<Folder width={20} height={20} />} onBack={closeDetailPage} />
     detailBody = <SharedFoldersPage />
@@ -1231,8 +1225,6 @@ export default function SettingsView({
         </section>
 
         <SharedFoldersSummary onOpen={() => openDetailPage(SHARED_FOLDERS_PAGE)} />
-
-        <NotificationChannelsSummary active={active} onOpen={() => openDetailPage(NOTIFICATIONS_ELSEWHERE_PAGE)} />
 
         <PlatformUpdates active={active} refreshToken={refreshToken} onOpenChat={onOpenChat} inertBoundaryRef={settingsBoundaryRef} />
 

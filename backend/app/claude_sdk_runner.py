@@ -271,11 +271,27 @@ _CLAUDE_TURN_END_TOOLS = (
   "Bash",
 )
 # Owner cards whose save hands the turn to the owner; the visible-answer check
-# runs just before one is saved (see `answer_check.reason`).
+# runs just before one is saved (see `answer_check.reason`). Not every call
+# ends the turn: a key request often answers at once without a card, and the
+# turn goes on (see `_ANSWER_CHECK_KEY_TOOL`). Membership also keeps these
+# calls out of the after-step note.
 _ANSWER_CHECK_CARD_TOOLS = frozenset(
   f"mcp__{CONTROL_SERVER_NAME}__{name}"
-  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME)
+  for name in (
+    APPROVAL_TOOL_NAME, KEY_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME,
+  )
 )
+# The cards whose save needs the turn's closing `message`. A key request may
+# carry one, but often answers at once without saving a card and drops it; a
+# secret card has none.
+_ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS = frozenset(
+  f"mcp__{CONTROL_SERVER_NAME}__{name}"
+  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME)
+)
+# A hold before a key request is forgotten once the request returns: if it
+# answered at once, the turn goes on, and its end-of-turn check must still see
+# what the hold covered.
+_ANSWER_CHECK_KEY_TOOL = f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}"
 # The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
 # of exact tool names, so only these calls pay the PreToolUse round trip.
 _ANSWER_CHECK_CARD_MATCHER = "|".join(sorted(_ANSWER_CHECK_CARD_TOOLS))
@@ -545,9 +561,10 @@ class ActiveClaudeClient:
 
   def __init__(
     self, client: ClaudeSDKClient, chat_id: str, run_marker: str | None = None,
-    *, sink=None, run_generation: int | None = None,
+    *, sink=None, run_generation: int | None = None, model: str | None = None,
   ):
     self.chat_id = chat_id
+    self.model = model
     self.kind = RunnerKind.CLAUDE_SDK
     self._client = client
     self._sink = sink
@@ -1425,6 +1442,9 @@ async def run_claude_sdk_turn(
   # check that spoke). The after-step note shares the thinking pointer, so one
   # swallowed draft is pointed out once, after a step or at the end.
   answer_check_reviewed: tuple[object, int, int] = (None, 0, 0)
+  # What a hold before a key request replaced (its block list, the blocks
+  # reviewed in it before, and the reminder count), restored when it returns.
+  answer_check_before_key_hold: tuple[object, int, int] | None = None
   answer_check_media_dir = os.path.normpath(
     str(chat_media_dir(get_settings().data_dir, chat_id))
   )
@@ -1445,11 +1465,24 @@ async def run_claude_sdk_turn(
     reviewed_through = end if reminder else _answer_check_pointers(blocks)[0]
     answer_check_reviewed = (blocks, reviewed_through, end)
 
+  def _answer_check_forget_key_hold() -> None:
+    """Undo a key request's hold so later checks see what it covered."""
+    nonlocal answer_check_reviewed, answer_check_reminders, answer_check_before_key_hold
+    if answer_check_before_key_hold is None:
+      return
+    held_blocks, held_through, held_reminders = answer_check_before_key_hold
+    answer_check_before_key_hold = None
+    blocks, _, thinking_through = answer_check_reviewed
+    if blocks is held_blocks:
+      # The thinking pointer stays: a draft already pointed out is not raised again.
+      answer_check_reviewed = (blocks, held_through, thinking_through)
+    answer_check_reminders = held_reminders
+
   def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
-    message_card: bool = False,
+    message_required: bool = False, key_request: bool = False,
   ) -> str | None:
-    nonlocal answer_check_reminders
+    nonlocal answer_check_reminders, answer_check_before_key_hold
     if (
       answer_check_reminders >= answer_check.MAX_REMINDERS
       or active_client is None
@@ -1463,10 +1496,16 @@ async def run_claude_sdk_turn(
       before_card=before_card,
       reminded=answer_check_reminders > 0,
       last_assistant_message=last_assistant_message,
-      message_card=message_card,
+      message_required=message_required,
+      key_request=key_request,
     )
     if reason is None:
       return None
+    if key_request and answer_check_before_key_hold is None:
+      blocks = getattr(bc, "assistant_blocks", None)
+      answer_check_before_key_hold = (
+        blocks, _answer_check_pointers(blocks)[0], answer_check_reminders,
+      )
     answer_check_reminders += 1
     _answer_check_spoke(reminder=True)
     log.info(
@@ -1501,12 +1540,13 @@ async def run_claude_sdk_turn(
       return {"continue_": True}
     # A successful save publishes this closing message with its card. Count
     # it as pending visible text, without publishing it before the save.
-    # Secret cards have no closing-message field.
-    message_card = hook_input.get("tool_name") != f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}"
     tool_input = hook_input.get("tool_input")
-    message = tool_input.get("message") if message_card and isinstance(tool_input, dict) else None
+    message = tool_input.get("message") if isinstance(tool_input, dict) else None
+    tool_name = hook_input.get("tool_name")
     reason = _answer_check_since_last_reminder(
-      before_card=True, last_assistant_message=message, message_card=message_card,
+      before_card=True, last_assistant_message=message,
+      message_required=tool_name in _ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS,
+      key_request=tool_name == _ANSWER_CHECK_KEY_TOOL,
     )
     if reason is None:
       return {"continue_": True}
@@ -1524,6 +1564,10 @@ async def run_claude_sdk_turn(
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
+    if hook_input.get("tool_name") == _ANSWER_CHECK_KEY_TOOL and not hook_input.get("agent_id"):
+      # The request returned. A saved card has ended the turn, so nothing
+      # reads this; an answer given at once lets the turn go on.
+      _answer_check_forget_key_hold()
     if (
       hook_input.get("agent_id")
       or hook_input.get("tool_name") in _ANSWER_CHECK_CARD_TOOLS
@@ -1751,6 +1795,7 @@ async def run_claude_sdk_turn(
     active_client = ActiveClaudeClient(
       client, chat_id=chat_id, run_marker=base_env.get(RUN_MARKER_ENV), sink=bc,
       run_generation=run_generation,
+      model=_model,
     )
     if not registry.register(active_client, run_generation=run_generation):
       startup_file_stack.close()

@@ -9,6 +9,13 @@ def _claude_engine(provider: str) -> bool:
   return provider_runtime_kind(provider) == "claude_sdk"
 
 
+def active_model_for_chat(chat_id: str, provider: str) -> str | None:
+  """The live steer target's resolved model, not mutable picker settings."""
+  kind = RunnerKind.CLAUDE_SDK if _claude_engine(provider) else RunnerKind.CODEX_SDK
+  handle = registry.get_handle(chat_id, kind)
+  return getattr(handle, "model", None)
+
+
 def has_live_steerable_turn(chat_id: str, provider: str) -> bool:
   """Whether the current provider handle can accept an in-band message."""
   if _claude_engine(provider):

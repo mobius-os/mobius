@@ -166,7 +166,7 @@ def _normalize_public_storage(raw: Any) -> dict[str, Any]:
       or normalized == _PUBLIC_STORAGE_ROOT
       or normalized.startswith("/")
       or "//" in normalized
-      or ".." in normalized.split("/")
+      or {".", ".."} & set(normalized.split("/"))
       or len(normalized) > 256
       or not _PUBLIC_WRITE_PREFIX_RE.match(normalized)
     ):
@@ -680,6 +680,7 @@ def contract_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
       "identity_manage": bool(perms.get("identity_manage", False)),
       "credits_manage": bool(perms.get("credits_manage", False)),
       "railway_manage": bool(perms.get("railway_manage", False)),
+      "channels_manage": bool(perms.get("channels_manage", False)),
       "helper_activity_read": bool(perms.get("helper_activity_read", False)),
       "location_history_read": bool(perms.get("location_history_read", False)),
     },
@@ -858,6 +859,7 @@ def contract_from_app_state(
       "identity_manage": bool(contract_grants.get("identity_manage", False)),
       "credits_manage": bool(contract_grants.get("credits_manage", False)),
       "railway_manage": bool(contract_grants.get("railway_manage", False)),
+      "channels_manage": bool(contract_grants.get("channels_manage", False)),
       "helper_activity_read": bool(
         contract_grants.get("helper_activity_read", False)
       ),
@@ -1120,7 +1122,8 @@ _BOOLEAN_GRANTS = {
   "agent.embeds_agent", "data.filesystem_api", "data.manage_apps",
   "data.manage_skills", "data.github_access", "data.github_connect",
   "data.connections_manage", "data.connect_manage", "data.identity_manage",
-  "data.credits_manage", "data.railway_manage", "data.helper_activity_read",
+  "data.credits_manage", "data.railway_manage", "data.channels_manage",
+  "data.helper_activity_read",
   "data.location_history_read", "public.storage.read",
 }
 

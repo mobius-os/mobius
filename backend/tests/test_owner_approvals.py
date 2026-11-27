@@ -611,6 +611,39 @@ def test_finished_approval_remains_answerable_and_late_answer_starts_once(
   assert len(scheduled) == 1
 
 
+@pytest.mark.parametrize("hidden", [False, True])
+def test_saved_question_answer_does_not_reorder_owner_models(
+  client, chat, auth, approval_run, monkeypatch, db, hidden,
+):
+  """A durable card continuation is not a new owner composer send."""
+  qid = _ask(client, chat, approval_run).json()["question_id"]
+  _finish(chat, approval_run[0])
+  unregister_active_sink(chat.id, approval_run[0])
+  owner = db.query(models.Owner).first()
+  owner.model_prefs_json = {"recent_ids": ["claude-opus-4-7"]}
+  chat.agent_settings_json = {"model": "claude-sonnet-4-6"}
+  db.commit()
+  scheduled = []
+  monkeypatch.setattr(chats_stream, "_schedule_continuation", lambda **kw: scheduled.append(kw))
+
+  answer = client.post(f"/api/chats/{chat.id}/messages", headers=auth, json={
+    "content": f"- {PROMPT['question']}: Not now", "hidden": hidden,
+    "answers": {PROMPT["question"]: "Not now"}, "question_id": qid,
+    "cid": f"saved-answer-{hidden}",
+  })
+  assert answer.status_code == 202, answer.text
+  assert answer.json()["answer_turn"] == "new"
+  assert len(scheduled) == 1
+  assert scheduled[0]["next_user"]["continuation_reason"] == "question_answer"
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "claude-opus-4-7",
+  ]
+  assert _answer(client, chat, auth, qid).status_code == 410
+  assert client.get("/api/owner/model-prefs", headers=auth).json()["recent_ids"] == [
+    "claude-opus-4-7",
+  ]
+
+
 def test_immediate_answer_queues_once_and_drain_starts_it_after_current_turn(
   client, chat, auth, approval_run, monkeypatch,
 ):

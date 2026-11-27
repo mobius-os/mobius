@@ -896,6 +896,15 @@ export async function probeDeletion(path) {
   }
 }
 
+/** The API path of one chat, with its id kept to a single path segment.
+ * Chat ids reach the shell from links, app frames and restored storage; a raw
+ * `../` id would otherwise climb to another authenticated /api route. Build
+ * every `/chats/<id>` request with this (or `encodeURIComponent`); the
+ * chat-path guard in internalNavigation.test.js refuses raw interpolation. */
+export function chatPath(chatId, suffix = '') {
+  return `/chats/${encodeURIComponent(chatId)}${suffix}`
+}
+
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.
@@ -1072,7 +1081,7 @@ export const api = {
       if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
-        `/chats/${chatId}${query ? `?${query}` : ''}`,
+        chatPath(chatId, query ? `?${query}` : ''),
         { signal, timeoutMs },
       )
     },
@@ -1086,12 +1095,12 @@ export const api = {
         { signal },
       )
     },
-    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
+    update: (chatId, payload) => listAffectingMutation('chats', chatPath(chatId), {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
     setPinned: (chatId, pinned, options) => pinnedResourceMutation(
-      'chats', `/chats/${chatId}`, pinned, options,
+      'chats', chatPath(chatId), pinned, options,
     ),
     markFailureSeen: (chatId, activityVersion) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
@@ -1113,10 +1122,10 @@ export const api = {
       'chats', `/chats/${encodeURIComponent(chatId)}/unarchive`, { method: 'POST' },
     ),
     remove: (chatId) => listAffectingMutation(
-      'chats', `/chats/${chatId}`, { method: 'DELETE' },
+      'chats', chatPath(chatId), { method: 'DELETE' },
     ),
     recover: (chatId, payload) => listAffectingMutation(
-      'chats', `/chats/${chatId}/recover`, {
+      'chats', chatPath(chatId, '/recover'), {
         method: 'POST',
         body: payload ? JSON.stringify(payload) : undefined,
       },
@@ -1368,6 +1377,23 @@ export const api = {
       `/projects/${encodeURIComponent(projectId)}/invites/${encodeURIComponent(inviteId)}`,
       { method: 'DELETE' },
     ),
+    // Invitations by Möbius @handle: sent to, and received from, other Möbius.
+    sendHandleInvite: (payload) => apiFetch('/project-invites/send', {
+      method: 'POST', body: JSON.stringify(payload),
+    }),
+    receivedInvites: () => apiFetch('/project-invites'),
+    acceptReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/accept`, { method: 'POST' },
+    ),
+    openReceivedProject: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/open`, { method: 'POST' },
+    ),
+    declineReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}/decline`, { method: 'POST' },
+    ),
+    removeReceivedInvite: (inviteId) => apiFetch(
+      `/project-invites/${encodeURIComponent(inviteId)}`, { method: 'DELETE' },
+    ),
     updateMember: (projectId, memberId, payload) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(memberId)}`,
       { method: 'PATCH', body: JSON.stringify(payload) },
@@ -1440,10 +1466,14 @@ export const api = {
         method: 'POST', body: JSON.stringify({ expected_head: expectedHead || null }),
       },
     ),
-    pushRemote: (projectId, expectedHead) => apiFetch(
+    pushRemote: (projectId, expectedHead, expectedPushBranch) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/git/push`, {
         method: 'POST',
-        body: JSON.stringify({ expected_head: expectedHead || null, confirmed: true }),
+        body: JSON.stringify({
+          expected_head: expectedHead || null,
+          expected_push_branch: expectedPushBranch || null,
+          confirmed: true,
+        }),
       },
     ),
     readFile: (projectId, path, { download = false, signal } = {}) => apiFetch(
@@ -1845,6 +1875,11 @@ export const api = {
       ...(body ? { body: JSON.stringify(body) } : {}),
     }),
     restart: () => apiFetch('/platform/restart', { method: 'POST' }),
+    launcherSide: () => apiFetch('/platform/launcher-side'),
+    chooseLauncherSide: (side) => apiFetch('/platform/launcher-side', {
+      method: 'POST',
+      body: JSON.stringify({ side }),
+    }),
   },
   push: {
     vapidKey: () => apiFetch('/push/vapid-key'),
@@ -1868,21 +1903,6 @@ export const api = {
         // Sign-out reloads the page right after; let the request finish.
         keepalive: true,
       }),
-    },
-    // Outside channels (Slack, Discord, ntfy, webhooks) that get a copy of
-    // notifications. The link goes in once and is never read back.
-    channels: {
-      list: () => apiFetch('/push/channels'),
-      add: (payload) => apiFetch('/push/channels', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-      }),
-      update: (id, payload) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify(payload),
-      }),
-      remove: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-      test: (id) => apiFetch(`/push/channels/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     },
   },
 }

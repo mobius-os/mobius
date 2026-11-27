@@ -43,6 +43,7 @@ import {
 import { AppleMark, GoogleMark } from '../ui/AccountProviderMarks.jsx'
 import { showsCreditsRow, walletGlance } from '../../lib/creditsWallet.js'
 import { closeAuthWindow, navigateAuthWindow } from '../../utils/authWindow.js'
+import LauncherSideSection from './LauncherSideSection.jsx'
 import './SettingsPage.css'
 import './MobiusAccountPage.css'
 
@@ -1279,6 +1280,7 @@ export default function MobiusAccountPage({ active = true, creditsSummary = null
           dashboard={dashboard}
         />
       )}
+      <LauncherSideSection />
     </div>
   )
 }

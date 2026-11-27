@@ -1,3 +1,5 @@
+import { parseApiTimestamp } from '../../lib/dateTimeFormat.js'
+
 // Normalize to a bare UTC wall-clock string so values from different sources
 // compare consistently: optimistic client stamps are ISO-with-`Z`, while the
 // server serializes naive-UTC without a suffix. Both denote UTC, so dropping a
@@ -12,10 +14,7 @@ function pinnedAt(item) {
 }
 
 function pinnedAtMillis(item) {
-  const value = item?.pinned_at
-  if (!value) return Number.NaN
-  const normalized = /(?:Z|[+-]\d\d:\d\d)$/.test(value) ? value : `${value}Z`
-  return Date.parse(normalized)
+  return parseApiTimestamp(item?.pinned_at)
 }
 
 /**

@@ -159,6 +159,8 @@ class SharedAppPrincipal:
   member_id: str | None = None
   display_name: str | None = None
   browser: BrowserLineage | None = None
+  # A delegated helper's bearer; it may use the app, never administer access.
+  delegation_id: str | None = None
 
   @property
   def is_owner(self) -> bool:
@@ -430,7 +432,8 @@ def resolve_shared_app_principal(token: str, db: Session) -> SharedAppPrincipal:
   scope = payload.get("scope")
   if scope is None:
     return SharedAppPrincipal(owner=owner, role="owner", display_name=owner.username,
-                              browser=BrowserLineage.from_claims(payload))
+                              browser=BrowserLineage.from_claims(payload),
+                              delegation_id=payload.get("delegation_id"))
   if scope != "shared_app_collaborator":
     raise HTTPException(403, "Token scope is not valid for shared apps.")
   member_id = payload.get("shared_app_member")
@@ -1472,6 +1475,38 @@ def get_owner_or_app_with_railway_manage(
     detail=(
       "This app needs permissions.railway_manage=true in its manifest "
       "to manage Railway deployments on your behalf."
+    ),
+  )
+
+
+def get_owner_or_app_with_channels_manage(
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> models.Owner:
+  """The owner or their top-level agent, or an app holding ``channels_manage``.
+
+  Outside channels receive owner notifications and speak for the owner in
+  other places, so, like a push subscription, a delegated helper or a
+  shared-browser guest may not manage or post to one. The grant lives in the
+  accepted capability contract (see ``_identity_manager``): omission on a later
+  app version revokes it on the next request. A helper can mint an app
+  credential that keeps its delegation, so both branches check lineage first.
+  """
+  require_installation_owner_control(principal)
+  if principal.app_id is None:
+    return _owner_principal_or_403(principal)
+  app = db.query(models.App).filter(models.App.id == principal.app_id).first()
+  if not app:
+    raise HTTPException(status_code=401, detail="App not found.")
+  contract = app.capability_contract if isinstance(app.capability_contract, dict) else {}
+  data = contract.get("data") if isinstance(contract.get("data"), dict) else {}
+  if data.get("channels_manage") is True:
+    return principal.owner
+  raise HTTPException(
+    status_code=403,
+    detail=(
+      "This app needs permissions.channels_manage=true in its manifest "
+      "to manage or post to your outside channels."
     ),
   )
 

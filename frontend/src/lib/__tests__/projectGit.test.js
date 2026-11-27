@@ -51,7 +51,7 @@ test('project versioning remains reachable inside the shared data repository', (
 test('remote synchronization exposes only safe fast-forward actions', () => {
   const ready = {
     available: true, connected: true, github_connected: true,
-    ahead: 2, behind: 0, dirty: false, diverged: false,
+    ahead: 2, behind: 0, dirty: false, diverged: false, push_branch: 'main',
   }
   assert.equal(remoteSyncPresentation(ready).title, '2 commits ready to push')
   assert.deepEqual(remoteSyncActions(ready), { fetch: true, pull: false, push: true })
@@ -65,6 +65,15 @@ test('remote synchronization exposes only safe fast-forward actions', () => {
   )
   assert.equal(remoteSyncActions({ ...ready, dirty: true }).push, false)
   assert.equal(remoteSyncActions({ ...ready, github_connected: false }).fetch, false)
+})
+
+test('push stays closed when the branch has no reviewed GitHub destination', () => {
+  const untracked = {
+    available: true, connected: true, github_connected: true,
+    ahead: 1, behind: 0, dirty: false, diverged: false, push_branch: null,
+  }
+  assert.equal(remoteSyncActions(untracked).push, false)
+  assert.equal(remoteSyncPresentation(untracked).title, 'No GitHub branch to push to')
 })
 
 test('only a complete shared status of untracked files is described as new files', () => {
