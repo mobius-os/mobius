@@ -5,6 +5,7 @@ import { useHistoryDismiss } from '../../hooks/useHistoryDismiss.jsx'
 import { BASE, chatPath } from '../../api/client.js'
 import { mediaTokenParam } from '../../api/mediaToken.js'
 import { markAttachmentThumbFit } from './attachmentThumbFit.js'
+import Spinner from '../ui/Spinner.jsx'
 
 /** Classifies a file by extension into a colored badge variant.
  *  Returns {kind, label} where kind = 'pdf' | 'doc' | 'code' and
@@ -152,7 +153,7 @@ export default function FileChips({ files, onRemove, chatId, disabled = false })
                 Preview unavailable
               </span>
             ) : isImage ? (
-              <span className="chat__attach-card-spin" aria-hidden="true" />
+              <Spinner size={12} tone="accent" className="chat__attach-card-spin" />
             ) : (
               <>
                 <span className={`chat__attach-card-icon chat__attach-card-icon--${cls.kind}`}>
@@ -162,7 +163,7 @@ export default function FileChips({ files, onRemove, chatId, disabled = false })
               </>
             )}
             {chip.status === 'uploading' && (
-              <span className="chat__attach-card-spin" aria-hidden="true" />
+              <Spinner size={12} tone="accent" className="chat__attach-card-spin" />
             )}
             <button
               type="button"

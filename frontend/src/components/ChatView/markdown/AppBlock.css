@@ -154,11 +154,6 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 /* A row's state is words in their tone, not a filled pill (after the tones,
    which it must outrank); footer pills keep their fill. */
 .md-app-block__item-state .md-app-block__pill { min-height:0; padding:0; background:transparent; font-size:13px; }
-@keyframes md-app-block-spin { to { transform:rotate(360deg); } }
-.md-app-block__spinner { flex-shrink:0; width:12px; height:12px; border-radius:50%; border:1.75px solid color-mix(in srgb, currentColor 25%, transparent);
-  border-top-color:currentColor; animation:md-app-block-spin .8s linear infinite; }
-.md-app-block__action .md-app-block__spinner { width:14px; height:14px; }
-@media (prefers-reduced-motion: reduce) { .md-app-block__spinner { animation:none; } }
 .md-app-block__links { display:inline-flex; flex-wrap:wrap; gap:0 10px; }
 .md-app-block__link { display:inline-flex; align-items:center; gap:2px; min-height:44px; color:var(--accent-text, var(--accent)); font-size:13px; font-weight:600;
   font-variant-numeric:tabular-nums; text-decoration:none; overflow-wrap:anywhere; }
@@ -186,9 +181,7 @@ a.md-app-block__item-title:focus-visible { outline:2px solid var(--accent); outl
 .md-app-block__title-mark.is-attention { background:color-mix(in srgb, var(--warning, var(--accent)) 18%, transparent); color:var(--warning-text, color-mix(in srgb, var(--warning, var(--accent)) 65%, var(--text))); }
 .md-app-block__title-mark.is-danger { background:color-mix(in srgb, var(--danger) 14%, transparent); color:var(--danger-text, color-mix(in srgb, var(--danger) 65%, var(--text))); }
 .md-app-block__title-mark-alert { font-size:13px; font-weight:700; line-height:1; }
-.md-app-block__title-mark .md-app-block__spinner { width:14px; height:14px; }
 .md-app-block__title-mark.is-busy { background:transparent; }
-.md-app-block__title-mark.is-busy .md-app-block__spinner { box-sizing:border-box; border-width:2px; transform-origin:center; }
 /* A folded block is one muted line, not a placeholder box: no rows, no controls. */
 .md-app-block--folded { border:0; background:transparent; }
 .md-app-block--folded > header { flex-wrap:wrap; padding:0 4px 0 8px; }

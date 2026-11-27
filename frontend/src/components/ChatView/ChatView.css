@@ -2076,19 +2076,6 @@
   word-break: break-word;
 }
 
-.chat__tool-spin {
-  display: inline-block;
-  width: 9px;
-  height: 9px;
-  border: 1.5px solid var(--border); /* CONTRACT: 1.5px ring on opaque fill (used for spinner track) */
-  border-top-color: var(--accent); /* CONTRACT: vivid accent — spinning arc on top of the track */
-  border-radius: 50%;
-  animation: spin 0.75s linear infinite;
-  flex-shrink: 0;
-}
-
-@keyframes spin { to { transform: rotate(360deg); } }
-
 /* ── Activity stretch (thinking + tools, unified) ───── */
 
 /* A MULTI-STEP contiguous run of thinking and tool blocks collapses to one
@@ -3749,12 +3736,6 @@
   position: absolute;
   bottom: 6px;
   left: 6px;
-  width: 12px;
-  height: 12px;
-  border: 1.5px solid var(--border); /* CONTRACT: 1.5px ring on opaque fill (used for spinner track) */
-  border-top-color: var(--accent); /* CONTRACT: vivid accent — spinning arc on top of the track */
-  border-radius: 50%;
-  animation: spin 0.75s linear infinite;
 }
 
 /* ── Message attachments ─────────────────────────────── */

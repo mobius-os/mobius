@@ -12,6 +12,7 @@ import { useNearViewport } from './blockViewport.js'
 import { useKeptFocus } from './blockFocus.js'
 import { passiveBlockMode } from './blockOwnership.js'
 import { appBlockChatKey, blockFingerprint, useAppBlockChat } from './appBlockChat.js'
+import Spinner from '../../ui/Spinner.jsx'
 
 export { passiveBlockMode }
 
@@ -77,7 +78,7 @@ export function SessionControls({ target, state, locked, confirmArmed = false, c
       : <button type="button" className="md-app-block__action" disabled={locked || state.disabled}
         aria-busy={state.busy || undefined} title={state.label || target.label}
         onClick={() => onEvent(target.intent, 'activate')}>
-        {state.busy ? <span className="md-app-block__spinner" aria-hidden="true" /> : null}
+        {state.busy ? <Spinner size={14} /> : null}
         {state.label || target.label}</button>
   return <div className="md-app-block__session">
     <div className="md-app-block__session-row">
@@ -120,7 +121,7 @@ export function AskControl({ status, locked, onAsk }) {
     <button type="button" className={`md-app-block__action is-ask${sending ? ' is-requesting' : ''}${settled ? ' is-settled' : ''}`}
       disabled={locked || waiting} aria-busy={sending || undefined}
       aria-describedby={waiting ? waitingId : undefined} onClick={onAsk}>
-      {sending ? <span className="md-app-block__spinner" aria-hidden="true" />
+      {sending ? <Spinner size={14} />
         : settled ? <Check width={16} height={16} aria-hidden="true" /> : <Chat width={16} height={16} aria-hidden="true" />}
       {ASK_LABELS[status] || ASK_LABEL}</button>
     {waiting ? <span id={waitingId} className="md-app-block__sr-only">{ASK_WAIT[status]}</span> : null}

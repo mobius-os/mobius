@@ -15,6 +15,7 @@ import { remoteSyncActions, remoteSyncPresentation } from '../../lib/projectGit.
 import { prepareProjectContribution } from '../../lib/projectContribution.js'
 import { linkedProjectAppId } from '../../lib/appSourceProject.js'
 import ProjectIdentityIcon from './ProjectIdentityIcon.jsx'
+import Spinner from '../ui/Spinner.jsx'
 import './ProjectGitPanel.css'
 
 export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
@@ -153,7 +154,7 @@ export default function ProjectGitPanel({ project, onClose, onOpenChat }) {
                 </div>
                 <details><summary>Direct branch sync</summary>
                 <div className="project-git__actions">
-                  <button type="button" disabled={!!busy || !actions.fetch} onClick={() => void run('fetch')}><RefreshCw size={14} className={busy === 'fetch' ? 'is-spinning' : ''} />{busy === 'fetch' ? 'Fetching…' : 'Fetch'}</button>
+                  <button type="button" disabled={!!busy || !actions.fetch} onClick={() => void run('fetch')}>{busy === 'fetch' ? <Spinner size={14} /> : <RefreshCw size={14} />}{busy === 'fetch' ? 'Fetching…' : 'Fetch'}</button>
                   <button type="button" disabled={!!busy || !actions.pull} onClick={() => void run('pull')}><ArrowDown size={14} />{busy === 'pull' ? 'Pulling…' : 'Pull'}</button>
                   <button type="button" className="is-primary" disabled={!!busy || !actions.push} aria-expanded={pushReview} onClick={() => setPushReview(true)}><ArrowUp size={14} />{busy === 'push' ? 'Pushing…' : 'Review & push'}</button>
                 </div>

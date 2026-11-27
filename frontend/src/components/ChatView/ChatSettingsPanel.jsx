@@ -96,6 +96,7 @@ import { orderPickerModels } from '../../lib/modelPickerOrder.js'
 import { formatRoundedTokenCount } from './brainUsage.js'
 import { providerInfoFor, providerOrderFor } from './providerRegistry.jsx'
 import ModelPickerRow, { providerSetupLink } from './ModelPickerRow.jsx'
+import Spinner from '../ui/Spinner.jsx'
 import './ChatSettingsPanel.css'
 
 /** Resolves the displayed model list for `providerId` from the live
@@ -599,7 +600,7 @@ export default function ChatSettingsPanel({
             </div>
           ) : (
             <div className="csp__loading" role="status" aria-live="polite">
-              {loadingModels && <span className="csp__loading-spinner" aria-hidden="true" />}
+              {loadingModels && <Spinner size={14} tone="accent" />}
               <span>Loading models…</span>
             </div>
           )}
