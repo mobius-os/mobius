@@ -181,6 +181,67 @@ def test_replacing_a_link_keeps_the_channel_settings(client, auth, db, sent):
   assert notification_channels.decrypt_url(row.url_encrypted) == DISCORD
 
 
+def test_replacing_a_self_hosted_ntfy_link_keeps_it_ntfy(client, auth, db, sent):
+  app = _app(db, "channel-social-ntfy")
+  channel = _add(client, auth, url="https://ntfy.example.org/alerts", kind="ntfy")
+  patched = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth,
+    json={"url": "https://ntfy.example.org/alerts-v2"},
+  ).json()
+  assert patched["kind"] == "ntfy" and patched["label"] == "ntfy"
+  _notify(client, auth, app)
+  url, payload = sent[-1]
+  assert url == "https://ntfy.example.org/" and payload["topic"] == "alerts-v2"
+  # A link a known service claims still moves the channel to that service.
+  moved = client.patch(f"/api/channels/{channel['id']}", headers=auth, json={"url": SLACK}).json()
+  assert moved["kind"] == "slack" and moved["label"] == "Slack"
+
+
+def test_an_explicit_kind_switches_between_ntfy_and_webhook_keeping_settings(client, auth, db, sent):
+  app = _app(db, "channel-social-switch")
+  channel = _add(
+    client, auth, url="https://ntfy.example.org/alerts", kind="ntfy", app_ids=[app.id],
+  )
+  # Unclaimed links look alike, so the caller names the kind; the channel and
+  # its app filter survive instead of having to be deleted and added again.
+  hook = "https://hooks.zapier.com/hooks/catch/123/abc"
+  as_webhook = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth, json={"url": hook, "kind": "webhook"},
+  ).json()
+  assert as_webhook["kind"] == "webhook" and as_webhook["label"] == "Webhook"
+  assert as_webhook["id"] == channel["id"] and as_webhook["appIds"] == [app.id]
+  _notify(client, auth, app)
+  url, payload = sent[-1]
+  assert url == hook and "topic" not in payload
+  # A webhook without a path is a webhook, not an ntfy link missing its topic.
+  bare = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth,
+    json={"url": "https://webhook.example.org/", "kind": "webhook"},
+  )
+  assert bare.status_code == 200, bare.text
+
+  as_ntfy = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth,
+    json={"url": "https://ntfy.example.org/alerts", "kind": "ntfy"},
+  ).json()
+  assert as_ntfy["kind"] == "ntfy" and as_ntfy["label"] == "ntfy"
+  _notify(client, auth, app)
+  url, payload = sent[-1]
+  assert url == "https://ntfy.example.org/" and payload["topic"] == "alerts"
+
+
+def test_changing_the_kind_without_the_link_is_refused(client, auth, db, sent):
+  channel = _add(client, auth, url="https://ntfy.example.org/alerts", kind="ntfy")
+  refused = client.patch(f"/api/channels/{channel['id']}", headers=auth, json={"kind": "webhook"})
+  assert refused.status_code == 400
+  assert client.get("/api/channels", headers=auth).json()[0]["kind"] == "ntfy"
+  # Naming the kind it already has changes nothing and is accepted.
+  same = client.patch(
+    f"/api/channels/{channel['id']}", headers=auth, json={"kind": "ntfy", "label": "Alerts"},
+  )
+  assert same.status_code == 200 and same.json()["label"] == "Alerts"
+
+
 def test_a_crafted_link_back_cannot_add_a_mention_or_another_link(client, auth, db, sent):
   social = _app(db, "channel-social-6")
   _add(client, auth, url=SLACK)

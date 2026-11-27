@@ -54,22 +54,31 @@ _ERROR_TYPE_KINDS = {
 # Grounded in Anthropic limit strings seen in production: "You've hit your
 # weekly limit · resets ...", "... session limit ...", and "Server is
 # temporarily limiting requests ... Rate limited".
-_USAGE_LIMIT_WORDING = re.compile(
-  r"rate[_ ]limit|usage[_ ]limit|weekly limit|session limit|overloaded|"
-  r"quota|too many requests|\b429\b",
-  re.IGNORECASE,
+_THROTTLE_WORDING = re.compile(
+  r"rate[_ ]limit|overloaded|too many requests|\b429\b", re.IGNORECASE,
+)
+_QUOTA_WORDING = re.compile(
+  r"usage[_ ]limit|weekly limit|session limit|quota", re.IGNORECASE,
 )
 
 
-def _is_usage_limit(text: str) -> bool:
-  # "limit" with "resets" catches the whole "hit your <period> limit · resets
-  # <time>" family without matching an error that merely says "limit". Plain
-  # substring checks keep this linear; a regex spanning the two words was
-  # quadratic on long limit-heavy text such as Codex stderr.
+def is_quota_limit(text: str | None) -> bool:
+  """Whether the account's own allowance ran out.
+
+  That allowance resets on a clock or when the owner resets it, unlike a
+  request throttle that clears in seconds. "limit" with "resets" catches the
+  whole "hit your <period> limit · resets <time>" family ("5-hour", "weekly",
+  "Opus") without matching an error that merely says "limit". Plain substring
+  checks keep this linear; a regex spanning the two words was quadratic on
+  long limit-heavy text such as Codex stderr.
+  """
+  text = text or ""
   low = text.lower()
-  return bool(_USAGE_LIMIT_WORDING.search(text)) or (
-    "limit" in low and "resets" in low
-  )
+  return bool(_QUOTA_WORDING.search(text)) or ("limit" in low and "resets" in low)
+
+
+def _is_usage_limit(text: str) -> bool:
+  return bool(_THROTTLE_WORDING.search(text)) or is_quota_limit(text)
 
 
 # Checked in order: a size or credit refusal can mention a limit or quota, and

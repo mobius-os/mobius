@@ -654,7 +654,8 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   fake_scaffold.write_text("#!/bin/bash\n")
 
   with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.app_cron.subprocess.run") as mock_run:
+       patch("app.app_cron.subprocess.run") as mock_run, \
+       patch("app.app_cron._install_declared_entry") as install_live:
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     app_cron.register_cron(
       "reflection", "0 6 * * *", job_path, 42, scaffold=fake_scaffold,
@@ -672,6 +673,11 @@ def test_register_cron_passes_job_name_to_scaffold(tmp_path):
   assert mock_run.call_args.kwargs["env"]["MOBIUS_APP_JOB_RUNNER"].endswith(
     "scripts/app-job-runner.py"
   )
+  # The scaffold only declares; the backend then installs that declaration.
+  assert mock_run.call_args.kwargs["env"]["MOBIUS_CRON_DECLARE_ONLY"] == "1"
+  install_live.assert_called_once_with(
+    app_cron.schedule_state_dir(42) / "init-cron.sh",
+  )
 
 
 def test_cron_scaffold_prefers_the_served_checkout():
@@ -685,7 +691,7 @@ def test_cron_scaffold_prefers_the_served_checkout():
 
 
 def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
-  """The scaffold owns durable declaration + live update as one ordered unit."""
+  """The scaffold's durable declaration carries the whole zone identity."""
   from app import app_cron
 
   app_dir = tmp_path / "reflection"
@@ -695,7 +701,8 @@ def test_register_cron_gives_scaffold_the_complete_zone_identity(tmp_path):
   fake_scaffold.write_text("#!/bin/bash\n")
 
   with patch.dict(os.environ, {"MOBIUS_ALLOW_TEST_CRON": "1"}), \
-       patch("app.app_cron.subprocess.run") as mock_run:
+       patch("app.app_cron.subprocess.run") as mock_run, \
+       patch("app.app_cron._install_declared_entry"):
     mock_run.return_value = MagicMock(returncode=0, stderr="")
     app_cron.register_cron(
       "reflection", "* * * * *", job_path, 42,
@@ -754,6 +761,8 @@ def test_register_cron_omits_app_id_when_none(tmp_path):
   assert mock_run.call_args.args[0] == [
     str(fake_scaffold), "selfcontained", "0 6 * * *", "job.sh",
   ]
+  # With no app identity the scaffold still installs its own live entry.
+  assert "MOBIUS_CRON_DECLARE_ONLY" not in mock_run.call_args.kwargs["env"]
 
 
 def test_register_cron_refuses_real_subprocess_in_test_runtime(

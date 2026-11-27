@@ -12,8 +12,9 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
   BEARER, relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
-  REQUESTS_SHOWN, VAULT_DOWN,
+  REQUESTS_SHOWN, VAULT_DOWN, keyParts, partLabel,
 } from '../../lib/keysSettingsText.js'
+import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import KeyRequest from './KeyRequest.jsx'
 import { KEYS_QUERY, useAppNames, useKeyUsage, useKeys } from './keysQueries.js'
 import './KeysSection.css'
@@ -42,6 +43,7 @@ function recordFor(key, changes = {}) {
     // The vault refuses a save made from a stale copy of the key.
     revision: key.revision,
     ...(changes.value ? { value: changes.value } : {}),
+    ...(changes.parts ? { parts: changes.parts } : {}),
   }
 }
 
@@ -341,7 +343,9 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
 
       <Group title="Key">
         <div className="settings-list">
-          <ValueRow keyRecord={key} names={names} save={save} busy={busy} />
+          {keyParts(key).map(part => (
+            <ValueRow key={part.name} keyRecord={key} part={part} names={names} save={save} busy={busy} />
+          ))}
         </div>
       </Group>
 
@@ -446,14 +450,18 @@ function AppRow({ grant, row, busy, onSwitch, onSites, onRemove }) {
   )
 }
 
-/** The value field: one masked line, or a box for keys with several lines. */
-function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFocus }) {
+/**
+ * The value field: one line (masked unless ``plain``), or a box for keys with
+ * several lines that also takes a dropped key file.
+ */
+function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFocus, plain = false }) {
   return multiline ? (
     <textarea
       id={id}
       className="settings-input settings-input--multiline"
       value={value}
       onChange={e => onChange(e.target.value)}
+      {...keyFileDropProps(onChange)}
       placeholder="Paste the whole key, including its first and last lines"
       aria-label={label}
       spellCheck={false}
@@ -465,7 +473,7 @@ function ValueInput({ id, value, onChange, multiline, placeholder, label, autoFo
     <input
       id={id}
       className="settings-input"
-      type="password"
+      type={plain ? 'text' : 'password'}
       value={value}
       onChange={e => onChange(e.target.value)}
       placeholder={placeholder}
@@ -490,19 +498,29 @@ function SwitchRow({ title, sub, checked, onChange, disabled }) {
   )
 }
 
-function ValueRow({ keyRecord: key, names, save, busy }) {
+/**
+ * One part of a key: the only one (``value``) for most keys, or each named
+ * part of a key sent in several pieces. A plain part (an id, a username)
+ * shows its text; a secret one stays hidden until Show. Replace changes only
+ * this part.
+ */
+function ValueRow({ keyRecord: key, part, names, save, busy }) {
   const savedBy = savedByApp(key, names)
   const warning = replaceWarning(key, names)
-  const [shown, setShown] = useState(null)
+  const single = keyParts(key).length === 1 && part.name === 'value'
+  const label = partLabel(part)
+  const [revealed, setShown] = useState(null)
+  // A plain part always shows its current text; a secret one only once revealed.
+  const shown = part.secret ? revealed : part.text
   const [replacing, setReplacing] = useState(false)
   const [next, setNext] = useState('')
-  const [multiline, setMultiline] = useState(Boolean(key.multiline))
+  const [multiline, setMultiline] = useState(Boolean(part.multiline))
   const [error, setError] = useState('')
 
   async function show() {
     setError('')
     try {
-      setShown((await jsonOrThrow(await api.keys.reveal(key.name), 'Show key')).value)
+      setShown((await jsonOrThrow(await api.keys.reveal(key.name, part.name), 'Show key')).value)
     } catch (err) {
       setError(err.message)
     }
@@ -510,7 +528,8 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
 
   async function replace(event) {
     event.preventDefault()
-    if (await save(recordFor(key, { value: next }))) {
+    const change = single ? { value: next } : { parts: [{ name: part.name, value: next }] }
+    if (await save(recordFor(key, change))) {
       setNext('')
       setReplacing(false)
       setShown(null)
@@ -522,18 +541,33 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
       <div className="settings-item settings-keys-value">
         <span className="settings-item__icon" aria-hidden="true"><Key {...ICON} /></span>
         <span className="settings-item__body">
+          {!single && <span className="settings-item__sub">{label}</span>}
           {shown === null
             ? <span className="settings-item__title settings-keys-value__mask" aria-label="Hidden">••••••••••••</span>
             : <code className="settings-keys__value">{shown}</code>}
-          <span className="settings-item__sub">{savedBy ? `Saved by ${savedBy}` : 'Encrypted on this Möbius'}</span>
+          <span className="settings-item__sub">
+            {!part.secret ? 'Not secret: shown as typed' : savedBy ? `Saved by ${savedBy}` : 'Encrypted on this Möbius'}
+          </span>
         </span>
         <span className="settings-actions settings-keys-value__actions">
-          <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => (shown === null ? show() : setShown(null))}>
-            {shown === null ? <Eye {...BUTTON_ICON} /> : <EyeOff {...BUTTON_ICON} />}
-            {shown === null ? 'Show' : 'Hide'}
-          </button>
+          {part.secret && (
+            <button
+              type="button"
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              aria-label={single ? undefined : `${shown === null ? 'Show' : 'Hide'} ${label}`}
+              onClick={() => (shown === null ? show() : setShown(null))}
+            >
+              {shown === null ? <Eye {...BUTTON_ICON} /> : <EyeOff {...BUTTON_ICON} />}
+              {shown === null ? 'Show' : 'Hide'}
+            </button>
+          )}
           {!replacing && (
-            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={() => setReplacing(true)}>
+            <button
+              type="button"
+              className="settings__btn settings__btn--outline settings__btn--sm"
+              aria-label={single ? undefined : `Replace ${label}`}
+              onClick={() => setReplacing(true)}
+            >
               <EditPencil {...BUTTON_ICON} /> Replace
             </button>
           )}
@@ -546,11 +580,12 @@ function ValueRow({ keyRecord: key, names, save, busy }) {
             value={next}
             onChange={setNext}
             multiline={multiline}
-            placeholder="Paste the new key"
-            label="New key value"
+            plain={!part.secret}
+            placeholder={single ? 'Paste the new key' : `Paste the new ${label}`}
+            label={single ? 'New key value' : `New ${label}`}
             autoFocus
           />
-          <SwitchRow title="It has several lines" sub="A certificate or key file" checked={multiline} onChange={setMultiline} />
+          {part.secret && <SwitchRow title="It has several lines" sub="A certificate or key file" checked={multiline} onChange={setMultiline} />}
           {warning && <p className="settings-field__hint" role="note">{warning}</p>}
           <div className="settings-actions">
             <button type="submit" className="settings__btn settings__btn--sm" disabled={busy || !next}>Save</button>

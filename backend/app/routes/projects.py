@@ -232,6 +232,8 @@ class ProjectRemoteAction(BaseModel):
 
 class ProjectRemotePush(ProjectRemoteAction):
   confirmed: bool = False
+  # The origin branch the owner saw in the confirmation (``push_branch``).
+  expected_push_branch: str | None = Field(default=None, min_length=1, max_length=255)
 
 
 class ProjectChatCreate(BaseModel):
@@ -2321,13 +2323,14 @@ def list_project_files(
     raise HTTPException(400, "Path is not a directory.")
 
   # `artifacts/` at the root is managed build output surfaced above the source
-  # tree, not a second editable copy of the same result.
+  # tree, not a second editable copy of the same result. Git review hides the
+  # same folder, so the tree and the change list agree on what is source.
   return workspace_files.list_entries(
     root, directory,
     path=path,
     recursive=recursive,
     hidden_dirs=workspace_files.GIT_METADATA_NAMES,
-    hidden_root_dirs=frozenset({"artifacts"}),
+    hidden_root_dirs=project_git.PROJECT_VISIBILITY.hidden_root_dirs,
   )
 
 
@@ -2574,7 +2577,9 @@ def push_project_git_remote(
   _require_project_github_connection()
   try:
     return {
-      **project_git.push_project(_project_root(project), body.expected_head),
+      **project_git.push_project(
+        _project_root(project), body.expected_head, body.expected_push_branch,
+      ),
       "github_connected": True,
     }
   except project_git.GitProjectError as exc:

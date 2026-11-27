@@ -282,6 +282,28 @@ def sites_outside(sites: list[dict], requested: list[dict]) -> list[dict]:
   return _vault_rules().sites_outside(sites, requested)
 
 
+def secret_echoes(*values: str):
+  """The vault's matcher for every echo of ``values``, however a site escaped them.
+
+  Building it can take a large part of a second for a long OAuth token, so call
+  it off the event loop. The few most recent matchers are kept, so repeat
+  requests with the same key do not rebuild one, while a rotated token's is soon
+  released.
+  """
+  return _secret_echoes_of(frozenset(values))
+
+
+@functools.lru_cache(maxsize=4)
+def _secret_echoes_of(values: frozenset[str]):
+  return _vault_rules().secret_echoes(*values)
+
+
+def stream_redactor(echoes, replacement: bytes):
+  """The vault's redactor for a body streamed in pieces, so the broker and the
+  vault relay share one hold-back rule."""
+  return _vault_rules().StreamRedactor(echoes, replacement)
+
+
 def stored_slot(inject):
   """A slot as the vault stores it, so one written differently but stored the
   same (spacing around its name, an absent prefix) compares equal; one the
@@ -381,7 +403,12 @@ def model_provider_key_in(
     return None
   record = next(k for k in keys if k["name"] == key)
   grant = _grant_of(record, app_id, install)
-  if record.get("multiline") or grant.get("paused"):
+  # A provider sends the one secret ``value`` as a bearer token: only a key
+  # sent that plainly qualifies, never one the vault signs or builds from
+  # parts, whose secret is not meant to leave as it is.
+  has_value = any(part["name"] == "value" and part["secret"] for part in record.get("parts") or [])
+  plain_recipe = (record.get("inject") or {}).get("type") in ("header", "query")
+  if not has_value or not plain_recipe or record.get("multiline") or grant.get("paused"):
     return None
   allowed = _vault_rules().site_allows(grant["sites"], site["host"], "POST", path) is None
   return key if allowed else None

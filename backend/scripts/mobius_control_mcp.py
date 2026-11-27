@@ -746,9 +746,9 @@ def _call_request_question(arguments: dict[str, Any]) -> dict:
 
 def _call_request_key(arguments: dict[str, Any]) -> dict:
   if not {"key", "reason"}.issubset(arguments) or not set(arguments).issubset(
-    {"key", "reason", "sites", "inject", "message"}
+    {"key", "reason", "sites", "inject", "parts", "message"}
   ):
-    raise ValueError("request_key needs key and reason, and may take sites, inject and message")
+    raise ValueError("request_key needs key and reason, and may take sites, inject, parts and message")
   try:
     return _APPROVALS.request_key(**arguments)
   except SystemExit as exc:
@@ -1859,15 +1859,79 @@ _TOOL_DEFINITIONS = {
           "description": (
             "How the key is sent, for a new key or one nothing sends yet "
             "(Allow then sets it; a key already in use keeps its own); "
-            "default Authorization: Bearer. "
-            "{type: header, name, prefix?} or {type: query, name}."
+            "default Authorization: Bearer. One value: {type: header, name, "
+            "prefix?} or {type: query, name}. Several parts (list them in "
+            "parts): {type: basic, username, password} naming two parts, or "
+            "{type: slots, slots: [...]} with up to 8 slots, each {type: header, "
+            "name, template} where template names parts like \"Token {id}:{secret}\", "
+            "{type: query, name, part}, or {type: body, format: json|form, field, part}. "
+            "Signed by the vault: {type: aws_sigv4, access_key_id, secret_access_key, "
+            "session_token?, region, service: s3} (S3-compatible storage only: S3, R2, B2, MinIO; "
+            "region auto for R2), or {type: jwt_bearer, private_key, alg?: RS256|ES256, key_id?, "
+            "claims: {iss?, sub?, aud?, scope?}, lifetime_secs?, exchange?: {kind: google} "
+            "| {kind: github, installation_id}}: a Google service account pastes its whole "
+            "JSON file as private_key and names claims.scope; a GitHub App names claims.iss."
           ),
           "properties": {
-            "type": {"type": "string", "enum": ["header", "query"]},
+            "type": {"type": "string", "enum": ["header", "query", "basic", "slots", "aws_sigv4", "jwt_bearer"]},
+            "access_key_id": {"type": "string"},
+            "secret_access_key": {"type": "string"},
+            "session_token": {"type": "string"},
+            "region": {"type": "string"},
+            "service": {"type": "string"},
+            "private_key": {"type": "string"},
+            "alg": {"type": "string", "enum": ["RS256", "ES256"]},
+            "key_id": {"type": "string"},
+            "claims": {
+              "type": "object", "additionalProperties": False,
+              "properties": {name: {"type": "string"} for name in ("iss", "sub", "aud", "scope")},
+            },
+            "lifetime_secs": {"type": "integer", "minimum": 60, "maximum": 3600},
+            "exchange": {
+              "type": "object", "additionalProperties": False, "required": ["kind"],
+              "properties": {"kind": {"type": "string", "enum": ["google", "github"]},
+                             "installation_id": {"type": "string"}},
+            },
             "name": {"type": "string"},
             "prefix": {"type": "string"},
+            "username": {"type": "string"},
+            "password": {"type": "string"},
+            "slots": {
+              "type": "array", "minItems": 1, "maxItems": 8,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "type": {"type": "string", "enum": ["header", "query", "body"]},
+                  "name": {"type": "string"},
+                  "template": {"type": "string"},
+                  "part": {"type": "string"},
+                  "format": {"type": "string", "enum": ["json", "form"]},
+                  "field": {"type": "string"},
+                },
+                "required": ["type"], "additionalProperties": False,
+              },
+            },
           },
-          "required": ["type", "name"], "additionalProperties": False,
+          "required": ["type"], "additionalProperties": False,
+        },
+        "parts": {
+          "type": "array", "minItems": 1, "maxItems": 8,
+          "description": (
+            "For a new key with several parts: each part the owner pastes on "
+            "the card, never its value. secret defaults to true; mark an id, "
+            "username or region secret: false so it is shown and not redacted. "
+            "At least one part is secret, and inject sends only listed parts."
+          ),
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,47}$", "description": "e.g. account_sid"},
+              "label": {"type": "string", "maxLength": 80, "description": "What the owner sees, e.g. Account SID"},
+              "secret": {"type": "boolean"},
+              "multiline": {"type": "boolean", "description": "True for a key file (PEM or service-account JSON)"},
+            },
+            "required": ["name"], "additionalProperties": False,
+          },
         },
         "message": CARD_MESSAGE_PROPERTY,
       },

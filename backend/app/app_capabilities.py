@@ -166,7 +166,7 @@ def _normalize_public_storage(raw: Any) -> dict[str, Any]:
       or normalized == _PUBLIC_STORAGE_ROOT
       or normalized.startswith("/")
       or "//" in normalized
-      or ".." in normalized.split("/")
+      or {".", ".."} & set(normalized.split("/"))
       or len(normalized) > 256
       or not _PUBLIC_WRITE_PREFIX_RE.match(normalized)
     ):

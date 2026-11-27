@@ -105,7 +105,9 @@ def app_frame_csp(
     f"script-src {resource_source} 'unsafe-inline' 'wasm-unsafe-eval' 'unsafe-eval' "
     "blob: https://esm.sh; "
     f"style-src {resource_source} 'unsafe-inline' https://fonts.googleapis.com; "
-    f"font-src {resource_source} https://fonts.gstatic.com https://cdn.openai.com; "
+    # `data:` matches `img-src` below and the published-page policy, so a page
+    # that inlines its font renders the same in the Pages preview as shared.
+    f"font-src {resource_source} data: https://fonts.gstatic.com https://cdn.openai.com; "
     f"connect-src {' '.join(connect_sources)}; "
     f"img-src {' '.join(image_sources)} data: blob:; "
     f"frame-src {' '.join(frame_sources)}; "

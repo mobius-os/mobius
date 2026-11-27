@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session, defer
 from app import chat_writer
 from app import (
   activity, app_activity, app_apply, app_badge, app_capability_acceptance,
-  app_git, app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
+  app_cron, app_git, app_jobs, app_recency, chat_app_artifacts, chat_queue, drawer_pins, fs_locks,
   git_transfers, icon_cache, models, pending_update, project_git, providers, schemas,
   settled, source_dirs, store_listing_source, workspace_files,
 )
@@ -110,6 +110,7 @@ log = logging.getLogger("mobius.apps")
 _APP_SOURCE_HIDDEN_DIRS = frozenset({
   ".git", ".build", "__pycache__", "dist", "node_modules",
 })
+_APP_SOURCE_VISIBILITY = project_git.SourceVisibility(hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
 
 
 def _require_nondelegated_control(
@@ -362,7 +363,7 @@ def get_app_source_git_status(
   db: Session = Depends(get_db),
 ):
   _app, root = _app_source_root(db, app_id)
-  return project_git.project_status(root, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS)
+  return project_git.project_status(root, visibility=_APP_SOURCE_VISIBILITY)
 
 
 @router.get("/{app_id}/source/git/diff")
@@ -377,11 +378,13 @@ def get_app_source_git_diff(
   if not target.is_file():
     relative = target.relative_to(root).as_posix()
     deleted = any(row["path"] == relative and row["status"] == "deleted"
-                  for row in project_git.project_status(root)["changes"])
+                  for row in project_git.project_status(
+                    root, visibility=_APP_SOURCE_VISIBILITY,
+                  )["changes"])
     if not deleted:
       raise HTTPException(404, "File not found.")
   return project_git.project_file_diff(
-    root, target, hidden_dirs=_APP_SOURCE_HIDDEN_DIRS,
+    root, target, visibility=_APP_SOURCE_VISIBILITY,
   )
 
 
@@ -554,6 +557,8 @@ async def _hard_delete_app(db: Session, app: models.App) -> None:
   await key_vault.forget_app(deleted_app_id)
   purge_app_bundles(deleted_app_id)
   await asyncio.to_thread(_rmtree_strict, storage_dir)
+  # The owner's schedule for the app lives outside its storage tree.
+  await asyncio.to_thread(_rmtree_strict, app_cron.schedule_state_dir(deleted_app_id))
   # The app's model engine home (threads, transcripts) is id-keyed too.
   from app.providers import app_engine_home
   await asyncio.to_thread(_rmtree_strict, app_engine_home(settings.data_dir, deleted_app_id))

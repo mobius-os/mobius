@@ -790,6 +790,52 @@ def test_retry_with_same_switch_id_is_idempotent(
   assert len(_compaction_rows(db, chat_id)) == 1
 
 
+def test_agent_provider_switch_leaves_the_owner_defaults_alone(
+  client, auth, chat, db, monkeypatch,
+):
+  """Only the owner's own switch becomes the default for later chats."""
+  import json
+  from datetime import timedelta
+  from app import auth as auth_mod
+
+  _connect_codex(monkeypatch)
+  _forbid_provider_calls(monkeypatch)
+  defaults_file = Path(get_settings().data_dir) / "shared" / "agent-settings.json"
+  defaults_file.parent.mkdir(parents=True, exist_ok=True)
+  defaults_file.write_text(json.dumps({"model": "claude-opus-4-7", "effort": "high"}))
+  target_id = _make_chat_with_messages(client, auth, [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "hello"},
+  ])
+  run_token = alloc_run_token()
+  get_writer().submit(StartTurn(
+    chat_id=chat.id,
+    run_token=run_token,
+    user_msg={"role": "user", "content": "lead", "ts": 1, "cid": "lead-msg"},
+    title_source="lead",
+    default_provider="claude",
+  )).result(timeout=5)
+  owner = db.query(models.Owner).first()
+  agent_token = auth_mod.create_agent_token(
+    chat.id, owner.username, owner.token_epoch,
+    run_id=run_token, expires_delta=timedelta(minutes=5),
+  )
+
+  switched = client.post(
+    f"/api/chats/{target_id}/provider-switch",
+    headers={"Authorization": f"Bearer {agent_token}"},
+    json=_payload(),
+  )
+
+  assert switched.status_code == 200, switched.text
+  db.expire_all()
+  assert db.get(models.Chat, target_id).provider == "codex"
+  assert json.loads(defaults_file.read_text()) == {
+    "model": "claude-opus-4-7", "effort": "high",
+  }
+  assert db.query(models.Owner).first().provider == "claude"
+
+
 def test_busy_chat_rejects_the_switch_and_changes_nothing(
   client, auth, db, monkeypatch,
 ):

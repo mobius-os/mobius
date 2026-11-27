@@ -189,18 +189,29 @@ function setQueue(next) {
   setState({ queueLength: queue.length, queuePersisted: persisted })
 }
 
+// Read one numeric field from the device. Only a number or a non-blank numeric
+// string counts: Number() turns null, '', ' ' and false into 0 (and true into
+// 1), which would store a missing reading as a real one.
+function finiteNumber(value) {
+  if (typeof value === 'number') return value
+  return typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN
+}
+
 // Normalize a raw device position to exactly the fields the backend stores,
 // dropping anything malformed. latitude/longitude are mandatory; timestamp is
 // the dedup identity, so a fix without a usable one cannot be stored.
 function normalizePosition(raw) {
   if (!raw || typeof raw !== 'object') return null
-  const lat = Number(raw.latitude)
-  const lon = Number(raw.longitude)
+  const lat = finiteNumber(raw.latitude)
+  const lon = finiteNumber(raw.longitude)
   const ts = Number(raw.timestamp)
   if (!Number.isFinite(lat) || lat < -90 || lat > 90) return null
   if (!Number.isFinite(lon) || lon < -180 || lon > 180) return null
   if (!Number.isInteger(ts) || ts < TS_MIN_MS || ts > TS_MAX_MS) return null
-  const opt = (v) => (v == null || !Number.isFinite(Number(v)) ? null : Number(v))
+  const opt = (v) => {
+    const n = finiteNumber(v)
+    return Number.isFinite(n) ? n : null
+  }
   return {
     latitude: lat,
     longitude: lon,

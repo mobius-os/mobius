@@ -896,6 +896,15 @@ export async function probeDeletion(path) {
   }
 }
 
+/** The API path of one chat, with its id kept to a single path segment.
+ * Chat ids reach the shell from links, app frames and restored storage; a raw
+ * `../` id would otherwise climb to another authenticated /api route. Build
+ * every `/chats/<id>` request with this (or `encodeURIComponent`); the
+ * chat-path guard in internalNavigation.test.js refuses raw interpolation. */
+export function chatPath(chatId, suffix = '') {
+  return `/chats/${encodeURIComponent(chatId)}${suffix}`
+}
+
 export const api = {
   // Public build identity. Used by Settings to show the served platform build
   // and frontend bundle identity.
@@ -1072,7 +1081,7 @@ export const api = {
       if (anchor) params.set('anchor', String(anchor))
       const query = params.toString()
       return apiFetch(
-        `/chats/${chatId}${query ? `?${query}` : ''}`,
+        chatPath(chatId, query ? `?${query}` : ''),
         { signal, timeoutMs },
       )
     },
@@ -1086,12 +1095,12 @@ export const api = {
         { signal },
       )
     },
-    update: (chatId, payload) => listAffectingMutation('chats', `/chats/${chatId}`, {
+    update: (chatId, payload) => listAffectingMutation('chats', chatPath(chatId), {
       method: 'PATCH',
       body: JSON.stringify(payload),
     }),
     setPinned: (chatId, pinned, options) => pinnedResourceMutation(
-      'chats', `/chats/${chatId}`, pinned, options,
+      'chats', chatPath(chatId), pinned, options,
     ),
     markFailureSeen: (chatId, activityVersion) => apiFetch(
       `/chats/${encodeURIComponent(chatId)}/failure-activity/seen`,
@@ -1113,10 +1122,10 @@ export const api = {
       'chats', `/chats/${encodeURIComponent(chatId)}/unarchive`, { method: 'POST' },
     ),
     remove: (chatId) => listAffectingMutation(
-      'chats', `/chats/${chatId}`, { method: 'DELETE' },
+      'chats', chatPath(chatId), { method: 'DELETE' },
     ),
     recover: (chatId, payload) => listAffectingMutation(
-      'chats', `/chats/${chatId}/recover`, {
+      'chats', chatPath(chatId, '/recover'), {
         method: 'POST',
         body: payload ? JSON.stringify(payload) : undefined,
       },
@@ -1155,7 +1164,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
     revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
-    reveal: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/value`),
+    reveal: (name, part) => apiFetch(`/keys/${encodeURIComponent(name)}/value${part && part !== 'value' ? `?part=${encodeURIComponent(part)}` : ''}`),
     // Sends one request with the key added by the vault (`host/path?query`).
     use: (name, destination, init = {}) => apiFetch(`/keys/use/${encodeURIComponent(name)}/${destination}`, init),
     approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
@@ -1459,10 +1468,14 @@ export const api = {
         method: 'POST', body: JSON.stringify({ expected_head: expectedHead || null }),
       },
     ),
-    pushRemote: (projectId, expectedHead) => apiFetch(
+    pushRemote: (projectId, expectedHead, expectedPushBranch) => apiFetch(
       `/projects/${encodeURIComponent(projectId)}/git/push`, {
         method: 'POST',
-        body: JSON.stringify({ expected_head: expectedHead || null, confirmed: true }),
+        body: JSON.stringify({
+          expected_head: expectedHead || null,
+          expected_push_branch: expectedPushBranch || null,
+          confirmed: true,
+        }),
       },
     ),
     readFile: (projectId, path, { download = false, signal } = {}) => apiFetch(

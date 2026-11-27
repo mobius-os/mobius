@@ -143,10 +143,16 @@ public lane is where a visitor says they paid), and it sees only a charge that
 paid this owner for one of those apps: any other, including the owner's own
 purchases, answers 404 `charge_not_found`. A local app may use it too, since
 it reads only the owner's own sales. Unlock only the item that charge's
-`action` names, and record each charge id once so one payment never unlocks
-twice. Each check is a call to the credits service under this installation's
-key, so check a visitor's claim once and keep the answer rather than asking
-again on every visit.
+`action` names, only when its `status` is `"charged"`, and record each charge
+id once so one payment never unlocks twice. A refund or lost dispute of the
+card payment behind a charge, or the service operator's reversal, makes it
+`"partially_reversed"` or `"reversed"`, with `reversed_micro` of its
+`amount_micro` given back to the buyer, and a refund that later fails lowers
+`reversed_micro` again. Nothing tells your app when that happens: a reversal
+after you unlocked an item shows only if you read the receipt again. Each check
+is a call to the credits service under this installation's key, so check a
+visitor's claim once and keep the answer rather than asking again on every
+visit.
 
 Everything else under `/api/identity/credits` is the owner's own money: the
 balance, earnings and history, pairing, buying, model funding, publishing

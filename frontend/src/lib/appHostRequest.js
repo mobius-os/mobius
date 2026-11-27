@@ -1,3 +1,5 @@
+import { isShellLinkId } from './notificationTarget.js'
+
 const REQUEST_TYPES = new Set([
   'moebius:new-chat',
   'moebius:open-chat',
@@ -30,7 +32,8 @@ export function appHostRequest(message) {
     }
   }
   if (message.type === 'moebius:open-chat' || message.type === 'moebius:open-existing-chat') {
-    if (typeof message.chatId !== 'string' || !message.chatId) return null
+    // An app chooses this id; only a one-segment chat id may reach the shell.
+    if (!isShellLinkId(message.chatId)) return null
     // A distinct wire type, so an older host ignores it instead of falling
     // back to a new chat. Hosts see one open-chat request with a strict flag.
     const strict = message.type === 'moebius:open-existing-chat'

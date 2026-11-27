@@ -190,6 +190,31 @@ def test_app_source_reports_its_own_git_changes_and_diff(client, auth):
   assert diff.json()["changed_lines"] == [2]
 
 
+def test_app_source_git_review_still_hides_generated_folders_at_any_depth(
+  client, auth,
+):
+  import subprocess
+  app, root = _source_app(client, auth)
+  generated = ("pkg/dist/out.js", "pkg/node_modules/dep/index.js")
+  for relative in (*generated, "pkg/artifacts/card.js"):
+    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+    (root / relative).write_text("v1\n")
+  # Force-track them so Git reports edits even if ignore rules cover them.
+  subprocess.run(["git", "-C", str(root), "add", "-f", "--", "pkg"], check=True)
+  subprocess.run(
+    ["git", "-C", str(root), "-c", "user.name=T", "-c", "user.email=t@e",
+     "commit", "-q", "-m", "Track generated files"], check=True,
+  )
+  for relative in (*generated, "pkg/artifacts/card.js"):
+    (root / relative).write_text("v2\n")
+
+  status = client.get(f"/api/apps/{app['id']}/source/git/status", headers=auth)
+  assert status.status_code == 200, status.text
+  paths = {row["path"] for row in status.json()["changes"]}
+  assert not paths.intersection(generated)
+  assert "pkg/artifacts/card.js" in paths
+
+
 def test_deleted_or_non_app_source_is_not_inspectable(client, auth, db, tmp_path):
   app, _root = _source_app(client, auth)
   row = db.get(models.App, app["id"])

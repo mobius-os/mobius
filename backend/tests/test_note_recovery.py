@@ -92,6 +92,25 @@ def test_uncertain_coverage_never_discards_history(change):
     recovery_source(note, messages)
 
 
+@pytest.mark.parametrize("entry", [
+  "Preserve old files.\r\nDraft only.",
+  "Preserve old files. Draft only.",
+  "Keep.\n\u00a0## Related\nPreserve old files.\nDraft only.",
+])
+def test_digest_line_breaks_keep_verified_coverage_through_disk(tmp_path, entry):
+  # The reader rebuilds the digest from str.splitlines() after a text-mode
+  # read and ends it at any line str.strip() turns into a section heading, so
+  # the bound fingerprint must describe that same text.
+  messages = copy.deepcopy(HISTORY)
+  path = tmp_path / "index.md"
+  write_note(path, apply_checkpoint(
+    None, name="test", digest=entry, coverage=checkpoint_coverage(messages, "run"),
+  ))
+  digest, tail = recovery_source(path.read_text(encoding="utf-8"), messages)
+  assert digest.endswith("Preserve old files.\nDraft only.")
+  assert tail == []
+
+
 def test_new_messages_remain_in_tail_and_first_turn_covers_nothing():
   messages = [{"role": "user", "content": "初めて"}]
   _digest, tail = recovery_source(_bound(messages), messages)

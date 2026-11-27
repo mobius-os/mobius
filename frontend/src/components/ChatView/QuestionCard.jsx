@@ -642,7 +642,7 @@ export default function QuestionCard({
             {(!completedAction || respondedRestartAction)
               && !keyCard
               && (!restartAction || writtenRestartAction) && (
-              <div className={`qcard__answer-row${hasOptions ? '' : ' qcard__answer-row--typed'}`}>
+              <div className="qcard__answer-row">
                 {/* Each answer has its own paperclip on the left of its box.
                     It stays while the action row does, so Submit, queueing
                     and the Submitted state never move the card; once the

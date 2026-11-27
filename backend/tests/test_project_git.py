@@ -4,6 +4,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from app import models
 from app import project_git
 
@@ -280,6 +282,144 @@ def test_github_remote_flow_reviews_pushes_and_fast_forward_pulls(
   assert (root / "README.md").read_text() == "from GitHub\n"
 
 
+def test_project_push_uses_the_branch_reviewed_in_remote_status(tmp_path, monkeypatch):
+  _git(tmp_path, "init", "-b", "main")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Remote base")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Reviewed change")
+  _git(tmp_path, "remote", "add", "origin", "https://github.com/example/project.git")
+  _git(tmp_path, "update-ref", "refs/remotes/origin/release", "HEAD^")
+  _git(tmp_path, "branch", "--set-upstream-to=origin/release", "main")
+  commands = []
+  monkeypatch.setattr(project_git, "_run_git_write", lambda root, *args, **kw: commands.append(args))
+  status = project_git.project_remote_status(tmp_path)
+  assert status["upstream"] == "origin/release"
+  assert status["push_branch"] == "release"
+  assert status["ahead"] == 1
+
+  project_git.push_project(tmp_path, status["head"], status["push_branch"])
+
+  head = _git(tmp_path, "rev-parse", "HEAD")
+  pushes = [command for command in commands if command[0] == "push"]
+  assert pushes == [("push", "origin", f"{head}:refs/heads/release")]
+
+
+def test_project_push_refuses_a_local_upstream_that_looks_like_origin(tmp_path, monkeypatch):
+  _git(tmp_path, "init", "-b", "main")
+  _git(tmp_path, "commit", "--allow-empty", "-m", "Base")
+  _git(tmp_path, "branch", "origin/release")
+  _git(tmp_path, "branch", "--set-upstream-to=origin/release", "main")
+  _git(tmp_path, "remote", "add", "origin", "https://github.com/example/project.git")
+  writes = []
+  monkeypatch.setattr(project_git, "_run_git_write", lambda root, *args, **kw: writes.append(args))
+  assert project_git.project_remote_status(tmp_path)["push_branch"] is None
+
+  with pytest.raises(project_git.GitProjectError, match="Track a branch on the connected"):
+    project_git.push_project(tmp_path)
+
+  assert writes == []
+
+
+def _project_with_bare_origin(tmp_path: Path) -> tuple[Path, Path]:
+  root = tmp_path / "project"
+  bare = tmp_path / "remote.git"
+  root.mkdir()
+  _git(tmp_path, "init", "--bare", str(bare))
+  _git(root, "init", "-b", "main")
+  _git(root, "commit", "--allow-empty", "-m", "Remote base")
+  _git(root, "remote", "add", "origin", "https://github.com/example/project.git")
+  # Keep the stored origin a GitHub URL while routing to the local bare repo.
+  _git(root, "config", f"url.file://{bare.as_posix()}.insteadOf",
+       "https://github.com/example/project.git")
+  _git(root, "push", "origin", "main:refs/heads/release")
+  _git(root, "config", "branch.main.remote", "origin")
+  _git(root, "config", "branch.main.merge", "refs/heads/release")
+  _git(root, "commit", "--allow-empty", "-m", "Reviewed change")
+  return root, bare
+
+
+def _remote_branches(bare: Path) -> dict[str, str]:
+  listing = _git(bare, "for-each-ref", "--format=%(refname:lstrip=2) %(objectname)", "refs/heads")
+  return dict(line.split(" ") for line in listing.splitlines())
+
+
+def test_project_push_refuses_a_destination_changed_after_the_owner_reviewed_it(tmp_path):
+  root, bare = _project_with_bare_origin(tmp_path)
+  status = project_git.project_remote_status(root)
+  assert status["push_branch"] == "release"
+  before = _remote_branches(bare)
+  # Something retargets the branch between the confirmation and the click.
+  _git(root, "config", "branch.main.merge", "refs/heads/prod")
+
+  with pytest.raises(project_git.GitProjectError, match="changed since this view"):
+    project_git.push_project(root, status["head"], status["push_branch"])
+
+  assert _remote_branches(bare) == before
+
+
+def test_project_push_destination_comes_from_config_before_the_first_fetch(tmp_path):
+  root, bare = _project_with_bare_origin(tmp_path)
+  # The upstream is configured but its tracking ref was never fetched.
+  _git(root, "update-ref", "-d", "refs/remotes/origin/release")
+  status = project_git.project_remote_status(root)
+  assert status["upstream"] is None
+  assert status["push_branch"] == "release"
+
+  pushed = project_git.push_project(root, status["head"], status["push_branch"])
+
+  assert _remote_branches(bare) == {"release": _git(root, "rev-parse", "HEAD")}
+  assert pushed["upstream"] == "origin/release"
+  assert pushed["ahead"] == 0
+
+
+def test_project_push_publishes_the_verified_commit_not_a_later_one(tmp_path, monkeypatch):
+  root, bare = _project_with_bare_origin(tmp_path)
+  status = project_git.project_remote_status(root)
+  reviewed = _git(root, "rev-parse", "HEAD")
+  write = project_git._run_git_write
+
+  def commit_just_before_push(cwd, *args, **kw):
+    if args[0] == "push":
+      _git(root, "commit", "--allow-empty", "-m", "Not reviewed")
+    return write(cwd, *args, **kw)
+
+  monkeypatch.setattr(project_git, "_run_git_write", commit_just_before_push)
+  project_git.push_project(root, status["head"], status["push_branch"])
+
+  assert _remote_branches(bare) == {"release": reviewed}
+  assert _git(root, "rev-parse", "HEAD") != reviewed
+
+
+def test_project_push_route_refuses_a_stale_reviewed_destination(
+  client, auth, db, tmp_path, monkeypatch,
+):
+  from app.routes import projects as project_routes
+
+  project = client.post(
+    "/api/projects", headers=auth,
+    json={"name": "Stale destination", "template_id": "blank"},
+  ).json()
+  _write_file(client, auth, project["id"], "README.md", "local\n")
+  client.post(f"/api/projects/{project['id']}/git/init", headers=auth)
+  root = _project_root(db, project)
+  bare = tmp_path / "remote.git"
+  _git(tmp_path, "init", "--bare", str(bare))
+  _git(root, "config", f"url.file://{bare.as_posix()}.insteadOf",
+       "https://github.com/example/stale.git")
+  project_git.connect_github_remote(root, "example/stale")
+  monkeypatch.setattr(project_routes, "_require_project_github_connection", lambda: None)
+  status = client.get(f"/api/projects/{project['id']}/git/remote", headers=auth).json()
+  assert status["push_branch"] == "main"
+
+  response = client.post(
+    f"/api/projects/{project['id']}/git/push", headers=auth,
+    json={"confirmed": True, "expected_head": status["head"], "expected_push_branch": "release"},
+  )
+
+  assert response.status_code == 409, response.text
+  assert "changed since this view" in response.json()["detail"]
+  assert _git(bare, "for-each-ref", "refs/heads") == ""
+
+
 def test_project_remote_routes_keep_network_actions_owner_confirmed(
   client, auth, db,
 ):
@@ -335,6 +475,68 @@ def test_applied_source_status_distinguishes_clean_commits_from_deployment(tmp_p
   assert state() == 'pending'
   assert project_git.applied_source_status(root, None, project_git.project_status(root)) == {'state': 'unknown'}
   assert project_git.applied_source_status(root, 'a' * 40, project_git.project_status(root)) == {'state': 'unknown'}
+
+
+def test_nested_artifacts_folders_are_reviewable_source(client, auth, db):
+  project = client.post('/api/projects', headers=auth, json={'name': 'Nested', 'template_id': 'blank'}).json()
+  root = _project_root(db, project)
+  nested = ('src/artifacts/config.js', 'components/artifacts/Card.jsx')
+  for relative in (*nested, 'artifacts/site/index.html'):
+    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+    (root / relative).write_text('v1\n')
+  _git(root, 'init', '-b', 'main')
+  _git(root, 'add', '-f', '.')
+  _git(root, 'commit', '-m', 'Accepted')
+  accepted = _git(root, 'rev-parse', 'HEAD')
+  for relative in (*nested, 'artifacts/site/index.html'):
+    (root / relative).write_text('v2\n')
+
+  status = client.get(f"/api/projects/{project['id']}/git/status", headers=auth).json()
+  rows = {row['path']: row['status'] for row in status['changes']}
+  assert rows == {relative: 'modified' for relative in nested}
+  for relative in nested:
+    diff = client.get(f"/api/projects/{project['id']}/git/diff?path={relative}", headers=auth).json()
+    assert diff['status'] == 'modified'
+    assert (diff['additions'], diff['deletions']) == (1, 1)
+  # The single-file diff path must apply the same boundary as the status list.
+  root_output = client.get(
+    f"/api/projects/{project['id']}/git/diff?path=artifacts/site/index.html", headers=auth,
+  ).json()
+  assert root_output['status'] == 'clean'
+  assert project_git.project_file_diff(root, root / 'artifacts/site/index.html')['status'] == 'clean'
+
+  def state():
+    return project_git.applied_source_status(root, accepted, project_git.project_status(root))['state']
+  assert state() == 'pending'
+  for relative in nested:
+    (root / relative).write_text('v1\n')
+  # Only the root build-output folder differs now, and it stays out of review.
+  assert project_git.project_status(root)['changes'] == []
+  assert state() == 'current'
+
+
+def test_review_commit_and_file_tree_reserve_the_same_root_artifacts_folder(client, auth, db):
+  project = client.post('/api/projects', headers=auth, json={'name': 'Agree', 'template_id': 'blank'}).json()
+  root = _project_root(db, project)
+  _git(root, 'init', '-b', 'main')
+  _git(root, 'commit', '--allow-empty', '-m', 'Start')
+  head = project_git.project_status(root)['head']
+  for relative in ('src/artifacts/config.js', 'artifacts/site/index.html'):
+    (root / relative).parent.mkdir(parents=True, exist_ok=True)
+    (root / relative).write_text('v1\n')
+
+  reviewed = {row['path'] for row in project_git.project_status(root)['changes']}
+  tree = client.get(f"/api/projects/{project['id']}/files?recursive=true", headers=auth).json()
+  listed = {entry['path'] for entry in tree['entries']}
+  committed = client.post(
+    f"/api/projects/{project['id']}/git/commit", headers=auth,
+    json={'message': 'Add source', 'expected_head': head},
+  )
+  assert committed.status_code == 200, committed.text
+  staged = set(_git(root, 'show', '--name-only', '--pretty=format:', 'HEAD').split())
+
+  assert 'src/artifacts/config.js' in reviewed & listed & staged
+  assert not any(path.startswith('artifacts/') for path in reviewed | listed | staged)
 
 
 def test_status_line_counts_and_unified_patches_include_new_deleted_and_binary_files(tmp_path):

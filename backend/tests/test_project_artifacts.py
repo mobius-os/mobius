@@ -9,6 +9,7 @@ network in CI.
 
 import asyncio
 import os
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -193,6 +194,43 @@ def test_creation_open_recency_is_navigation_state(client, auth, db):
   assert client.post(
     f"/api/projects/{project['id']}/artifacts/missing/opened", headers=auth,
   ).status_code == 404
+
+
+def test_localized_result_titles_get_distinct_valid_ids(client, auth):
+  project = _make_project(client, auth)
+  _write_file(client, auth, project, "index.html", "<h1>Hello</h1>")
+  titles = ("Izvještaj o troškovima", "研究ノート", "設計メモ", "a" * 60 + "é")
+  ids = set()
+  for title in titles:
+    created = client.post(
+      f"/api/projects/{project['id']}/artifacts", headers=auth,
+      json={"name": title, "builder": "website", "source": "index.html"},
+    )
+    assert created.status_code == 201, created.text
+    artifact = created.json()
+    artifact_id = artifact["id"]
+    assert artifact["name"] == title
+    assert project_builders.ARTIFACT_ID_RE.fullmatch(artifact_id)
+    assert artifact_id == project_builders.slug_artifact_id(title)
+    assert artifact_id not in ids
+    ids.add(artifact_id)
+
+  assert project_builders.slug_artifact_id("Annual report!") == "annual-report"
+
+
+def test_accented_titles_fold_to_readable_ids_in_any_normalization():
+  title = "Izvještaj o troškovima"
+  nfc = unicodedata.normalize("NFC", title)
+  nfd = unicodedata.normalize("NFD", title)
+  assert nfc != nfd
+  assert project_builders.slug_artifact_id(nfc) == "izvjestaj-o-troskovima"
+  assert project_builders.slug_artifact_id(nfd) == "izvjestaj-o-troskovima"
+  assert project_builders.slug_artifact_id("Résumé") == "resume"
+  assert project_builders.slug_artifact_id("Report ²") == "report-2"
+  # Letters folding cannot express keep a stable hash suffix instead.
+  unfoldable = project_builders.slug_artifact_id("Đak")
+  assert unfoldable.startswith("ak-")
+  assert project_builders.ARTIFACT_ID_RE.fullmatch(unfoldable)
 
 
 def test_build_missing_source_records_error_not_500(client, auth, db):
@@ -428,6 +466,34 @@ def test_a_source_edit_after_a_build_marks_the_result_out_of_date(
 
   asyncio.run(project_builders.run_build(project["id"], "site"))
   assert _artifact(client, auth, project["id"], "site")["out_of_date"] is False
+
+
+def test_legacy_filename_does_not_block_project_build_or_results(client, auth, db, monkeypatch):
+  async def copy_builder(*, root, source, output_dir, log_path):
+    (output_dir / source).write_text((root / source).read_text())
+
+  monkeypatch.setitem(project_builders.BUILDERS, "website", copy_builder)
+  project = _make_project(client, auth)
+  project_id = project["id"]
+  _write_file(client, auth, project, "index.html", "<h1>Hello</h1>")
+  created = client.post(
+    f"/api/projects/{project_id}/artifacts", headers=auth,
+    json={"id": "site", "name": "Site", "builder": "website", "source": "index.html"},
+  )
+  assert created.status_code == 201, created.text
+  asyncio.run(project_builders.run_build(project_id, "site"))
+  assert _artifact(client, auth, project_id, "site")["out_of_date"] is False
+
+  row = db.get(models.Project, project_id)
+  root = Path(os.environ["DATA_DIR"]) / row.root_path
+  (root / os.fsdecode(b"legacy-\xff.txt")).write_bytes(b"dependency")
+  assert _artifact(client, auth, project_id, "site")["out_of_date"] is True
+
+  asyncio.run(project_builders.run_build(project_id, "site"))
+  artifact = _artifact(client, auth, project_id, "site")
+  assert (artifact["status"], artifact["has_output"], artifact["out_of_date"]) == (
+    "ok", True, False,
+  )
 
 
 def test_source_fingerprint_ignores_build_outputs_and_git(tmp_path):

@@ -28,7 +28,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
 import ArrowDown from 'lucide-react/dist/esm/icons/arrow-down.mjs'
 import { Chat, Flag, Play } from '@openai/apps-sdk-ui/components/Icon'
-import { api, apiFetch, getAuthHeaders, getToken, isSharedBrowserAuth, jsonOrThrow, BASE } from '../../api/client.js'
+import { api, apiFetch, getAuthHeaders, getToken, isSharedBrowserAuth, jsonOrThrow, BASE, chatPath } from '../../api/client.js'
 import { invalidateSharedRuntimeRead, sharedRuntimeRead } from './runtimeReads.js'
 import {
   chatMessagesQueryKey,
@@ -1440,7 +1440,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const res = await apiFetch(
-        `/chats/${chatId}?limit=20&compact=1`,
+        `${chatPath(chatId)}?limit=20&compact=1`,
         { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
       )
       if (!res.ok) throw new Error(`CHAT_FETCH_FAILED_${res.status}`)
@@ -1643,7 +1643,7 @@ export default function ChatView({
     const gen = fetchGenRef.current
     try {
       const read = () => (
-        apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
+        apiFetch(`${chatPath(chatId)}/runtime`, { timeoutMs: CHAT_FETCH_TIMEOUT_MS })
           .then(res => jsonOrThrow(res, 'Runtime refresh failed'))
       )
       const data = await (shared ? sharedRuntimeRead(chatId, read) : read())
@@ -2722,7 +2722,7 @@ export default function ChatView({
 
       if (activationCacheReusable && typeof activationCache?.updated_at === 'string') {
         runtime = await requestJson(
-          `/chats/${chatId}/runtime`,
+          `${chatPath(chatId)}/runtime`,
           'CHAT_RUNTIME_FAILED',
         )
         // A terminal background refresh can win while this tiny runtime read is
@@ -2751,7 +2751,7 @@ export default function ChatView({
           ? `&anchor=${encodeURIComponent(activationAnchorKey)}`
           : ''
         runtime = await requestJson(
-          `/chats/${chatId}?limit=20&compact=1${anchorParam}`,
+          `${chatPath(chatId)}?limit=20&compact=1${anchorParam}`,
           'CHAT_LOAD_FAILED',
         )
         const runtimeAnchorMatch = anchorMatchIn(runtime)
@@ -3124,7 +3124,7 @@ export default function ChatView({
       retry.attempts += 1
     }
     apiFetch(
-      `/chats/${chatId}?limit=20&before=${before}&compact=1`,
+      `${chatPath(chatId)}?limit=20&before=${before}&compact=1`,
       { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
     )
       .then(r => jsonOrThrow(r, 'Earlier messages failed to load'))
@@ -4387,7 +4387,7 @@ export default function ChatView({
     goalClearInFlightRef.current = true
     setGoalClearError('')
     try {
-      const res = await apiFetch(`/chats/${chatId}/goal`, {
+      const res = await apiFetch(`${chatPath(chatId)}/goal`, {
         method: 'DELETE',
         body: JSON.stringify({ goal_id: goalId }),
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
@@ -4527,7 +4527,7 @@ export default function ChatView({
     }
     forgetSendIntent({ cid })
     try {
-      const res = await apiFetch(`/chats/${chatId}/pending/${encodeURIComponent(cid)}`, {
+      const res = await apiFetch(`${chatPath(chatId)}/pending/${encodeURIComponent(cid)}`, {
         method: 'DELETE',
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
@@ -4539,7 +4539,7 @@ export default function ChatView({
       // response cannot overwrite unrelated queue mutations.
       try {
         const res = await apiFetch(
-          `/chats/${chatId}/runtime`,
+          `${chatPath(chatId)}/runtime`,
           { timeoutMs: CHAT_FETCH_TIMEOUT_MS },
         )
         const data = await jsonOrThrow(res, 'Queue refresh failed')
@@ -4586,7 +4586,7 @@ export default function ChatView({
     if (!getDeliveryReadySnapshot()) return 'waiting'
     try {
       const res = await apiFetch(
-        `/chats/${chatId}/pending/${encodeURIComponent(cid)}`,
+        `${chatPath(chatId)}/pending/${encodeURIComponent(cid)}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
@@ -4658,7 +4658,7 @@ export default function ChatView({
       }
       const confirmStopIdle = async () => {
         try {
-          const res = await apiFetch(`/chats/${chatId}/runtime`, { timeoutMs: 5000 })
+          const res = await apiFetch(`${chatPath(chatId)}/runtime`, { timeoutMs: 5000 })
           if (!res.ok) return { failed: true, running: null }
           const data = await res.json()
           return {
@@ -5714,7 +5714,7 @@ export default function ChatView({
     loadingLatestRef.current = true
     const generation = fetchGenRef.current
     try {
-      const response = await apiFetch(`/chats/${chatId}?limit=20&compact=1`, {
+      const response = await apiFetch(`${chatPath(chatId)}?limit=20&compact=1`, {
         timeoutMs: CHAT_FETCH_TIMEOUT_MS,
       })
       if (!response.ok) return

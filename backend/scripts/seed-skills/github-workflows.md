@@ -101,6 +101,21 @@ no conflicts, and no other agent works on the PR. A pre-dispatch refusal is
 not a possible public attempt; transport uncertainty is. Never retry an
 uncertain merge/queue request. Use `/observe` read-only to reconcile it.
 
+The guarded merge uses the first method the repository allows, in the order
+squash, merge commit, rebase (a merge queue picks its own), and an agent
+cannot choose another. If the owner wants a specific method, for example a
+merge commit so commit ids survive, start a plain `review` instead and tell
+them to press Merge in Contribute, whose sheet offers each allowed method;
+never substitute a raw `gh` merge.
+
+The selection's `base_sha` is the target branch's tip when you previewed, not
+the PR's own base or merge base: the merge re-proves that tip is unchanged. A
+PR behind its target branch differs from that tip by everything that landed
+since it forked, so read the PR's own change with `gh pr diff` (or
+`git diff <base_sha>...<head_sha>`, three dots), and judge the combined result
+by merging onto `base_sha`; a two-dot diff against `base_sha` also shows the
+reverse of every newer commit.
+
 Stop revokes future actions. It cannot undo a merge already confirmed by
 GitHub. A queued item is not merged; use a durable Wait owned by the review
 conversation, then observe again. Do not leave an in-memory poll running.
@@ -119,7 +134,7 @@ the server posts one COMMENT review on the exact head when the agent sends
 `propose_verdict:true` (requires `post_review`, and always on for
 `review_merge`) turns `publish:true` into a saved *proposal* instead of a
 post: APPROVE for `all_clear`, REQUEST_CHANGES for `needs_you`, worded from
-the summary, plus the same findings worded as a plain comment
+the summary and tests, plus the same findings worded as a plain comment
 (`comment_body`). Only the owner submits or discards it, through
 `POST <run>/verdict` from their own session; an agent bearer is refused. The
 owner may send it as the plain comment instead (`event: "COMMENT"`), so a
@@ -175,6 +190,12 @@ retrying the same recorded all-clear evidence after its blocker is resolved.
 Private evidence fields accept up to 200,000 characters each. The public copy
 is bounded conservatively to 65,536 UTF-16 units with explicit omission
 markers; the full accepted private evidence is retained.
+
+A public review reads: the verdict header, your `summary`, then a
+`**Verification:** <tests>` line whenever `tests` is not empty (an `all_clear`
+always has it), then the reviewed-at footer. Put the checks you ran only in
+`tests`; a Verification heading of your own in `summary` appears twice, and
+posted evidence cannot be edited.
 
 For an opted-in public-review grant, `/outcomes` publishes only when the agent explicitly sends `publish: true` with a deliberate public verdict. For a verdict-proposal grant, send `publish: true` whenever the result is a verdict, findings that need changes included: it saves a proposal that posts nothing until the owner submits it in Contribute (or, when the owner chose that up front, until the server submits it at once). Owner questions and blocked verification use `publish: false` (the default) with `"blocked"` naming the obstacle, remain private, and do not post. Once armed, verdict evidence is immutable. Another grant for the same PR/head cannot post while an earlier posting/unknown/posted receipt exists; open the named holding run and observe it read-only. Lists retain full findings and frozen prompts for the owning app or owner. Foreign rows remain privacy-minimized; any bounded navigation summary explicitly marks omitted text.
 

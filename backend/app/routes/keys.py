@@ -150,6 +150,15 @@ def _agent_changes(existing: dict, body: dict) -> list[str]:
   changes = []
   if body.get("value") is not None:
     changes.append("replaced its value")
+  items = [item for item in body.get("parts") or [] if isinstance(item, dict)]
+  replaced = [item.get("name") for item in items if item.get("value") is not None]
+  if replaced:
+    changes.append(f"replaced {', '.join(map(str, replaced))}")
+  shown = [item.get("name") for item in items if item.get("secret") is False]
+  if shown:
+    changes.append(f"made {', '.join(map(str, shown))} not secret")
+  if body.get("remove_parts"):
+    changes.append(f"removed {', '.join(map(str, body['remove_parts']))}")
   if body.get("inject") is not None and key_vault.stored_slot(body["inject"]) != existing["inject"]:
     changes.append("changed how it is sent")
   return changes
@@ -203,7 +212,8 @@ async def put_key(
   # list), and the vault matches app callers by it, so a page loaded before
   # an app was removed and its id reused can only write a grant no app can use.
   allowed = {
-    k: body[k] for k in ("value", "inject", "grants", "revision", "create_only") if k in body
+    k: body[k] for k in ("value", "parts", "remove_parts", "inject", "grants", "revision", "create_only")
+    if k in body
   }
   caller = _caller(principal)
   existing = next(
@@ -249,10 +259,15 @@ async def revoke_key(name: str, principal: Principal = Depends(get_principal)) -
 
 
 @router.get("/{name}/value")
-async def reveal_key(name: str, principal: Principal = Depends(get_principal)) -> dict:
-  """The value itself, for the owner and the owner's top-level agents; never
-  for apps or delegated helpers, which use keys through /api/keys/use."""
-  return await _relay("GET", f"/keys/{quote(name, safe='')}/value", caller=reader_caller(principal))
+async def reveal_key(
+  name: str, principal: Principal = Depends(get_principal),
+  part: str | None = Query(None, max_length=64),
+) -> dict:
+  """One part's value (``value`` unless ``part`` names another), for the
+  owner and the owner's top-level agents; never for apps or delegated
+  helpers, which use keys through /api/keys/use."""
+  query = f"?{urlencode({'part': part})}" if part else ""
+  return await _relay("GET", f"/keys/{quote(name, safe='')}/value{query}", caller=reader_caller(principal))
 
 
 @router.post("/requests/{request_id}/approve", dependencies=[*owner_only, Depends(reject_cross_site)])
@@ -265,7 +280,7 @@ async def approve_request(
   Letting an app use a key is the owner's own decision, so agents are refused.
   """
   _refuse_unless_owners_own_input(principal)
-  allowed = {k: body[k] for k in ("value", "inject", "sites", "ticket") if k in body}
+  allowed = {k: body[k] for k in ("value", "parts", "inject", "sites", "ticket") if k in body}
   return await _relay("POST", f"/requests/{quote(request_id, safe='')}/approve", allowed,
                       caller=_caller(principal))
 
@@ -326,7 +341,7 @@ async def request_key(
     # the owner can't answer it.
     raise HTTPException(403, "Only apps ask here. An agent asks with the request_key tool, which shows "
                         "the owner a card in its chat; you manage keys in Settings › Keys.")
-  payload = {k: body[k] for k in ("key", "reason", "sites", "inject") if k in body}
+  payload = {k: body[k] for k in ("key", "reason", "sites", "inject", "parts") if k in body}
   app = db.query(models.App).filter(
     models.App.id == principal.app_id, models.App.deleted_at.is_(None),
   ).first()

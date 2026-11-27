@@ -136,7 +136,8 @@ def test_short_notifications_are_sent_unchanged():
 
 
 def test_the_title_is_shortened_too_when_the_link_leaves_little_room():
-  data = {"url": "https://mobius.example/" + "ü" * 1500, "notificationId": "n1"}
+  # The link alone leaves less room than the title needs, so no body fits.
+  data = {"url": "https://mobius.example/" + "ü" * 1900, "notificationId": "n1"}
 
   title, body = push_relay.fit_notification("Tïtle " * 60, "ü" * 2000, data)
 
@@ -145,3 +146,27 @@ def test_the_title_is_shortened_too_when_the_link_leaves_little_room():
     {"title": title, "body": body, "data": data},
     separators=(",", ":"), ensure_ascii=False,
   ).encode()) <= push_relay.MAX_PAYLOAD_BYTES
+
+
+def test_a_multibyte_body_is_cut_by_bytes_and_keeps_all_that_fits():
+  data = {"url": "https://mobius.example/shell/", "notificationId": "n1"}
+
+  title, body = push_relay.fit_notification("T", "你" * 2000, data)
+
+  size = len(json.dumps(
+    {"title": title, "body": body, "data": data},
+    separators=(",", ":"), ensure_ascii=False,
+  ).encode())
+  assert title == "T" and body.endswith("…")
+  assert set(body[:-1]) == {"你"}
+  assert push_relay.MAX_PAYLOAD_BYTES - 3 <= size <= push_relay.MAX_PAYLOAD_BYTES
+
+
+def test_fixed_fields_over_the_limit_are_logged_instead_of_failing_silently(caplog):
+  data = {"url": "https://mobius.example/" + "x" * 5000, "notificationId": "n1"}
+
+  with caplog.at_level("WARNING", logger="app.push_relay"):
+    title, body = push_relay.fit_notification("Title", "Body", data)
+
+  assert (title, body) == ("T…", "")
+  assert "over its 4096-byte limit" in caplog.text

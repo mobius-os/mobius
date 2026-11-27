@@ -15,7 +15,7 @@
  * tokens on ?token= — owner JWTs are explicitly rejected.
  */
 
-import { BASE, apiFetch, getAuthSessionCacheKey } from './client.js'
+import { BASE, apiFetch, getAuthSessionCacheKey, chatPath } from './client.js'
 
 // Per-chat token cache: { token: string, expiresAt: number }
 // Cache for 10 minutes (server TTL is 15 min, giving 5 min buffer for clock skew
@@ -50,7 +50,7 @@ export async function mediaTokenParam(chatId) {
   // Never retain media authority from a previous embedded auth session.
   if (cached) _cache.delete(chatId)
   try {
-    const res = await apiFetch(`/chats/${chatId}/media-token`, { method: 'POST' })
+    const res = await apiFetch(`${chatPath(chatId)}/media-token`, { method: 'POST' })
     if (!res.ok) return ''
     const data = await res.json()
     if (!data.token) return ''

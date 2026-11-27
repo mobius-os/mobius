@@ -1,6 +1,6 @@
 /* Chat-scoped projection of records owned by the installed Pages app (slug `artifacts`). */
 
-import { parseApiTimestamp } from '../../lib/relativeTime.js'
+import { parseApiTimestamp } from '../../lib/dateTimeFormat.js'
 
 const ARTIFACT_ID_RE = /^[A-Za-z0-9_-]{1,64}$/
 

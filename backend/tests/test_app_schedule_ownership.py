@@ -1,6 +1,8 @@
 """Owner timezone and schedule provenance across app updates."""
 
+import json
 import os
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -84,8 +86,8 @@ def test_manifest_default_is_never_mistaken_for_an_owner_choice():
   assert app_cron.owner_schedule_to_keep(9104, "30 5 * * *", "fetch.sh") is None
 
 
-def _write_zone_declaration(app_id, slug, zone, zone_cron):
-  state = app_cron.schedule_state_dir(app_id)
+def _write_zone_declaration(app_id, slug, zone, zone_cron, state=None):
+  state = state or app_cron.schedule_state_dir(app_id)
   state.mkdir(parents=True, exist_ok=True)
   escaped = zone_cron.replace(" ", "\\ ").replace("*", "\\*")
   (state / "init-cron.sh").write_text(
@@ -108,8 +110,8 @@ def test_owner_weekday_time_survives_only_a_same_weekdays_default():
   assert app_cron.owner_schedule_to_keep(9107, "0 10 * * *", "fetch.sh") is None
 
 
-def _write_server_declaration(app_id, slug, cron):
-  state = app_cron.schedule_state_dir(app_id)
+def _write_server_declaration(app_id, slug, cron, state=None):
+  state = state or app_cron.schedule_state_dir(app_id)
   state.mkdir(parents=True, exist_ok=True)
   (state / "init-cron.sh").write_text(
     f'#!/bin/sh\nENTRY="{cron} API_BASE_URL=http://localhost:8000 '
@@ -122,8 +124,6 @@ def test_provenance_migration_classifies_declarations_made_before_it(tmp_path):
   """Before provenance, updates always reset defaults to server time. So a
   zone-owned declaration, or a server-time one off the default, was set
   through the schedule route; one equal to the default is the manifest's."""
-  import json
-
   from sqlalchemy import create_engine
 
   from app import models
@@ -147,18 +147,25 @@ def test_provenance_migration_classifies_declarations_made_before_it(tmp_path):
         "schedule": {"default": "0 6 * * *", "job": "fetch.sh"},
       }))
     db.commit()
-  _write_zone_declaration(9111, "a9111", "Asia/Tokyo", "30 5 * * 1-5")
-  _write_server_declaration(9112, "a9112", "0 6 * * *")
-  _write_server_declaration(9113, "a9113", "15 4 * * *")
-  _write_server_declaration(9114, "a9114", "0 6 * * *")
+
+  def legacy(app_id):
+    return data_dir / "apps" / str(app_id) / "schedule"
+
+  _write_zone_declaration(
+    9111, "a9111", "Asia/Tokyo", "30 5 * * 1-5", legacy(9111),
+  )
+  _write_server_declaration(9112, "a9112", "0 6 * * *", legacy(9112))
+  _write_server_declaration(9113, "a9113", "15 4 * * *", legacy(9113))
+  _write_server_declaration(9114, "a9114", "0 6 * * *", legacy(9114))
   already = ScheduleChoice(
     source="owner", cron="0 6 * * *", job="fetch.sh",
     manifest_default="0 6 * * *",
   )
-  app_cron.record_schedule_choice(9114, already)
+  (legacy(9114) / "choice.json").write_text(json.dumps(asdict(already)))
 
   migrations._record_schedule_provenance(eng)
   migrations._record_schedule_provenance(eng)
+  migrations._move_schedule_state_out_of_app_data(eng)
 
   assert app_cron.read_schedule_choice(9111) == ScheduleChoice(
     source="owner", cron="30 5 * * 1-5", job="fetch.sh",
@@ -339,3 +346,190 @@ def test_a_failing_rollback_never_replaces_the_original_error(monkeypatch):
         source="owner", cron="0 3 * * *", job="fetch.sh",
       ))
       raise RuntimeError("registration failed")
+
+
+def test_clearing_app_data_keeps_its_wall_clock_schedule(
+  client, auth, db, scheduled_app, tmp_path, monkeypatch,
+):
+  """Clear data keeps cron, so a reconcile afterwards must not downgrade the
+  every-minute wall-clock gate into a real every-minute job."""
+  _fake_crontab(tmp_path, monkeypatch)
+  monkeypatch.setenv(
+    "MOBIUS_APP_BASE", str(Path(get_settings().data_dir) / "apps"),
+  )
+  saved = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "0 5 * * *", "job": "fetch.sh",
+          "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert saved.status_code == 200, saved.text
+  choice = app_cron.read_schedule_choice(scheduled_app.id)
+  storage = Path(get_settings().data_dir) / "apps" / str(scheduled_app.id)
+  (storage / "schedule").mkdir(parents=True, exist_ok=True)
+  (storage / "schedule" / "notes.txt").write_text("app data")
+
+  wiped = client.delete(f"/api/apps/{scheduled_app.id}/data", headers=auth)
+  assert wiped.status_code == 204, wiped.text
+  assert not storage.exists()
+
+  from app.routes.app_schedules import reconcile_app_cron_supervision
+  _count, warnings, _ready = reconcile_app_cron_supervision(db)
+  live = (tmp_path / "crontab.txt").read_text()
+  assert warnings == []
+  assert "--wall-clock Europe/Belgrade" in live, live
+  assert app_cron.read_schedule_choice(scheduled_app.id) == choice
+
+
+def test_an_app_cannot_rewrite_its_owner_schedule_from_its_data_folder(
+  client, auth, db, scheduled_app, tmp_path, monkeypatch,
+):
+  """The schedule is outside everything the app can write: its storage token,
+  and the data folder its Edit-role agents and jobs write on disk. Replaying
+  the old attack (rewrite the declaration, then redeploy with an empty
+  crontab) leaves the owner's time in place."""
+  from app import auth as auth_mod
+  from app.routes.app_schedules import reconcile_app_cron_supervision
+  crontab = _fake_crontab(tmp_path, monkeypatch).with_name("crontab.txt")
+  monkeypatch.setenv(
+    "MOBIUS_APP_BASE", str(Path(get_settings().data_dir) / "apps"),
+  )
+  saved = client.post(
+    f"/api/apps/{scheduled_app.id}/schedule",
+    json={"cron": "0 5 * * *", "job": "fetch.sh",
+          "timezone": "Europe/Belgrade"},
+    headers=auth,
+  )
+  assert saved.status_code == 200, saved.text
+  state = app_cron.schedule_state_dir(scheduled_app.id)
+  declared = (state / "init-cron.sh").read_bytes()
+  choice = app_cron.read_schedule_choice(scheduled_app.id)
+  storage = Path(get_settings().data_dir) / "apps" / str(scheduled_app.id)
+  assert not state.resolve().is_relative_to(storage.resolve())
+
+  owner = db.query(models.Owner).one()
+  app_auth = {"Authorization": "Bearer " + auth_mod.create_app_token(
+    scheduled_app.id, owner.username, owner.token_epoch,
+    scheduled_app.token_nonce,
+  )}
+  written = client.put(
+    f"/api/storage/apps/{scheduled_app.id}/schedule/init-cron.sh",
+    content=b"ENTRY='* * * * * fetch.sh'\n",
+    headers={**app_auth, "Content-Type": "text/plain"},
+  )
+  assert written.status_code == 204, written.text
+  (storage / "schedule" / "choice.json").write_text(
+    '{"source": "owner", "cron": "* * * * *", "job": "fetch.sh"}',
+  )
+
+  crontab.write_text("")
+  _count, warnings, _ready = reconcile_app_cron_supervision(db)
+
+  assert warnings == []
+  assert "--wall-clock Europe/Belgrade" in crontab.read_text()
+  assert (state / "init-cron.sh").read_bytes() == declared
+  assert app_cron.read_schedule_choice(scheduled_app.id) == choice
+
+
+def test_purging_an_uninstalled_app_removes_its_schedule(
+  client, auth, db, scheduled_app,
+):
+  """Uninstall keeps the schedule for recovery; the purge removes it before
+  the app id can be reused, so a later app never inherits it."""
+  from datetime import UTC, datetime, timedelta
+  app_id = scheduled_app.id
+  _owner_daily(app_id)
+  state = app_cron.schedule_state_dir(app_id)
+
+  removed = client.delete(f"/api/apps/{app_id}", headers=auth)
+  assert removed.status_code == 204, removed.text
+  assert app_cron.read_schedule_choice(app_id) is not None
+
+  scheduled_app.deleted_at = (
+    datetime.now(UTC).replace(tzinfo=None) - timedelta(days=8)
+  )
+  db.commit()
+  client.get("/api/apps/", headers=auth)
+
+  db.expire_all()
+  assert db.get(models.App, app_id) is None
+  assert not state.exists()
+
+
+def test_schedule_migration_moves_declarations_out_of_app_data(tmp_path):
+  """The one-shot move takes only the two declaration files, lets a restored
+  backup's copy replace one already moved, follows no symlink, and is safe
+  to run again."""
+  from sqlalchemy import create_engine
+
+  import app.schema_migrations as migrations
+
+  data_dir = Path(get_settings().data_dir)
+  eng = create_engine(f"sqlite:///{tmp_path / 'move.db'}")
+  models.Base.metadata.create_all(eng)
+  with Session(eng) as db:
+    for app_id in (9141, 9142, 9143):
+      db.add(models.App(
+        id=app_id, name=f"m{app_id}", slug=f"m{app_id}",
+        source_dir=str(data_dir / "apps" / f"m{app_id}"),
+      ))
+    db.commit()
+
+  def legacy(app_id):
+    folder = data_dir / "apps" / str(app_id) / "schedule"
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+  _write_zone_declaration(
+    9141, "m9141", "Europe/Belgrade", "0 5 * * *", legacy(9141),
+  )
+  declared = (legacy(9141) / "init-cron.sh").read_bytes()
+  (legacy(9141) / "init-cron.sh").chmod(0o755)
+  choice = json.dumps(asdict(ScheduleChoice(
+    source="owner", cron="0 5 * * *", job="fetch.sh",
+    timezone="Europe/Belgrade",
+  ))).encode()
+  (legacy(9141) / "choice.json").write_bytes(choice)
+  (legacy(9141) / "notes.txt").write_text("app data")
+
+  _write_server_declaration(9142, "m9142", "0 7 * * *")
+  _write_server_declaration(9142, "m9142", "0 6 * * *", legacy(9142))
+  restored = (legacy(9142) / "init-cron.sh").read_bytes()
+
+  elsewhere = tmp_path / "elsewhere.sh"
+  elsewhere.write_text("ENTRY='* * * * * x'\n")
+  (legacy(9143) / "init-cron.sh").symlink_to(elsewhere)
+
+  migrations._move_schedule_state_out_of_app_data(eng)
+  migrations._move_schedule_state_out_of_app_data(eng)
+
+  moved = app_cron.schedule_state_dir(9141)
+  assert (moved / "init-cron.sh").read_bytes() == declared
+  assert (moved / "init-cron.sh").stat().st_mode & 0o777 == 0o755
+  assert (moved / "choice.json").read_bytes() == choice
+  assert sorted(p.name for p in legacy(9141).iterdir()) == ["notes.txt"]
+
+  assert (
+    app_cron.schedule_state_dir(9142) / "init-cron.sh"
+  ).read_bytes() == restored
+  assert not (legacy(9142) / "init-cron.sh").exists()
+
+  assert not app_cron.schedule_state_dir(9143).exists()
+  assert (legacy(9143) / "init-cron.sh").is_symlink()
+
+
+def test_wall_clock_gate_is_read_the_way_cron_runs_the_line():
+  """Only the runner's own --wall-clock flag makes a gate; a comment or an
+  unsupervised command naming it never does."""
+  runner = "python3 /app/scripts/app-job-runner.py --scheduled"
+  gate = (
+    f"* * * * * {runner} --wall-clock Europe/Belgrade "
+    "0\\ 5\\ \\*\\ \\*\\ \\* 7 /data/apps/memory/fetch.sh"
+  )
+  assert app_cron.is_wall_clock_gate(gate)
+  assert not app_cron.is_wall_clock_gate(
+    f"* * * * * {runner} 7 /data/apps/memory/fetch.sh # --wall-clock",
+  )
+  assert not app_cron.is_wall_clock_gate(
+    "* * * * * /data/apps/memory/fetch.sh --wall-clock Europe/Belgrade",
+  )

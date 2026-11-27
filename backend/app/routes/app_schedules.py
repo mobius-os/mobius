@@ -109,16 +109,15 @@ def _schedule_from_crontab_text(
     command_path = app_cron.crontab_command_path(line)
     if not command_path.startswith(needle):
       continue
-    # A line whose job script is gone is DEBRIS, not a declaration. Cron
-    # registration is add-only — the scaffold rewrites the line for the path
-    # it installs and leaves every other line alone — so an app that renames
-    # its job leaves the old entry behind forever. Trusting it here let the
-    # dead line win purely because it sorted first, which then (a) reported a
-    # phantom job and cadence on /api/apps/schedules, and (b) failed the
-    # reconciler's own is_file() guard, so the app's REAL schedule was never
-    # re-registered and the whole supervision pass reported a warning.
-    # Skipping debris lets discovery fall through to the durable init-cron.sh
-    # declaration and then the manifest — both of which state real intent.
+    # A line whose job script is gone is DEBRIS, not a declaration. Older
+    # registration was add-only per job filename, so an app that renamed its
+    # job left the old entry behind (registration now replaces the app's
+    # entry, but instances may still carry that debris). Trusting it here let
+    # the dead line win purely because it sorted first, which then (a)
+    # reported a phantom job and cadence on /api/apps/schedules, and (b)
+    # failed the reconciler's own is_file() guard, so the app's REAL schedule
+    # was never re-registered and the whole supervision pass reported a
+    # warning. Skipping debris lets discovery fall through to the next source.
     if not (runtime_dir / Path(command_path).name).is_file():
       continue
     return cron, Path(command_path).name
@@ -126,18 +125,26 @@ def _schedule_from_crontab_text(
 
 
 def _app_schedule(app: models.App, live_crontab: str, runtime_dir: Path) -> tuple[str, str] | None:
+  """The app's current schedule: its durable declaration, then live, then manifest.
+
+  The declaration is written before every live change, so it is never older
+  than a supervised live line. The live crontab can instead hold several
+  supervised lines for one app (a renamed job left by older registration).
+  Preferring whichever sorts first would re-register the stale job, and since
+  registration replaces the app's entry, that would delete the current one.
+  """
   source_dir = Path(app.source_dir)
-  live = _schedule_from_crontab_text(
-    source_dir, live_crontab, runtime_dir, supervised_only=True,
-  )
-  if live is not None:
-    return live
   for replay_dir in _cron_replay_dirs_for_app(app, runtime_dir):
     schedule = _schedule_from_crontab_text(
       source_dir, _read_init_cron_text(replay_dir), runtime_dir,
     )
     if schedule is not None:
       return schedule
+  live = _schedule_from_crontab_text(
+    source_dir, live_crontab, runtime_dir, supervised_only=True,
+  )
+  if live is not None:
+    return live
   return _manifest_schedule(runtime_dir)
 
 
@@ -157,6 +164,16 @@ def _app_zone_declaration(app: models.App) -> tuple[str, str] | None:
     if declaration is not None:
       return declaration
   return None
+
+
+def _has_live_wall_clock_gate(source_dir: Path, live_crontab: str) -> bool:
+  """Whether a live supervised entry for this app is a ``--wall-clock`` gate."""
+  needle = f"{str(source_dir).rstrip('/')}/"
+  return any(
+    app_cron.is_wall_clock_gate(line)
+    and app_cron.crontab_command_path(line).startswith(needle)
+    for line in live_crontab.splitlines()
+  )
 
 
 def _is_orphaned_supervised_entry(line: str, apps_root: Path, runtime_roots: dict[Path, Path] | None = None) -> bool:
@@ -323,6 +340,14 @@ def reconcile_app_cron_supervision(
       declaration = _app_zone_declaration(app)
     except (OSError, RuntimeError, ValueError) as exc:
       warnings.append(f"app {app.id}: {exc}")
+      rejected_sources.add(resolved_source)
+      continue
+    if declaration is None and _has_live_wall_clock_gate(source_dir, live_crontab):
+      # The gate's every-minute cadence is not the schedule: without its
+      # declaration, re-registering it would run the job every minute.
+      warnings.append(
+        f"app {app.id}: wall-clock schedule has no timezone declaration"
+      )
       rejected_sources.add(resolved_source)
       continue
     try:

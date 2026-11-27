@@ -1502,3 +1502,12 @@ def test_local_contract_only_grant_survives_unrelated_patch(
   assert reapplied.status_code == 200, reapplied.text
   data = reapplied.json()["app"]["capability_contract"]["data"]
   assert not data.get(grant)
+
+
+@pytest.mark.parametrize("prefix", ["public/./", "public/inbox/./", "public/./inbox/"])
+def test_public_write_prefix_rejects_dot_segments(prefix):
+  """A '.' segment would widen the anonymous write area to its parent."""
+  with pytest.raises(ManifestContractError):
+    validate_manifest_contract(_manifest(
+      public_access={"storage": {"read": True, "write_prefix": prefix}},
+    ))

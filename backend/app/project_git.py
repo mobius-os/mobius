@@ -32,6 +32,31 @@ _GITHUB_REPOSITORY_RE = re.compile(
 )
 
 
+@dataclass(frozen=True)
+class SourceVisibility:
+  """Which workspace paths Git review treats as non-source.
+
+  ``hidden_dirs`` hide a folder name at any depth; ``hidden_root_dirs`` hide it
+  only directly under the workspace root, matching ``workspace_files.list_entries``.
+  """
+
+  hidden_dirs: frozenset[str] = frozenset()
+  hidden_root_dirs: frozenset[str] = frozenset()
+
+  def hides(self, relative: PurePosixPath) -> bool:
+    parts = relative.parts
+    return bool(parts) and (
+      parts[0] in self.hidden_root_dirs
+      or any(part in self.hidden_dirs for part in parts)
+    )
+
+
+# The one project-root folder of managed build output. Review, commit staging,
+# the file tree and build fingerprints all reserve exactly this folder, so a
+# nested `src/artifacts/` is ordinary, reviewable source.
+PROJECT_VISIBILITY = SourceVisibility(hidden_root_dirs=frozenset({"artifacts"}))
+
+
 class GitProjectError(RuntimeError):
   """An owner-actionable repository error safe to surface at the route."""
 
@@ -66,7 +91,8 @@ def _run_git_write(cwd: Path, *args: str, timeout: int = 15) -> str:
 
 
 def _stage_project(root: Path) -> None:
-  _run_git_write(root, "add", "-A", "--", ".", ":(exclude)artifacts")
+  excluded = (f":(exclude){name}" for name in sorted(PROJECT_VISIBILITY.hidden_root_dirs))
+  _run_git_write(root, "add", "-A", "--", ".", *excluded)
 
 
 def _ensure_commit_identity(root: Path) -> None:
@@ -176,18 +202,43 @@ def connect_github_remote(root: Path, repository: str) -> dict:
   return project_remote_status(root)
 
 
-def _remote_tracking_ref(context: _GitContext, branch: str) -> str | None:
+def _branch_upstream(context: _GitContext, branch: str) -> tuple[str | None, str | None]:
+  """Return ``(comparison ref, push branch)`` from the branch's upstream config.
+
+  The push branch is the branch on ``origin`` that Push updates. Git's own
+  upstream config names it (``branch.<b>.remote`` and ``branch.<b>.merge``);
+  never reverse-map it from a tracking-ref name, which a local branch or a
+  custom fetch refspec can imitate. An upstream on another remote, a local
+  branch, or a remote Git cannot resolve has no GitHub destination: its push
+  branch is ``None`` and Push refuses rather than guess one.
+  """
   code, output, _truncated = _run_git(
-    context.repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name",
-    "@{upstream}", limit=1024,
+    context.repo, "for-each-ref",
+    "--format=%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream)%00%(upstream:short)",
+    f"refs/heads/{branch}", limit=4096,
   )
-  if code == 0 and output.strip():
-    return output.decode("utf-8", "replace").strip()
-  candidate = f"refs/remotes/origin/{branch}"
+  fields = output.decode("utf-8", "replace").rstrip("\n").split("\0") if code == 0 else []
+  remote, remote_ref, tracking_ref, tracking = (fields + ["", "", "", ""])[:4]
+  if not remote:
+    code, _output, _truncated = _run_git(
+      context.repo, "config", "--get", f"branch.{branch}.merge", limit=1024,
+    )
+    if code == 0:
+      return None, None
+    tracking_ref, tracking = f"refs/remotes/origin/{branch}", f"origin/{branch}"
+    push_branch: str | None = branch
+  elif remote == "origin" and remote_ref.startswith("refs/heads/"):
+    push_branch = remote_ref.removeprefix("refs/heads/")
+  else:
+    push_branch = None
+  # A configured upstream that has not been fetched yet still names the push
+  # branch; there is just nothing local to compare with until the next fetch.
+  if not tracking_ref or not tracking:
+    return None, push_branch
   code, _output, _truncated = _run_git(
-    context.repo, "show-ref", "--verify", "--quiet", candidate, limit=128,
+    context.repo, "show-ref", "--verify", "--quiet", tracking_ref, limit=128,
   )
-  return f"origin/{branch}" if code == 0 else None
+  return (tracking if code == 0 else None), push_branch
 
 
 def _revision_count(context: _GitContext, revision: str) -> int:
@@ -216,6 +267,7 @@ def project_remote_status(root: Path) -> dict:
       "branch": None,
       "head": None,
       "upstream": None,
+      "push_branch": None,
       "ahead": 0,
       "behind": 0,
       "diverged": False,
@@ -231,7 +283,7 @@ def project_remote_status(root: Path) -> dict:
     _github_repository(output.decode("utf-8", "replace"))
     if code == 0 else None
   )
-  upstream = _remote_tracking_ref(context, branch) if branch else None
+  upstream, push_branch = _branch_upstream(context, branch) if branch else (None, None)
   ahead = 0
   behind = 0
   commits: list[dict[str, str]] = []
@@ -268,6 +320,7 @@ def project_remote_status(root: Path) -> dict:
     "branch": branch,
     "head": head,
     "upstream": upstream,
+    "push_branch": push_branch,
     "ahead": ahead,
     "behind": behind,
     "diverged": ahead > 0 and behind > 0,
@@ -308,8 +361,17 @@ def pull_project(root: Path, expected_head: str | None = None) -> dict:
   return project_remote_status(root)
 
 
-def push_project(root: Path, expected_head: str | None = None) -> dict:
-  """Publish committed work without force-push or implicit local mutation."""
+def push_project(
+  root: Path,
+  expected_head: str | None = None,
+  expected_push_branch: str | None = None,
+) -> dict:
+  """Publish the reviewed commit to the reviewed origin branch.
+
+  ``expected_push_branch`` is the destination the owner confirmed. Push never
+  force-pushes, and it pushes the verified commit rather than the moving branch
+  name, so a commit made after the check cannot ride along.
+  """
   context = _owned_context(root)
   status = project_remote_status(root)
   if status["dirty"]:
@@ -318,19 +380,34 @@ def push_project(root: Path, expected_head: str | None = None) -> dict:
     raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   if not status["connected"]:
     raise GitProjectError("Connect a GitHub repository before pushing.")
-  if not status["branch"]:
+  branch = status["branch"]
+  if not branch:
     raise GitProjectError("Switch to a named branch before pushing.")
+  destination = status["push_branch"]
+  if not destination:
+    raise GitProjectError("Track a branch on the connected GitHub remote before pushing.")
+  if expected_push_branch is not None and expected_push_branch != destination:
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
+  code, output, _truncated = _run_git(
+    context.repo, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", limit=128,
+  )
+  commit = output.decode("ascii", "replace").strip() if code == 0 else ""
+  if not commit or not status["head"] or not commit.startswith(status["head"]):
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
   _run_git_write(context.repo, "fetch", "--prune", "origin", timeout=60)
-  status = project_remote_status(root)
-  if status["behind"]:
+  refreshed = project_remote_status(root)
+  reviewed = (branch, status["head"], destination)
+  if (refreshed["branch"], refreshed["head"], refreshed["push_branch"]) != reviewed:
+    raise GitProjectError("The project changed since this view was loaded. Refresh and try again.")
+  if refreshed["behind"]:
     raise GitProjectError("GitHub has newer commits. Pull and review them before pushing.")
-  if status["upstream"]:
-    _run_git_write(context.repo, "push", "origin", status["branch"], timeout=60)
-  else:
-    _run_git_write(
-      context.repo, "push", "--set-upstream", "origin", status["branch"],
-      timeout=60,
-    )
+  _run_git_write(
+    context.repo, "push", "origin", f"{commit}:refs/heads/{destination}", timeout=60,
+  )
+  # A commit refspec cannot carry --set-upstream; record the same destination
+  # so the next status compares with the branch that was just updated.
+  _run_git_write(context.repo, "config", f"branch.{branch}.remote", "origin")
+  _run_git_write(context.repo, "config", f"branch.{branch}.merge", f"refs/heads/{destination}")
   return project_remote_status(root)
 
 
@@ -440,7 +517,8 @@ def _context_path(context: _GitContext, path: Path) -> str:
 def _project_relative(
   context: _GitContext,
   repo_path: str,
-  hidden_dirs: frozenset[str],
+  *,
+  visibility: SourceVisibility,
 ) -> str | None:
   value = PurePosixPath(repo_path)
   if context.scope == ".":
@@ -451,7 +529,7 @@ def _project_relative(
     except ValueError:
       return None
   path = relative.as_posix()
-  if not path or path == "." or any(part in hidden_dirs for part in relative.parts):
+  if not path or path == "." or visibility.hides(relative):
     return None
   return path
 
@@ -483,7 +561,7 @@ def _branch_and_head(context: _GitContext) -> tuple[str | None, str | None]:
 def project_status(
   root: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
 ) -> dict:
   """Return repository identity and working changes confined to ``root``."""
   context = _discover(root)
@@ -522,7 +600,7 @@ def project_status(
       continue
     record = raw.decode("utf-8", "replace")
     code_value = record[:2]
-    path = _project_relative(context, record[3:], hidden_dirs)
+    path = _project_relative(context, record[3:], visibility=visibility)
     if path is None:
       continue
     status = _status_name(code_value)
@@ -537,7 +615,7 @@ def project_status(
       truncated = True
   changes.sort(key=lambda row: row["path"].lower())
   branch, head = _branch_and_head(context)
-  line_stats = _status_line_stats(context, changes, hidden_dirs)
+  line_stats = _status_line_stats(context, changes, visibility=visibility)
   return {
     "line_stats": line_stats,
     "available": True,
@@ -597,7 +675,7 @@ def project_file_diff(
   root: Path,
   target: Path,
   *,
-  hidden_dirs: frozenset[str] = frozenset({"artifacts"}),
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
 ) -> dict:
   """Return compact line annotations for one confined Project file."""
   context = _discover(root)
@@ -612,7 +690,7 @@ def project_file_diff(
       "truncated": False,
     }
   repo_path = _context_path(context, target)
-  relative = _project_relative(context, repo_path, hidden_dirs)
+  relative = _project_relative(context, repo_path, visibility=visibility)
   pathspec = f":(literal){repo_path}"
   status = None
   status_truncated = False
@@ -694,7 +772,13 @@ def project_file_diff(
   }
 
 
-def applied_source_status(root: Path, accepted_commit: str | None, status: dict) -> dict:
+def applied_source_status(
+  root: Path,
+  accepted_commit: str | None,
+  status: dict,
+  *,
+  visibility: SourceVisibility = PROJECT_VISIBILITY,
+) -> dict:
   """Compare saved source with the accepted build, not merely with local HEAD.
 
   A local commit is not a deployment. Unknown baselines and bounded read failures
@@ -713,7 +797,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   )
   if code != 0 or truncated:
     return unknown
-  changed = any(_project_relative(context, path.decode("utf-8", "replace"), frozenset({"artifacts"}))
+  changed = any(_project_relative(context, path.decode("utf-8", "replace"), visibility=visibility)
                 for path in output.split(b"\0") if path)
   # Git diff omits new, untracked source files. The existing bounded status read
   # already includes them and applies the Project's source visibility boundary.
@@ -721,7 +805,7 @@ def applied_source_status(root: Path, accepted_commit: str | None, status: dict)
   return {"state": "pending" if changed or added else "current"}
 
 
-def _status_line_stats(context, changes, hidden_dirs) -> dict:
+def _status_line_stats(context, changes, *, visibility: SourceVisibility) -> dict:
   """One bounded numstat read plus a shared read budget for untracked text."""
   code, output, truncated = _run_git(
     context.repo, "diff", "--numstat", "-z", "--no-renames", "--no-ext-diff", "HEAD", "--", context.scope,
@@ -731,7 +815,7 @@ def _status_line_stats(context, changes, hidden_dirs) -> dict:
     fields = record.split(b"\t", 2)
     if len(fields) != 3:
       continue
-    path = _project_relative(context, fields[2].decode("utf-8", "replace"), hidden_dirs)
+    path = _project_relative(context, fields[2].decode("utf-8", "replace"), visibility=visibility)
     if path is None:
       continue
     binary = fields[0] == b"-"

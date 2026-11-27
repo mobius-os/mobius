@@ -80,3 +80,24 @@ test('drop clears the overlay and attaches files exactly once', () => {
   assert.deepEqual(attached, [[first, second]])
   assert.deepEqual(drop.calls, ['preventDefault', 'stopPropagation'])
 })
+
+test('a drop onto a field that takes the file itself is left to that field', () => {
+  let depth = 1
+  let active = true
+  const files = []
+  const handlers = createFileDragHandlers({
+    getDepth: () => depth, setDepth: next => { depth = next }, setActive: next => { active = next }, onFiles: dropped => files.push(...dropped),
+  })
+  const keyFile = { closest: selector => (selector === '[data-own-file-drop]' ? {} : null) }
+  const calls = []
+  const event = {
+    target: keyFile, dataTransfer: { types: ['Files'], files: [{ name: 'service-account.json' }] },
+    preventDefault: () => calls.push('preventDefault'), stopPropagation: () => calls.push('stopPropagation'),
+  }
+  handlers.onDragOver(event)
+  handlers.onDrop(event)
+  assert.deepEqual(files, [], 'the key file never becomes a chat attachment')
+  assert.deepEqual(calls, [], 'the field, not the chat, handles the drop')
+  assert.equal(depth, 0)
+  assert.equal(active, false, 'the composer drop overlay clears')
+})

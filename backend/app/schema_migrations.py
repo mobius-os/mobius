@@ -5604,6 +5604,51 @@ def _record_schedule_provenance(eng) -> None:
     os.replace(tmp, target)
 
 
+def _move_schedule_state_out_of_app_data(eng) -> None:
+  """Move each app's schedule declaration out of the app's own data tree.
+
+  ``choice.json`` and ``init-cron.sh`` lived in ``apps/<id>/schedule/``, which
+  the app's storage token, its Edit-role agents and Clear data all reach.
+  Reconciliation trusts them, so they now live in the platform-owned
+  ``app-schedules/<id>/`` (``app_cron.schedule_state_dir``). This runs once
+  from the ledger, never at every boot: afterwards the old folder is ordinary
+  app data, and adopting what an app wrote there would undo the move.
+
+  Each file is copied before the old one is removed, so an interrupted run
+  repeats safely. The data-folder copy replaces one already in
+  ``app-schedules/``: both exist only when an older backup was restored over
+  this layout, and the backup is the schedule being restored. Symlinks are
+  never followed, and anything else in the old folder stays as app data.
+  """
+  import shutil
+
+  from sqlalchemy import inspect as sa_inspect, text
+
+  if "apps" not in sa_inspect(eng).get_table_names():
+    return
+  data_dir = Path(os.environ.get("DATA_DIR", "/data"))
+  with eng.connect() as conn:
+    app_ids = conn.execute(text("SELECT id FROM apps")).scalars().all()
+  for app_id in app_ids:
+    old_dir = data_dir / "apps" / str(int(app_id)) / "schedule"
+    new_dir = data_dir / "app-schedules" / str(int(app_id))
+    if old_dir.is_symlink() or not old_dir.is_dir():
+      continue
+    for name in ("choice.json", "init-cron.sh"):
+      old = old_dir / name
+      if old.is_symlink() or not old.is_file():
+        continue
+      new_dir.mkdir(parents=True, exist_ok=True)
+      tmp = new_dir / f".{name}.migration.tmp"
+      shutil.copy2(old, tmp)
+      os.replace(tmp, new_dir / name)
+      old.unlink()
+    try:
+      old_dir.rmdir()
+    except OSError:
+      pass
+
+
 def _add_notification_seen_at(eng) -> None:
   """Keep old history, but do not count pre-upgrade rows as new arrivals."""
   from sqlalchemy import inspect as sa_inspect, text
@@ -7503,6 +7548,7 @@ _SCHEMA_MIGRATIONS = (
   ("0107_app_install_id", _add_app_install_ids),
   ("0108_chat_pending_revision", _add_chat_pending_revision),
   ("0109_channel_feeds", _add_channel_feeds),
+  ("0110_schedule_state_out_of_app_data", _move_schedule_state_out_of_app_data),
 )
 
 
