@@ -47,7 +47,7 @@ export function RetiredLocalCopies({ copies }) {
 
 export default function UpdateReviewModal({
   intent = 'update', platform, rebuild, onClose, onApply, onRebuild, onResolve, onChooseAgent,
-  applying, rebuilding, resolving, observing, applyError, applyErrorCode, onRefreshReview, applyProgress,
+  applying, rebuilding, resolving, observing, applyError, applyErrorCode, applyNotice, onRefreshReview, applyProgress,
   restoreFocusRef, inertBoundaryRef,
 }) {
   const [preview, setPreview] = useState(null)
@@ -244,6 +244,7 @@ export default function UpdateReviewModal({
                   </details>
                 </>}
           {busy && <p className="urm__notice" role="status">{parking ? 'Preparing the reviewed update for an agent…' : progressLabel}</p>}
+          {busy && applyNotice && <p className="urm__notice">{applyNotice}</p>}
         </div>
         {fixError && <div className="urm__error"><Alert color="danger" variant="soft" description={fixError} /></div>}
         {applyError && <div className="urm__error">{repairReason

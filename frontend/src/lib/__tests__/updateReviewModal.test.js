@@ -203,3 +203,16 @@ test('the review lists replaced local copies and qualifies its keep-your-changes
   assert.match(modal, /<RetiredLocalCopies copies=\{retiredCopies\} \/>/)
   assert.match(modal, /keeping your changes\$\{retiredCopies\.length \? ', except local copies this release already includes \(listed below\)' : ''\}/)
 })
+
+test('a lost Apply reply is followed as progress, never offered as a failure to repair', () => {
+  // Any error offers repair (platformUpdateRepairReason), so a still-running
+  // update's reconnect message must live in notice, not error.
+  assert.doesNotMatch(requests, /setError\('The connection was interrupted/)
+  assert.match(requests, /setNotice\('The connection was interrupted\. Following the update on the server/)
+  assert.match(requests, /setNotice\('The connection was interrupted\. Checking whether your update started/)
+  // Settling ends the notice before any real outcome is shown.
+  assert.match(requests, /function settled\(\) \{[^}]*setNotice\(''\)/)
+  assert.match(requests, /observedApplyResult\(outcome, status\)\s*setNotice\(''\)\s*setError\(result\.error\)/)
+  assert.match(modal, /\{busy && applyNotice && <p className="urm__notice">\{applyNotice\}<\/p>\}/)
+  assert.match(updates, /applyNotice=\{update\.notice\}/)
+})
