@@ -89,3 +89,23 @@ def test_a_direct_client_rotating_forwarded_headers_still_shares_one_limit(clien
   finally:
     _limiter.enabled = False
     _limiter.reset()
+
+
+def test_a_strangers_failed_logins_never_lock_the_owner_out(client, owner_token):
+  """The failed-login cooldown counts each visitor's own failures: keyed by
+  username alone, one stranger could keep the owner locked out with a single
+  wrong password every 15 minutes."""
+  behind_proxy = TestClient(client.app, client=(PROXY_PEER, 40000))
+
+  def login(visitor: str, password: str) -> int:
+    return behind_proxy.post(
+      "/api/auth/token",
+      data={"username": "test", "password": password},
+      headers={"X-Forwarded-For": visitor},
+    ).status_code
+
+  stranger = [login("198.51.100.1", "wrong") for _ in range(31)]
+  assert stranger[:10] == [401] * 10 and stranger[-1] == 429
+  # The stranger stays locked out; the owner, elsewhere, signs in.
+  assert login("198.51.100.1", "testpassword123") == 429
+  assert login("203.0.113.7", "testpassword123") == 200
