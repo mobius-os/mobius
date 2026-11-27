@@ -13,11 +13,20 @@ convention: a changed test file, or ``tests/test_x.py`` for a changed
 directly or through other source files. Only test files present on both sides
 can be compared. A whole backend family is deliberately not selected: on a
 large local delta it costs tens of minutes per side, so ``removed_references``
-covers the commonest semantic break statically instead.
+covers the commonest semantic break statically instead. For the same reason
+frontend tests are taken nearest-first and capped: an edit to a module nearly
+everything imports would otherwise select the whole suite.
+
+The comparison has one time budget (``TIMEOUT_SECONDS``) for both sides
+together. Each suite gets a fair share of what is left, so one slow suite
+cannot starve the others, and the candidate reruns only the suites that passed
+something on the baseline: without an earlier pass there is no regression to
+observe.
 
 Runs must use frozen isolated checkouts and the same selected files. Only an
-observed pass before and failure after is a regression; missing, skipped or
-incomplete runs are retained as incomplete evidence, never an all-clear.
+observed pass before and failure after is a regression; missing, skipped,
+limited or incomplete runs are retained as incomplete evidence, never an
+all-clear.
 """
 
 from __future__ import annotations
@@ -33,8 +42,10 @@ import subprocess
 import tempfile
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Callable
 
 from app import app_git
 
@@ -45,7 +56,10 @@ FRONTEND_RUNNER = "scripts/wt-npm.sh"
 # The npm scripts that define which files each frontend suite runs and with
 # which module loader. Reading them keeps package.json the one definition.
 FRONTEND_SUITES = ("test:lib", "test:hooks")
+# The whole baseline-plus-candidate comparison, not each side.
 TIMEOUT_SECONDS = 600
+# Frontend test files run per comparison, nearest to the changed sources first.
+FRONTEND_TEST_LIMIT = 40
 _SCRUBBED_ENV = (
   "PYTHONPATH", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
   "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR", "GIT_NAMESPACE",
@@ -88,6 +102,16 @@ class LocalTestRun:
   failed: frozenset[str] = frozenset()
   skipped: frozenset[str] = frozenset()
   unavailable: str | None = None
+  # Wall time the run took, for diagnosing slow checks; never compared.
+  seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class Selection:
+  """The test files to compare, and how many covering files the cap left out."""
+
+  tests: list[str]
+  omitted: int = 0
 
 
 def _git_lines(repo: Path, *args: str) -> list[str]:
@@ -136,10 +160,11 @@ def _resolve_frontend_reference(source: str, reference: str, files: set[str]) ->
   return None
 
 
-def _frontend_tests(repo: Path, candidate: str, changed: list[str], tree: set[str]) -> set[str]:
-  changed_sources = {path for path in changed if path.startswith("frontend/src/")}
+def _frontend_tests(repo: Path, candidate: str, changed: list[str], tree: set[str]) -> list[str]:
+  """Tests reaching a changed source, nearest first (fewest import hops)."""
+  changed_sources = sorted(path for path in changed if path.startswith("frontend/src/"))
   if not changed_sources:
-    return set()
+    return []
   referrers: dict[str, set[str]] = {}
   for source, data in app_git.read_ref_subtree(repo, candidate, "frontend/src").items():
     if not source.endswith(_FRONTEND_SOURCE_SUFFIXES):
@@ -148,29 +173,38 @@ def _frontend_tests(repo: Path, candidate: str, changed: list[str], tree: set[st
       target = _resolve_frontend_reference(source, reference, tree)
       if target and target != source:
         referrers.setdefault(target, set()).add(source)
-  reached, pending = set(changed_sources), list(changed_sources)
+  distance = {path: 0 for path in changed_sources}
+  pending = deque(changed_sources)
   while pending:
-    for referrer in referrers.get(pending.pop(), ()):
-      if referrer not in reached:
-        reached.add(referrer)
+    source = pending.popleft()
+    for referrer in sorted(referrers.get(source, ())):
+      if referrer not in distance:
+        distance[referrer] = distance[source] + 1
         pending.append(referrer)
-  return {path for path in reached if path.endswith(_FRONTEND_TEST_SUFFIXES)}
+  return sorted(
+    (path for path in distance if path.endswith(_FRONTEND_TEST_SUFFIXES)),
+    key=lambda path: (distance[path], path),
+  )
 
 
-def select(repo: Path, release: str, candidate: str, baseline: str) -> list[str]:
+def select(repo: Path, release: str, candidate: str, baseline: str) -> Selection:
   """Repo-relative test files covering the local delta ``release..candidate``.
 
   Only files that also exist at ``baseline`` are kept: a test the release adds
   has no earlier pass to compare, and one missing file would leave the whole
-  run without evidence.
+  run without evidence. Frontend tests beyond ``FRONTEND_TEST_LIMIT`` (the
+  farthest from the change) are counted, not run.
   """
   changed = _changed_paths(repo, release, candidate)
   if not changed:
-    return []
+    return Selection([])
   tree = _tree(repo, candidate)
-  selected = _backend_tests(changed, tree) | _frontend_tests(repo, candidate, changed, tree)
-  comparable = _tree(repo, baseline) if selected else set()
-  return sorted(selected & comparable)
+  backend = _backend_tests(changed, tree)
+  frontend = _frontend_tests(repo, candidate, changed, tree)
+  comparable = _tree(repo, baseline) if backend or frontend else set()
+  frontend = [path for path in frontend if path in comparable]
+  kept = frontend[:FRONTEND_TEST_LIMIT]
+  return Selection(sorted((backend & comparable) | set(kept)), len(frontend) - len(kept))
 
 
 def _read_report(report: Path, exit_code: int) -> LocalTestRun:
@@ -220,7 +254,7 @@ def _run_process(repo: Path, argv: list[str], runtime: Path, deadline: float) ->
   """
   timeout = deadline - time.monotonic()
   if timeout <= 0:
-    return f"local tests timed out after {TIMEOUT_SECONDS}s"
+    return "local tests had no time left in the check's budget"
   env = {key: value for key, value in os.environ.items() if key not in _SCRUBBED_ENV}
   # Contain the runner's runtime directories too: SIGKILL cannot run its trap.
   env["TMPDIR"] = str(runtime)
@@ -267,8 +301,13 @@ def _run_backend(repo: Path, tests: list[str], deadline: float) -> LocalTestRun:
       return LocalTestRun(unavailable="local test report was unreadable")
 
 
-def _frontend_suites(frontend: Path) -> dict[str, tuple[str, frozenset[str]]] | str:
-  """Each suite's module loader and test files, as its npm script defines them."""
+def _frontend_suites(
+  frontend: Path, deadline: float | None = None,
+) -> dict[str, tuple[str, frozenset[str]]] | str:
+  """Each suite's module loader and test files, as its npm script defines them.
+
+  Listing counts against ``deadline`` when one is given.
+  """
   try:
     scripts = json.loads((frontend / "package.json").read_text())["scripts"]
   except (OSError, ValueError, KeyError, TypeError):
@@ -282,9 +321,12 @@ def _frontend_suites(frontend: Path) -> dict[str, tuple[str, frozenset[str]]] | 
       return f"frontend test suite {name} is not in the expected form"
     members: set[str] = set()
     for listing in listings:
+      limit = 60.0 if deadline is None else min(60.0, deadline - time.monotonic())
+      if limit <= 0:
+        return "local tests had no time left in the check's budget"
       try:
         proc = subprocess.run(
-          ["sh", "-c", listing], cwd=str(frontend), capture_output=True, text=True, timeout=60,
+          ["sh", "-c", listing], cwd=str(frontend), capture_output=True, text=True, timeout=limit,
         )
       except (OSError, subprocess.TimeoutExpired):
         return f"frontend test suite {name} could not be listed"
@@ -295,42 +337,41 @@ def _frontend_suites(frontend: Path) -> dict[str, tuple[str, frozenset[str]]] | 
   return suites
 
 
-def _run_frontend(repo: Path, tests: list[str], deadline: float) -> list[LocalTestRun]:
-  """Run frontend-relative test files, each with its own suite's loader."""
+def _frontend_plan(
+  repo: Path, tests: list[str], deadline: float,
+) -> dict[str, tuple[str, list[str]]] | str:
+  """Frontend-relative test files grouped by owning suite, with its loader."""
   if not (repo / FRONTEND_RUNNER).is_file():
-    return [LocalTestRun(unavailable=f"{FRONTEND_RUNNER} is missing")]
-  suites = _frontend_suites(repo / "frontend")
+    return f"{FRONTEND_RUNNER} is missing"
+  suites = _frontend_suites(repo / "frontend", deadline)
   if isinstance(suites, str):
-    return [LocalTestRun(unavailable=suites)]
-  chosen: dict[str, list[str]] = {}
+    return suites
+  chosen: dict[str, tuple[str, list[str]]] = {}
   for test in tests:
     owners = [name for name, (_, members) in suites.items() if test in members]
     if len(owners) != 1:
-      return [LocalTestRun(unavailable=f"frontend test is not in exactly one suite: {test}")]
-    chosen.setdefault(owners[0], []).append(test)
-  runs = []
-  for name, files in chosen.items():
-    loader = suites[name][0]
-    with tempfile.TemporaryDirectory(prefix="mobius-local-tests-") as tmp:
-      report = Path(tmp) / "report.xml"
-      exit_code = _run_process(repo, [
-        "bash", FRONTEND_RUNNER, "exec", "--no", "--",
-        "node", "--disable-warning=ExperimentalWarning", f"--loader={loader}",
-        "--test", "--test-concurrency=1", "--test-reporter=junit",
-        f"--test-reporter-destination={report}", *sorted(files),
-      ], Path(tmp), deadline)
-      if isinstance(exit_code, str):
-        runs.append(LocalTestRun(unavailable=exit_code))
-      elif not report.is_file():
-        runs.append(LocalTestRun(
-          unavailable=f"frontend tests produced no report (exit {exit_code})",
-        ))
-      else:
-        try:
-          runs.append(_read_node_report(report, exit_code, repo / "frontend"))
-        except (ET.ParseError, OSError):
-          runs.append(LocalTestRun(unavailable="frontend test report was unreadable"))
-  return runs
+      return f"frontend test is not in exactly one suite: {test}"
+    chosen.setdefault(owners[0], (suites[owners[0]][0], []))[1].append(test)
+  return chosen
+
+
+def _run_frontend_suite(repo: Path, loader: str, files: list[str], deadline: float) -> LocalTestRun:
+  with tempfile.TemporaryDirectory(prefix="mobius-local-tests-") as tmp:
+    report = Path(tmp) / "report.xml"
+    exit_code = _run_process(repo, [
+      "bash", FRONTEND_RUNNER, "exec", "--no", "--",
+      "node", "--disable-warning=ExperimentalWarning", f"--loader={loader}",
+      "--test", "--test-concurrency=1", "--test-reporter=junit",
+      f"--test-reporter-destination={report}", *sorted(files),
+    ], Path(tmp), deadline)
+    if isinstance(exit_code, str):
+      return LocalTestRun(unavailable=exit_code)
+    if not report.is_file():
+      return LocalTestRun(unavailable=f"frontend tests produced no report (exit {exit_code})")
+    try:
+      return _read_node_report(report, exit_code, repo / "frontend")
+    except (ET.ParseError, OSError):
+      return LocalTestRun(unavailable="frontend test report was unreadable")
 
 
 def _read_node_report(report: Path, exit_code: int, frontend: Path) -> LocalTestRun:
@@ -380,24 +421,64 @@ def _read_node_report(report: Path, exit_code: int, frontend: Path) -> LocalTest
 
 
 def run(repo: Path, tests: list[str], *, timeout: int = TIMEOUT_SECONDS) -> LocalTestRun:
-  """Execute exactly the selection; never silently drop missing test files."""
+  """Execute exactly the selection within ``timeout``, as one run's evidence."""
+  return combine(list(run_suites(repo, tests, deadline=time.monotonic() + timeout).values()))
+
+
+def run_suites(
+  repo: Path, tests: list[str], *, deadline: float,
+  only: set[str] | None = None, reserve: bool = False,
+) -> dict[str, LocalTestRun]:
+  """Each suite's evidence for the selection, keyed ``backend`` or by npm suite.
+
+  Never silently drops missing test files. Each suite runs with a fair share
+  of the time left before ``deadline``; ``reserve`` keeps an equal share per
+  suite for a later run (the candidate after the baseline). Suites outside
+  ``only`` are reported as not run.
+  """
   if not tests:
-    return LocalTestRun(unavailable="no local tests selected for the changed files")
+    return {"selection": LocalTestRun(unavailable="no local tests selected for the changed files")}
   missing = [test for test in tests if not (repo / test).is_file()]
   if missing:
-    return LocalTestRun(unavailable="selected test files are missing: " + ", ".join(missing))
-  deadline = time.monotonic() + timeout
+    return {"selection": LocalTestRun(unavailable="selected test files are missing: " + ", ".join(missing))}
   backend = [test.removeprefix("backend/") for test in tests if test.startswith("backend/")]
   frontend = [test.removeprefix("frontend/") for test in tests if test.startswith("frontend/")]
-  parts = []
+  planned: dict[str, Callable[[float], LocalTestRun]] = {}
+  results: dict[str, LocalTestRun] = {}
   if backend:
-    parts.append(_run_backend(repo, backend, deadline))
-  if frontend:
-    parts.extend(_run_frontend(repo, frontend, deadline))
-  return _combine(parts)
+    planned["backend"] = lambda until: _run_backend(repo, backend, until)
+  if frontend and only is not None and not only & set(FRONTEND_SUITES):
+    results["frontend"] = LocalTestRun(unavailable="frontend not rerun: nothing in it passed on the baseline")
+  elif frontend:
+    plan = _frontend_plan(repo, frontend, deadline)
+    if isinstance(plan, str):
+      results["frontend"] = LocalTestRun(unavailable=plan)
+    else:
+      for name, (loader, files) in plan.items():
+        planned[name] = lambda until, loader=loader, files=files: _run_frontend_suite(
+          repo, loader, files, until,
+        )
+  runnable = [name for name in planned if only is None or name in only]
+  for name in planned:
+    if name not in runnable:
+      results[name] = LocalTestRun(unavailable=f"{name} not rerun: nothing in it passed on the baseline")
+  for index, name in enumerate(runnable):
+    started = time.monotonic()
+    slots = len(runnable) - index + (len(runnable) if reserve else 0)
+    outcome = planned[name](started + max(0.0, deadline - started) / slots)
+    results[name] = replace(outcome, seconds=time.monotonic() - started)
+  return results
 
 
-def _combine(parts: list[LocalTestRun]) -> LocalTestRun:
+def describe_timing(results: dict[str, LocalTestRun]) -> str:
+  """Per-suite wall time and outcome, for the update log."""
+  return ", ".join(
+    f"{name} {run.seconds:.0f}s{' (' + run.unavailable + ')' if run.unavailable else ''}"
+    for name, run in results.items()
+  )
+
+
+def combine(parts: list[LocalTestRun]) -> LocalTestRun:
   """One run's evidence from independent suites; a suite without evidence adds none."""
   if len(parts) == 1:
     return parts[0]
@@ -410,7 +491,7 @@ def _combine(parts: list[LocalTestRun]) -> LocalTestRun:
   )
 
 
-def compare(tests: list[str], before: LocalTestRun, after: LocalTestRun) -> dict:
+def compare(tests: list[str], before: LocalTestRun, after: LocalTestRun, *, omitted: int = 0) -> dict:
   """Comparable proof and its limits, suitable for retained prepare diagnostics."""
   incomplete = []
   for label, result in (("baseline", before), ("candidate", after)):
@@ -423,10 +504,16 @@ def compare(tests: list[str], before: LocalTestRun, after: LocalTestRun) -> dict
       incomplete.append("test identities differ between baseline and candidate")
     if before.skipped or after.skipped:
       incomplete.append("selected tests were skipped")
+  if omitted:
+    incomplete.append(
+      f"{omitted} more frontend test file(s) cover the change but were not run "
+      f"(nearest {FRONTEND_TEST_LIMIT} only)"
+    )
   broken = newly_failing(before, after)
   return {
     "status": "regression" if broken else "incomplete" if incomplete else "compared",
     "selected": tests,
+    "selection_omitted": omitted,
     "regressions": broken or [],
     "incomplete": incomplete,
     "baseline": {"passed": sorted(before.passed), "failed": sorted(before.failed),

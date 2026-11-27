@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -58,7 +59,7 @@ def test_frontend_tests_that_reach_a_changed_file_are_selected(history):
   candidate = _commit(repo, {
     "frontend/src/components/Sources.jsx": "export default function Sources({ groups }) {}\n",
   })
-  assert lt.select(repo, release, candidate, baseline) == [
+  assert lt.select(repo, release, candidate, baseline).tests == [
     # Through Reply.jsx, by Vite path, and by reading the source as text.
     "frontend/src/components/__tests__/loaded.test.js",
     "frontend/src/components/__tests__/reply.test.js",
@@ -69,7 +70,7 @@ def test_frontend_tests_that_reach_a_changed_file_are_selected(history):
 def test_tests_the_release_added_are_not_selected_without_an_earlier_run(history):
   repo, baseline, release = history
   candidate = _commit(repo, {"frontend/src/components/Reply.jsx": "export default 1\n"})
-  selected = lt.select(repo, release, candidate, baseline)
+  selected = lt.select(repo, release, candidate, baseline).tests
   assert "frontend/src/components/__tests__/added.test.js" not in selected
   assert "frontend/src/components/__tests__/reply.test.js" in selected
 
@@ -77,7 +78,27 @@ def test_tests_the_release_added_are_not_selected_without_an_earlier_run(history
 def test_a_change_outside_frontend_source_selects_no_frontend_tests(history):
   repo, baseline, release = history
   candidate = _commit(repo, {"frontend/README.md": "notes\n"})
-  assert lt.select(repo, release, candidate, baseline) == []
+  assert lt.select(repo, release, candidate, baseline).tests == []
+
+
+def test_an_edit_to_a_widely_imported_module_runs_only_the_nearest_tests(history, monkeypatch):
+  repo, baseline, release = history
+  monkeypatch.setattr(lt, "FRONTEND_TEST_LIMIT", 2)
+  candidate = _commit(repo, {
+    "frontend/src/components/Sources.jsx": "export default function Sources({ groups }) {}\n",
+  })
+  selection = lt.select(repo, release, candidate, baseline)
+  # text.test.js reads Sources.jsx itself (one hop); reaching Reply.jsx's
+  # tests takes two, so the farthest is counted rather than run.
+  assert selection.tests == [
+    "frontend/src/components/__tests__/loaded.test.js",
+    "frontend/src/components/__tests__/text.test.js",
+  ]
+  assert selection.omitted == 1
+  never_run = lt.LocalTestRun(unavailable="not run")
+  report = lt.compare(selection.tests, never_run, never_run, omitted=selection.omitted)
+  assert report["selection_omitted"] == 1
+  assert any("not run (nearest 2 only)" in reason for reason in report["incomplete"])
 
 
 def test_every_frontend_test_belongs_to_exactly_one_npm_suite():
@@ -212,11 +233,67 @@ def test_frontend_tests_run_with_their_own_suites_loader(tmp_path):
   }
 
 
+def _suite_checkout(tmp_path, backend_runner: str) -> Path:
+  (tmp_path / "scripts").mkdir()
+  (tmp_path / "scripts/wt-npm.sh").write_text(_FAKE_NPM)
+  (tmp_path / "scripts/wt-pytest.sh").write_text(backend_runner)
+  (tmp_path / "backend/tests").mkdir(parents=True)
+  (tmp_path / "backend/tests/test_local.py").touch()
+  frontend = tmp_path / "frontend"
+  (frontend / "src/lib").mkdir(parents=True)
+  (frontend / "src/lib/a.test.js").write_text("")
+  (frontend / "package.json").write_text(json.dumps({"scripts": {
+    "test:lib": "node --loader=./lib-loader.mjs --test $(find src/lib -name '*.test.js')",
+    "test:hooks": "node --loader=./hooks-loader.mjs --test $(find src/lib -name '*.hooktest.js')",
+  }}))
+  return tmp_path
+
+
+_TESTS = ["backend/tests/test_local.py", "frontend/src/lib/a.test.js"]
+
+
+def test_a_hanging_suite_cannot_starve_the_suites_after_it(tmp_path):
+  repo = _suite_checkout(tmp_path, "sleep 60\n")
+  results = lt.run_suites(repo, _TESTS, deadline=time.monotonic() + 6)
+  assert "timed out" in results["backend"].unavailable
+  assert results["backend"].seconds < 4.5
+  assert results["test:lib"].passed == {"frontend/src/lib/a.test.js::test::t"}
+
+
+def test_the_baseline_leaves_the_candidate_its_share_of_one_budget(tmp_path):
+  repo = _suite_checkout(tmp_path, "sleep 60\n")
+  started = time.monotonic()
+  results = lt.run_suites(repo, _TESTS, deadline=started + 8, reserve=True)
+  # Two suites now and two reserved for later: the hang gets a quarter.
+  assert results["backend"].seconds < 3
+  assert time.monotonic() - started < 5
+
+
+def test_suites_left_out_of_a_rerun_are_reported_not_run(tmp_path):
+  repo = _suite_checkout(tmp_path, "exit 1\n")
+  results = lt.run_suites(repo, _TESTS, deadline=time.monotonic() + 30, only={"test:lib"})
+  assert "not rerun" in results["backend"].unavailable
+  assert results["test:lib"].passed
+
+
+def test_frontend_suite_discovery_counts_against_the_budget(tmp_path):
+  repo = _suite_checkout(tmp_path, "exit 1\n")
+  results = lt.run_suites(repo, _TESTS[1:], deadline=time.monotonic() - 1)
+  assert "no time left" in results["frontend"].unavailable
+
+
+def test_a_rerun_without_frontend_suites_skips_their_discovery(tmp_path):
+  repo = _suite_checkout(tmp_path, "exit 1\n")
+  (repo / "frontend/package.json").write_text("not json")
+  results = lt.run_suites(repo, _TESTS, deadline=time.monotonic() + 30, only={"backend"})
+  assert "not rerun" in results["frontend"].unavailable
+
+
 def test_frontend_evidence_missing_does_not_hide_backend_evidence():
   backend = lt.LocalTestRun(passed=frozenset({"tests.test_a::test_a"}))
   frontend = lt.LocalTestRun(unavailable="frontend tests produced no report (exit 3)")
-  before = lt._combine([backend, frontend])
-  after = lt._combine([lt.LocalTestRun(failed=frozenset({"tests.test_a::test_a"})), frontend])
+  before = lt.combine([backend, frontend])
+  after = lt.combine([lt.LocalTestRun(failed=frozenset({"tests.test_a::test_a"})), frontend])
   report = lt.compare(["backend/tests/test_a.py", "frontend/src/a.test.js"], before, after)
   assert report["regressions"] == ["tests.test_a::test_a"]
   assert report["status"] == "regression"

@@ -72,6 +72,9 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
   const [error, setError] = useState('')
   const [errorCode, setErrorCode] = useState('')
   const [checkResult, setCheckResult] = useState('')
+  // What a still-running request is doing after its reply was lost. It is
+  // progress, never a failure: error is what offers repair.
+  const [notice, setNotice] = useState('')
   const [progress, setProgress] = useState(null)
   const [reconnect, setReconnect] = useState(null)
   const [slow, setSlow] = useState(false)
@@ -135,7 +138,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
     let sawUnavailable = false
     let freshServerSeen = false
     const started = Date.now()
-    function settled() { setReconnect(null); setPhase('idle'); refreshPlatform() }
+    function settled() { setReconnect(null); setNotice(''); setPhase('idle'); refreshPlatform() }
     const poll = async () => {
       attempts += 1
       if (reconnect.kind === 'rebuild') {
@@ -222,7 +225,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
     if (pending.current || busy) return { ok: false }
     pending.current = true
     setPhase(kind === 'rebuild' ? 'rebuilding' : 'applying')
-    setError(''); setErrorCode(''); setProgress(null); setCheckResult('')
+    setError(''); setErrorCode(''); setNotice(''); setProgress(null); setCheckResult('')
     const requestedAt = Date.now()
     const previousOperationId = rebuild?.operation_id
     const before = kind === 'rebuild' ? await health() : null
@@ -251,15 +254,17 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
       setError('The update returned an unexpected result. Check its status before trying again.')
       return { ok: false, state }
     } catch (cause) {
-      setError(cause.message || 'The update could not be confirmed.')
-      setErrorCode(cause.code || '')
       if (!cause.definitive && kind === 'apply') {
         return await settleObservedApply(plan, progressBefore?.updated_at ?? null)
       }
       if (!cause.definitive) {
         setReconnect({ kind, plan, bootId: before?.bootId || '', requestedAt, previousOperationId })
-        setError('The connection was interrupted. Checking whether your update started; no second request will be sent.')
-      } else await Promise.all([
+        setNotice('The connection was interrupted. Checking whether your update started; no second request will be sent.')
+        return { ok: false }
+      }
+      setError(cause.message || 'The update could not be confirmed.')
+      setErrorCode(cause.code || '')
+      await Promise.all([
         refreshPlatform({ preserveCurrentOnFailure: true }),
         refreshRebuild(),
       ])
@@ -273,8 +278,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
   // The Apply reply was lost, but the server finishes an admitted update anyway:
   // follow its progress record and return the same outcome the reply would have.
   async function settleObservedApply(plan, after) {
-    setError('The connection was interrupted. Following the update on the server; no second request will be sent.')
-    setErrorCode('')
+    setNotice('The connection was interrupted. Following the update on the server; no second request will be sent.')
     const outcome = await waitForApplyOutcome({
       planId: plan.plan_id, after, readProgress: readUpdateProgress, sleep: delay,
     })
@@ -282,6 +286,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
     // read must not leave the pre-Apply status (and its update action) in place.
     const status = await refreshPlatform()
     const result = observedApplyResult(outcome, status)
+    setNotice('')
     setError(result.error)
     setErrorCode(result.errorCode)
     setCheckResult(result.notice)
@@ -383,7 +388,7 @@ export default function usePlatformUpdates({ active, refreshToken, onOpenChat, c
   const clearError = useCallback(() => { setError(''); setErrorCode('') }, [])
 
   return {
-    platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, checkResult,
+    platform, cachedPlatform, rebuild, version: versionQuery.data, phase, busy, error, errorCode, notice, checkResult,
     progress, reconnecting: !!reconnect, slow, check, execute, restart, resolve, resume, cancel,
     withdrawHostRequest, keepSettling, clearError, chooseAgent,
   }

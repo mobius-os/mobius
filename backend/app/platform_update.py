@@ -3664,37 +3664,49 @@ def _check_local_tests(
   # Static and image-independent, so it runs first: when it already rejects
   # the candidate, running the tests could not change that verdict.
   started = time.monotonic()
+  # One budget for both sides: the baseline reserves the candidate's share.
+  deadline = started + local_change_tests.TIMEOUT_SECONDS
   removed = removed_references.find(repo, target, prepared, snapshot)
-  tests = local_change_tests.select(repo, target, prepared, snapshot)
+  selection = local_change_tests.select(repo, target, prepared, snapshot)
+  tests = selection.tests
   unavailable = (
     "local changes use names this release removed" if removed
     else "target image test runtime is not available before activation" if requires_image
     else "no local tests selected for the changed files" if not tests else None
   )
+  timing = ""
   if unavailable:
     result = local_change_tests.LocalTestRun(unavailable=unavailable)
     runs = [result, result]
   else:
-    runs = []
+    sides: dict[str, dict[str, local_change_tests.LocalTestRun]] = {}
     with tempfile.TemporaryDirectory(prefix="mobius-update-tests-") as tmp:
       for label, revision in (("baseline", snapshot), ("candidate", prepared)):
         checkout = Path(tmp) / label
         try:
           _git("worktree", "add", "--detach", "-q", str(checkout), revision, repo=repo)
-          runs.append(local_change_tests.run(checkout, tests))
+          baseline = sides.get("baseline")
+          sides[label] = local_change_tests.run_suites(
+            checkout, tests, deadline=deadline, reserve=baseline is None,
+            # A suite that passed nothing before cannot show a regression.
+            only=None if baseline is None else {name for name, run in baseline.items() if run.passed},
+          )
         finally:
           app_git.remove_overlay_worktree(repo, checkout)
+    runs = [local_change_tests.combine(list(sides[label].values())) for label in ("baseline", "candidate")]
+    timing = "; ".join(f"{label}: {local_change_tests.describe_timing(sides[label])}" for label in sides)
   report = {
-    **local_change_tests.compare(tests, *runs),
+    **local_change_tests.compare(tests, *runs, omitted=selection.omitted),
     "removed_references": removed,
     "baseline_sha": snapshot, "candidate_sha": prepared, "target_sha": target,
   }
   log.info(
     "platform update local tests for %s: %s, %d selected file(s), "
-    "%d regression(s), %.1fs%s",
+    "%d regression(s), %.1fs%s%s",
     target[:12], report["status"], len(tests), len(report["regressions"]),
     time.monotonic() - started,
     f"; incomplete: {'; '.join(report['incomplete'])}" if report["incomplete"] else "",
+    f"; timing: {timing}" if timing else "",
   )
   return report
 

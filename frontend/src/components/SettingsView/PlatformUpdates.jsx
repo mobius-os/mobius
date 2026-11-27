@@ -227,6 +227,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           : 'The page will refresh when Möbius is ready.'}</p>
       )}
       {update.checkResult && <p className="platform-updates__description" role="status">{update.checkResult}</p>}
+      {!review && update.notice && <p className="platform-updates__description" role="status">{update.notice}</p>}
       {!review && !repairReason && update.error && <Alert color="danger" variant="soft" description={update.error} />}
       {review && (
         <UpdateReviewModal intent={review} platform={platform} rebuild={rebuild} onClose={closeReview}
@@ -234,7 +235,7 @@ export function PlatformUpdatesView({ update, onOpenChat, inertBoundaryRef }) {
           onApply={plan => update.execute(plan, 'apply')}
           onRebuild={plan => update.execute(plan, 'rebuild')}
           onResolve={update.resolve} onChooseAgent={update.chooseAgent} applying={phase === 'applying'} rebuilding={phase === 'rebuilding'}
-          resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} onRefreshReview={update.clearError} applyProgress={update.progress} />
+          resolving={phase === 'resolving'} observing={update.reconnecting} applyError={update.error} applyErrorCode={update.errorCode} applyNotice={update.notice} onRefreshReview={update.clearError} applyProgress={update.progress} />
       )}
       </div>
     </section>
