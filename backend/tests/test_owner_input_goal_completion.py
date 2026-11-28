@@ -52,6 +52,28 @@ def test_an_offer_left_open_does_not_hold_a_finished_goal(
       "contribute-upstream"]
 
 
+def test_another_goals_request_never_fences_a_task_sharing_its_id(client, owner_token, db):
+  chat_id = _planned_goal(client, owner_token, db)
+  requests.add_request(db, chat_id=chat_id, run_id="goal-root", goal_id="goal-earlier",
+                       key="earlier-deploy", spec={"prompt": "Deploy the old build?"},
+                       blocks={"tasks": ["deploy"]})
+
+  finished = _update(client, db, chat_id, {"tasks": [{"id": "deploy", "status": "completed"}]})
+
+  assert finished.status_code == 200, finished.text
+
+
+def test_this_goals_request_fences_its_task(client, owner_token, db):
+  chat_id = _planned_goal(client, owner_token, db)
+  requests.add_request(db, chat_id=chat_id, run_id="goal-root", goal_id="goal-1",
+                       key="release-target", spec={"prompt": "Staging or production?"},
+                       blocks={"tasks": ["deploy"]})
+
+  refused = _update(client, db, chat_id, {"tasks": [{"id": "deploy", "status": "completed"}]})
+
+  assert refused.status_code != 200 and "release-target" in refused.text
+
+
 def test_a_request_fencing_this_goals_task_holds_its_completion(client, owner_token, db):
   chat_id = _planned_goal(client, owner_token, db)
   _finish_tasks(client, db, chat_id)
@@ -117,6 +139,30 @@ def test_an_approval_still_asked_keeps_its_claim_past_goal_completion(client, ow
   with SessionLocal() as session:
     assert session.query(models.AgentWorkClaim).filter_by(
       work_key=work_key).one().released_at is not None
+
+
+def test_a_goal_ended_unfinished_withdraws_the_approval_whose_claim_it_releases(
+  client, owner_token, db,
+):
+  chat_id = _planned_goal(client, owner_token, db)
+  agent = _agent_run_auth(db, chat_id, "goal-root")
+  assert inputs.add(client, chat_id, agent, "publish", **inputs.APPROVAL).status_code == 200
+
+  assert _update(client, db, chat_id, {"tasks": [
+    {"id": task["id"], "status": "cancelled", "result": "Called off."} for task in TASKS]}).status_code == 200
+  cancelled = _update(client, db, chat_id, {"cancel": "The release was called off."})
+
+  assert cancelled.status_code == 200, cancelled.text
+  with SessionLocal() as session:
+    claim = session.query(models.AgentWorkClaim).filter_by(
+      work_key=inputs.APPROVAL["work_key"]).one()
+    assert claim.released_at is not None
+    # The owner is never offered an action nobody holds any more.
+    assert requests.open_requests(session, chat_id) == []
+    settled = requests.settled_since_last_turn(session, chat_id)
+  assert [(row["key"], row["status"], row["settled_by"]) for row in settled] == [
+    ("publish", "withdrawn", "platform")]
+  assert "cancelled" in settled[0]["reason"]
 
 
 def test_an_approval_named_as_finished_completes_with_its_goal(client, owner_token, db):

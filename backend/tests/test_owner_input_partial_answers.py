@@ -22,12 +22,12 @@ def test_a_partial_answer_keeps_the_secret_and_restart_entries_on_their_card(
   ids = {row.key: row.id for row in rows}
   answers = {"How formal should the changelog be?": "Casual"}
 
-  assert requests.self_settling_entries_left(card, answers, {}) == {
+  assert requests.self_settling_entries_left(card, answers) == {
     ids["mail-key"], ids["restart"]}
   # Written feedback settles a restart entry; a settled entry is not left.
   assert requests.self_settling_entries_left(
     {**card, "request_states": {ids["mail-key"]: {"status": "consumed"}}},
-    {**answers, card["questions"][2]["question"]: "Not now, I am presenting."}, {},
+    {**answers, card["questions"][2]["question"]: "Not now, I am presenting."},
   ) == set()
 
   requests.stage_card_answers(db, chat.id, {**card, "answers": answers})

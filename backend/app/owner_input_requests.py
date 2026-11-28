@@ -16,7 +16,7 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -358,7 +358,8 @@ def open_requests(db: Session, chat_id: str) -> list[models.OwnerInputRequest]:
 def find_open(db: Session, chat_id: str, ref: str) -> models.OwnerInputRequest:
   """Resolve an id or key to this chat's open request, never another chat's.
 
-  A request that is no longer open is named with what closed it, so an edit
+  Agents name a request by key; the platform's own edits (a withdrawal at
+  publication) use the id. A request that is no longer open is named with what closed it, so an edit
   that lost a race with an answer says so."""
   matches = (models.OwnerInputRequest.id == ref) | (models.OwnerInputRequest.key == ref)
   row = (
@@ -523,7 +524,8 @@ _EDIT_ATTEMPTS = 2
 
 def _edit_open(
   db: Session, chat_id: str, ref: str,
-  change: Any, stage_after: Any = None,
+  change: Callable[[models.OwnerInputRequest], dict[str, Any] | None],
+  stage_after: Callable[[models.OwnerInputRequest], Any] | None = None,
 ) -> tuple[models.OwnerInputRequest, bool, Any]:
   """Apply one edit to an open request, conditional on the state it read.
 
@@ -635,6 +637,22 @@ def open_approval_work_keys(db: Session, chat_id: str) -> set[str]:
     row.spec_json["work_key"] for row in open_requests(db, chat_id)
     if request_kind(row) == APPROVAL
   }
+
+
+def stage_approvals_withdrawn(
+  db: Session, chat_id: str, work_keys: set[str], *, reason: str,
+) -> None:
+  """Withdraw, in the caller's transaction, the open approvals whose claims
+  are being released, so the owner is never offered an action this chat no
+  longer holds and the agent hears why (`settled_by: platform`)."""
+  if not work_keys:
+    return
+  now = now_naive_utc()
+  for row in open_requests(db, chat_id):
+    if request_kind(row) == APPROVAL and row.spec_json.get("work_key") in work_keys:
+      row.status = "withdrawn"
+      row.outcome_json = {"reason": reason, "by": "platform"}
+      row.updated_at = now
 
 
 RESOLVE_SOURCES = ("owner_message", "found")
@@ -1080,19 +1098,22 @@ def shown_request_card(db: Session, chat_id: str) -> str | None:
 
 
 def require_tasks_not_waiting_on_owner(
-  db: Session, chat_id: str, edits: list[dict[str, Any]], *,
-  completing_goal: models.ChatGoal | None = None,
+  db: Session, goal: models.ChatGoal, edits: list[dict[str, Any]], *, completing: bool,
 ) -> None:
   """A task that waits on an open request cannot be reported finished.
 
   Recording a request is not an answer. This is the one place the list is
   enforced rather than advised: finishing the blocked work would mean the
-  agent proceeded without its owner. A completing Goal is refused only by
-  its own open requests that fence a task of its plan; an offer the agent
-  leaves open for the owner (no blocks, blocked work described only, or
-  another Goal's) does not hold a finished outcome open.
+  agent proceeded without its owner. Only this Goal's requests fence its
+  tasks (and one recorded while no Goal was attached, which names its task
+  ids); another Goal's request never holds a task that shares an id. A
+  completing Goal is refused only by its own open requests that fence a task
+  of its plan; an offer the agent leaves open for the owner (no blocks,
+  blocked work described only, or another Goal's) does not hold a finished
+  outcome open.
   """
-  rows = open_requests(db, chat_id)
+  rows = [row for row in open_requests(db, goal.chat_id)
+          if row.goal_id in (goal.id, None)]
   waiting = {
     task: row.key for row in rows for task in (row.blocks_json or {}).get("tasks", [])
   }
@@ -1103,12 +1124,12 @@ def require_tasks_not_waiting_on_owner(
         f"{waiting[edit['id']]!r}; it can be completed once that is answered "
         "or withdrawn"
       )
-  if completing_goal is None:
+  if not completing:
     return
-  task_ids = goal_task_ids(db, completing_goal.id) or set()
+  task_ids = goal_task_ids(db, goal.id) or set()
   fencing = [
     row.key for row in rows
-    if row.goal_id == completing_goal.id
+    if row.goal_id == goal.id
     and task_ids.intersection((row.blocks_json or {}).get("tasks") or [])
   ]
   if fencing:
@@ -1132,7 +1153,7 @@ def compose_card(
 
   - question: a prompt with options or free text, answered on the card.
   - approval: the prompt, options with ids and `action_key` (the claimed
-    work_key); granted only by an explicit option of the shown revision.
+    work_key); settled only by an explicit option of the shown revision.
   - restart: one Restart now option and its own `platform_action`, derived
     here for this run and ``boot_id`` (`owner_input_cards.restart_entry`).
   - secret: `secure_input` prompts and labels only; values go to the sealed
@@ -1341,7 +1362,7 @@ def require_card_answers_current(
   require_answerable_entries(card, answers, selections)
   if selections:
     # The route validated these too; the writer re-binds every selection to
-    # the exact saved options, so an approval is granted only by its own
+    # the exact saved options, so an approval is settled only by its own
     # option ids, whatever a caller sends.
     from app.questions import validate_saved_answer
     validate_saved_answer(card, answers, selections)
@@ -1411,9 +1432,7 @@ def stage_unpressed_restart_wait_withdrawn(db: Session, chat_id: str, question_i
   }, synchronize_session=False)
 
 
-def self_settling_entries_left(
-  card: dict[str, Any], answers: dict[str, Any], selections: dict[str, Any] | None,
-) -> set[str]:
+def self_settling_entries_left(card: dict[str, Any], answers: dict[str, Any]) -> set[str]:
   """Entries of a request-list card that settle on their own (a secret's
   sealed form, an unpressed restart) and that this submission leaves open.
 
@@ -1451,7 +1470,7 @@ def stage_card_answers(db: Session, chat_id: str, card: dict[str, Any]) -> None:
   selections = card.get("selected_options") or {}
   if not card.get("input_requests"):
     return
-  still_shown = self_settling_entries_left(card, answers, selections)
+  still_shown = self_settling_entries_left(card, answers)
   for question in card.get("questions") or []:
     request_id = question.get("id")
     kind = entry_kind(question)
@@ -1466,7 +1485,7 @@ def stage_card_answers(db: Session, chat_id: str, card: dict[str, Any]) -> None:
       # only through the restart resolver (`require_answerable_entries`).
       and kind != SECRET
       and not (kind == RESTART and request_id in selections)
-      # Only an explicit option grants an approval; typed text is a message
+      # Only an explicit option settles an approval; typed text is a message
       # to the agent and leaves the approval open for the next card.
       and (kind != APPROVAL or bool(selections.get(request_id)))
     )

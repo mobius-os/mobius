@@ -8445,8 +8445,7 @@ def apply_answers_to_last_question(
     from app.owner_input_requests import self_settling_entries_left, stage_card_answers
     stage_card_answers(db, chat.id, block)
     if (block.get("input_requests") and chat.open_request_card_id == block.get("question_id")
-        and not self_settling_entries_left(
-          block, block.get("answers") or {}, block.get("selected_options") or {})):
+        and not self_settling_entries_left(block, block.get("answers") or {})):
       # Answered, fully or in part: what is left open is shown on the next
       # card. A secret or unpressed restart entry acts on its own, so while
       # one is left the card stays open for it until the next card replaces it.
