@@ -71,6 +71,11 @@ from app import schemas
 # 65 real seconds.
 TERMINAL_LOCK_TIMEOUT_SECS = 65.0
 
+# Pauses before resubmitting a PromotePending whose commit was rolled back by a
+# transient lock. Three attempts (each at most the 5s busy timeout) plus these
+# pauses and the following FinishRun stay well inside the terminal bound above.
+PROMOTE_RETRY_DELAYS_SECS = (1.0, 3.0)
+
 
 class TerminalDisposition(enum.Enum):
   """How a turn's locked terminal transition resolved.
@@ -257,7 +262,9 @@ async def promote_pending_messages_locked(
   returning promoted=None, which would be indistinguishable from an empty
   queue and let the caller clear the marker on stranded work) — propagate so
   the turn-end caller surfaces a transport error / leaves the marker rather
-  than promoting a write that never landed.
+  than promoting a write that never landed. A ``CommitDropped`` (definitively
+  rolled back behind another writer's lock) is resubmitted first, after the
+  pauses in ``PROMOTE_RETRY_DELAYS_SECS``.
   """
   del db  # the actor owns the JSON-blob write on its own session
   if not chat_id:
@@ -269,17 +276,27 @@ async def promote_pending_messages_locked(
     get_writer,
   )
 
-  ack = get_writer().submit(
-    PromotePending(
-      chat_id=chat_id,
-      run_token=run_token,
-      ending_status=ending_status,
-      ending_run_token=ending_run_token,
-      owner_send=owner_send,
-      restore_archived=restore_archived,
-    )
+  from app.chat_writer import CommitDropped
+
+  command = dict(
+    chat_id=chat_id,
+    run_token=run_token,
+    ending_status=ending_status,
+    ending_run_token=ending_run_token,
+    owner_send=owner_send,
+    restore_archived=restore_archived,
   )
-  result = await await_ack(ack)
+  for delay in (*PROMOTE_RETRY_DELAYS_SECS, None):
+    try:
+      result = await await_ack(get_writer().submit(PromotePending(**command)))
+      break
+    except CommitDropped:
+      # Definitively rolled back (another writer held SQLite's lock past the
+      # busy timeout): submitting again is the same promotion, only later.
+      # An ack TIMEOUT stays fatal: that write may still land.
+      if delay is None:
+        raise
+      await asyncio.sleep(delay)
   if isinstance(result, PromotePendingBlocked):
     raise PendingAdmissionBlocksPromotion(result)
   if result.get("settlement_error"):

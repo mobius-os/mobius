@@ -107,6 +107,109 @@ def test_promote_pending_messages_locked_collapses_queue(db):
   assert chat.pending_messages == []
 
 
+def _drop_commits(monkeypatch, count):
+  """Make the writer's next ``count`` commits roll back as a lock would."""
+  from app import chat_writer
+
+  real = chat_writer._commit_or_rollback
+  dropped = []
+
+  def flaky(session):
+    if len(dropped) < count:
+      dropped.append(True)
+      session.rollback()
+      return False
+    return real(session)
+
+  monkeypatch.setattr(chat_writer, "_commit_or_rollback", flaky)
+  monkeypatch.setattr(chat_queue, "PROMOTE_RETRY_DELAYS_SECS", (0.01, 0.01))
+  return dropped
+
+
+def _seed_queued(db, chat_id):
+  db.add(create_chat(
+    id=chat_id, title="t", messages=[],
+    pending_messages=[{"role": "user", "content": "queued", "ts": 1}],
+    session_id="sess-retry",
+  ))
+  db.commit()
+
+
+def test_promotion_survives_a_commit_dropped_behind_another_writers_lock(
+  db, monkeypatch,
+):
+  """A database lock held past the busy timeout rolls the promotion back
+  completely; it is resubmitted rather than stranding the turn behind a
+  "could not be saved" sweep."""
+  _seed_queued(db, "cq-retry")
+  dropped = _drop_commits(monkeypatch, 2)
+
+  _msgs, promoted, _sid = asyncio.run(
+    chat_queue.promote_pending_messages_locked(db, "cq-retry", "rt-retry"),
+  )
+
+  assert len(dropped) == 2
+  assert promoted is not None and promoted["content"] == "queued"
+  db.expire_all()
+  chat = db.get(models.Chat, "cq-retry")
+  assert chat.pending_messages == []
+  assert chat.active_assistant_message_id == "rt-retry"
+  assert db.get(models.ChatRun, "rt-retry").status == "running"
+
+
+def test_promotion_retries_a_lock_hit_while_inserting_rows(db, monkeypatch):
+  """The busy timeout can fire on the promoted rows' INSERT, before commit."""
+  import sqlite3
+
+  from sqlalchemy.exc import OperationalError
+
+  from app import transcript_rows as rows
+
+  _seed_queued(db, "cq-retry-insert")
+  monkeypatch.setattr(chat_queue, "PROMOTE_RETRY_DELAYS_SECS", (0.01, 0.01))
+  real = rows.append_many
+  locked = []
+
+  def flaky(*args, **kwargs):
+    if not locked:
+      locked.append(True)
+      raise OperationalError(
+        "INSERT", {}, sqlite3.OperationalError("database is locked"),
+      )
+    return real(*args, **kwargs)
+
+  monkeypatch.setattr(rows, "append_many", flaky)
+
+  _msgs, promoted, _sid = asyncio.run(
+    chat_queue.promote_pending_messages_locked(
+      db, "cq-retry-insert", "rt-retry-insert",
+    ),
+  )
+
+  assert locked == [True]
+  assert promoted is not None and promoted["content"] == "queued"
+  db.expire_all()
+  assert db.get(models.Chat, "cq-retry-insert").pending_messages == []
+  assert db.get(models.ChatRun, "rt-retry-insert").status == "running"
+
+
+def test_promotion_gives_up_after_bounded_retries(db, monkeypatch):
+  from app.chat_writer import CommitDropped
+
+  _seed_queued(db, "cq-retry-exhausted")
+  dropped = _drop_commits(monkeypatch, 99)
+
+  with pytest.raises(CommitDropped):
+    asyncio.run(chat_queue.promote_pending_messages_locked(
+      db, "cq-retry-exhausted", "rt-retry-exhausted",
+    ))
+
+  assert len(dropped) == 1 + len(chat_queue.PROMOTE_RETRY_DELAYS_SECS)
+  db.expire_all()
+  assert db.get(models.Chat, "cq-retry-exhausted").pending_messages != []
+  assert db.get(models.ChatRun, "rt-retry-exhausted") is None
+
+
 def test_promote_pending_messages_locked_returns_none_on_empty_queue(db):
   chat = create_chat(
     id="cq-empty",

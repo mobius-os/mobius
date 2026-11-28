@@ -799,6 +799,7 @@ async def _recover_wedged_run_strict(
   kind: str | None = None,
   resumable: bool = True,
   terminal_status: str = "interrupted",
+  saved_reply_message: str | None = None,
 ) -> bool:
   """Atomically leave a durable interruption marker and close a wedged run.
 
@@ -813,6 +814,10 @@ async def _recover_wedged_run_strict(
       chat_id=chat_id,
       run_token=run_token,
       interruption_block=_pause_note(message, kind=kind, resumable=resumable),
+      saved_reply_block=(
+        _pause_note(saved_reply_message, kind=kind, resumable=resumable)
+        if saved_reply_message is not None else None
+      ),
       terminal_status=terminal_status,
     )
   )
@@ -1360,6 +1365,12 @@ def notify_after_reconcile(db: Session, reconciled: list[str]) -> str | None:
 # broadcast + registry state below; the floor is only belt-and-suspenders
 # against a just-started turn whose registry/broadcast state hasn't settled.
 _WEDGED_RUN_MIN_AGE = timedelta(seconds=120)
+# A swept run whose reply is already saved lost only its ending (the step that
+# closes the turn or starts what follows), not its response.
+WEDGED_SAVED_REPLY_MESSAGE = (
+  "This reply was saved, but what should have followed it could not start. "
+  "You can resume the turn."
+)
 
 
 def _runner_alive(chat_id: str) -> bool:
@@ -1464,7 +1475,9 @@ async def sweep_wedged_runs(db: Session) -> list[str]:
           # Identity-keyed on the wedged run's token: a fresh turn that raced in
           # owns a different token, so the actor no-ops.
           # Strict variant so a failed ack RAISES and is retried later.
-          await _recover_wedged_run_strict(chat_id, run.id)
+          await _recover_wedged_run_strict(
+            chat_id, run.id, saved_reply_message=WEDGED_SAVED_REPLY_MESSAGE,
+          )
           # Publish inside the queue lock so a fresh run cannot start between
           # the run close and its terminal signal — a finish event must never
           # be observable after a newer running turn has already begun.

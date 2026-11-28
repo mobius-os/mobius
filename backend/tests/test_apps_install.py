@@ -3351,6 +3351,82 @@ JSX_MULTI = (
 )
 
 
+def test_app_update_leaves_the_database_writable_until_its_final_commit(
+  client, auth, db, bypass_url_validation,
+):
+  """An update's slow phase (git, merge, file writes, compile) must not hold
+  SQLite's database-wide write lock: chat saves and every other writer run
+  behind a 5-second busy timeout, and a batch of updates once made them fail
+  with "database is locked". This update renames the app and replaces its
+  service aliases, the row changes that used to be written early."""
+  import sqlite3
+  from app.database import engine
+
+  base = "https://packages.test/x/app-lock-probe/main/"
+
+  def manifest(version, name, aliases):
+    return {
+      "id": "lock-probe", "name": name, "version": version,
+      "description": "Update write-lock probe", "entry": "index.jsx",
+      "permissions": {"cross_app_access": "none", "share_with_apps": "none"},
+      "service": {
+        "id": "lock-probe", "entry": "service.py", "access": "public",
+        "aliases": aliases,
+      },
+      "source_files": ["service.py"],
+      "runtime": {"imports": ["react"], "esm_deps": []},
+    }
+
+  def post(body):
+    responses = {
+      base + "mobius.json": (200, json.dumps(body).encode()),
+      base + "index.jsx": (200, JSX.encode()),
+      base + "service.py": (200, b"def handle(req):\n    return {}\n"),
+    }
+    with patch(
+      "app.install.httpx.AsyncClient",
+      side_effect=_fake_async_client(responses),
+    ):
+      return client.post("/api/apps/install", headers=auth, json={
+        "manifest_url": base + "mobius.json",
+      })
+
+  first = post(manifest("1.0.0", "Lock Probe", ["lock-old", "lock-kept"]))
+  assert first.status_code == 201, first.text
+  app_id = first.json()["id"]
+
+  def another_writer_can_commit() -> bool:
+    conn = sqlite3.connect(engine.url.database, timeout=0)
+    try:
+      conn.execute("BEGIN IMMEDIATE")
+      conn.execute("ROLLBACK")
+      return True
+    except sqlite3.OperationalError as exc:
+      assert "locked" in str(exc)
+      return False
+    finally:
+      conn.close()
+
+  observed = []
+  real_activate = install._activate_install_source
+
+  async def activate_then_probe(*args, **kwargs):
+    result = await real_activate(*args, **kwargs)
+    observed.append(another_writer_can_commit())
+    return result
+
+  with patch.object(install, "_activate_install_source", activate_then_probe):
+    second = post(manifest("2.0.0", "Lock Probe Renamed", ["lock-kept", "lock-new"]))
+
+  assert second.status_code == 201, second.text
+  assert second.json()["mode"] == "update"
+  assert observed == [True]
+  db.expire_all()
+  assert db.get(models.App, app_id).name == "Lock Probe Renamed"
+  aliases = db.query(models.AppServiceAlias).filter_by(app_id=app_id).all()
+  assert sorted(alias.service_id for alias in aliases) == ["lock-kept", "lock-new"]
+
+
 def _install_v1(client, auth, base, manifest, jsx):
   responses = {
     base + "mobius.json": (200, json.dumps(manifest).encode()),
