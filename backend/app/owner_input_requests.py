@@ -1042,9 +1042,7 @@ def goal_waits_on_request_card(
   unowned = [row for row in rows if row.goal_id is None]
   if not unowned:
     return False
-  goal = db.get(models.ChatGoal, goal_id)
-  plan = goal.plan_json if goal is not None and isinstance(goal.plan_json, dict) else {}
-  task_ids = {task.get("id") for task in plan.get("tasks") or [] if isinstance(task, dict)}
+  task_ids = goal_task_ids(db, goal_id) or set()
   return any(
     task_ids.intersection((row.blocks_json or {}).get("tasks") or []) for row in unowned
   )
@@ -1082,13 +1080,17 @@ def shown_request_card(db: Session, chat_id: str) -> str | None:
 
 
 def require_tasks_not_waiting_on_owner(
-  db: Session, chat_id: str, edits: list[dict[str, Any]], *, completing_goal: bool,
+  db: Session, chat_id: str, edits: list[dict[str, Any]], *,
+  completing_goal: models.ChatGoal | None = None,
 ) -> None:
   """A task that waits on an open request cannot be reported finished.
 
   Recording a request is not an answer. This is the one place the list is
-  enforced rather than advised: finishing the blocked work, or the Goal that
-  still has questions out, would mean the agent proceeded without its owner.
+  enforced rather than advised: finishing the blocked work would mean the
+  agent proceeded without its owner. A completing Goal is refused only by
+  its own open requests that fence a task of its plan; an offer the agent
+  leaves open for the owner (no blocks, blocked work described only, or
+  another Goal's) does not hold a finished outcome open.
   """
   rows = open_requests(db, chat_id)
   waiting = {
@@ -1101,11 +1103,18 @@ def require_tasks_not_waiting_on_owner(
         f"{waiting[edit['id']]!r}; it can be completed once that is answered "
         "or withdrawn"
       )
-  if completing_goal and rows:
-    keys = ", ".join(row.key for row in rows[:5])
+  if completing_goal is None:
+    return
+  task_ids = goal_task_ids(db, completing_goal.id) or set()
+  fencing = [
+    row.key for row in rows
+    if row.goal_id == completing_goal.id
+    and task_ids.intersection((row.blocks_json or {}).get("tasks") or [])
+  ]
+  if fencing:
     raise RequestError(
-      f"this chat still has open owner requests ({keys}); withdraw the ones "
-      "that no longer matter before completing the Goal"
+      f"this Goal's tasks still wait on open owner requests ({', '.join(fencing[:5])}); "
+      "withdraw the ones that no longer matter before completing the Goal"
     )
 
 

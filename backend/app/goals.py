@@ -529,7 +529,7 @@ def _update_goal_record(db, run, goal, expected_revision, *, checkpoint=None,
   from app.owner_input_requests import RequestError, require_tasks_not_waiting_on_owner
   try:
     require_tasks_not_waiting_on_owner(
-      db, goal.chat_id, tasks or [], completing_goal=status == "completed",
+      db, goal.chat_id, tasks or [], completing_goal=goal if status == "completed" else None,
     )
   except RequestError as exc:
     raise GoalPlanError(str(exc)) from exc
