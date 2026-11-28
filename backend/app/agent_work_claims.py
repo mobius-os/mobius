@@ -505,6 +505,12 @@ def _stage_settle(
   )
 
 
+def stage_release_claim(db: Session, row: models.AgentWorkClaim, *, outcome: str) -> bool:
+  """Release one open claim in the caller's transaction, fenced by revision;
+  False when a concurrent finish or transfer won."""
+  return _stage_settle(db, row, complete=False, outcome=outcome) is not None
+
+
 def _open_claims_for_chat(db: Session, chat_id: str):
   return db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,

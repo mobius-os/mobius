@@ -1918,7 +1918,7 @@ class OwnerInputRequest(Base):
   revision = Column(Integer, nullable=False, default=1)
   spec_json = Column(JSON, nullable=False)
   blocks_json = Column(JSON, nullable=False, default=dict)
-  # open | answered | withdrawn | superseded
+  # open | answered | withdrawn
   status = Column(String(16), nullable=False, default="open")
   answer_json = Column(JSON, nullable=True)
   answered_revision = Column(Integer, nullable=True)

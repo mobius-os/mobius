@@ -38,7 +38,8 @@ def test_recording_a_request_leaves_the_turn_running_and_shows_no_card(client, c
   assert [row["key"] for row in body["open"]] == ["release-target"]
   assert body["open"][0]["shown_to_owner"] is False
   assert body["open"][0]["blocks"] == {"tasks": ["deploy"], "work": "The release itself"}
-  assert "do not act" in body["next_action"]
+  assert (body["result"], body["key"], body["revision"]) == ("created", "release-target", 1)
+  assert body["next_action"].startswith("Recorded, not shown yet")
   # Asking is not publishing: no card owns the chat and the run is untouched.
   assert _pending_question(chat.id) is None
   db.expire_all()
@@ -132,7 +133,10 @@ def test_withdrawing_needs_a_reason_and_closes_only_that_request(client, chat, d
   assert [row["key"] for row in remaining["open"]] == ["changelog-tone"]
   row = db.query(models.OwnerInputRequest).filter_by(key="release-target").one()
   assert row.status == "withdrawn"
-  assert row.outcome_json == {"reason": "The owner said production in their last message."}
+  assert row.outcome_json == {"reason": "The owner said production in their last message.",
+                              "by": "agent"}
+  assert (remaining["result"], remaining["key"]) == ("withdrawn", "release-target")
+  assert "next_action" not in remaining and "released" not in remaining
 
 
 def test_a_withdrawn_key_can_be_asked_again_as_a_new_request(client, chat, run_auth):

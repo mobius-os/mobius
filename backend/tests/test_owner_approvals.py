@@ -838,7 +838,8 @@ def test_control_tool_records_an_approval_that_is_not_permission(
   assert not result["isError"]
   body = json.loads(result["content"][0]["text"])
   assert [row["kind"] for row in body["open"]] == ["approval"]
-  assert "Nothing here is answered" in body["next_action"]
+  assert body["result"] == "created"
+  assert body["next_action"].startswith("Recorded, not shown yet")
   assert not any("answer" in row for row in body["open"])
   assert _row(chat.id)[0] is None
 

@@ -92,10 +92,14 @@ def _options(options: Any, *, minimum: int, maximum: int) -> list[dict[str, Any]
     on_answer = option.get("on_answer", "resume")
     if on_answer not in _ON_ANSWER:
       raise RequestError("option on_answer must be resume or close")
+    # A self-explanatory label needs no description; one is kept only when given.
+    description = _text(
+      option.get("description"), "option description", limit=500, required=False,
+    )
     saved_options.append({
       "id": str(index),
       "label": _text(option.get("label"), "option label", limit=100),
-      "description": _text(option.get("description"), "option description", limit=500),
+      **({"description": description} if description else {}),
       **({"on_answer": on_answer} if on_answer != "resume" else {}),
     })
   labels = [option["label"] for option in saved_options]
@@ -120,7 +124,7 @@ def normalize_spec(raw: dict[str, Any]) -> dict[str, Any]:
     if value is not None and name != "kind" and name not in _KIND_FIELDS[kind]
   )
   if extra:
-    raise RequestError(f"a {kind} request does not take {', '.join(extra)}")
+    raise RequestError(f"{article(kind)} {kind} request does not take {', '.join(extra)}")
   if kind == APPROVAL:
     spec = _approval_spec(raw)
   elif kind == RESTART:
@@ -282,7 +286,7 @@ def _require_same_binding(row: models.OwnerInputRequest, spec: dict[str, Any]) -
 
   A request keeps its kind; an approval keeps the exact action it claimed,
   and a secret keeps the consumer its values go to. To change either, the
-  agent withdraws the request (releasing an approval's claim itself) and adds
+  agent withdraws the request (which releases an approval's claim) and adds
   a new one.
   """
   old = row.spec_json or {}
@@ -293,8 +297,8 @@ def _require_same_binding(row: models.OwnerInputRequest, spec: dict[str, Any]) -
     )
   if old.get("work_key") != spec.get("work_key"):
     raise RequestError(
-      "an approval's work_key cannot change; withdraw this request, release its "
-      "claim with finish_agent_work, and add a new one for the other action"
+      "an approval's work_key cannot change; withdraw this request (which "
+      "releases its claim) and add a new one for the other action"
     )
   if old.get("consumer") != spec.get("consumer") or old.get("preset") != spec.get("preset"):
     raise RequestError(
@@ -302,8 +306,24 @@ def _require_same_binding(row: models.OwnerInputRequest, spec: dict[str, Any]) -
     )
 
 
-def normalize_blocks(raw: Any) -> dict[str, Any]:
-  """What waits on the answer: Goal task ids and/or a plain description."""
+def goal_task_ids(db: Session, goal_id: str | None) -> set[str] | None:
+  """The task ids of a Goal's plan, or None when there is no such Goal."""
+  goal = db.get(models.ChatGoal, goal_id) if goal_id else None
+  if goal is None:
+    return None
+  plan = goal.plan_json if isinstance(goal.plan_json, dict) else {}
+  return {
+    task["id"] for task in plan.get("tasks") or []
+    if isinstance(task, dict) and isinstance(task.get("id"), str)
+  }
+
+
+def normalize_blocks(raw: Any, *, task_ids: set[str] | None = None) -> dict[str, Any]:
+  """What waits on the answer: Goal task ids and/or a plain description.
+
+  With ``task_ids`` (the attached Goal's plan) a task id the plan does not
+  have is refused: a mistyped id would fence nothing.
+  """
   if raw is None:
     return {}
   if not isinstance(raw, dict) or not set(raw).issubset({"tasks", "work"}):
@@ -312,6 +332,13 @@ def normalize_blocks(raw: Any) -> dict[str, Any]:
   if (not isinstance(tasks, list) or len(tasks) > 20
       or any(not isinstance(task, str) or not task or len(task) > 64 for task in tasks)):
     raise RequestError("blocks.tasks must be a short list of Goal task ids")
+  unknown = [task for task in tasks if task_ids is not None and task not in task_ids]
+  if unknown:
+    valid = ", ".join(sorted(task_ids or ())) or "none"
+    raise RequestError(
+      f"blocks.tasks names {', '.join(unknown)}, not a task of this chat's Goal; "
+      f"its task ids are: {valid}"
+    )
   work = _text(raw.get("work"), "blocks.work", limit=500, required=False)
   return {**({"tasks": tasks} if tasks else {}), **({"work": work} if work else {})}
 
@@ -328,17 +355,30 @@ def open_requests(db: Session, chat_id: str) -> list[models.OwnerInputRequest]:
 
 
 def find_open(db: Session, chat_id: str, ref: str) -> models.OwnerInputRequest:
-  """Resolve an id or key to this chat's open request, never another chat's."""
+  """Resolve an id or key to this chat's open request, never another chat's.
+
+  A request that is no longer open is named with what closed it, so an edit
+  that lost a race with an answer says so."""
+  matches = (models.OwnerInputRequest.id == ref) | (models.OwnerInputRequest.key == ref)
   row = (
     db.query(models.OwnerInputRequest)
     .filter(models.OwnerInputRequest.chat_id == chat_id,
-            models.OwnerInputRequest.status == "open",
-            (models.OwnerInputRequest.id == ref) | (models.OwnerInputRequest.key == ref))
+            models.OwnerInputRequest.status == "open", matches)
     .first()
   )
-  if row is None:
-    raise RequestError(f"no open request {ref!r} in this chat; list to see what is open")
-  return row
+  if row is not None:
+    return row
+  closed = (
+    db.query(models.OwnerInputRequest)
+    .filter(models.OwnerInputRequest.chat_id == chat_id, matches)
+    .order_by(models.OwnerInputRequest.updated_at.desc()).first()
+  )
+  if closed is not None:
+    raise RequestError(
+      f"{closed.key!r} is no longer open: it was {closed.status}; list to see "
+      "what is open and what was settled"
+    )
+  raise RequestError(f"no open request {ref!r} in this chat; list to see what is open")
 
 
 def _require_distinct_prompt(
@@ -379,27 +419,31 @@ def require_can_add(db: Session, chat_id: str, spec: dict[str, Any]) -> None:
     )
 
 
-def add_request(
+# Results an edit names. An identical re-add or update is `unchanged`.
+CREATED, REVISED, UNCHANGED = "created", "revised", "unchanged"
+
+
+def record_request(
   db: Session, *, chat_id: str, run_id: str | None, goal_id: str | None,
   key: str, spec: dict[str, Any], blocks: Any = None,
-) -> models.OwnerInputRequest:
-  """Record a request, or revise the open one that already has this key.
+) -> tuple[models.OwnerInputRequest, str]:
+  """Record a request, or revise the open one that already has this key; the
+  row and what happened (`created`, `revised`, `unchanged`).
 
   The key makes asking idempotent: a retry after a lost response, or the same
-  question re-derived after compaction, lands on the same row. An approval's
-  work_key is claimed by the caller before the row exists (see the route).
+  question re-derived after compaction, lands on the same row, and revises it
+  exactly as `update` does (only what it states changes; an unstated
+  `blocks` keeps the recorded fence). An approval's work_key is claimed by
+  the caller before the row exists (see the route).
   """
   require_valid_key(key)
+  task_ids = goal_task_ids(db, goal_id)
+  # An add states its kind; a question states none.
+  changes = {**spec, "kind": spec.get("kind") or QUESTION}
+  if open_request_by_key(db, chat_id, key) is not None:
+    return _revise(db, chat_id, key, changes, blocks, task_ids=task_ids)
   normalized = normalize_spec(spec)
-  normalized_blocks = normalize_blocks(blocks)
-  existing = open_request_by_key(db, chat_id, key)
-  if existing is not None:
-    # A retry or re-derived ask that does not restate what waits on the answer
-    # keeps the recorded fence rather than erasing it.
-    return _apply_edit(
-      db, existing, normalized,
-      normalized_blocks if blocks is not None else existing.blocks_json,
-    )
+  normalized_blocks = normalize_blocks(blocks, task_ids=task_ids)
   require_can_add(db, chat_id, normalized)
   row = models.OwnerInputRequest(
     id=str(uuid.uuid4()), chat_id=chat_id, goal_id=goal_id,
@@ -412,75 +456,184 @@ def add_request(
   except IntegrityError:
     # A concurrent add of the same key won the open-key index; revise its row.
     db.rollback()
-    winner = (
-      db.query(models.OwnerInputRequest)
-      .filter_by(chat_id=chat_id, key=key, status="open").first()
-    )
-    if winner is None:
+    if open_request_by_key(db, chat_id, key) is None:
       raise
-    return _apply_edit(
-      db, winner, normalized,
-      normalized_blocks if blocks is not None else winner.blocks_json,
-    )
-  return row
+    return _revise(db, chat_id, key, changes, blocks, task_ids=task_ids)
+  return row, CREATED
+
+
+def add_request(db: Session, **kwargs: Any) -> models.OwnerInputRequest:
+  """`record_request`, for a caller that needs only the row."""
+  return record_request(db, **kwargs)[0]
 
 
 def update_request(
   db: Session, *, chat_id: str, ref: str,
-  spec: dict[str, Any] | None = None, blocks: Any = None,
+  spec: dict[str, Any] | None = None, blocks: Any = None, goal_id: str | None = None,
 ) -> models.OwnerInputRequest:
-  row = find_open(db, chat_id, ref)
-  return _apply_edit(
-    db, row,
-    normalize_spec(spec) if spec is not None else row.spec_json,
-    normalize_blocks(blocks) if blocks is not None else row.blocks_json,
+  """Revise an open request. ``spec`` states only what changes; unstated
+  content is kept. With ``goal_id`` (the attached Goal) `blocks.tasks` must
+  name its tasks."""
+  return revise_request(
+    db, chat_id=chat_id, ref=ref, spec=spec, blocks=blocks, goal_id=goal_id,
+  )[0]
+
+
+def revise_request(
+  db: Session, *, chat_id: str, ref: str,
+  spec: dict[str, Any] | None = None, blocks: Any = None, goal_id: str | None = None,
+) -> tuple[models.OwnerInputRequest, str]:
+  return _revise(db, chat_id, ref, spec, blocks, task_ids=goal_task_ids(db, goal_id))
+
+
+def _revise(
+  db: Session, chat_id: str, ref: str, changes: dict[str, Any] | None,
+  blocks: Any, *, task_ids: set[str] | None,
+) -> tuple[models.OwnerInputRequest, str]:
+  """Merge ``changes`` into the open request's current content.
+
+  Only a change the owner would see is a new revision. What a request blocks
+  is the agent's bookkeeping; revising it must not invalidate an answer the
+  owner is typing.
+  """
+  def change(row: models.OwnerInputRequest) -> dict[str, Any] | None:
+    if changes and changes.get("kind", request_kind(row)) != request_kind(row):
+      _require_same_binding(row, {"kind": changes["kind"]})
+    spec = row.spec_json if changes is None else normalize_spec(
+      {**editable_spec(row.spec_json), **changes},
+    )
+    _require_same_binding(row, spec)
+    values: dict[str, Any] = {}
+    if spec != row.spec_json:
+      _require_distinct_prompt(db, row.chat_id, spec, except_id=row.id)
+      values.update(spec_json=spec, revision=row.revision + 1)
+    if blocks is not None:
+      normalized_blocks = normalize_blocks(blocks, task_ids=task_ids)
+      if normalized_blocks != (row.blocks_json or {}):
+        values["blocks_json"] = normalized_blocks
+    return values or None
+
+  row, changed, _ = _edit_open(db, chat_id, ref, change)
+  return row, REVISED if changed else UNCHANGED
+
+
+_EDIT_ATTEMPTS = 2
+
+
+def _edit_open(
+  db: Session, chat_id: str, ref: str,
+  change: Any, stage_after: Any = None,
+) -> tuple[models.OwnerInputRequest, bool, Any]:
+  """Apply one edit to an open request, conditional on the state it read.
+
+  ``change(row)`` returns the column values to write, or None when nothing
+  changes. The write applies only if the row is still open at the revision
+  and update time this edit read, so a concurrent edit or an owner's answer
+  is never overwritten: the edit is read and merged once more, and refused
+  naming the request's state if it moved again. ``stage_after(row)`` stages
+  what follows the write in the same commit; its result is returned.
+  Returns (row, whether it was written, ``stage_after``'s result).
+  """
+  for _attempt in range(_EDIT_ATTEMPTS):
+    row = find_open(db, chat_id, ref)
+    values = change(row)
+    if values is None:
+      return row, False, None
+    values["updated_at"] = now_naive_utc()
+    written = db.query(models.OwnerInputRequest).filter(
+      models.OwnerInputRequest.id == row.id,
+      models.OwnerInputRequest.status == "open",
+      models.OwnerInputRequest.revision == row.revision,
+      models.OwnerInputRequest.updated_at == row.updated_at,
+    ).update(values, synchronize_session=False)
+    if written == 1:
+      after = stage_after(row) if stage_after is not None else None
+      db.commit()
+      db.refresh(row)
+      return row, True, after
+    db.rollback()
+  current = db.get(models.OwnerInputRequest, row.id)
+  raise RequestError(
+    f"{row.key!r} changed while this edit was applied (now {current.status}, "
+    f"revision {current.revision}); list it and edit again if it still matters"
   )
 
 
-def _apply_edit(
-  db: Session, row: models.OwnerInputRequest,
-  spec: dict[str, Any], blocks: dict[str, Any],
-) -> models.OwnerInputRequest:
-  """Only a change the owner would see is a new revision.
-
-  What a request blocks is the agent's bookkeeping; revising it must not
-  invalidate an answer the owner is typing.
-  """
-  _require_same_binding(row, spec)
-  changed = False
-  if spec != row.spec_json:
-    _require_distinct_prompt(db, row.chat_id, spec, except_id=row.id)
-    row.spec_json = spec
-    row.revision += 1
-    changed = True
-  if blocks != row.blocks_json:
-    row.blocks_json = blocks
-    changed = True
-  if changed:
-    row.updated_at = now_naive_utc()
-    db.commit()
-  return row
-
-
 def withdraw_request(
-  db: Session, *, chat_id: str, ref: str, reason: str,
+  db: Session, *, chat_id: str, ref: str, reason: str, by: str = "agent",
 ) -> models.OwnerInputRequest:
-  """Close a request the agent no longer needs answered, keeping why."""
-  row = find_open(db, chat_id, ref)
-  if request_kind(row) == SECRET:
-    sealed = db.get(models.SavedSecureInput, row.id)
-    if sealed is not None and sealed.chat_id == chat_id and sealed.status == "consuming":
-      # Its values are already with the consumer; only the consumer's fixed
-      # outcome may settle it, so the outcome is never lost.
-      raise RequestError(
-        f"{row.key!r} is being consumed now; its outcome arrives when the "
-        "consumer finishes"
-      )
-  row.status = "withdrawn"
-  row.outcome_json = {"reason": _text(reason, "reason", limit=500)}
-  row.updated_at = now_naive_utc()
-  db.commit()
-  return row
+  """`withdraw`, for a caller that needs only the row."""
+  return withdraw(db, chat_id=chat_id, ref=ref, reason=reason, by=by)[0]
+
+
+def withdraw(
+  db: Session, *, chat_id: str, ref: str, reason: str, by: str = "agent",
+) -> tuple[models.OwnerInputRequest, bool | None]:
+  """Close a request no longer to be answered, keeping why and who closed it
+  (`by`: the agent, or the platform when it can no longer be shown as asked).
+
+  Withdrawing an approval also releases the work claim it took, when this
+  chat still owns it open and no other open request of this chat is for the
+  same action: nobody will perform an action whose approval was withdrawn.
+  Returns the row and, for an approval, whether its claim was released.
+  """
+  clean_reason = _text(reason, "reason", limit=500)
+
+  def change(row: models.OwnerInputRequest) -> dict[str, Any]:
+    if request_kind(row) == SECRET:
+      sealed = db.get(models.SavedSecureInput, row.id)
+      if sealed is not None and sealed.chat_id == chat_id and sealed.status == "consuming":
+        # Its values are already with the consumer; only the consumer's fixed
+        # outcome may settle it, so the outcome is never lost.
+        raise RequestError(
+          f"{row.key!r} is being consumed now; its outcome arrives when the "
+          "consumer finishes"
+        )
+    return {"status": "withdrawn", "outcome_json": {"reason": clean_reason, "by": by}}
+
+  def release(row: models.OwnerInputRequest) -> bool | None:
+    if request_kind(row) != APPROVAL:
+      return None
+    return stage_release_approval_claim(
+      db, chat_id, row.spec_json["work_key"],
+      outcome=f"Approval request withdrawn: {clean_reason}",
+    )
+
+  row, _written, released = _edit_open(db, chat_id, ref, change, release)
+  return row, released
+
+
+def stage_release_approval_claim(
+  db: Session, chat_id: str, work_key: str, *, outcome: str,
+  run_id: str | None = None,
+) -> bool:
+  """Release, in the caller's transaction, the open claim an approval took.
+
+  Only a claim this chat owns (with ``run_id``, one this run took), neither
+  completed nor released, and named by no open approval request of this
+  chat: an approval still asked keeps the claim it needs.
+  """
+  from app.agent_work_claims import stage_release_claim
+
+  claim = db.query(models.AgentWorkClaim).filter(
+    models.AgentWorkClaim.owner_chat_id == chat_id,
+    models.AgentWorkClaim.work_key == work_key,
+    models.AgentWorkClaim.completed_at.is_(None),
+    models.AgentWorkClaim.released_at.is_(None),
+  ).first()
+  if claim is None or (run_id is not None and claim.owner_run_id != run_id):
+    return False
+  if work_key in open_approval_work_keys(db, chat_id):
+    return False
+  return stage_release_claim(db, claim, outcome=outcome)
+
+
+def open_approval_work_keys(db: Session, chat_id: str) -> set[str]:
+  """The exact actions this chat's open approval requests are for."""
+  return {
+    row.spec_json["work_key"] for row in open_requests(db, chat_id)
+    if request_kind(row) == APPROVAL
+  }
 
 
 RESOLVE_SOURCES = ("owner_message", "found")
@@ -497,28 +650,33 @@ def resolve_request(
   never silently means "the agent guessed". Withdrawing is for a question
   that no longer matters; resolving is for one that now has its answer.
   """
-  row = find_open(db, chat_id, ref)
-  if request_kind(row) in SENSITIVE_KINDS:
-    # Only the owner, on the request's entry, can grant an approval, a
-    # restart or a secret. Withdraw one that no longer matters.
-    raise RequestError(
-      f"a {request_kind(row)} request is settled only by the owner on the card; "
-      "withdraw it if it no longer matters"
-    )
   if source not in RESOLVE_SOURCES:
     raise RequestError(
       "source must be owner_message (the owner said it in chat) or found "
       "(you established it yourself)"
     )
-  row.status = "answered"
-  row.answer_json = {"text": _text(answer, "answer", limit=2000)}
-  row.answered_revision = row.revision
-  row.answered_by = f"agent:{source}"
-  row.answered_at = now_naive_utc()
-  row.outcome_json = {"reason": _text(reason, "reason", limit=500)}
-  row.updated_at = row.answered_at
-  db.commit()
-  return row
+  clean_answer = _text(answer, "answer", limit=2000)
+  clean_reason = _text(reason, "reason", limit=500)
+
+  def change(row: models.OwnerInputRequest) -> dict[str, Any]:
+    if request_kind(row) in SENSITIVE_KINDS:
+      # Only the owner, on the request's entry, can grant an approval, a
+      # restart or a secret. Withdraw one that no longer matters.
+      raise RequestError(
+        f"{article(request_kind(row))} {request_kind(row)} request is settled only "
+        "by the owner on the card; withdraw it if it no longer matters"
+      )
+    return {
+      "status": "answered", "answer_json": {"text": clean_answer},
+      "answered_revision": row.revision, "answered_by": f"agent:{source}",
+      "answered_at": now_naive_utc(), "outcome_json": {"reason": clean_reason},
+    }
+
+  return _edit_open(db, chat_id, ref, change)[0]
+
+
+def article(word: str) -> str:
+  return "an" if word[:1] in "aeiou" else "a"
 
 
 def _summary(row: models.OwnerInputRequest) -> dict[str, Any]:
