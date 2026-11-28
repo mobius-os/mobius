@@ -9,8 +9,10 @@ top-level turn's process environment names its run; a shared helper host's
 environment does not, so the host resolves the thread to that helper turn's
 own private env file. Codex runs it only for threads whose turn has a
 refresher: every top-level turn, and a helper turn with a Goal assignment.
-Failure adds nothing: the next turn's context, read_goal and owner_input list
-cover it.
+Failure adds nothing here and never breaks the turn: the runner sees the
+compaction in its event stream and, when this hook did not deliver by the
+model's first output after it, steers the same context into the live turn
+(ActiveCodexTurn.observe_compaction); the next turn's start carries it too.
 """
 
 from __future__ import annotations

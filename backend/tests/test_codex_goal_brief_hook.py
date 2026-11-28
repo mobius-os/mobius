@@ -87,13 +87,14 @@ def test_thread_trust_covers_each_exact_platform_hook_and_nothing_else(monkeypat
     ))
 
 
-def test_undiscovered_brief_hook_only_loses_in_turn_restore(monkeypatch):
+def test_undiscovered_brief_hook_is_left_untrusted(monkeypatch):
   brief, card = _codex_goal_brief_hook_override(), _codex_owner_card_hook_override()
   _listing(monkeypatch, [_metadata(card, key="card")])
   result = asyncio.run(_codex_platform_hook_thread_config(
     object(), {"HooksListResponse": object}, "/work", {}, [card], optional=[brief],
   ))
-  # Left untrusted, Codex never runs it; the next turn's brief covers it.
+  # Left untrusted, Codex never runs it; the runner's steering fallback
+  # restores instead (test_codex_compaction_restore_fallback).
   assert result["hooks.state"] == {"card": {"trusted_hash": "card-hash"}}
 
   class Broken:

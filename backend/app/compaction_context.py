@@ -11,7 +11,13 @@ again, read fresh at that moment:
   A Claude helper-host turn (a subagent, for which the CLI runs no
   ``SessionStart`` hooks) uses ``PostToolUse`` only.
 - Codex: a ``SessionStart`` command hook matching ``^compact$``
-  (``scripts/codex_goal_brief_hook.py``), whose call is itself the signal.
+  (``scripts/codex_goal_brief_hook.py``), whose call is itself the signal,
+  adds them to the request that continues the compacted turn. The runner also
+  sees the compaction in its event stream; if the hook did not deliver (not
+  discovered, or its call failed) by the first model output after it, the
+  runner steers the same text into the live turn, which Codex gives the model
+  at its next request. The refresher counts the hook call and the stream
+  report as one compaction, so the two never both deliver.
 
 Delegated helpers get their assignment brief only: the owner's request list
 belongs to the top-level chat, and a helper asks its parent instead.
@@ -42,14 +48,25 @@ class CompactionContextRefresh:
     self._load = load
     self._marked = 0
     self._delivered = 0
+    self._signals = {}
     self._lock = asyncio.Lock()
 
   @property
   def stale(self):
     return self._marked > self._delivered
 
-  def mark_compacted(self):
-    self._marked += 1
+  def mark_compacted(self, signal=None):
+    """Record a compaction.
+
+    A provider that reports each compaction through more than one signal
+    names it (Codex: ``"hook"`` and ``"stream"``); the need is the highest
+    count of any one signal, so one compaction seen twice is one need.
+    """
+    if signal is None:
+      self._marked += 1
+      return
+    seen = self._signals[signal] = self._signals.get(signal, 0) + 1
+    self._marked = max(self._marked, seen)
 
   async def take(self):
     if not self.stale:
