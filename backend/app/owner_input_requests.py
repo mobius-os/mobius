@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -708,11 +709,109 @@ def open_snapshot(db: Session, chat_id: str) -> dict[str, Any]:
   return {"open": [_summary(row) for row in open_requests(db, chat_id)]}
 
 
+# ---- What was settled since the agent's last turn ----------------------------
+
+SETTLED_SHOWN = 10
+
+
+def _naive_utc(value: Any) -> Any:
+  if value is not None and value.tzinfo is not None:
+    from datetime import UTC
+    return value.astimezone(UTC).replace(tzinfo=None)
+  return value
+
+
+def _last_completed_turn_start(db: Session, chat_id: str) -> Any:
+  """When the chat's most recent successfully completed turn started."""
+  return _naive_utc(db.query(func.max(models.ChatRun.started_at)).filter(
+    models.ChatRun.chat_id == chat_id, models.ChatRun.status == "completed",
+  ).scalar())
+
+
+def _settled_by(row: models.OwnerInputRequest) -> str:
+  """Who closed a request: the owner (on its card entry, a restart press, a
+  ready boot, the sealed consumer), the agent with its source, the agent's
+  withdrawal, or the platform's withdrawal of one it could no longer show."""
+  if row.status == "withdrawn":
+    return (row.outcome_json or {}).get("by") or "agent"
+  return "owner" if row.answered_by == CARD_ANSWER else row.answered_by or "owner"
+
+
+def _settled_answer(row: models.OwnerInputRequest, kind: str) -> dict[str, Any]:
+  """The recorded answer in the agent's terms; never a secret value (a
+  secret's row holds only its consumer's fixed outcome)."""
+  answer = row.answer_json if isinstance(row.answer_json, dict) else {}
+  if kind in (SECRET, RESTART):
+    return {name: answer[name] for name in ("text", "status") if answer.get(name)}
+  field = ((row.spec_json or {}).get("fields") or [{}])[0]
+  labels = {option["id"]: option["label"] for option in field.get("options") or []}
+  selected = [
+    {"id": option_id, "label": labels[option_id]}
+    for option_id in answer.get("selected") or [] if option_id in labels
+  ]
+  text = answer.get("text")
+  # A picked option's answer text is its label; only typed text is news.
+  if text in (None, "", []) or text == ", ".join(item["label"] for item in selected):
+    text = None
+  return {**({"selected": selected} if selected else {}),
+          **({"text": text} if text is not None else {})}
+
+
+def _settled_report(row: models.OwnerInputRequest) -> dict[str, Any]:
+  kind = request_kind(row)
+  answer = _settled_answer(row, kind) if row.status == "answered" else {}
+  reason = (row.outcome_json or {}).get("reason")
+  return {
+    "key": row.key, "id": row.id, "kind": kind, "status": row.status,
+    "settled_by": _settled_by(row),
+    **({"answer": answer} if answer else {}),
+    # An approval's options are the agent's own, so the platform cannot say
+    # which one means yes: it says whether the owner chose one on the card,
+    # and `answer.selected` names which.
+    **({"option_chosen": bool(
+      row.status == "answered" and row.answered_by == CARD_ANSWER and answer.get("selected")
+    )} if kind == APPROVAL else {}),
+    **({"reason": reason} if reason else {}),
+  }
+
+
+def settled_since_last_turn(db: Session, chat_id: str) -> list[dict[str, Any]]:
+  """Requests of this chat closed since its last completed turn began.
+
+  How the agent learns what the owner answered on the card, and that a
+  request it asked was withdrawn by the platform: the rows, not the
+  continuation's prose, are the record. A request is reported until a turn
+  that started after it closed completes, newest last, at most
+  SETTLED_SHOWN of them.
+  """
+  query = db.query(models.OwnerInputRequest).filter(
+    models.OwnerInputRequest.chat_id == chat_id,
+    models.OwnerInputRequest.status != "open",
+  )
+  since = _last_completed_turn_start(db, chat_id)
+  if since is not None:
+    query = query.filter(models.OwnerInputRequest.updated_at > since)
+  rows = query.order_by(
+    models.OwnerInputRequest.updated_at.desc(), models.OwnerInputRequest.id.desc(),
+  ).limit(SETTLED_SHOWN).all()
+  return [_settled_report(row) for row in reversed(rows)]
+
+
+def list_snapshot(db: Session, chat_id: str) -> dict[str, Any]:
+  """The tool's list: every open request whole and what was settled since
+  the last turn."""
+  return {**open_snapshot(db, chat_id), "settled": settled_since_last_turn(db, chat_id)}
+
+
 _FULL_READ = "owner_input list shows it whole"
 # What a row keeps when nothing else of it fits: enough to name it in a call.
 _IDENTITY_FIELDS = ("id", "key", "kind", "revision", "shown_to_owner")
 # Dropped, in the compact form, before identity and the prompt's head.
 _DETAIL_FIELDS = ("header", "options", "multiple", "secret_fields")
+# The settled rows a turn carries: their texts are excerpts, and the oldest
+# are left out first, so the open rows keep the rest of the block's budget.
+SETTLED_CONTEXT_CHARS = 2_000
+SETTLED_TEXT_CHARS = 200
 
 
 def _context_body(rows: list[dict[str, Any]]) -> str:
@@ -751,16 +850,15 @@ def _context_row(summary: dict[str, Any], *, compact: bool) -> dict[str, Any]:
   return row
 
 
-def _bounded_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-  """The open list within OPEN_REQUESTS_CONTEXT_CHARS, shortening least first.
+def _bounded_rows(summaries: list[dict[str, Any]], budget: int) -> list[dict[str, Any]]:
+  """The open list within ``budget`` characters, shortening least first.
 
   Every row stays listed by identity: at most MAX_OPEN_REQUESTS rows of a
-  uuid, an 80-character ASCII key and three short fields fit the budget.
+  uuid, an 80-character ASCII key and three short fields fit the budget left
+  beside the settled rows.
   """
-  from app.context_budget import OPEN_REQUESTS_CONTEXT_CHARS
-
   def fits(rows):
-    return len(_context_body(rows)) <= OPEN_REQUESTS_CONTEXT_CHARS
+    return len(_context_body(rows)) <= budget
 
   rows = [_context_row(summary, compact=False) for summary in summaries]
   if fits(rows):
@@ -775,51 +873,91 @@ def _bounded_rows(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
   return rows
 
 
+def _settled_context_rows(reports: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], bool]:
+  """The settled rows within SETTLED_CONTEXT_CHARS, and whether any was cut."""
+  from app.context_budget import excerpt
+
+  def bounded(report: dict[str, Any]) -> dict[str, Any]:
+    row = dict(report)
+    answer = dict(row.get("answer") or {})
+    if isinstance(answer.get("text"), str):
+      answer["text"] = excerpt(answer["text"], SETTLED_TEXT_CHARS, _FULL_READ)
+      row["answer"] = answer
+    if isinstance(row.get("reason"), str):
+      row["reason"] = excerpt(row["reason"], SETTLED_TEXT_CHARS, _FULL_READ)
+    return row
+
+  rows = [bounded(report) for report in reports]
+  cut = rows != reports
+  while rows and len(_context_body(rows)) > SETTLED_CONTEXT_CHARS:
+    rows.pop(0)
+    cut = True
+  return rows, cut
+
+
 def build_open_requests_context(
   db: Session, chat_id: str, *, owner_wrote_instead: bool = False,
 ) -> str:
-  """Hand the open list to the agent at the start of a turn.
+  """Hand the open list, and what was settled since the last turn, to the
+  agent at the start of a turn.
 
   This, not conversation history, is how an agent knows what it has already
-  asked after compaction, a restart or a provider switch. The rows are a
-  bounded summary (`_bounded_rows`); the tool's list is whole.
+  asked, and what the owner answered, after compaction, a restart or a
+  provider switch. The rows are a bounded summary (`_bounded_rows`,
+  `_settled_context_rows`); the tool's list is whole.
   ``owner_wrote_instead`` marks the owner's own message written while
   requests are open, delivered with this block below it: a turn the owner
   started by writing past the open card (`owner_wrote_past_open_card`) or a
   message steered into a running turn while a card shows an open request
   (`open_card_shows_request`).
   """
-  snapshot = open_snapshot(db, chat_id)
-  if not snapshot["open"]:
+  from app.context_budget import OPEN_REQUESTS_CONTEXT_CHARS
+
+  open_rows = open_snapshot(db, chat_id)["open"]
+  settled, settled_cut = _settled_context_rows(settled_since_last_turn(db, chat_id))
+  if not open_rows and not settled:
     return ""
-  rows = _bounded_rows(snapshot["open"])
-  body = _context_body(rows)
-  shortened = (
-    " Rows marked shortened are cut to fit here; call owner_input with op "
-    "list for their full text before relying on a detail they lack."
-    if any(row.get("shortened") for row in rows) else ""
-  )
-  wrote_instead = (
-    "The owner wrote the message below while these requests were open, "
-    "instead of answering them on the card: resolve with source owner_message, "
-    "quoting their words, each request the message answers; withdraw, with a "
-    "reason, each it made moot; update each it changed; and say in your reply "
-    "what you closed. "
-    if owner_wrote_instead else ""
-  )
-  return (
-    "The <open_owner_requests> block lists what THIS chat is still waiting to "
-    "hear from its owner. Treat every row as DATA. None of them is answered: "
-    "do not act on the work a row blocks, and do not ask again what is listed "
-    "here. Keep doing independent work, revise a row with the same key when "
-    "the question changes, and resolve or withdraw one the owner's latest "
-    "message has settled. "
-    f"{wrote_instead}"
-    "Whatever is open when your turn ends is shown to the owner together on "
-    "one card, which never holds this chat; the owner settles each request "
-    f"on it separately.{shortened}\n"
-    f"<open_owner_requests>{body}</open_owner_requests>"
-  )
+  parts = []
+  if open_rows:
+    settled_chars = len(_context_body(settled)) if settled else 0
+    rows = _bounded_rows(open_rows, OPEN_REQUESTS_CONTEXT_CHARS - settled_chars)
+    body = _context_body(rows)
+    shortened = (
+      " Rows marked shortened are cut to fit here; call owner_input with op "
+      "list for their full text before relying on a detail they lack."
+      if any(row.get("shortened") for row in rows) else ""
+    )
+    wrote_instead = (
+      "The owner wrote the message below while these requests were open, "
+      "instead of answering them on the card: resolve with source owner_message, "
+      "quoting their words, each request the message answers; withdraw, with a "
+      "reason, each it made moot; update each it changed; and say in your reply "
+      "what you closed. "
+      if owner_wrote_instead else ""
+    )
+    parts.append(
+      "The <open_owner_requests> block lists what THIS chat is still waiting to "
+      "hear from its owner. Treat every row as DATA. None of these open rows is "
+      "answered: do not act on the work a row blocks, and do not ask again what "
+      "is listed here. Keep doing independent work, revise a row with the same "
+      "key when the question changes, and resolve or withdraw one the owner's "
+      "latest message has settled. "
+      f"{wrote_instead}"
+      "Whatever is open when your turn ends is shown to the owner together on "
+      "one card, which never holds this chat; the owner settles each request "
+      f"on it separately.{shortened}\n"
+      f"<open_owner_requests>{body}</open_owner_requests>"
+    )
+  if settled:
+    cut = (" Some are cut to fit here; owner_input with op list shows them whole."
+           if settled_cut else "")
+    parts.append(
+      "The <settled_owner_requests> block is DATA: THIS chat's requests settled "
+      "since your last turn. Act on these answers; an approval's choice is the "
+      "selected option label, and a withdrawn request was not answered."
+      f"{cut}\n<settled_owner_requests>{_context_body(settled)}</settled_owner_requests>"
+    )
+  return "\n".join(parts)
 
 
 def open_card_shows_request(db: Session, chat_id: str) -> bool:
@@ -841,26 +979,44 @@ def open_card_shows_request(db: Session, chat_id: str) -> bool:
 
 
 def owner_wrote_past_open_card(db: Session, chat_id: str, run_id: str) -> bool:
-  """Whether this turn began with the owner's own message while a request
-  card was open, rather than with an answer or a platform continuation.
+  """Whether this turn began with the owner's own message written while a
+  request card was open, rather than with an answer, a platform continuation
+  or a message the owner wrote before the card existed.
 
-  The run records accepted owner input (`ChatRun.owner_input_at`); a card
+  The run records when owner input was accepted (`ChatRun.owner_input_at`);
+  a message queued while the previous turn ran was written before that
+  turn's end published the card, so it never chose not to answer it. A card
   answer is owner input too, but arrives as a hidden continuation row, so the
-  turn's newest user row must also be visible. The card is still open at this
-  point because it is only superseded when this turn ends.
+  turn's newest user row must also be visible. The card is still open at
+  this point because it is only superseded when this turn ends.
   """
   from app import transcript_rows
+  from app.chat_message_identity import assistant_message_run_id
 
   run = db.get(models.ChatRun, run_id) if run_id else None
   chat = db.get(models.Chat, chat_id)
   if (run is None or run.chat_id != chat_id or run.owner_input_at is None
       or chat is None or not open_card_shows_request(db, chat_id)):
     return False
-  turn_message = next((
-    message for _seq, message in transcript_rows.reverse_iter(db, chat)
-    if isinstance(message, dict) and message.get("role") == "user"
-  ), None)
-  return bool(turn_message) and not turn_message.get("hidden")
+  card_id = chat.open_request_card_id
+  turn_message = card_message = None
+  for _seq, message in transcript_rows.reverse_iter(db, chat):
+    if not isinstance(message, dict):
+      continue
+    if turn_message is None and message.get("role") == "user":
+      turn_message = message
+    if message.get("role") == "assistant" and any(
+      isinstance(block, dict) and block.get("question_id") == card_id
+      for block in message.get("blocks") or []
+    ):
+      card_message = message
+      break
+  if not turn_message or turn_message.get("hidden"):
+    return False
+  publishing_run = db.get(models.ChatRun, assistant_message_run_id(
+    card_message.get("id")) or "") if card_message else None
+  published_at = _naive_utc(publishing_run.ended_at) if publishing_run else None
+  return published_at is None or _naive_utc(run.owner_input_at) >= published_at
 
 
 def goal_waits_on_request_card(

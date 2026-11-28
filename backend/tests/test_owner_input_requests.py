@@ -204,7 +204,7 @@ def test_turn_start_context_carries_the_open_list_and_cannot_be_closed_by_its_te
 
   assert context.count("</open_owner_requests>") == 1
   assert '"key":"tone"' in context
-  assert "None of them is answered" in context
+  assert "None of these open rows is answered" in context
 
 
 def test_the_request_tool_is_offered_only_to_top_level_turns():
@@ -477,9 +477,16 @@ async def test_answering_part_of_a_card_keeps_the_rest_open_for_the_next_card(
     assert answered.answer_json == {"text": "Staging", "selected": ["0"]}
     assert answered.answered_revision == answered.revision
     assert carried.status == "open" and carried.published_question_id is None
-    # The agent's next turn is told exactly what is still open.
+    # The agent's next turn is told exactly what is still open, and what
+    # the owner chose for the request the card settled.
     context = requests.build_open_requests_context(session, chat_id)
-    assert '"key":"tone"' in context and "release-target" not in context
+    open_part, settled_part = context.rsplit("<settled_owner_requests>", 1)
+    assert '"key":"tone"' in open_part and "release-target" not in open_part
+    assert json.loads(settled_part.split("</settled_owner_requests>")[0]) == [{
+      "key": "release-target", "id": answered.id, "kind": "question",
+      "status": "answered", "settled_by": "owner",
+      "answer": {"selected": [{"id": "0", "label": "Staging"}]},
+    }]
 
 
 @pytest.mark.asyncio

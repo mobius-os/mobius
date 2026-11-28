@@ -73,7 +73,7 @@ def edit_input_requests(
   if run is None or run.status != "running":
     raise HTTPException(status_code=409, detail="This agent turn is no longer current.")
   if body.op == "list":
-    return requests.open_snapshot(db, chat_id)
+    return requests.list_snapshot(db, chat_id)
   try:
     if body.op == "add":
       return _add(db, chat, run, principal, body, spec)

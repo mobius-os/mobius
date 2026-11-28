@@ -53,6 +53,7 @@ def test_each_edit_names_what_it_did_and_only_add_carries_a_next_step(client, ch
   assert set(revised) == {"result", "key", "revision", "open"}
   assert (revised["result"], revised["revision"]) == ("revised", 2)
   assert (unchanged["result"], unchanged["revision"]) == ("unchanged", 2)
+  assert set(listed) == {"open", "settled"}
 
 
 def test_an_edit_refers_to_a_request_by_key_only(client, chat, run_auth):

@@ -3209,9 +3209,9 @@ async def _publish_open_owner_requests_once(
         reason = owner_input_cards.unshowable_reason(read_db, chat_id, row)
         if reason is not None:
           # Withdrawn with its reason, never silently dropped; the agent's
-          # next turn start no longer lists it.
+          # next turn start reports it as settled by the platform.
           owner_input_requests.withdraw_request(
-            read_db, chat_id=chat_id, ref=row.id, reason=reason,
+            read_db, chat_id=chat_id, ref=row.id, reason=reason, by="platform",
           )
       rows = owner_input_requests.open_requests(read_db, chat_id)
     if rows and pending is None:

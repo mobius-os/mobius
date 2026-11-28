@@ -1924,6 +1924,8 @@ class OwnerInputRequest(Base):
   answered_revision = Column(Integer, nullable=True)
   answered_by = Column(String(32), nullable=True)
   answered_at = Column(DateTime, nullable=True)
+  # Why it closed: {"reason"} for an agent's resolve; for a withdrawal also
+  # "by", the agent or the platform.
   outcome_json = Column(JSON, nullable=True)
   published_revision = Column(Integer, nullable=True)
   published_question_id = Column(String(64), nullable=True)
