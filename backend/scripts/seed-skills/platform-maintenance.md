@@ -246,11 +246,11 @@ because `/data/platform` is the persistent served clone. The baked
    Each request saves that chat's visible owner decision and post-restart
    continuation. These are separate chat handoffs, not duplicate restart
    executors: pressing any card's **Restart now** requests one platform-owned
-   restart, and a later ready boot resumes every still-registered chat
-   independently. Each agent then verifies its own changes before completing
-   its Goal. Do not
-   substitute a peer note, shared work claim, or monitor of the owner's
-   decision for your own request. Stop or a written response cancels only that
+   restart (the platform admits one restart per worker), and a later ready
+   boot resumes every still-registered chat independently. Each agent then
+   verifies its own changes before completing its Goal. Record your own
+   request, never a peer handoff instead: do not substitute a peer note,
+   shared work claim, or monitor of the owner's decision for it. Stop or a written response cancels only that
    chat's activation wait; unrelated owner-input and recovery holds still apply.
 
    If the tool is absent, the same request is available through:

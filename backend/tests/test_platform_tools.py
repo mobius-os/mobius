@@ -573,10 +573,11 @@ def test_control_protocol_advertises_every_run_bound_tool(monkeypatch):
   assert owner_input["inputSchema"]["properties"]["kind"]["enum"] == [
     "question", "approval", "restart", "secret",
   ]
-  assert "platform derives the exact restart" in owner_input["description"]
-  assert "never issue a restart command yourself" in owner_input["description"]
-  assert "never to you" in owner_input["description"]
-  assert "resolve is refused for them" in owner_input["description"]
+  properties = owner_input["inputSchema"]["properties"]
+  assert "platform derives the exact restart" in properties["kind"]["description"]
+  assert "never restart yourself" in properties["kind"]["description"]
+  assert "never to you" in properties["kind"]["description"]
+  assert "Only question requests can be resolved" in properties["source"]["description"]
   wait_schema = tools[platform_tools.WAIT_TOOL_NAME]["inputSchema"]
   assert wait_schema["required"] == ["description"]
   assert set(wait_schema["properties"]) == {
@@ -1680,23 +1681,46 @@ def test_owner_input_description_owns_the_open_list_and_closing_procedure():
           "changed") in tool
   assert "Never resolve a request by guessing" in tool
   assert "tell the owner in your reply what you resolved or withdrew" in tool
-  assert "these three are settled only on the card, never by you" in tool
+  assert "Approval, restart and secret requests are settled only by the owner on the card" in tool
+  assert "also report what was settled since your last turn" in tool
+
+
+def test_owner_input_description_stays_short_and_keeps_its_fences():
+  """Kind-specific detail lives in the field descriptions and the skills; the
+  description keeps only what every call needs, fences first."""
+  control = _control_module()
+  definition = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]
+  tool = " ".join(definition["description"].split())
+  assert len(tool.split()) <= 300
+  assert "Recording a request is never an answer or permission" in tool
+  assert "blocks.tasks is enforced" in tool and "blocks.work is only a note" in tool
+  assert "releases an approval's claim (no finish_agent_work needed)" in tool
+  properties = definition["inputSchema"]["properties"]
+  # The request is named by key only; id stays in results for sealed submits.
+  assert "id" not in properties
+  assert properties["options"]["items"]["required"] == ["label"]
+  assert "platform-maintenance" in properties["kind"]["description"]
+  assert "secure-input" in properties["kind"]["description"]
+  assert "created, revised or unchanged" in properties["op"]["description"]
+  assert "a note, not enforced" in properties["blocks"]["properties"]["work"]["description"]
 
 
 def test_restart_guidance_registers_each_chat_without_duplicating_the_executor():
+  """Peer coordination around a restart is policy, kept in the skill; the
+  tool points there and says only that the platform runs the restart."""
   control = _control_module()
-  description = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]["description"]
-  assert "Record this chat's own restart request even when another chat has one" in " ".join(description.split())
-  assert "one later ready restart resumes every still-registered chat" in description
-  assert "one restart per worker" in description
-  assert "never a peer handoff instead" in description
-  assert "not a second restart executor" in description
+  kind = control._TOOL_DEFINITIONS[control.OWNER_INPUT_TOOL]["inputSchema"]["properties"]["kind"]
+  assert "never restart yourself" in kind["description"]
   root = Path(__file__).resolve().parents[2]
   core = " ".join((root / "skill/core.md").read_text().split())
   maintenance = (root / "backend/scripts/seed-skills/platform-maintenance.md").read_text()
+  flat = " ".join(maintenance.split())
   assert "Each chat whose work needs a restart records its own request." in core
   assert "Every chat that still owes activation and verification records its own" in maintenance
   assert "restart request, even if another chat already shows one." in maintenance
+  assert "never a peer handoff instead" in flat
+  assert "a later ready boot resumes every still-registered chat" in flat
+  assert "admits one restart per worker" in flat
   # A restart is an entry of the one card, which never holds the chat.
   assert "entry of the one card that holds every open request" in maintenance
   assert "own Restart card" not in maintenance and "holds the chat until" not in maintenance

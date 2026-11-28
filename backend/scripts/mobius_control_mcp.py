@@ -1724,64 +1724,62 @@ _TOOL_DEFINITIONS = {
     "name": OWNER_INPUT_TOOL,
     "description": (
       "Record, revise or withdraw something you need from the owner, without "
-      "ending your turn and without interrupting them. Use it the moment a "
-      "decision is missing, then keep doing every piece of work that does not "
-      "depend on it. Whatever is still open when your turn ends is shown to "
-      "the owner on one card; they may answer some and leave others, and "
-      "unanswered requests stay open. op add records a request under a short "
-      "stable key (adding an existing open key revises it, so a retry never "
-      "duplicates); update changes the fields you pass on the request named "
-      "by key or id; resolve records an answer you now have without the card, "
-      "with source owner_message when the owner answered it in an ordinary "
-      "message, or found when you established it yourself (in code, a "
-      "document, a result), and a reason naming the evidence; withdraw closes "
-      "one that no longer matters, with a reason; list reads the current "
-      "state. When the owner writes instead of answering, resolve what their "
-      "message answers with their words as evidence, withdraw what no longer "
-      "matters and update what changed. Never resolve a request by guessing, "
-      "and tell the owner in your reply what you resolved or withdrew and why. "
-      "Every result, like the <open_owner_requests> block at the start of each "
-      "turn, is the complete open list: trust it over your memory and never "
-      "ask again what is already open. A refused call records nothing. "
-      "Recording a request is never an answer or permission: do not act on "
-      "the work it blocks. State in blocks which Goal tasks or work wait on "
-      "it. Give each option everything needed to choose; set multiple when "
-      "several options may be picked together. "
-      "kind (default question) also asks for what only the owner can grant, "
-      "the same way and without ending your turn: approval (prompt, 2-3 "
-      "options including a decline or defer choice, and work_key, the exact "
-      "action; the key is claimed when you add it, so do not call "
-      "claim_agent_work first, and if another chat owns or completed it "
-      "nothing is recorded and the result is held_by_peer or completed: do "
-      "not duplicate), restart (no other fields: the platform derives the "
-      "exact restart when the owner is shown it, and pressing Restart now is "
-      "handled by the platform; never issue a restart command yourself. "
-      "Record this chat's own restart request even when another chat has "
-      "one, never a peer handoff instead: it registers this chat's "
-      "continuation, not a second restart executor; one later ready restart "
-      "resumes every still-registered chat, and the platform admits one "
-      "restart per worker), or "
-      "secret (title, fields, and the consumer command and cwd you prepared, "
-      "or preset owner_credentials: submitted values go once, as one JSON "
-      "object on stdin, to that consumer, never to you, the transcript or "
-      "this list; the consumer gets a minimal environment, must not log or "
-      "persist them, and its output is discarded). Every open request, of "
-      "every kind, is shown on the same one card, which never holds the "
-      "chat; these three are settled only on the card, never by you: "
-      "resolve is refused for them; an approval's work_key "
-      "and a secret's consumer never change (withdraw and add a new one, "
-      "releasing an approval's claim yourself with finish_agent_work)."
+      "ending your turn. Use it the moment a decision is missing, then keep "
+      "doing all work that does not depend on it. Whatever is open when your "
+      "turn ends is shown on one card that never holds the chat. op add "
+      "records a request under a short stable key (adding an existing open "
+      "key revises it, so a retry never duplicates); update changes the "
+      "fields you pass; resolve records an answer you now have without the "
+      "card; withdraw closes one that no longer matters, with a reason, and "
+      "releases an approval's claim (no finish_agent_work needed); list reads "
+      "the state. When the owner writes instead of answering, resolve what "
+      "their message answers with their words as evidence, withdraw what no "
+      "longer matters and update what changed. Never resolve a request by "
+      "guessing, and tell the owner in your reply what you resolved or "
+      "withdrew. Every result, like the <open_owner_requests> block at the "
+      "start of each turn, is the complete open list: trust it over your "
+      "memory and never ask again what is already open. That block and list "
+      "also report what was settled since your last turn. A refused call "
+      "records nothing. Recording a request is never an answer or permission: "
+      "do not act on what it blocks. blocks.tasks is enforced (a named Goal "
+      "task cannot be completed while the request is open); blocks.work is "
+      "only a note. Approval, restart and secret requests are settled only by "
+      "the owner on the card, never by you. For an approval, do not call "
+      "claim_agent_work first: add claims its work_key; if another chat owns "
+      "or completed it, nothing is recorded and the result is held_by_peer or "
+      "completed: do not duplicate."
     ),
     "inputSchema": {
       "type": "object",
       "properties": {
-        "op": {"type": "string", "enum": ["add", "update", "withdraw", "resolve", "list"]},
-        "kind": {"type": "string", "enum": ["question", "approval", "restart", "secret"]},
+        "op": {
+          "type": "string", "enum": ["add", "update", "withdraw", "resolve", "list"],
+          "description": (
+            "Each result names what happened: add is created, revised or "
+            "unchanged; withdrawing an approval also says whether its claim "
+            "was released. list returns the open and the settled requests."
+          ),
+        },
+        "kind": {
+          "type": "string", "enum": ["question", "approval", "restart", "secret"],
+          "description": (
+            "add only; default question. approval: prompt, 2-3 options "
+            "including a decline or defer choice, and work_key. restart: no "
+            "other fields; the platform derives the exact restart when it is "
+            "shown and runs it only when the owner presses Restart now, so never "
+            "restart yourself (read platform-maintenance). secret: title, "
+            "fields and a prepared consumer command and cwd, or preset "
+            "owner_credentials; values go only to that consumer, never to you "
+            "(read secure-input)."
+          ),
+        },
         "key": {
           "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$",
-          "description": "Short stable name for this request, e.g. deploy-target.",
+          "description": (
+            "Short stable name for this request, e.g. deploy-target; every op "
+            "but list names the request by it."
+          ),
         },
-        "id": {"type": "string", "maxLength": 64},
         "header": {"type": "string", "maxLength": 80},
         "prompt": {
           "type": "string", "maxLength": 300,
@@ -1800,7 +1798,10 @@ _TOOL_DEFINITIONS = {
         },
         "options": {
           "type": "array", "maxItems": 8,
-          "description": "Omit for a free-text answer.",
+          "description": (
+            "Omit for a free-text answer. Each label, with its optional "
+            "description, holds everything needed to choose."
+          ),
           "items": {
             "type": "object",
             "properties": {
@@ -1808,15 +1809,27 @@ _TOOL_DEFINITIONS = {
               "description": {"type": "string", "minLength": 1, "maxLength": 500},
               "on_answer": {"type": "string", "enum": ["resume", "close"]},
             },
-            "required": ["label", "description"], "additionalProperties": False,
+            "required": ["label"], "additionalProperties": False,
           },
         },
-        "multiple": {"type": "boolean"},
+        "multiple": {
+          "type": "boolean", "description": "Several options may be picked together.",
+        },
         "blocks": {
           "type": "object",
+          "description": "What waits on the answer.",
           "properties": {
-            "tasks": {"type": "array", "items": {"type": "string"}, "maxItems": 20},
-            "work": {"type": "string", "maxLength": 500},
+            "tasks": {
+              "type": "array", "items": {"type": "string"}, "maxItems": 20,
+              "description": (
+                "Ids of this Goal's tasks; none can be completed while the "
+                "request is open."
+              ),
+            },
+            "work": {
+              "type": "string", "maxLength": 500,
+              "description": "Other waiting work, in plain words; a note, not enforced.",
+            },
           },
           "additionalProperties": False,
         },
@@ -1824,7 +1837,8 @@ _TOOL_DEFINITIONS = {
           "type": "string", "minLength": 3, "maxLength": 256,
           "description": (
             "approval: canonical lowercase identity of the exact action, "
-            "claimed atomically when the request is added."
+            "claimed atomically when the request is added. It never changes: "
+            "withdraw the request and add a new one."
           ),
         },
         # Limits match secure_inputs.validate_request_spec, which rejects more.
@@ -1848,7 +1862,9 @@ _TOOL_DEFINITIONS = {
           "type": "array", "items": {"type": "string"}, "minItems": 1,
           "description": (
             "secret: consumer argv, e.g. "
-            "[\"python3\", \"/data/apps/x/store_key.py\"]."
+            "[\"python3\", \"/data/apps/x/store_key.py\"]. It receives the "
+            "values once as one JSON object on stdin; it never changes: "
+            "withdraw the request and add a new one."
           ),
         },
         "cwd": {
@@ -1856,12 +1872,22 @@ _TOOL_DEFINITIONS = {
           "description": "secret: absolute consumer working directory; default /data.",
         },
         "preset": {"type": "string", "enum": ["owner_credentials"]},
-        "reason": {"type": "string", "maxLength": 500},
+        "reason": {
+          "type": "string", "maxLength": 500,
+          "description": "withdraw and resolve: why; for resolve, the evidence.",
+        },
         "answer": {
           "type": "string", "maxLength": 2000,
           "description": "With resolve: the answer, in the owner's own words when they gave it.",
         },
-        "source": {"type": "string", "enum": ["owner_message", "found"]},
+        "source": {
+          "type": "string", "enum": ["owner_message", "found"],
+          "description": (
+            "With resolve: owner_message when the owner answered in an "
+            "ordinary message; found when you established it yourself (code, "
+            "a document, a result). Only question requests can be resolved."
+          ),
+        },
       },
       "required": ["op"], "additionalProperties": False,
     },
