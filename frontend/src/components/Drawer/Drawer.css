@@ -499,12 +499,16 @@
   color: inherit;
 }
 
+/* A title too long for its row fades out over its last 24px, as the Apps row
+   does, rather than ending in an ellipsis; titles ending short of that band
+   are unaffected. */
 .drawer__item-text {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 24px), transparent);
 }
 
 /* Trailing status column: one fixed width so markers of different shapes
@@ -1156,23 +1160,16 @@
   touch-action: pan-x pan-y;
   -webkit-overflow-scrolling: touch;
   scrollbar-width: none;
-  --apps-fade: 40px;
+  /* Each edge fades over as many pixels as the row can still scroll that way
+     (capped by DrawerAppsStrip), so the fade grows and shrinks continuously. */
+  --fade-start: 0px;
+  --fade-end: 0px;
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--fade-start), #000 calc(100% - var(--fade-end)), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 var(--fade-start), #000 calc(100% - var(--fade-end)), transparent);
 }
 .drawer__apps-card-grid--row::-webkit-scrollbar { display: none; }
 .drawer__apps-card-grid--row > li {
   flex: 0 0 auto;
-}
-.drawer__apps-card-grid--fade-end {
-  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - var(--apps-fade)), transparent);
-  mask-image: linear-gradient(to right, #000 calc(100% - var(--apps-fade)), transparent);
-}
-.drawer__apps-card-grid--fade-start {
-  -webkit-mask-image: linear-gradient(to left, #000 calc(100% - var(--apps-fade)), transparent);
-  mask-image: linear-gradient(to left, #000 calc(100% - var(--apps-fade)), transparent);
-}
-.drawer__apps-card-grid--fade-start.drawer__apps-card-grid--fade-end {
-  -webkit-mask-image: linear-gradient(to right, transparent, #000 var(--apps-fade), #000 calc(100% - var(--apps-fade)), transparent);
-  mask-image: linear-gradient(to right, transparent, #000 var(--apps-fade), #000 calc(100% - var(--apps-fade)), transparent);
 }
 
 .drawer__apps-card-tile {

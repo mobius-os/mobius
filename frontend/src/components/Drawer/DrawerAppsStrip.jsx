@@ -13,6 +13,10 @@ const ORDER_KEY = 'mobius.drawer.appsOrder'
 const TILE = 48
 // Fixed spacing between icons; it never stretches with the sidebar width.
 const GAP = 10
+// Widest an edge fade grows, in px.
+const EDGE_FADE = 40
+// How long after a wheel notch its smooth glide may still be running.
+const WHEEL_GLIDE_MS = 400
 
 function readOrder() {
   try {
@@ -157,15 +161,17 @@ export default function DrawerAppsStrip({
   const [perRow, setPerRow] = useState(6)
   const [rowWidth, setRowWidth] = useState(null)
   const rowRef = useRef(null)
-  // Which edges of the collapsed, horizontally scrolling row have more apps
-  // beyond them; those edges fade out to show the row scrolls.
-  const [edges, setEdges] = useState({ start: false, end: false })
+  // Each edge of the collapsed row fades over as far as the row can still
+  // scroll that way, up to EDGE_FADE, so the fade follows the scroll smoothly
+  // instead of switching on and off. Written straight to the element: it
+  // changes every scroll frame and nothing else renders from it.
   const updateEdges = useCallback(() => {
     const row = rowRef.current
     if (!row) return
-    const start = row.scrollLeft > 6
-    const end = row.scrollLeft + row.clientWidth < row.scrollWidth - 6
-    setEdges(current => (current.start === start && current.end === end ? current : { start, end }))
+    const start = Math.max(0, Math.min(EDGE_FADE, row.scrollLeft))
+    const end = Math.max(0, Math.min(EDGE_FADE, row.scrollWidth - row.clientWidth - row.scrollLeft))
+    row.style.setProperty('--fade-start', `${start}px`)
+    row.style.setProperty('--fade-end', `${end}px`)
   }, [])
   const hasApps = apps.length > 0
   // App name label: positioned in the section from the icon's rectangle and
@@ -278,16 +284,27 @@ export default function DrawerAppsStrip({
 
   // A mouse wheel scrolls the collapsed row sideways while the row can still
   // move that way; at either end the wheel scrolls the sidebar as usual.
-  // Registered natively because React's wheel listener is passive.
+  // A wheel notch is a large jump, so the browser glides the row there: its
+  // smooth scroll runs off the page's main thread, so it stays fluid while the
+  // shell is busy. Quick notches aim from the glide's destination rather than
+  // its current position, so they add up. Registered natively because React's
+  // wheel listener is passive.
   useEffect(() => {
     const row = rowRef.current
     if (!row || expanded) return undefined
+    let target = null
+    let lastWheelAt = 0
     const onWheel = (event) => {
       const delta = wheelRowScrollDelta(event, row)
       if (!delta) return
       event.preventDefault()
       stopGlide()
-      row.scrollLeft += delta
+      const gliding = target !== null && event.timeStamp - lastWheelAt < WHEEL_GLIDE_MS
+      const max = row.scrollWidth - row.clientWidth
+      target = Math.max(0, Math.min(max, (gliding ? target : row.scrollLeft) + delta))
+      lastWheelAt = event.timeStamp
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      row.scrollTo({ left: target, behavior: reduce ? 'auto' : 'smooth' })
     }
     row.addEventListener('wheel', onWheel, { passive: false })
     return () => row.removeEventListener('wheel', onWheel)
@@ -430,12 +447,7 @@ export default function DrawerAppsStrip({
       )}
       {apps.length > 0 && <ul
         ref={rowRef}
-        className={[
-          'drawer__apps-card-grid',
-          expanded ? 'drawer__apps-card-grid--expanded' : 'drawer__apps-card-grid--row',
-          !expanded && edges.start ? 'drawer__apps-card-grid--fade-start' : '',
-          !expanded && edges.end ? 'drawer__apps-card-grid--fade-end' : '',
-        ].filter(Boolean).join(' ')}
+        className={`drawer__apps-card-grid drawer__apps-card-grid--${expanded ? 'expanded' : 'row'}`}
         style={!expanded && rowWidth ? { width: `${rowWidth}px` } : undefined}
         onScroll={expanded ? undefined : () => { hideTip(); updateEdges() }}
         data-drawer-hscroll={expanded ? undefined : ''}
