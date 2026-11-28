@@ -344,3 +344,29 @@ test('attachments preserve the text column and height budget in a short viewport
     expect(await text(page)).toBe(source)
   }
 })
+
+
+// A phone with the keyboard up leaves the chat ~470px. Half of that, minus a
+// full 96px card, used to leave the owner ~4 lines of their own message.
+test('attachments compact before the text drops below six lines when the keyboard halves the room', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 520 })
+  const editor = await open(page)
+  await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '474px'))
+  await page.evaluate(() => window.composerFixture.replace('A long draft that the owner is still writing. '.repeat(30)))
+  await page.evaluate(() => window.composerFixture.attachments([
+    { id: 'one', name: 'one.txt', status: 'ready', mime_type: 'text/plain' },
+    { id: 'two', name: 'two.txt', status: 'ready', mime_type: 'text/plain' },
+  ]))
+  await expect(page.getByRole('button', { name: 'Remove two.txt' })).toBeVisible()
+  const layout = await page.locator('.chat__pill').evaluate(pill => ({
+    pill: pill.getBoundingClientRect().height,
+    text: pill.querySelector('.chat__markdown-input').getBoundingClientRect().height,
+    card: pill.querySelector('.chat__attach-card').getBoundingClientRect().height,
+  }))
+  expect(layout.text).toBeGreaterThanOrEqual(6 * 23.2 + 8 - 1)
+  expect(layout.card).toBeLessThan(96)
+  expect(layout.card).toBeGreaterThanOrEqual(24)
+  // The conversation still keeps the larger half of what the reader can see.
+  expect(layout.pill).toBeLessThanOrEqual(474 / 2 + 1)
+  await expect(editor).toBeVisible()
+})
