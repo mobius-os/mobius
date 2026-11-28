@@ -369,7 +369,30 @@ test('the caret at the end stays in view when the box shrinks or a draft is rest
   await expect.poll(() => caretInView(page)).toBe(true)
 
   // A scroll the owner made to reread earlier text is not undone by a resize.
-  await page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => { scroller.scrollTop = 0 })
+  const scroller = page.locator('.chat__markdown-input .cm-scroller')
+  await scroller.evaluate(element => { element.scrollTop = 0 })
+  const height = await scroller.evaluate(element => element.clientHeight)
   await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '400px'))
-  await expect.poll(() => page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => scroller.scrollTop)).toBe(0)
+  await expect.poll(() => scroller.evaluate(element => element.clientHeight)).not.toBe(height)
+  await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
+  expect(await scroller.evaluate(element => element.scrollTop)).toBe(0)
+})
+
+test('a caret placed far from the lines in view is scrolled into view', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 })
+  await open(page)
+  const lines = Array.from({ length: 400 }, (_, index) => `Line ${index + 1} of a very long draft.`)
+  await page.evaluate(value => window.composerFixture.replace(value), lines.join('\n'))
+  await expect.poll(() => caretInView(page)).toBe(true)
+  // A caret placed from outside, far above the lines in view.
+  await page.locator('.chat__markdown-input .cm-content').evaluate(element => element.blur())
+  const offset = lines.slice(0, 199).join('\n').length + 1
+  await select(page, offset)
+  await expect.poll(() => page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => {
+    const line = [...scroller.querySelectorAll('.cm-line')].find(element => element.textContent === 'Line 200 of a very long draft.')
+    if (!line) return false
+    const box = scroller.getBoundingClientRect(), rect = line.getBoundingClientRect()
+    const middle = (rect.top + rect.bottom) / 2
+    return middle > box.top && middle < box.bottom
+  })).toBe(true)
 })
