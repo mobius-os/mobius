@@ -93,6 +93,24 @@ def _scheduled_cleanup(request_id: str) -> None:
     _cleanup()
 
 
+# The owner's sign-in change card. Its consumer is fixed by the platform
+# (`saved_secure_inputs.validate_consumer_spec` replaces any command for this action).
+OWNER_CREDENTIALS_REQUEST = {
+  "mode": "sealed",
+  "title": "Update sign-in",
+  "description": (
+    "Values go directly to a local credential updater and are not sent to "
+    "the AI provider."
+  ),
+  "fields": [
+    {"name": "current_password", "type": "password", "label": "Current password", "autocomplete": "current-password"},
+    {"name": "new_username", "type": "text", "label": "New username", "autocomplete": "username"},
+    {"name": "new_password", "type": "password", "label": "New password", "autocomplete": "new-password"},
+    {"name": "confirm_password", "type": "password", "label": "Confirm new password", "autocomplete": "new-password"},
+  ],
+}
+
+
 def validate_request_spec(
   *, title: Any, description: Any, mode: Any, fields: Any,
 ) -> tuple[str, str, str, list[dict[str, Any]]]:

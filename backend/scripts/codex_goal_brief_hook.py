@@ -1,13 +1,18 @@
-"""Give Codex the current Goal brief right after it compacts a live turn.
+"""Give Codex the turn's current context right after it compacts a live turn.
 
 Codex runs this SessionStart hook (source "compact") before the request that
-continues the compacted turn and adds its additionalContext there. The
-run-bound backend returns the brief only to the run owning that exact
-thread's live turn, at most once per compaction. A top-level turn's process
-environment names its run; a shared helper host's environment does not, so
-the host resolves the thread to that helper turn's own private env file.
-Codex runs it only for threads whose turn has a Goal brief to restore.
-Failure adds nothing: the next turn's brief and read_goal cover it.
+continues the compacted turn and adds its additionalContext there: the Goal
+brief and, for a top-level turn, the open owner requests
+(app/compaction_context.py). The run-bound backend returns it only to the
+run owning that exact thread's live turn, at most once per compaction. A
+top-level turn's process environment names its run; a shared helper host's
+environment does not, so the host resolves the thread to that helper turn's
+own private env file. Codex runs it only for threads whose turn has a
+refresher: every top-level turn, and a helper turn with a Goal assignment.
+Failure adds nothing here and never breaks the turn: the runner sees the
+compaction in its event stream and, when this hook did not deliver by the
+model's first output after it, steers the same context into the live turn
+(ActiveCodexTurn.observe_compaction); the next turn's start carries it too.
 """
 
 from __future__ import annotations
@@ -60,7 +65,7 @@ def main() -> None:
         "hookEventName": "SessionStart", "additionalContext": context,
       }}
   except Exception as exc:
-    print(f"Goal brief hook failed: {exc}", file=sys.stderr)
+    print(f"Compaction context hook failed: {exc}", file=sys.stderr)
   print(json.dumps(output))
 
 

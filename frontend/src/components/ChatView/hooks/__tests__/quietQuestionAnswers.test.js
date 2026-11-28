@@ -347,3 +347,81 @@ for (const approvesRestart of [false, true]) {
     resolveStream(new Response(null, { status: 204 }))
   })
 }
+
+test('Restart now on a card entry posts only its selection and leaves the stream as it is', async () => {
+  await setup()
+  const requests = []
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url, ...options })
+    return Response.json({
+      status: 'restart_requested', answer_turn: 'none', running: false,
+      question_id: 'list-card', request_id: 'req-restart', state: { status: 'restart_requested' },
+    }, { status: 202 })
+  }
+  const response = await hook.result.current.sendMessage('Restart now', undefined, {
+    hidden: true, question_id: 'list-card',
+    selected_options: { 'req-restart': ['opt-restart'] }, entryPress: true,
+  })
+  assert.equal(response.status, 'restart_requested')
+  assert.equal(requests.length, 1)
+  assert.match(requests[0].url, /\/api\/chats\/a\/messages$/)
+  const body = JSON.parse(requests[0].body)
+  // The documented press: content, hidden, question_id and the one selection.
+  // Timezone and viewport ride every send; no answers, files or replay cid.
+  assert.deepEqual(Object.keys(body).sort(), ['content', 'hidden', 'question_id', 'selected_options', 'timezone', 'viewport'])
+  assert.deepEqual(body.selected_options, { 'req-restart': ['opt-restart'] })
+  assert.equal(body.hidden, true)
+  assert.equal(body.question_id, 'list-card')
+  assert.deepEqual(hook.result.current.streamItems, [{ type: 'text', content: 'Existing answer' }])
+  assert.equal(hook.result.current.isStreaming, false)
+  assert.deepEqual(await listIntents(outboxPrincipalKey(token)), [], 'a restart press is never queued for later')
+})
+
+test('a refused Restart now press keeps the stream and leaves nothing to replay', async () => {
+  await setup()
+  globalThis.fetch = async () => Response.json({
+    detail: { code: 'question_state_changed', message: 'This restart is no longer offered on this card.' },
+  }, { status: 410 })
+  await assert.rejects(hook.result.current.sendMessage('Restart now', undefined, {
+    hidden: true, question_id: 'list-card', selected_options: { r: ['o'] }, entryPress: true,
+  }), error => error.status === 410 && error.detail === 'This restart is no longer offered on this card.')
+  assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+  assert.deepEqual(await listIntents(outboxPrincipalKey(token)), [])
+})
+
+const pressOptions = {
+  hidden: true, question_id: 'list-card', selected_options: { 'req-restart': ['opt-restart'] }, entryPress: true,
+}
+
+test('a Restart now press whose response is lost is never sent again and reports an unknown outcome', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async (_url, options) => {
+    if (options?.method === 'POST') {
+      posts++
+      // The server commits the press, then the connection drops.
+      throw new TypeError('Failed to fetch')
+    }
+    return Response.json({ ready: true, boot_id: 'quiet-fixture' })
+  }
+  await assert.rejects(hook.result.current.sendMessage('Restart now', undefined, pressOptions),
+    error => error.outcomeUnknown === true && !error.status)
+  assert.equal(posts, 1, 'no ambiguity retry, no replay')
+  assert.deepEqual(await listIntents(outboxPrincipalKey(token)), [])
+  assert.equal(hook.result.current.streamItems[0].content, 'Existing answer')
+})
+
+test('a server fault on a Restart now press is an unknown outcome, a refusal is not', async () => {
+  await setup()
+  let posts = 0
+  globalThis.fetch = async () => { posts++; return Response.json({ detail: 'gateway' }, { status: 502 }) }
+  await assert.rejects(hook.result.current.sendMessage('Restart now', undefined, pressOptions),
+    error => error.status === 502 && error.outcomeUnknown === true)
+  globalThis.fetch = async () => {
+    posts++
+    return Response.json({ detail: { code: 'restart_action_conflict', message: 'x' } }, { status: 409 })
+  }
+  await assert.rejects(hook.result.current.sendMessage('Restart now', undefined, pressOptions),
+    error => error.status === 409 && !error.outcomeUnknown)
+  assert.equal(posts, 2)
+})

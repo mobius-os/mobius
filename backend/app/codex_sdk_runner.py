@@ -13,8 +13,8 @@ in the shared runner registry, keyed by `(chat_id, RunnerKind.CODEX_SDK)`,
 so Stop and queued-message steering can reach it.
 
 Owner questions have one lifecycle: the provider-neutral Möbius
-`request_question` control saves a durable terminal card, ends the
-current turn, and starts exactly one continuation when answered.
+`owner_input` control records them without ending the turn, a durable card
+shows them when the turn ends, and an answer starts exactly one continuation.
 Codex's provider-native `request_user_input` tool is deliberately
 disabled at tool registration, because it waits inside the current provider
 turn and cannot safely share that terminal-card contract. The legacy approval
@@ -323,7 +323,7 @@ def _codex_config_overrides() -> list[str]:
   grow a provider-specific second constitution.
 
   Owner questions are deliberately absent here: the Möbius control MCP's
-  durable ``request_question`` is the sole owner-facing question capability.
+  durable ``owner_input`` is the sole owner-facing question capability.
 
   Helpers are Möbius's too: agents delegate with ``spawn_agent`` on the
   Möbius control server, whose helpers run on any provider, outlive the turn,
@@ -360,12 +360,15 @@ def _codex_owner_card_hook_override() -> str:
 
 
 def _codex_goal_brief_hook_override() -> str:
-  """Restore the Goal brief in the same turn, right after Codex compacts.
+  """Restore the turn's context in the same turn, right after Codex compacts.
 
   Codex runs SessionStart hooks matching source "compact" after compaction,
   including automatic compaction mid-turn, and gives their additionalContext
-  to the immediate continuation request. The hook adds no model call. Its
-  spill limit is off so the brief stays inline, as at turn start.
+  to the immediate continuation request. The hook adds no model call. It
+  carries the Goal brief and, on a top-level turn, the open owner requests
+  (app/compaction_context.py). Its spill limit is off so they stay inline,
+  as at turn start. ``ActiveCodexTurn.observe_compaction`` is the fallback
+  when the hook is missing or does not deliver.
   """
   import sys
   script = Path(__file__).resolve().parents[1] / "scripts" / "codex_goal_brief_hook.py"
@@ -391,8 +394,9 @@ async def _codex_platform_hook_thread_config(
   that hash session-scoped trust. Other discovered hooks keep their own trust.
   Codex never runs an untrusted hook, so trust is what installs one for the
   thread. ``hook_overrides`` must be found (owner cards end top-level turns);
-  an ``optional`` hook (the Goal brief restore) that cannot be discovered is
-  left untrusted, and the turn runs without in-turn restore.
+  an ``optional`` hook (the compaction restore) that cannot be discovered is
+  left untrusted (absent from ``hooks.state``); the turn then restores
+  through its stream fallback instead.
   """
   try:
     listing = await control_client(codex).request(
@@ -401,7 +405,7 @@ async def _codex_platform_hook_thread_config(
   except Exception:
     if hook_overrides:
       raise
-    log.warning("Codex hook discovery failed; no in-turn Goal brief restore",
+    log.warning("Codex hook discovery failed; compaction restore falls back to steering",
                 exc_info=True)
     return config
   # Newer SDKs wrap each hook variant in HookMetadata.root; older ones
@@ -825,12 +829,12 @@ class ActiveCodexTurn:
     sink: Any | None = None,
     run_marker: str | None = None,
     shared_host: bool = False,
-    goal_brief_refresh: Any | None = None,
+    compaction_refresh: Any | None = None,
     model: str | None = None,
   ):
     self.chat_id = chat_id
     self.model = model
-    self._goal_brief_refresh = goal_brief_refresh
+    self._compaction_refresh = compaction_refresh
     self.kind = RunnerKind.CODEX_SDK
     self.thread = thread
     self.turn = turn
@@ -855,14 +859,18 @@ class ActiveCodexTurn:
     # validation distinguish them without treating a deliberate Stop as an
     # error.
     self._interrupt_requested = False
-    # Set synchronously by begin_finish_after_owner_card(). A
-    # continuation owner-input card ends the turn on our initiative — like Stop,
-    # terminal validation must read it as "we did this to ourselves" (a clean
-    # TurnStatus.interrupted, not a provider failure) — but it is NOT Stop: it
-    # never clears the pending queue or bumps the chat generation, because the
-    # chat is meant to resume from the owner's answer.
+    # Set synchronously by begin_finish_after_owner_card(). A turn-ending
+    # receipt (a recorded helper question or a saved key card) ends the turn
+    # on our initiative — like Stop, terminal validation must read it as "we
+    # did this to ourselves" (a clean TurnStatus.interrupted, not a provider
+    # failure) — but it is NOT Stop: it never clears the pending queue or bumps the chat
+    # generation, because the chat is meant to resume from the answer.
     self._owner_card_requested = False
     self._owner_card_interrupt_task: asyncio.Task[None] | None = None
+    # Compaction restore fallback; see observe_compaction.
+    self.compaction_hook_installed = False
+    self._restore_due = False
+    self._restore_tasks: set[asyncio.Task[None]] = set()
     self._finished: asyncio.Future[None] = (
       asyncio.get_running_loop().create_future()
     )
@@ -885,12 +893,13 @@ class ActiveCodexTurn:
   def interrupt_requested(self) -> bool:
     return self._interrupt_requested
 
-  async def goal_brief_after_compaction(self, thread_id: str) -> str:
-    """The fresh brief for this thread's post-compaction hook.
+  async def context_after_compaction(self, thread_id: str) -> str:
+    """The fresh restorable context for this thread's post-compaction hook.
 
     Codex runs the hook only after it compacts, so the call is itself the
-    compaction signal: mark the need and take it, once per compaction. If the
-    hook fails, the next turn's brief and read_goal cover it.
+    compaction signal: mark the need and take it, once per compaction. The
+    stream's report of the same compaction is the other signal of that need;
+    if the hook does not deliver, ``observe_compaction`` steers it instead.
     """
     if (
       str(getattr(self.thread, "id", "")) != thread_id
@@ -898,27 +907,72 @@ class ActiveCodexTurn:
       or self._interrupt_requested
     ):
       raise LookupError("This Codex turn does not own that thread or is ending.")
-    if self._goal_brief_refresh is None:
+    if self._compaction_refresh is None:
       return ""
-    self._goal_brief_refresh.mark_compacted()
-    return await self._goal_brief_refresh.take()
+    self._compaction_refresh.mark_compacted("hook")
+    return await self._compaction_refresh.take()
+
+  def observe_compaction(self) -> None:
+    """The event stream reported a compaction: arm the steering fallback.
+
+    A trusted hook restores the context in the very request that continues
+    the compacted turn. Its call and this report are two signals of one
+    compaction, counted once by the refresher. Once the model answers that
+    request (``observe_model_output``) the hook ran or never will, so a need
+    still open is steered into the live turn and reaches the model at its next
+    request. Without a trusted hook it is steered at once. Codex may report
+    one compaction twice (item and legacy notification); a report before the
+    next model output is the same compaction.
+    """
+    if self._compaction_refresh is None or self._restore_due:
+      return
+    self._restore_due = True
+    self._compaction_refresh.mark_compacted("stream")
+    if not self.compaction_hook_installed:
+      self._schedule_restore()
+
+  def observe_model_output(self) -> None:
+    """The model answered a request after a compaction: steer any open need."""
+    if self._restore_due:
+      self._restore_due = False
+      self._schedule_restore()
+
+  def _schedule_restore(self) -> None:
+    task = asyncio.create_task(self._steer_restored_context())
+    self._restore_tasks.add(task)
+    task.add_done_callback(self._restore_tasks.discard)
+
+  async def _steer_restored_context(self) -> None:
+    if not self.is_steerable:
+      return  # The next turn's start carries the context.
+    text = await self._compaction_refresh.take()
+    if not text:
+      return
+    try:
+      await self.turn.steer(text)
+    except Exception as exc:
+      log.warning(
+        "Codex compaction restore steer failed chat_id=%s: %s; the next turn"
+        " start carries it", self.chat_id, exc,
+      )
 
   @property
   def owner_card_requested(self) -> bool:
-    """Whether a continuation owner-input card ended this turn on our side."""
+    """Whether a turn-ending receipt ended this turn on our side."""
     return self._owner_card_requested
 
   def begin_finish_after_owner_card(self) -> Awaitable[None] | None:
-    """End the turn after a continuation owner-input receipt is delivered.
+    """End the turn after a turn-ending receipt (a recorded helper question
+    or a saved key card) is delivered.
 
-    The event sink calls this only after Codex emits the completed card tool
-    result. Interrupt the live turn now to stop further generation. Events
+    The event sink calls this only after Codex emits the completed receipt
+    tool result. Interrupt the live turn now to stop further generation. Events
     already emitted while that interrupt takes effect still drain through the
     sink and remain visible and durable.
     Distinct from Stop: it marks only `_owner_card_requested`
     (folded into `stop_requested()` so terminal validation treats the resulting
     TurnStatus.interrupted as a clean, error-free completion) and never runs
-    Stop's queue-clear / generation-bump, so the owner's saved answer resumes the
+    Stop's queue-clear / generation-bump, so the recorded answer resumes the
     chat normally. Claim ownership synchronously before returning the interrupt
     awaitable: a terminal already queued behind the tool result must classify
     this as our clean end even before the event loop runs that awaitable.
@@ -1017,6 +1071,8 @@ class ActiveCodexTurn:
   def mark_finished(self) -> None:
     """Resolves the stop waiter once the runner is fully drained."""
     self._reject_pending_steer()
+    for task in list(self._restore_tasks):
+      task.cancel()
     if not self._finished.done():
       self._finished.set_result(None)
 
@@ -1281,6 +1337,7 @@ def _sdk_imports() -> dict[str, Any]:
     ErrorNotification,
     FileChangePatchUpdatedNotification,
     FileChangeThreadItem,
+    HookPromptThreadItem,
     ImageGenerationThreadItem,
     ImageViewThreadItem,
     HooksListResponse,
@@ -1301,6 +1358,7 @@ def _sdk_imports() -> dict[str, Any]:
     ThreadGoalStatus,
     TurnCompletedNotification,
     TurnStatus,
+    UserMessageThreadItem,
     WebSearchThreadItem,
   )
   # The pinned SDK includes the complete collab, sub-agent, status, and
@@ -1335,6 +1393,8 @@ def _sdk_imports() -> dict[str, Any]:
     "ErrorNotification": ErrorNotification,
     "FileChangePatchUpdatedNotification": FileChangePatchUpdatedNotification,
     "FileChangeThreadItem": FileChangeThreadItem,
+    "HookPromptThreadItem": HookPromptThreadItem,
+    "UserMessageThreadItem": UserMessageThreadItem,
     "ImageGenerationThreadItem": ImageGenerationThreadItem,
     "ImageViewThreadItem": ImageViewThreadItem,
     "Personality": Personality,
@@ -1668,6 +1728,14 @@ def _install_delegated_approval_handler(codex: Any, *, chat_id: str) -> None:
     )
 
 
+def _is_model_output(item: Any, sdk: dict[str, Any]) -> bool:
+  """Whether a started item comes from a model response, not turn input."""
+  inputs = tuple(sdk[name] for name in (
+    "ContextCompactionThreadItem", "UserMessageThreadItem", "HookPromptThreadItem",
+  ) if name in sdk)
+  return not isinstance(item, inputs)
+
+
 def _publish_codex_context_compaction(bc: Any, chat_id: str) -> None:
   """Make provider-native compaction visible without affecting the turn."""
   log.info("Codex context compacted for chat %s", chat_id)
@@ -1709,7 +1777,7 @@ async def _run_codex_sdk_turn(
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
-  goal_brief_refresh=None,
+  compaction_refresh=None,
   app_room=None,
 ) -> RunnerResult:
   """Runs one Codex SDK turn and publishes Möbius-shaped events.
@@ -1864,8 +1932,6 @@ async def _run_codex_sdk_turn(
       app_agent_tools=app_room.control_tools, app_tool_names=app_room.app_tools,
     )
     config_overrides.extend(app_room.codex_overrides(provider_overrides))
-    if app_room.asks_owner:
-      config_overrides.append(_codex_owner_card_hook_override())
     if codex_bin is None:
       raise RuntimeError("Codex is not installed, so this app's agent cannot start.")
     launch_args = app_room.codex_launch_args(codex_bin, config_overrides)
@@ -1986,11 +2052,11 @@ async def _run_codex_sdk_turn(
     `active_turn` exists, which is deliberate — a teardown during startup is
     no more the provider's fault than one mid-stream.
 
-    Also includes a continuation owner-input card ending the turn: that too is
-    Möbius, not the provider, ending the turn, so its TurnStatus.interrupted is
-    a clean completion rather than a failure. Unlike Stop, the card path does
-    not clear the pending queue or bump the generation — the chat resumes from
-    the owner's saved answer.
+    Also includes a turn-ending receipt (a recorded helper question or a saved
+    key card): that too is Möbius, not the provider, ending the turn, so its
+    TurnStatus.interrupted is a clean completion rather than a failure. Unlike
+    Stop, the receipt path does not clear the pending queue or bump the
+    generation — the chat resumes from the recorded answer.
     """
     return bool(
       (active_turn is not None and active_turn.interrupt_requested)
@@ -2062,20 +2128,24 @@ async def _run_codex_sdk_turn(
       # keyed without per-turn facts); this thread trusts only the ones it
       # uses. Every turn needs its recorded-result end hook; a lazy Goal
       # refresher also covers coordinator promotion after provider entry.
-      # A room has no Goals; it ends a turn on a card only when it may ask.
-      required_hooks = (
-        [_codex_owner_card_hook_override()]
-        if app_room is None or app_room.asks_owner else []
-      )
+      # A room has no Goals and no turn-ending result: asking the owner
+      # (owner_input) never ends a turn, and it has no helper or key request.
+      required_hooks = [_codex_owner_card_hook_override()] if app_room is None else []
       brief_hooks = (
         [_codex_goal_brief_hook_override()]
-        if goal_brief_refresh is not None and app_room is None else []
+        if compaction_refresh is not None and app_room is None else []
       )
+      brief_hook_trusted = False
       if required_hooks or brief_hooks:
         connector_thread_config = await _codex_platform_hook_thread_config(
           codex, sdk, cwd, connector_thread_config, required_hooks,
           optional=brief_hooks,
         )
+        # Every required hook is trusted or discovery raised, so the brief
+        # hook is trusted exactly when the state holds one entry more.
+        brief_hook_trusted = bool(brief_hooks) and len(
+          (connector_thread_config or {}).get("hooks.state", {}),
+        ) == len(required_hooks) + len(brief_hooks)
       # Keep the old request_user_input bridge on the sync CodexClient's
       # approval_handler attribute. `approval_handler` is a public
       # sync-client constructor argument as of openai-codex 0.142.5;
@@ -2085,7 +2155,7 @@ async def _run_codex_sdk_turn(
       # the kwarg natively) keeps ~100 lines of SDK glue out of this
       # module.
       # New turns do not advertise the provider-native tool; durable owner
-      # questions use the Möbius request_question MCP control. If a resumed
+      # questions use the Möbius owner_input MCP control. If a resumed
       # provider session already knows the old tool, the app-server sends an
       # `item/tool/requestUserInput`
       # JSON-RPC request to our handler; we park on the shared
@@ -2281,9 +2351,10 @@ async def _run_codex_sdk_turn(
         sink=bc,
         run_marker=base_env.get(RUN_MARKER_ENV),
         shared_host=helper_host is not None,
-        goal_brief_refresh=goal_brief_refresh,
+        compaction_refresh=compaction_refresh,
         model=model,
       )
+      active_turn.compaction_hook_installed = brief_hook_trusted
       registry.register(active_turn)
       record_memory_checkpoint_once(
         "codex_first_turn_ready",
@@ -2414,6 +2485,8 @@ async def _run_codex_sdk_turn(
 
         if isinstance(payload, sdk["ItemStartedNotification"]):
           item = payload.item.root if hasattr(payload.item, "root") else payload.item
+          if _is_model_output(item, sdk):
+            active_turn.observe_model_output()
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             provider_responded = True
             item_id = str(getattr(item, "id", None) or "")
@@ -2444,9 +2517,8 @@ async def _run_codex_sdk_turn(
           else:
             event = _tool_start_event(item, sdk)
             if event is not None:
-              # Every tool item classified here is a call the model requested
-              # (an owner card's request_question included); user messages,
-              # hook prompts and compaction markers are not.
+              # Every tool item classified here is a call the model requested;
+              # user messages, hook prompts and compaction markers are not.
               provider_responded = True
               _stamp_tool_use_id(event, item)
               bc.publish(event)
@@ -2526,6 +2598,7 @@ async def _run_codex_sdk_turn(
                 image_delivery_output = _IMAGE_DELIVERY_OUTPUT[delivery]
           if isinstance(item, sdk["ContextCompactionThreadItem"]):
             _publish_codex_context_compaction(bc, chat_id)
+            active_turn.observe_compaction()
             continue
           if isinstance(item, sdk["AgentMessageThreadItem"]):
             item_id = str(getattr(item, "id", None) or "")
@@ -2609,6 +2682,7 @@ async def _run_codex_sdk_turn(
           # Compatibility for older app-server releases. Current v2 servers
           # expose compaction as a ContextCompactionThreadItem instead.
           _publish_codex_context_compaction(bc, chat_id)
+          active_turn.observe_compaction()
           continue
 
         if isinstance(payload, sdk["AccountRateLimitsUpdatedNotification"]):
@@ -2905,7 +2979,7 @@ async def run_codex_sdk_turn(
   data_dir: str | None = None,
   coordination_enabled: bool = True,
   helper_host_key=None,
-  goal_brief_refresh=None,
+  compaction_refresh=None,
   app_room=None,
 ) -> RunnerResult:
   """Hold cross-process rollout ownership around one strict Codex call.
@@ -2963,7 +3037,7 @@ async def run_codex_sdk_turn(
         data_dir=data_dir,
         coordination_enabled=coordination_enabled,
         helper_host_key=helper_host_key,
-        goal_brief_refresh=goal_brief_refresh,
+        compaction_refresh=compaction_refresh,
         app_room=app_room,
       )
   finally:

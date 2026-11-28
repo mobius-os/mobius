@@ -2673,3 +2673,32 @@ def test_unowned_wait_never_counts_toward_creators_later_goal(db, chat):
     deadline_at=now_naive_utc(), next_check_at=now_naive_utc())
   db.add(row); db.commit()
   assert chat_waits_mod._goal_waits(db, chat.id, goal.id).count() == 0
+
+
+def test_a_restart_wait_says_whether_the_owner_has_asked_for_the_restart(client, owner_token, db):
+  """Offered and requested look different to the owner; other waits carry no such flag."""
+  from app.chat_waits import serialize_wait
+
+  chat_id = _owner_chat(client, owner_token)
+  now = now_naive_utc()
+  row = models.ChatWait(
+    id="offered-platform-activation", chat_id=chat_id,
+    description="Load the exact committed platform changes",
+    condition_owner="Möbius startup", kind="platform_activation",
+    condition_json={"version": 1}, interval_secs=60,
+    deadline_at=now + timedelta(days=1), next_check_at=now + timedelta(minutes=1),
+    status="armed", created_at=now,
+  )
+  db.add(row)
+  db.commit()
+
+  assert serialize_wait(row, db=db)["restart_requested"] is False
+  # Still listed: the chat's restart hand-off stays visible.
+  assert [wait.id for wait in chat_waits_mod.outstanding_waits_for_chat(db, chat_id)] == [row.id]
+
+  row.action_approved_at = now
+  db.commit()
+  assert serialize_wait(row, db=db)["restart_requested"] is True
+
+  timer = declare_wait(db, chat_id=chat_id, description="later", kind="timer", delay_secs=120)
+  assert "restart_requested" not in serialize_wait(timer, db=db)

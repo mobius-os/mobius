@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class GoalCardHandoff:
   question_id: str
-  kind: str  # saved or in_turn
+  kind: str  # saved, in_turn or request_list
 
 
 @dataclass(frozen=True)
@@ -146,6 +146,13 @@ def native_handoffs(db: Session, chat_id: str, *, goal_id: str | None,
       card = GoalCardHandoff(question_id=pending_id, kind="saved")
     elif pending is not None and pending.run_token == latest.id:
       card = GoalCardHandoff(question_id=pending.question_id, kind="in_turn")
+  if card is None and goal_id is not None:
+    # A request-list card bars nothing, but a Goal whose own request it shows
+    # has handed its next step to the owner, whichever turn published it.
+    from app.owner_input_requests import goal_waits_on_request_card, shown_request_card
+    request_card_id = shown_request_card(db, chat_id)
+    if goal_waits_on_request_card(db, chat_id, goal_id, request_card_id):
+      card = GoalCardHandoff(question_id=request_card_id, kind="request_list")
   wait_query = _goal_waits(db, chat_id, goal_id).filter(
     (models.ChatWait.status == "armed") | _FIRED_UNDELIVERED,
   )

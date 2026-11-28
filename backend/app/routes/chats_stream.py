@@ -382,6 +382,7 @@ _KEEPALIVE_INTERVAL = 30  # seconds
 # identity, or a durable transcript boundary that tells the client to refresh.
 _SNAPSHOT_REPLAY_EVENT_TYPES = frozenset({
   "answers_applied",
+  "input_request_settled",
   "app_updated",
   "build_phase",
   # A complete current reading; the log keeps only the newest.
@@ -564,6 +565,18 @@ async def _append_restart_feedback_to_pending(
   )
 
 
+def _no_longer_open(exc: Exception) -> HTTPException:
+  """The 410 for an answer the card no longer accepts.
+
+  A card whose request changed while the owner answered carries a code the
+  client can act on (`{"code": "card_out_of_date", "message": ...}`).
+  """
+  message = str(exc) or "The question is no longer accepting answers."
+  if isinstance(exc, questions.QuestionCardChanged):
+    return HTTPException(status_code=410, detail={"code": exc.code, "message": message})
+  return HTTPException(status_code=410, detail=message)
+
+
 async def _submit_pending_message(
   chat: models.Chat, db: Session, command: AppendPending,
 ) -> dict:
@@ -573,12 +586,165 @@ async def _submit_pending_message(
     result = await await_ack(ack)
   except (RestartCardStateChanged, RestartCardActionConflict, ScopedStartRefused):
     raise
+  except questions.QuestionNoLongerOpen as exc:
+    # A newer request-list card took over after the route's own check, or a
+    # request on it changed.
+    raise _no_longer_open(exc) from exc
+  except questions.AnswerConflict as exc:
+    # The writer refused what this submission tried to settle on the card.
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
   except Exception as exc:
     raise _message_persist_unavailable(exc, chat_id=chat.id) from exc
   # Reflect the committed state on the request's session so a later
   # `db.refresh(chat)` in this handler sees the actor's write.
   db.expire(chat)
   return result
+
+
+def _refusal_reason(exc: HTTPException) -> tuple[str, str]:
+  detail = exc.detail
+  if isinstance(detail, dict):
+    return str(detail.get("code") or ""), str(detail.get("message") or "")
+  return "", str(detail or "")
+
+
+def _log_refused_card_selection(
+  db: Session, chat_id: str, body: schemas.SendMessage, exc: HTTPException,
+) -> None:
+  """One INFO line for a refused send that selects options on a card.
+
+  The line names the status, code and reason, and the restart entry when the
+  selection presses one; never answers or content.
+  """
+  press = _pressed_restart_request(db, chat_id, body)
+  code, reason = _refusal_reason(exc)
+  log.info(
+    "%s chat_id=%s question_id=%s request_id=%s status=%s code=%s reason=%s",
+    "Restart entry press refused" if press else "Card selection refused",
+    chat_id, body.question_id, press or "-", exc.status_code, code or "-", reason[:200],
+  )
+
+
+def _pressed_restart_request(
+  db: Session, chat_id: str, body: schemas.SendMessage,
+) -> str | None:
+  """The restart entry a selection names on its card, if any; never raises."""
+  from app.owner_input_requests import RESTART, entry_kind
+
+  try:
+    chat = db.get(models.Chat, chat_id)
+    card = (questions.saved_question(chat, body.question_id)
+            if chat is not None and body.selected_options else None)
+    if not isinstance(card, dict) or not card.get("input_requests"):
+      return None
+    for question in card.get("questions") or []:
+      if (isinstance(question, dict) and entry_kind(question) == RESTART
+          and question.get("id") in body.selected_options):
+        return question["id"]
+  except Exception:
+    return None
+  return None
+
+
+def _restart_entry_press(
+  chat: models.Chat, body: schemas.SendMessage,
+) -> tuple[str, str] | None:
+  """(request id, option id) when this send presses Restart now on a restart
+  entry of a request-list card; None for anything else.
+
+  A selection naming a restart entry is the press. It must stand alone: no
+  other selection, no answer but that entry's own label, and no files.
+  """
+  from app.owner_input_requests import RESTART, entry_kind
+
+  selections = body.selected_options
+  card = questions.saved_question(chat, body.question_id) if selections else None
+  if not isinstance(card, dict) or not card.get("input_requests"):
+    return None
+  restart_ids = {
+    question.get("id") for question in card.get("questions") or []
+    if isinstance(question, dict) and entry_kind(question) == RESTART
+  }
+  pressed = restart_ids.intersection(selections)
+  if not pressed:
+    return None
+  request_id = next(iter(pressed))
+  entry = next(q for q in card["questions"] if q.get("id") == request_id)
+  chosen = selections[request_id]
+  allowed_answers = ({}, {entry.get("question"): "Restart now"}, {request_id: "Restart now"})
+  if (len(selections) != 1 or not isinstance(chosen, list) or len(chosen) != 1
+      or not isinstance(chosen[0], str) or (body.answers or {}) not in allowed_answers):
+    raise HTTPException(
+      status_code=409,
+      detail="Restart now is pressed on its own; send other answers separately.",
+    )
+  if body.attachments:
+    raise HTTPException(409, detail="A Restart card can't take files. Remove the attachment to continue.")
+  return request_id, chosen[0]
+
+
+async def _press_restart_entry(
+  chat: models.Chat, body: schemas.SendMessage, request_id: str, option_id: str,
+  *, restore_archived: bool,
+) -> JSONResponse:
+  """Settle Restart now for one entry and dispatch the restart at most once.
+
+  The writer re-matches the card, entry, option and wait and answers the
+  request in the same commit that approves the restart; only a first press
+  dispatches. The rest of the card stays open and answerable.
+  """
+  chat_id = chat.id
+  async with chat_queue.get_transition_lock(chat_id):
+    async with chat_queue.get_lock(chat_id):
+      try:
+        result = await await_ack(get_writer().submit(ResolvePlatformRestartCard(
+          chat_id=chat_id, run_token="", question_id=body.question_id or "",
+          selected_option_id=option_id, request_id=request_id,
+          restore_archived=restore_archived,
+        )))
+      except RestartCardStateChanged as exc:
+        raise HTTPException(status_code=410, detail={
+          "code": "question_state_changed",
+          "message": "This restart is no longer offered on this card.",
+        }) from exc
+      except RestartCardActionConflict as exc:
+        raise HTTPException(status_code=409, detail={
+          "code": "restart_action_conflict", "message": str(exc),
+        }) from exc
+      except Exception as exc:
+        log.exception("Restart entry press failed chat_id=%s question_id=%s",
+                      chat_id, body.question_id)
+        raise HTTPException(
+          status_code=503,
+          detail="Möbius could not save that Restart choice. Please try again.",
+        ) from exc
+  event = {
+    "type": "input_request_settled", "question_id": body.question_id,
+    "request_id": request_id, "kind": "restart", "state": result["state"],
+  }
+  from app.chat_event_sink import get_active_sink
+  sink = get_active_sink(chat_id)
+  bc = get_broadcast(chat_id)
+  if sink is not None:
+    sink.publish(event)
+  elif bc is not None:
+    bc.publish(event)
+  background = None
+  if result["dispatch"]:
+    async def execute_restart() -> None:
+      from app.restart_util import restart_this_worker
+      await restart_this_worker()
+    background = BackgroundTask(execute_restart)
+  return JSONResponse(status_code=202, content={
+    "status": result["status"],
+    "answer_turn": "none",
+    "running": is_chat_running(chat_id),
+    "question_id": body.question_id,
+    "request_id": request_id,
+    "state": result["state"],
+    "platform_action": result["platform_action"],
+    "action_id": result["action_id"],
+  }, background=background)
 
 
 def _answer_delivered_response(chat_id: str) -> JSONResponse:
@@ -914,6 +1080,12 @@ async def send_message(
   )
   try:
     return await _send_message_impl(body, chat_id, principal, db, restore)
+  except HTTPException as exc:
+    # A refused card selection, a Restart now press included, leaves one
+    # INFO line.
+    if body.selected_options and body.question_id:
+      _log_refused_card_selection(db, chat_id, body, exc)
+    raise
   finally:
     if was_archived:
       db.rollback()  # See the writer's committed row, including on a later 410.
@@ -981,6 +1153,20 @@ async def _send_message_impl(
     body = _confine_agent_card_answer(body, exact_card)
     if exact_retry:
       agent_exact_retry = _is_exact_agent_card_retry(body, exact_card)
+
+  # Restart now on a restart entry of the request-list card is its own
+  # platform action, routed to the restart resolver for that entry; written
+  # feedback for it is an ordinary card answer below.
+  # It is recognised before every check meant for ordinary sends (queueing, a
+  # running turn, the resource floors, model admission): none of them guards
+  # anything a restart press needs. What still applies is above (the caller's
+  # authority over this chat) and inside the writer (current card, revision,
+  # option, and at most one dispatch).
+  entry_press = _restart_entry_press(chat, body)
+  if entry_press is not None:
+    return await _press_restart_entry(
+      chat, body, *entry_press, restore_archived=restore_archived,
+    )
 
   # A typed Restart card is a platform action, not a prose continuation. The
   # writer re-matches the exact card and option identity inside its mutation;
@@ -1297,6 +1483,8 @@ async def _send_message_impl(
           )))
       except questions.AnswerConflict as exc:
         raise HTTPException(409, detail=str(exc)) from exc
+      except questions.QuestionNoLongerOpen as exc:
+        raise _no_longer_open(exc) from exc
       except Exception as exc:
         log.warning("Quiet answer did not persist chat_id=%s: %s", chat_id, exc)
         raise HTTPException(503, detail="Could not save your answer; please try again.") from exc
@@ -1775,6 +1963,22 @@ async def _send_message_locked(
         user_msgs = [reserved]
         consume_cids = [reserved_cid] if reserved_cid is not None else []
         steer_content = reserved.get("content", "")
+      if is_owner_input_principal(principal) and not body.hidden:
+        # The owner wrote into a running turn while requests are open, as a
+        # new turn's start says too: the agent settles what the message
+        # answers. Read now, so it is the list this message lands beside;
+        # only the provider's copy is framed. The message is written instead
+        # of answering only when a card already shows an open request; one
+        # recorded earlier in this turn has not been shown yet. A helper chat
+        # records no requests, so it never gets this list.
+        from app.owner_input_requests import (
+          build_open_requests_context, open_card_shows_request,
+        )
+        requests_text = build_open_requests_context(
+          db, chat_id, owner_wrote_instead=open_card_shows_request(db, chat_id),
+        )
+        if requests_text:
+          steer_content = f"{requests_text}\n\n{steer_content}"
       if questions.is_waiting(chat_id):
         # A new-message steer awaits AppendPending above. A question can
         # register during that actor round-trip even though the entry gate was

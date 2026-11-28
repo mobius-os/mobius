@@ -5,7 +5,7 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import './SecureInputCard.css'
 
 
-function settledLabel(status) {
+function secureSettledLabel(status) {
   if (status === 'filled') return 'Provided'
   if (status === 'consuming') return 'Using securely…'
   if (status === 'interrupted') return 'Outcome unknown'
@@ -30,12 +30,23 @@ export function collectAndClearSecureFields(form, fields) {
 
   // Chrome can treat removal of a filled password form as a successful login.
   // Clear and blur before the server can publish a state that replaces the form.
+  wipeSecureFields(form)
+  return values
+}
+
+
+/**
+ * Empty and blur every sealed input of a form. The one wipe for every way a
+ * form stops holding values: submit, a successful cancel, the request no
+ * longer being open, and unmount. Safe on a form React has detached.
+ */
+export function wipeSecureFields(form) {
+  if (!form) return
   form.reset()
-  for (const input of inputs.values()) {
+  for (const input of form.querySelectorAll('input[data-secure-field]')) {
     input.value = ''
     input.blur()
   }
-  return values
 }
 
 
@@ -45,17 +56,173 @@ function declaredCredentialHint(field) {
 }
 
 
-export default function SecureInputCard({ block, chatId, interactive = false }) {
+/** Whether these prompts may use the browser's password manager. */
+export function secureFormAutoComplete(fields) {
+  return (fields || []).some(declaredCredentialHint) ? 'on' : 'off'
+}
+
+
+/**
+ * One uncontrolled input per sealed prompt. Values live only in these DOM
+ * inputs until `collectAndClearSecureFields` takes and clears them; nothing
+ * here keeps them in React state, a draft or the transcript.
+ */
+export function SecureFields({ fields, disabled }) {
+  return (fields || []).map(field => {
+    const credentialHint = declaredCredentialHint(field)
+    const genericMaskedField = field.type !== 'text' && !credentialHint
+    return (
+      <label className="secure-card__field" key={field.name}>
+        <span>{field.label}</span>
+        <input
+          name={credentialHint ? field.name : undefined}
+          // Chromium deliberately ignores autocomplete="off" on
+          // password fields. Generic secrets are ordinary text inputs
+          // with visual masking; only explicitly declared owner
+          // credentials enter the browser's password-manager flow.
+          type={genericMaskedField ? 'text' : (field.type === 'text' ? 'text' : 'password')}
+          autoComplete={credentialHint || 'off'}
+          required
+          disabled={disabled}
+          data-secure-field={field.name}
+          data-secure-masked={genericMaskedField ? 'true' : undefined}
+          data-chat-inline-editor="secure-input"
+        />
+      </label>
+    )
+  })
+}
+
+
+/** The settled form: each prompt with what happened to it, never a value. */
+export function SecureReceipts({ fields, status }) {
+  return (
+    <div className="secure-card__receipts" role="status">
+      {(fields || []).map(field => (
+        <div className="secure-card__receipt" key={field.name}>
+          <span className="secure-card__receipt-prompt">
+            <span className="secure-card__receipt-lock" aria-hidden="true" />
+            <span>{field.label}</span>
+          </span>
+          <strong>{secureSettledLabel(status) || 'Not provided'}</strong>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+
+function messageOf(error, fallback) {
+  return error?.message || fallback
+}
+
+
+/**
+ * Submit and Cancel for one sealed request. The submitted values are read
+ * from the form, cleared from it before the request is sent, and dropped when
+ * it settles; `onStatus` hears the server's resulting status.
+ *
+ * `describeError(error, action)` turns a failure into owner-facing copy.
+ * `revealFlag` keeps the original card's body, which always names
+ * `reveal_confirmed`; a request-list entry sends `{fields}` and `shown`,
+ * its card id and request revision, which Cancel also names.
+ */
+export function useSecureSubmission({
+  chatId, requestId, fields, reveal = false, revealFlag = true, open,
+  onStatus, describeError, afterFailure, shown,
+}) {
   const formRef = useRef(null)
-  const [localStatus, setLocalStatus] = useState(block.status || 'pending')
   const [submitting, setSubmitting] = useState(false)
   const [cancelling, setCancelling] = useState(false)
   const [error, setError] = useState('')
+
+  // Values typed but never submitted go when the form does: the request was
+  // superseded or settled elsewhere (open turns false), or the card unmounts.
+  // The form node is captured now: React has usually cleared the ref by
+  // cleanup time, so the ref is only the fallback.
+  useEffect(() => {
+    if (!open) return undefined
+    const form = formRef.current
+    // The fallback deliberately reads the ref late; the captured node wins.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => wipeSecureFields(form || formRef.current)
+  }, [open])
+
+  async function submit(event) {
+    event.preventDefault()
+    if (!open || submitting) return
+    const form = formRef.current
+    if (!form?.reportValidity()) return
+
+    const revealConfirmed = reveal
+      && form.elements.reveal_confirmed?.checked === true
+    if (reveal && !revealConfirmed) {
+      setError('Confirm that these values may be sent to the AI provider.')
+      return
+    }
+
+    const values = collectAndClearSecureFields(form, fields)
+    setError('')
+    setSubmitting(true)
+    try {
+      const result = await jsonOrThrow(
+        await api.secureInputs.submit(chatId, requestId, revealFlag
+          ? { fields: values, reveal_confirmed: revealConfirmed }
+          : { ...shown, fields: values }),
+        'Secure input failed',
+      )
+      onStatus(result.status || 'filled')
+    } catch (submitError) {
+      setError(describeError
+        ? describeError(submitError, 'submit')
+        : messageOf(submitError, 'Secure input failed. Please enter the values again.'))
+      // Never resent: the caller may only read what the server recorded.
+      await afterFailure?.(submitError, 'submit')
+    } finally {
+      // Submitted fields are ordinary JS memory and become unreachable here.
+      for (const key of Object.keys(values)) values[key] = ''
+      setSubmitting(false)
+    }
+  }
+
+  async function cancel() {
+    if (!open || submitting || cancelling) return
+    setError('')
+    setCancelling(true)
+    try {
+      await jsonOrThrow(
+        await api.secureInputs.cancel(chatId, requestId, shown),
+        'Could not cancel',
+      )
+      // Values typed but never submitted leave with the form.
+      wipeSecureFields(formRef.current)
+      onStatus('cancelled')
+    } catch (cancelError) {
+      setError(describeError
+        ? describeError(cancelError, 'cancel')
+        : messageOf(cancelError, 'Could not cancel this input.'))
+      await afterFailure?.(cancelError, 'cancel')
+    } finally {
+      setCancelling(false)
+    }
+  }
+
+  return { formRef, submitting, cancelling, error, setError, submit, cancel }
+}
+
+
+export default function SecureInputCard({ block, chatId, interactive = false }) {
+  const [localStatus, setLocalStatus] = useState(block.status || 'pending')
   const reveal = block.mode === 'reveal'
   const blockStatus = block.status || 'pending'
   const status = blockStatus === 'pending' ? localStatus : blockStatus
   const open = status === 'pending' && interactive
-  const credentialForm = (block.fields || []).some(declaredCredentialHint)
+  const {
+    formRef, submitting, cancelling, error, setError, submit, cancel,
+  } = useSecureSubmission({
+    chatId, requestId: block.request_id, fields: block.fields, reveal, open,
+    onStatus: setLocalStatus,
+  })
 
   useEffect(() => {
     if (block.status && block.status !== 'pending') {
@@ -77,61 +244,7 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
         if (active) setError('Could not check this request. Reopen the chat before submitting again.')
       })
     return () => { active = false }
-  }, [block.saved, block.request_id, chatId, interactive])
-
-  async function submit(event) {
-    event.preventDefault()
-    if (!open || submitting) return
-    const form = formRef.current
-    if (!form?.reportValidity()) return
-
-    const revealConfirmed = reveal
-      && form.elements.reveal_confirmed?.checked === true
-    if (reveal && !revealConfirmed) {
-      setError('Confirm that these values may be sent to the AI provider.')
-      return
-    }
-
-    const fields = collectAndClearSecureFields(form, block.fields)
-    setError('')
-    setSubmitting(true)
-    try {
-      const result = await jsonOrThrow(
-        await api.secureInputs.submit(chatId, block.request_id, {
-          fields,
-          reveal_confirmed: revealConfirmed,
-        }),
-        'Secure input failed',
-      )
-      setLocalStatus(result.status || 'filled')
-    } catch (submitError) {
-      setError(
-        submitError?.message
-        || 'Secure input failed. Please enter the values again.',
-      )
-    } finally {
-      // Submitted fields are ordinary JS memory and become unreachable here.
-      for (const key of Object.keys(fields)) fields[key] = ''
-      setSubmitting(false)
-    }
-  }
-
-  async function cancel() {
-    if (!open || submitting || cancelling) return
-    setError('')
-    setCancelling(true)
-    try {
-      await jsonOrThrow(
-        await api.secureInputs.cancel(chatId, block.request_id),
-        'Could not cancel',
-      )
-      setLocalStatus('cancelled')
-    } catch (cancelError) {
-      setError(cancelError?.message || 'Could not cancel this input.')
-    } finally {
-      setCancelling(false)
-    }
-  }
+  }, [block.saved, block.request_id, chatId, interactive, setError])
 
   return (
     <section
@@ -157,32 +270,10 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
         <form
           ref={formRef}
           className="secure-card__form"
-          autoComplete={credentialForm ? 'on' : 'off'}
+          autoComplete={secureFormAutoComplete(block.fields)}
           onSubmit={submit}
         >
-          {(block.fields || []).map(field => {
-            const credentialHint = declaredCredentialHint(field)
-            const genericMaskedField = field.type !== 'text' && !credentialHint
-            return (
-              <label className="secure-card__field" key={field.name}>
-                <span>{field.label}</span>
-                <input
-                  name={credentialHint ? field.name : undefined}
-                  // Chromium deliberately ignores autocomplete="off" on
-                  // password fields. Generic secrets are ordinary text inputs
-                  // with visual masking; only explicitly declared owner
-                  // credentials enter the browser's password-manager flow.
-                  type={genericMaskedField ? 'text' : (field.type === 'text' ? 'text' : 'password')}
-                  autoComplete={credentialHint || 'off'}
-                  required
-                  disabled={submitting}
-                  data-secure-field={field.name}
-                  data-secure-masked={genericMaskedField ? 'true' : undefined}
-                  data-chat-inline-editor="secure-input"
-                />
-              </label>
-            )
-          })}
+          <SecureFields fields={block.fields} disabled={submitting} />
 
           {reveal && (
             <label className="secure-card__consent">
@@ -217,17 +308,7 @@ export default function SecureInputCard({ block, chatId, interactive = false }) 
           </div>
         </form>
       ) : (
-        <div className="secure-card__receipts" role="status">
-          {(block.fields || []).map(field => (
-            <div className="secure-card__receipt" key={field.name}>
-              <span className="secure-card__receipt-prompt">
-                <span className="secure-card__receipt-lock" aria-hidden="true" />
-                <span>{field.label}</span>
-              </span>
-              <strong>{settledLabel(status) || 'Not provided'}</strong>
-            </div>
-          ))}
-        </div>
+        <SecureReceipts fields={block.fields} status={status} />
       )}
 
       {block.outcome && <p className="secure-card__description" role="status">{block.outcome}</p>}

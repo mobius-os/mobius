@@ -1073,15 +1073,15 @@ async def test_a_confined_agent_never_inherits_history_from_another_grant(
 # --- more tools: ask and other apps' tools -------------------------------------
 
 
-def test_ask_reaches_only_the_runs_own_chat_cards():
+def test_ask_reaches_only_the_runs_own_chat_request_list():
   key = AgentKey(7, "read", frozenset({"ask"}), "claude", "chat-1", "run-1")
-  assert key.may_call("POST", "/api/chats/chat-1/question")
-  assert key.may_call("POST", "/api/chats/chat-1/approval")
-  assert key.may_call("POST", "/api/chats/chat-1/turn-end")
-  assert not key.may_call("POST", "/api/chats/chat-2/question")
-  assert not key.may_call("POST", "/api/chats/chat-1/restart-request")
+  assert key.may_call("POST", "/api/chats/chat-1/input-requests")
+  assert not key.may_call("POST", "/api/chats/chat-2/input-requests")
+  # Asking never ends a turn, so the room needs no turn-end rendezvous.
+  assert not key.may_call("POST", "/api/chats/chat-1/turn-end")
+  assert not key.may_call("POST", "/api/chats/chat-1/key-request")
   assert not AgentKey(7, "read", frozenset(), "claude", "chat-1").may_call(
-    "POST", "/api/chats/chat-1/question"
+    "POST", "/api/chats/chat-1/input-requests"
   )
 
 
@@ -1098,14 +1098,11 @@ def test_a_confined_key_is_an_agent_run_of_its_own_chat(client, owner_token, db)
   )
 
 
-def test_ask_makes_the_room_end_its_turn_on_cards(tmp_path):
+def test_ask_gives_the_room_the_owner_input_tool(tmp_path):
   room = _room(tmp_path, "edit", "ask")
-  assert room.asks_owner and room.control_tools == (
-    "request_question",
-    "request_approval",
-  )
+  assert room.asks_owner and room.control_tools == ("owner_input",)
   assert "MOBIUS_RUN_TOKEN" in agent_roles.ROOM_ENV
-  assert "request_approval" in agent_roles.system_prompt(
+  assert "owner_input" in agent_roles.system_prompt(
     room.role, app_id=7, app_name="Notes", room=room, app_prompt=None
   )
 
@@ -1489,9 +1486,12 @@ def test_a_confined_approval_claims_only_inside_its_own_app_and_chat(
   merge = "github:mobius-os/mobius:pr:1:abc:merge"
   try:
     saved = client.post(
-      f"/api/chats/{chat_id}/approval",
+      f"/api/chats/{chat_id}/input-requests",
       json={
-        "question": "Merge it?",
+        "op": "add",
+        "kind": "approval",
+        "key": "merge",
+        "prompt": "Merge it?",
         "work_key": merge,
         "options": [
           {"label": "Yes", "description": "Merge."},
@@ -1504,7 +1504,8 @@ def test_a_confined_approval_claims_only_inside_its_own_app_and_chat(
     unregister_active_sink(chat_id, sink)
     remove_broadcast(chat_id)
   assert saved.status_code == 200, saved.text
-  assert saved.json()["state"] == "waiting_for_owner"
+  (recorded,) = db.query(models.OwnerInputRequest).filter_by(chat_id=chat_id).all()
+  assert recorded.spec_json["work_key"] == f"app:{app.id}:chat:{chat_id}:{merge}"
   owner = db.query(models.Owner).first()
   other = claim_work(
     db,
@@ -1613,7 +1614,7 @@ async def test_routes_that_hand_out_keys_or_secrets_refuse_an_app_agent(
   from fastapi import HTTPException
 
   from app.deps import get_agent_run_principal
-  from app.routes import keys, secure_inputs
+  from app.routes import keys, owner_input_requests
 
   app = _local_app(db, "weather", _role("tools", "keys", "ask"))
   key, run = _agent_key_for(db, app, role="tools", tools=("keys", "ask"))
@@ -1622,10 +1623,23 @@ async def test_routes_that_hand_out_keys_or_secrets_refuse_an_app_agent(
   for attempt in (
     keys.agent_asks(ask, principal),
     keys.request_key(body=ask, principal=principal, db=db),
-    secure_inputs.create_saved_secure_input(run.chat_id, None, principal, db),
   ):
     with pytest.raises(HTTPException) as refused:
       await attempt
+    assert refused.value.status_code == 403
+    assert "An app's agent cannot" in refused.value.detail
+  for kind, extra in (
+    ("secret", {"title": "Weather key", "fields": [
+      {"name": "key", "type": "password", "label": "Key"},
+    ], "command": ["python3", "/data/apps/weather/store.py"]}),
+    ("restart", {}),
+  ):
+    with pytest.raises(HTTPException) as refused:
+      owner_input_requests.edit_input_requests(
+        run.chat_id,
+        owner_input_requests.RequestEdit(op="add", kind=kind, key=kind, **extra),
+        principal, db,
+      )
     assert refused.value.status_code == 403
     assert "An app's agent cannot" in refused.value.detail
 

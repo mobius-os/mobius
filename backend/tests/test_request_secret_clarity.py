@@ -1,4 +1,4 @@
-"""A rejected secret card says why, and the tool schema promises only what passes."""
+"""A refused secret request says why, and the tool schema promises only what passes."""
 
 import importlib.util
 from pathlib import Path
@@ -26,8 +26,9 @@ def helper(monkeypatch):
 
 
 def _request(helper):
-  spec = {"title": "t", "fields": [{"name": "k", "type": "password", "label": "Key"}]}
-  return helper._request_saved(spec, ["consumer"], "run")
+  request = {"title": "t", "fields": [{"name": "k", "type": "password", "label": "Key"}],
+             "command": ["consumer"], "cwd": "/data"}
+  return helper._record_secret_request("service-key", request)
 
 
 def test_rejected_card_surfaces_the_servers_reason(helper, monkeypatch):
@@ -46,9 +47,9 @@ def test_server_fault_keeps_the_retry_advice(helper, monkeypatch):
     _request(helper)
 
 
-def test_request_secret_schema_limits_match_the_servers_validator():
+def test_secret_request_schema_limits_match_the_servers_validator():
   control = _load("mobius_control_mcp.py", "mobius_control_clarity")
-  properties = control._TOOL_DEFINITIONS["request_secret"]["inputSchema"]["properties"]
+  properties = control._TOOL_DEFINITIONS["owner_input"]["inputSchema"]["properties"]
   label = properties["fields"]["items"]["properties"]["label"]
   field = {"name": "k", "type": "password", "label": "x" * label["maxLength"]}
   title_max = properties["title"]["maxLength"]

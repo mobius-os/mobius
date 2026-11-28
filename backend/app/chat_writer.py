@@ -328,23 +328,47 @@ class QuestionCommit(_Command):
 
 
 @dataclass
+class RetireRequestCard(_Command):
+  """End the open request-list card when a turn ends with nothing open.
+
+  Only the exact named card is retired, so a card a concurrent answer already
+  settled, or a newer card, is left alone.
+  """
+
+  chat_id: str = ""
+  question_id: str = ""
+
+
+@dataclass
 class ClaimSecureInput(_Command):
-  """Irreversibly claim a sealed operation before any side effect begins."""
+  """Irreversibly claim a sealed operation before any side effect begins.
+
+  ``request_id`` is a legacy barring card's question id, or the request id of
+  a secret entry on the request-list card; ``revision`` is the entry revision
+  the owner filled in.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   request_id: str = ""
+  revision: int | None = None
 
 
 @dataclass
 class SettleSecureInput(_Command):
-  """Commit a fixed safe outcome and its single owner-answer continuation."""
+  """Commit a fixed safe outcome and its single owner-answer continuation.
+
+  The owner's Cancel of a secret entry names the card (``question_id``) and
+  the entry ``revision`` it was shown on, exactly like a submission's claim.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   request_id: str = ""
   status: str = "failed"
   outcome: str = ""
+  question_id: str | None = None
+  revision: int | None = None
 
 
 @dataclass
@@ -428,6 +452,7 @@ class ResolvePlatformRestartCard(_Command):
   question write. A label, free text, a legacy answer call, or an option id
   from another card cannot dispatch the restart. Written feedback
   uses AppendPending instead and atomically closes this card without authority.
+  With ``request_id`` it settles that restart entry of a request-list card.
   """
 
   chat_id: str = ""
@@ -435,6 +460,7 @@ class ResolvePlatformRestartCard(_Command):
   question_id: str = ""
   selected_option_id: str = ""
   restore_archived: bool = False
+  request_id: str = ""
 
 
 @dataclass
@@ -2295,9 +2321,21 @@ class ChatWriterActor:
       if outcome is not _WriteOutcome.APPLIED:
         raise _PersistFailed(f"QuestionCommit did not persist ({outcome.value})")
       return True
+    if isinstance(cmd, RetireRequestCard):
+      chat = _active_chat(db, cmd.chat_id)
+      if chat is None or chat.open_request_card_id != cmd.question_id:
+        db.rollback()
+        return False
+      _retire_request_card(db, chat, "superseded")
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("RetireRequestCard did not persist")
+      return True
     if isinstance(cmd, ClaimSecureInput):
       chat = _active_chat(db, cmd.chat_id)
       row = db.get(models.SavedSecureInput, cmd.request_id)
+      entry_request = db.get(models.OwnerInputRequest, cmd.request_id)
+      if entry_request is not None:
+        return self._claim_sealed_entry(db, cmd, chat, row, entry_request)
       if (chat is None or row is None or row.chat_id != cmd.chat_id
           or chat.pending_question_id != cmd.request_id):
         return {"status": "closed"}
@@ -2492,22 +2530,55 @@ class ChatWriterActor:
     if chat is None:
       return _WriteOutcome.NOOP
     from app.decision_cards import stage_decision_outcome, stage_saved_decision
-    if chat.pending_question_id and chat.pending_question_id != question_id:
-      stage_decision_outcome(db, chat, chat.pending_question_id, "superseded")
     card = next((block for block in snapshot.get("blocks", [])
                  if block.get("type") == "question" and block.get("question_id") == question_id), None)
+    if card is not None and card.get("input_requests"):
+      # A request-list card is shown but never bars a turn: it takes its own
+      # marker and leaves `pending_question_id` (every admission guard's
+      # input) untouched. A newer list card supersedes the previous one.
+      from app.owner_input_requests import (
+        CardOutOfDate, require_card_shows_current_requests, stage_card_shown,
+        stage_sealed_entries,
+      )
+      try:
+        require_card_shows_current_requests(db, chat_id, card)
+      except CardOutOfDate as exc:
+        db.rollback()
+        raise QuestionCardOutOfDate(f"QuestionCommit: {exc}") from exc
+      if chat.open_request_card_id and chat.open_request_card_id != question_id:
+        _retire_request_card(db, chat, "superseded")
+      stage_card_shown(db, chat_id, card)
+      try:
+        stage_sealed_entries(db, chat_id, card)
+      except CardOutOfDate as exc:
+        db.rollback()
+        raise _PersistFailed(f"QuestionCommit: {exc}") from exc
+      chat.open_request_card_id = question_id
+    else:
+      if chat.pending_question_id and chat.pending_question_id != question_id:
+        stage_decision_outcome(db, chat, chat.pending_question_id, "superseded")
+      # One answerable card at a time: a barring card takes over from an open
+      # request-list card, whose requests are shown again once it settles.
+      _retire_request_card(db, chat, "superseded")
+      chat.pending_question_id = question_id
     if card is not None:
       from app.chat_message_identity import assistant_message_run_id
       owner = db.get(models.ChatRun, assistant_message_run_id(snapshot.get("id"))) if snapshot.get("id") else None
       stage_saved_decision(db, chat, card, source_goal_id=owner.goal_id if owner else None)
-    chat.pending_question_id = question_id
     if activation_wait is not None:
+      from app.chat import current_run_generation
       from app.platform_restart import ACTIVATION_WAIT_KIND
       requirement = activation_wait.get("condition_json")
       if db.get(models.ChatWait, activation_wait["id"]) is not None:
         db.rollback()
         raise _PersistFailed("QuestionCommit: activation wait identity exists")
       now = datetime.now(UTC).replace(tzinfo=None)
+      # A Stop bumps the generation before PrepareChatStop cancels the chat's
+      # activation waits. A card committed after that cancellation brings its
+      # wait already cancelled, so the offered restart resumes nothing the
+      # Stop ended; one committed before it is cancelled by it.
+      generation = activation_wait.get("run_generation")
+      stopped = generation is not None and current_run_generation(chat_id) != generation
       db.add(models.ChatWait(
         id=activation_wait["id"],
         chat_id=chat_id,
@@ -2525,7 +2596,10 @@ class ChatWriterActor:
         # decision and remains open until answered, cancelled, or satisfied.
         deadline_at=now + timedelta(days=7),
         next_check_at=now,
-        status="armed",
+        status="cancelled" if stopped else "armed",
+        cancelled_at=now if stopped else None,
+        result_disposition="withdrawn" if stopped else None,
+        result_disposed_at=now if stopped else None,
       ))
     if secure_request is not None:
       # Only pre-authored execution metadata crosses this persistence seam.
@@ -2687,7 +2761,10 @@ class ChatWriterActor:
                    for block in reversed(message.get("blocks") or [])
                    if block.get("type") == "question"
                    and (not cmd.question_id or block.get("question_id") == cmd.question_id)), None)
-      if card and (has_quiet_options(card) or card.get("secure_input")):
+      # A request-list answer must reach its agent as a continuation; a
+      # save-only answer would settle requests no turn ever hears about.
+      if card and (has_quiet_options(card) or card.get("secure_input")
+                   or card.get("input_requests")):
         raise AnswerConflict("Use the question card to submit this answer.")
       if cmd.require_exact_card:
         if card is None:
@@ -2786,6 +2863,8 @@ class ChatWriterActor:
         break
     if matched is None:
       raise RestartCardStateChanged("Restart card: card is no longer present")
+    if cmd.request_id:
+      return self._resolve_restart_entry(db, cmd, chat, matched)
     action, question, labels = _platform_restart_card_envelope(
       matched, "Restart card",
     )
@@ -2898,6 +2977,86 @@ class ChatWriterActor:
       "selected_options": selected_options,
       "answer_turn": "none",
       "platform_action": copy.deepcopy(action),
+    }
+
+  def _resolve_restart_entry(
+    self, db, cmd: ResolvePlatformRestartCard, chat, card: dict,
+  ) -> dict:
+    """Press Restart now on one restart entry of a request-list card.
+
+    At most once: the press is accepted only while this card shows the open
+    request's current revision, and it answers the request and records the
+    press on the entry (`request_states`) in the same commit that approves
+    the activation wait. A duplicate click or a retry after a lost response
+    finds the press and returns it without a second dispatch; no later card
+    can offer the request again. Pressing grants nothing else on the card.
+    """
+    from app.owner_input_requests import (
+      RESTART, card_entry, entry_kind, stage_entry_answered, stage_entry_state,
+    )
+    from app.timeutil import now_naive_utc
+
+    entry = card_entry(card, cmd.request_id)
+    if entry is None or entry_kind(entry) != RESTART:
+      raise RestartCardStateChanged("Restart entry: not on this card")
+    action, labels = _restart_entry_envelope(entry)
+    if cmd.selected_option_id not in labels:
+      raise RestartCardActionConflict("Use this restart's current Restart now button.")
+    wait = db.query(models.ChatWait).filter(
+      models.ChatWait.id == action["wait_id"],
+      models.ChatWait.chat_id == cmd.chat_id,
+      models.ChatWait.linked_question_id == cmd.question_id,
+      models.ChatWait.kind == "platform_activation",
+    ).first()
+    if wait is None or wait.condition_json != action["requirement"]:
+      raise RestartCardActionConflict(
+        "This Restart request is no longer active. Tell the agent to check it again."
+      )
+    prior = (card.get("request_states") or {}).get(cmd.request_id)
+    if prior is not None:
+      if prior.get("selected") != [cmd.selected_option_id]:
+        raise RestartCardStateChanged("Restart entry: already settled differently")
+      db.rollback()
+      return {
+        "status": (prior.get("platform_action") or {}).get("status") or "settled",
+        "dispatch": False, "action_id": action["action_id"], "wait_id": wait.id,
+        "request_id": cmd.request_id, "state": copy.deepcopy(prior),
+        "answer_turn": "none", "platform_action": copy.deepcopy(prior.get("platform_action")),
+      }
+    request = db.get(models.OwnerInputRequest, cmd.request_id)
+    if (request is None or request.chat_id != chat.id or request.status != "open"
+        or request.revision != entry.get("request_revision")
+        or request.published_question_id != cmd.question_id):
+      raise RestartCardStateChanged("Restart entry: no longer offered on this card")
+    if (wait.resume_delivered_at is not None
+        or wait.result_disposition == "retired_by_goal_outcome"
+        or wait.status not in ("armed", "met", "expired", "failed", "cancelled")):
+      raise RestartCardStateChanged("Restart entry: no longer accepting actions")
+    from app.restart_util import RestartSourceInvalid, validate_restart_source
+    try:
+      validate_restart_source()
+    except RestartSourceInvalid as exc:
+      raise RestartCardActionConflict(str(exc)) from exc
+    now = now_naive_utc()
+    wait.action_approved_at = now
+    pressed = {**copy.deepcopy(action), "status": "restart_requested"}
+    state = {
+      "status": "restart_requested", "text": labels[cmd.selected_option_id],
+      "selected": [cmd.selected_option_id], "platform_action": pressed,
+    }
+    stage_entry_state(db, chat, cmd.request_id, state, question_id=cmd.question_id)
+    stage_entry_answered(db, chat.id, cmd.request_id, {
+      "text": labels[cmd.selected_option_id], "selected": [cmd.selected_option_id],
+    }, revision=entry.get("request_revision"))
+    chat.activity_at = now
+    chat_archive.restore_on_accepted_input(chat, cmd.restore_archived)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("Restart entry resolution did not persist")
+    return {
+      "status": "restart_requested", "dispatch": True,
+      "action_id": action["action_id"], "wait_id": wait.id,
+      "request_id": cmd.request_id, "state": copy.deepcopy(state),
+      "answer_turn": "none", "platform_action": copy.deepcopy(pressed),
     }
 
   def _persist_session_id(self, db, cmd: PersistSessionId) -> bool:
@@ -4253,6 +4412,8 @@ class ChatWriterActor:
         if found:
           break
       if not found:
+        found = _settle_activation_entry(db, chat, activation_wait)
+      if not found:
         raise _PersistFailed("StartContinuation: linked activation card missing")
       live = copy.deepcopy(chat.live_assistant)
       if isinstance(live, dict):
@@ -4940,6 +5101,9 @@ class ChatWriterActor:
     chat = _active_chat(db, cmd.chat_id)
     if row is None or row.chat_id != cmd.chat_id:
       return {"status": "closed"}
+    entry_request = db.get(models.OwnerInputRequest, cmd.request_id)
+    if entry_request is not None:
+      return self._settle_sealed_entry(db, cmd, chat, row, entry_request)
     if row.status not in {"pending", "consuming"}:
       return {"status": row.status}
     if cmd.status == "cancelled" and row.status != "pending":
@@ -4966,6 +5130,86 @@ class ChatWriterActor:
                 "content": f"Secure input: {row.outcome}"},
     ))
     return {"status": cmd.status, "queued": True, "answers": answers,
+            "message": queued["stored"]}
+
+  def _claim_sealed_entry(self, db, cmd: ClaimSecureInput, chat, row, request) -> dict:
+    """Claim a secret entry's one-use consumer, once, before it runs.
+
+    The entry is claimable only while the chat's current request-list card
+    shows exactly the revision the owner filled in. The pending -> consuming
+    transition on the request's single receipt is the at-most-once fence: a
+    duplicate submission, a republished card or a retry finds it consuming.
+    """
+    from app.owner_input_requests import stage_entry_state
+
+    if (chat is None or row is None or row.chat_id != cmd.chat_id
+        or request.chat_id != cmd.chat_id):
+      return {"status": "closed"}
+    if row.status != "pending":
+      return {"status": row.status}
+    card_id = chat.open_request_card_id
+    if (request.status != "open" or not card_id
+        or request.published_question_id != card_id
+        or cmd.revision != request.revision):
+      return {"status": "closed"}
+    row.status = "consuming"
+    # Shown in progress on its card; republication shows it so too.
+    stage_entry_state(db, chat, request.id, {"status": "consuming"}, question_id=card_id)
+    if not _commit_or_rollback(db):
+      raise _PersistFailed("ClaimSecureInput did not persist")
+    return {"status": "claimed", "command": list(row.command_json),
+            "cwd": row.cwd, "action": row.action, "question_id": card_id}
+
+  def _settle_sealed_entry(self, db, cmd: SettleSecureInput, chat, row, request) -> dict:
+    """Commit a secret entry's fixed safe outcome and its continuation.
+
+    The outcome answers the request whatever card shows it now, because its
+    values already reached the immutable consumer: it must never be offered
+    again. The other entries of the card stay open, and the hidden
+    continuation is queued exactly like an ordinary partial answer.
+    """
+    from app.owner_input_requests import stage_entry_answered, stage_entry_state
+    from app.saved_secure_inputs import SAFE_OUTCOMES
+
+    if request.chat_id != cmd.chat_id:
+      return {"status": "closed"}
+    if row.status not in {"pending", "consuming"}:
+      return {"status": row.status}
+    if cmd.status == "cancelled" and row.status != "pending":
+      return {"status": row.status}
+    if cmd.status != "cancelled" and row.status != "consuming":
+      return {"status": "pending"}
+    if cmd.status == "cancelled" and (
+      chat is None or request.status != "open" or not chat.open_request_card_id
+      or request.published_question_id != chat.open_request_card_id
+      or cmd.question_id != chat.open_request_card_id
+      or cmd.revision != request.revision
+    ):
+      # Cancel is the owner's choice on the card that shows the entry now, at
+      # the revision they were shown: a stale tab cancels nothing.
+      return {"status": "closed"}
+    row.status = cmd.status
+    row.outcome = SAFE_OUTCOMES[cmd.outcome]
+    stage_entry_answered(db, cmd.chat_id, request.id,
+                         {"text": row.outcome, "status": cmd.status})
+    if chat is None:
+      if not _commit_or_rollback(db):
+        raise _PersistFailed("Secure input outcome did not persist")
+      return {"status": cmd.status}
+    state = {"status": cmd.status, "outcome": row.outcome}
+    question_id = stage_entry_state(db, chat, request.id, state)
+    owner_run = _question_owner_run(db, chat, question_id) if question_id else None
+    queued = self._append_pending(db, AppendPending(
+      chat_id=cmd.chat_id, front=True,
+      user_msg={"role": "user", "hidden": True,
+                "kind": "continuation", "continuation_reason": "question_answer",
+                "cid": f"secure-input:{cmd.request_id}",
+                "goal_id": request.goal_id,
+                "source_work_id": owner_run.id if owner_run is not None else None,
+                "content": f"- Secure input ({request.key}): {row.outcome}"},
+    ))
+    return {"status": cmd.status, "queued": True, "entry": True,
+            "request_id": request.id, "question_id": question_id, "state": state,
             "message": queued["stored"]}
 
   def _append_pending(self, db, cmd: AppendPending) -> dict:
@@ -5016,6 +5260,7 @@ class ChatWriterActor:
           existing_message = transcript_rows.at(db, chat, seq)
 
     feedback_action = None
+    answers_request_card = False
     if isinstance(cmd, AppendRestartFeedback):
       feedback_action = _apply_platform_restart_feedback(
         db, chat, cmd.answers, cmd.question_id,
@@ -5028,6 +5273,11 @@ class ChatWriterActor:
         metadata["selected_options"] = cmd.selected_options
       if cmd.answers and new_msg.get("attachments"):
         metadata["attachments"] = new_msg["attachments"]
+      # Only the current list card can be answered (the apply below refuses
+      # any other), so this names exactly an answer to a list card.
+      answers_request_card = bool(
+        cmd.question_id and cmd.question_id == chat.open_request_card_id
+      )
       applied = apply_answers_to_last_question(
         chat, cmd.answers, cmd.question_id, metadata=metadata,
       )
@@ -5072,8 +5322,10 @@ class ChatWriterActor:
     if applied:
       # Both a recovered answer and an early continuation-card answer use the
       # queue. Retire the question, but leave a still-running turn's browser
-      # identity intact until its terminal transition owns the handoff.
-      chat.pending_question_id = None
+      # identity intact until its terminal transition owns the handoff. A
+      # request-list card retired its own marker; it never held the barrier.
+      if not answers_request_card:
+        chat.pending_question_id = None
       if db.query(models.ChatRun.id).filter_by(
         chat_id=cmd.chat_id, status="running",
       ).first() is None:
@@ -6192,6 +6444,9 @@ class ChatWriterActor:
     if cmd.messages is not None:
       from app.decision_cards import stage_replace_decisions
       stage_replace_decisions(db, chat, cmd.messages, _tail_open_question_id(cmd.messages))
+      # The replaced history may no longer hold the list card; its requests
+      # are shown again at the next turn end.
+      _retire_request_card(db, chat, "superseded")
       transcript_rows.replace_all(db, chat, cmd.messages)
       chat.live_assistant = None
       (
@@ -6342,6 +6597,27 @@ class ChatWriterActor:
           models.SavedSecureInput.chat_id == cmd.chat_id,
           models.SavedSecureInput.status.in_(("pending", "consuming")),
         ).all():
+          entry_request = db.get(models.OwnerInputRequest, request.request_id)
+          if entry_request is not None and entry_request.chat_id == cmd.chat_id:
+            # A secret entry of the request-list card, which Stop leaves open:
+            # a waiting one stays waiting. One whose consumer already claimed
+            # execution may have acted, so its request is settled with the
+            # unknown outcome and never offered again.
+            if request.status == "pending":
+              continue
+            if chat is not None:
+              from app.owner_input_requests import stage_entry_answered, stage_entry_state
+              from app.saved_secure_inputs import SAFE_OUTCOMES
+              stage_entry_answered(db, chat.id, entry_request.id, {
+                "text": SAFE_OUTCOMES["interrupted"], "status": "interrupted",
+              })
+              stage_entry_state(db, chat, entry_request.id, {
+                "status": "interrupted", "outcome": SAFE_OUTCOMES["interrupted"],
+              })
+            request.status = "cancelled"
+            request.outcome = "Secure input was cancelled."
+            changed = True
+            continue
           request.status = "cancelled"
           request.outcome = "Secure input was cancelled."
           changed = True
@@ -6903,6 +7179,11 @@ class _PersistFailed(Exception):
   without poisoning the actor.  Distinct from `SQLAlchemyError`, so it
   does NOT trigger a session recreate (the session is fine; the write was
   legitimately impossible)."""
+
+
+class QuestionCardOutOfDate(_PersistFailed):
+  """A request-list card was composed from a stale read of the open
+  requests; composing it again from the current rows may succeed."""
 
 
 class _SelectedResultUnavailable(_PersistFailed):
@@ -7491,12 +7772,32 @@ def _tail_open_question_state(
       if (
         block.get("type") == "question"
         and not block.get("answers")
+        # A request-list card never bars a turn, so it is never the barrier
+        # this rebuilds; `open_request_card_id` carries it instead.
+        and not block.get("input_requests")
         and isinstance(candidate, str)
         and 0 < len(candidate) <= 64
       ):
         return candidate, _assistant_message_id(message)
     break
   return None, None
+
+
+def _retire_request_card(db, chat, outcome: str) -> None:
+  """End the open request-list card in the caller's transaction.
+
+  Its decision record gets `outcome` and its still-open requests become
+  unshown, so the next turn end shows them again. The rows, not the card,
+  hold what is still being asked; nothing here closes a request.
+  """
+  card_id = chat.open_request_card_id
+  if not card_id:
+    return
+  from app.decision_cards import stage_decision_outcome
+  from app.owner_input_requests import stage_card_retired
+  stage_decision_outcome(db, chat, card_id, outcome)
+  stage_card_retired(db, chat.id, card_id)
+  chat.open_request_card_id = None
 
 
 def _tail_open_question_id(messages) -> str | None:
@@ -8040,11 +8341,73 @@ def _platform_restart_card_envelope(
   return action, question, labels
 
 
+def _settle_activation_entry(db, chat, activation_wait) -> bool:
+  """A later ready boot settles the restart entry its activation wait links.
+
+  Whoever restarted, the restart this request asked for happened: the
+  request is answered (one already settled by Restart now keeps that answer)
+  and its entry records the activation outcome.
+  """
+  from app.owner_input_requests import RESTART, entry_kind, stage_entry_answered, stage_entry_state
+  from app.questions import saved_question
+
+  card = saved_question(chat, activation_wait.linked_question_id)
+  entry = next((
+    question for question in (card or {}).get("questions") or []
+    if card.get("input_requests") and isinstance(question, dict)
+    and entry_kind(question) == RESTART
+    and (question.get("platform_action") or {}).get("wait_id") == activation_wait.id
+    and question["platform_action"].get("requirement") == activation_wait.condition_json
+  ), None)
+  if entry is None:
+    return False
+  status = "activated" if activation_wait.status == "met" else "activation_uncertain"
+  prior = copy.deepcopy((card.get("request_states") or {}).get(entry["id"]) or {})
+  stage_entry_state(db, chat, entry["id"], {
+    **prior, "status": status,
+    "platform_action": {**(prior.get("platform_action") or entry["platform_action"]),
+                        "status": status},
+  }, question_id=card["question_id"])
+  stage_entry_answered(db, chat.id, entry["id"], {"text": "Möbius restarted", "status": status})
+  return True
+
+
+def _restart_entry_envelope(entry: dict) -> tuple[dict, dict[str, str]]:
+  """Validate the server-issued authority of one restart entry."""
+  action = entry.get("platform_action")
+  if (
+    not isinstance(action, dict) or action.get("version") != 2
+    or action.get("type") != "restart"
+    or not isinstance(action.get("requirement"), dict)
+    or not isinstance(action.get("action_id"), str) or not action["action_id"]
+    or not isinstance(action.get("wait_id"), str) or not action["wait_id"]
+    or action["requirement"].get("action_id") != action["action_id"]
+    or not isinstance(entry.get("question"), str) or not entry["question"]
+  ):
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    )
+  restart_id = action.get("restart_option_id")
+  options = entry.get("options")
+  if (
+    not isinstance(restart_id, str) or not restart_id
+    or not isinstance(options, list) or len(options) != 1
+    or not isinstance(options[0], dict) or options[0].get("id") != restart_id
+    or options[0].get("label") != "Restart now"
+    or options[0].get("on_answer") != "close"
+  ):
+    raise RestartCardActionConflict(
+      "This Restart request is no longer active. Tell the agent to check it again."
+    )
+  return action, {restart_id: "Restart now"}
+
+
 def _question_answer_fields(block: dict) -> dict:
   """Persisted settlement wins over stale streaming snapshots, even without Yes."""
   return {
     key: copy.deepcopy(block[key])
-    for key in ("answers", "answer_turn", "selected_options", "platform_action", "attachments")
+    for key in ("answers", "answer_turn", "selected_options", "platform_action",
+                "attachments", "request_states")
     if key in block
   }
 
@@ -8079,6 +8442,14 @@ def apply_answers_to_last_question(
     stage_decision_outcome(db, chat, block.get("question_id"),
       "closed_without_reply" if block.get("answer_turn") == "none" else "answered",
       card=block, source_run_id=assistant_message_run_id(message.get("id")) or "")
+    from app.owner_input_requests import self_settling_entries_left, stage_card_answers
+    stage_card_answers(db, chat.id, block)
+    if (block.get("input_requests") and chat.open_request_card_id == block.get("question_id")
+        and not self_settling_entries_left(block, block.get("answers") or {})):
+      # Answered, fully or in part: what is left open is shown on the next
+      # card. A secret or unpressed restart entry acts on its own, so while
+      # one is left the card stays open for it until the next card replaces it.
+      chat.open_request_card_id = None
 
   def sync_live_answer(match_id: str | None) -> bool:
     live = copy.deepcopy(chat.live_assistant)
@@ -8113,6 +8484,27 @@ def apply_answers_to_last_question(
         ):
           if isinstance(block.get("platform_action"), dict):
             return False
+          if (block.get("input_requests")
+              and (question_id != chat.open_request_card_id or block.get("answers"))):
+            # Route checks run before the writer, and a turn end can
+            # republish in between: a superseded list card's answer must
+            # not land on requests a newer card now shows. A card already
+            # answered stays open only for its entries that act on their own.
+            from app.questions import QuestionNoLongerOpen
+            raise QuestionNoLongerOpen("The question is no longer accepting answers.")
+          from app.owner_input_requests import (
+            CardOutOfDate, EntryNotAnswerable, require_card_answers_current,
+          )
+          try:
+            require_card_answers_current(
+              db, chat.id, block, answers, (metadata or {}).get("selected_options"),
+            )
+          except EntryNotAnswerable as exc:
+            from app.questions import AnswerConflict
+            raise AnswerConflict(str(exc)) from exc
+          except CardOutOfDate as exc:
+            from app.questions import QuestionCardChanged
+            raise QuestionCardChanged(str(exc)) from exc
           block.update({"answers": answers, **(metadata or {})})
           stamp_answer(block, msg)
           transcript_rows.update_at(db, chat, seq, msg)
@@ -8133,7 +8525,8 @@ def apply_answers_to_last_question(
       continue
     for block in reversed(msg.get("blocks") or []):
       if block.get("type") == "question":
-        if isinstance(block.get("platform_action"), dict):
+        # Typed and request-list cards are answered only by exact identity.
+        if isinstance(block.get("platform_action"), dict) or block.get("input_requests"):
           return False
         block.update({"answers": answers, **(metadata or {})})
         stamp_answer(block, msg)

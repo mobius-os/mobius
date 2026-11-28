@@ -15,6 +15,7 @@ from app.broadcast import create_broadcast
 from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_active_sink
 from app.chat_writer import Barrier, ClaimSecureInput, FinishRun, SettleSecureInput, StartTurn, get_writer
 from app.database import SessionLocal
+from tests import owner_input_fixtures as inputs
 
 
 @pytest.fixture
@@ -33,16 +34,23 @@ def sealed_run(chat, db):
 
 
 def _spec(tmp_path):
-  return {"title": "Connect service", "description": "Local sealed operation.",
+  return {"kind": "secret", "title": "Connect service", "description": "Local sealed operation.",
           "fields": [{"name": "api_key", "type": "password", "label": "API key"}],
           "command": [sys.executable, "-c", "import json,sys; json.load(sys.stdin)"],
-          "cwd": str(tmp_path), "action": "run", "mode": "sealed"}
+          "cwd": str(tmp_path)}
+
+
+def _record(client, chat, sealed_run, tmp_path):
+  response = inputs.add(client, chat.id, sealed_run[1], "service-key", **_spec(tmp_path))
+  assert response.status_code == 200, response.text
+  return response
 
 
 def _create(client, chat, sealed_run, tmp_path):
-  response = client.post(f"/api/secure-inputs/{chat.id}/saved", headers=sealed_run[1], json=_spec(tmp_path))
-  assert response.status_code == 200, response.text
-  return response.json()["request_id"]
+  """Save a barring Secure input card, as chats keep from earlier releases;
+  its id. The request-list entry form is covered in
+  test_owner_input_mixed_card.py."""
+  return inputs.save_legacy_secret(sealed_run[0], _spec(tmp_path))
 
 
 def _state(chat_id, request_id):
@@ -62,8 +70,10 @@ def test_saved_card_and_private_operation_commit_together_without_values(client,
   assert block["response_mode"] == "continuation"
   assert "command" not in json.dumps(messages)
   assert "values" not in models.SavedSecureInput.__table__.columns
-  second = _create(client, chat, sealed_run, tmp_path)
-  assert second == qid
+  # A later turn end never shows another card over the open barring one.
+  _record(client, chat, sealed_run, tmp_path)
+  inputs.publish_now(sealed_run[0])
+  assert inputs.last_card(chat.id)["question_id"] == qid
 
 
 def test_finish_preserves_saved_card_and_stop_retires_execution(client, chat, sealed_run, tmp_path):
@@ -263,12 +273,16 @@ def test_failed_question_commit_does_not_leave_a_private_request(client, chat, s
   from app import chat_writer
   def fail(*args, **kwargs):
     raise RuntimeError("test-save-failure")
+  _record(client, chat, sealed_run, tmp_path)
   monkeypatch.setattr(get_writer(), "_persist_question_required", fail)
-  response = client.post(f"/api/secure-inputs/{chat.id}/saved", headers=sealed_run[1], json=_spec(tmp_path))
-  assert response.status_code == 503
+  inputs.publish_now(sealed_run[0])
   with SessionLocal() as db:
     assert db.query(models.SavedSecureInput).filter_by(chat_id=chat.id).count() == 0
-  assert "test-save-failure" not in response.text
+    row = db.query(models.OwnerInputRequest).filter_by(chat_id=chat.id).one()
+    # Still asked, not shown: the next turn end shows it.
+    assert row.status == "open" and row.published_question_id is None
+    assert db.get(models.Chat, chat.id).pending_question_id is None
+  assert "test-save-failure" not in json.dumps(sealed_run[0].assistant_blocks)
 
 
 def test_pending_secure_card_blocks_plain_send(client, chat, auth, sealed_run, tmp_path):

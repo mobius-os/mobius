@@ -839,10 +839,11 @@ every agent it starts can reach (manifest shape in the `building-apps` skill). S
   inside its room. `allow_tools` adds Möbius tools that reach beyond it. `web` is
   provider-hosted search through the gateway plus `open_page` through the
   guarded `/api/proxy`; each opened page is recorded as an `app_agent_web`
-  activity. `notify` is `notify_owner`. `ask` is `request_question` and
-  `request_approval` for the run's own chat (a confined key is an agent run of
-  that chat; an approval's work claim is namespaced to the app and chat; Codex
-  ends the turn through the owner-card hook inside the room).
+  activity. `notify` is `notify_owner`. `ask` is `owner_input` question and
+  approval requests on the run's own chat (a confined key is an agent run of
+  that chat; an approval's work claim is namespaced to the app and chat;
+  secret and restart requests are refused). Asking never ends the turn: the
+  open requests are shown on one card when it ends by itself.
   `screenshot` is `app_screenshot`: Möbius captures the app's own standalone
   page outside the room, with a sign-in bound to the run. That capture browser
   is signed in as the owner, so the app's page could navigate it; the popup's

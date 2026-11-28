@@ -66,10 +66,12 @@ result, and use `message_agent` for a follow-up.
 
 A helper's `ask_parent` question is addressed to its parent agent, and the
 owner sees it only as internal activity. When it is genuinely the owner's
-decision, ask the owner yourself in a saved owner question: state the decision
-and its consequences in plain words, with your recommendation when you have a
-genuine preference. Do not relay the helper's raw wording or options as if they
-were that question.
+decision, record an owner request yourself with `owner_input` (helpers
+cannot): state the decision and its consequences in plain words, with your
+recommendation when you have a genuine preference. Do not relay the helper's
+raw wording or options as if they were that question. Name the helper's work in
+its `blocks`, keep the other branches moving, and answer the helper with
+`message_agent` and its `question_id` once the owner has answered.
 
 Quota pauses retain the same bounded task. Retry/check times do not guarantee
 provider availability. Planned restarts preserve accepted work; never infer

@@ -279,8 +279,9 @@ class HelperTurn:
   provider_responded: bool = False
   # The host process died under this turn: its agent cannot be resumed.
   host_lost: bool = False
-  # goals.CompactionBriefRefresh for a helper with a Goal assignment.
-  goal_brief_refresh: Any | None = None
+  # compaction_context.CompactionContextRefresh for a helper with a Goal
+  # assignment (its brief only, never the owner's request list).
+  compaction_refresh: Any | None = None
   started: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   done: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
   session_state: dict = dataclasses.field(default_factory=dict)
@@ -503,9 +504,9 @@ class ClaudeHelperHost(Host):
       else list(self._turn_by_dispatch.values())
     )
     for turn in turns:
-      if (turn is not None and turn.goal_brief_refresh is not None
+      if (turn is not None and turn.compaction_refresh is not None
           and turn.started.is_set() and not turn.done.is_set()):
-        turn.goal_brief_refresh.mark_compacted()
+        turn.compaction_refresh.mark_compacted()
     log.info(
       "Claude helper host compacted key=%s trigger=%s agent=%s",
       self.key.digest, input_data.get("trigger"), agent or "unattributed",
@@ -531,9 +532,9 @@ class ClaudeHelperHost(Host):
           "continue_": False,
           "stopReason": "The helper's question is recorded; its parent's answer resumes it.",
         }
-      if turn.goal_brief_refresh is None:
+      if turn.compaction_refresh is None:
         return {}
-      brief = await turn.goal_brief_refresh.take()
+      brief = await turn.compaction_refresh.take()
       if not brief:
         return {}
       return {"hookSpecificOutput": {
@@ -1167,7 +1168,7 @@ async def run_claude_host_turn(
   connector_plan,
   helper_host_key: HostKey,
   data_dir: str,
-  goal_brief_refresh=None,
+  compaction_refresh=None,
   run_generation: int | None = None,
 ) -> dict:
   """Run one delegated Claude helper turn inside its parent's shared host.
@@ -1212,7 +1213,7 @@ async def run_claude_host_turn(
       spec={"to": agent_id, "summary": dispatch_id, "message": user_message},
       sink=bc, env_file=env_file, agent_id=agent_id,
       launch_tool_use_id=launch_tool_use_id,
-      goal_brief_refresh=goal_brief_refresh,
+      compaction_refresh=compaction_refresh,
     )
   else:
     # A first turn may spawn; a lost provider agent must not replay work.
@@ -1230,7 +1231,7 @@ async def run_claude_host_turn(
       }
     turn = HelperTurn(
       dispatch_id=dispatch_id, kind="spawn", spec=spawn_spec(user_message),
-      sink=bc, env_file=env_file, goal_brief_refresh=goal_brief_refresh,
+      sink=bc, env_file=env_file, compaction_refresh=compaction_refresh,
     )
 
   factory = _host_options(

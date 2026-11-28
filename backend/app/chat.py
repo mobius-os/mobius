@@ -125,6 +125,7 @@ from app.chat_writer import (
   RecoverWedgedRun,
   PostponeResourcePark,
   ResolvePark,
+  RetireRequestCard,
   StartContinuation,
   StartContinuationAttached,
   StartContinuationBlocked,
@@ -3131,6 +3132,146 @@ async def _admit_provider_execution(
   return not _run_generation_superseded(chat_id, run_gen)
 
 
+_PUBLISH_REQUEST_ATTEMPTS = 3
+
+
+async def _publish_open_owner_requests(chat_id: str, sink, run_gen: int | None = None) -> None:
+  """Show the owner what this chat still needs, as the turn's last item.
+
+  Asking never ends a turn; a turn that ends by itself with requests open is
+  what publishes them. The provider has stopped generating, so the card is
+  terminal by construction and goes through the ordinary save-before-broadcast
+  path; no provider cut is involved.
+
+  Every open request, of every kind, is an entry of one request-list card,
+  oldest first; the card never bars a turn (`Chat.open_request_card_id`) and
+  each entry is settled on its own. A request that can no longer be shown as
+  asked (an approval whose claim is gone, a restart with no restart-loadable
+  boot) is withdrawn with its reason first. A restart entry is derived now,
+  for this run and the boot current now, and the card commit links its
+  activation wait. The card supersedes the previous list card even when
+  nothing changed, so the open list is always the last item of the latest
+  turn; only a card showing a revision the owner has not seen pushes a
+  notification. A barring card saved by an earlier release, still open, is
+  kept; a turn that ends with nothing open retires the previous list card.
+
+  The card commit refuses a card composed from a stale read (a request
+  recorded or revised at the last moment, `QuestionCardOutOfDate`); only that
+  refusal composes again, a bounded number of times. `run_gen` is the
+  generation the ending turn owns: a Stop that takes it before the card
+  commits leaves the restart entry's wait cancelled, as a Stop after it does.
+  """
+  from app.chat_writer import QuestionCardOutOfDate
+
+  for _attempt in range(_PUBLISH_REQUEST_ATTEMPTS):
+    try:
+      await _publish_open_owner_requests_once(chat_id, sink, run_gen)
+      return
+    except QuestionCardOutOfDate:
+      _get_logger().info(
+        "open owner requests changed while their card was saved chat_id=%s", chat_id,
+      )
+  _publish_unshown_requests_notice(sink)
+
+
+def _publish_unshown_requests_notice(sink) -> None:
+  """The requests stay open and unshown; the next turn end publishes them.
+  Say so, rather than ending a turn that looks finished while it waits."""
+  sink.publish({"type": "error", "message": (
+    "The questions this chat has for you could not be shown. Send any "
+    "message here to see them."
+  )})
+
+
+async def _publish_open_owner_requests_once(
+  chat_id: str, sink, run_gen: int | None = None,
+) -> None:
+  """Compose and commit the request-list card once.
+
+  Raises `QuestionCardOutOfDate` when the commit refused a stale composition;
+  any other failure to show the requests says so on the turn.
+  """
+  from app import owner_input_cards, owner_input_requests, restart_ledger
+  from app.chat_writer import QuestionCardOutOfDate
+  from app.database import SessionLocal
+  from app.owner_input import publish_owner_input_changed
+
+  card = activation_wait = None
+  # A fresh read: the turn's own session loaded these rows at turn start and
+  # the agent has revised them through other requests since.
+  with SessionLocal() as read_db:
+    rows = owner_input_requests.open_requests(read_db, chat_id)
+    pending, shown_card = read_db.query(
+      models.Chat.pending_question_id, models.Chat.open_request_card_id,
+    ).filter(models.Chat.id == chat_id).one()
+    if rows and pending is None:
+      for row in rows:
+        reason = owner_input_cards.unshowable_reason(read_db, chat_id, row)
+        if reason is not None:
+          # Withdrawn with its reason, never silently dropped; the agent's
+          # next turn start reports it as settled by the platform.
+          owner_input_requests.withdraw_request(
+            read_db, chat_id=chat_id, ref=row.id, reason=reason, by="platform",
+          )
+      rows = owner_input_requests.open_requests(read_db, chat_id)
+    if rows and pending is None:
+      run = read_db.get(models.ChatRun, sink.run_token) if sink.run_token else None
+      try:
+        card = owner_input_requests.compose_card(
+          rows, chat_id=chat_id, run_id=sink.run_token or "",
+          boot_id=restart_ledger.current_boot_id(),
+        )
+        activation_wait = owner_input_cards.entry_activation_wait(card, run)
+        if activation_wait is not None and run_gen is not None:
+          activation_wait["run_generation"] = run_gen
+        # A secret already being consumed is shown in progress, never offered.
+        states = owner_input_requests.sealed_entry_states(read_db, chat_id, card)
+        if states:
+          card["request_states"] = states
+      except owner_input_cards.CardUnavailable:
+        _get_logger().warning(
+          "owner request card could not be built chat_id=%s", chat_id, exc_info=True,
+        )
+        _publish_unshown_requests_notice(sink)
+        return
+    notify_owner = owner_input_requests.shows_owner_something_new(rows)
+  if not rows:
+    if shown_card is None:
+      return
+    try:
+      retired = await _await_ack(get_writer().submit(RetireRequestCard(
+        chat_id=chat_id, question_id=shown_card,
+      )))
+    except Exception:
+      _get_logger().warning(
+        "settled owner request card was not retired chat_id=%s", chat_id,
+        exc_info=True,
+      )
+      return
+    if retired:
+      publish_owner_input_changed(chat_id, None, request_card_id=None)
+    return
+  if pending is not None:
+    return
+  try:
+    await sink.publish_question(card, notify_owner=notify_owner, **(
+      {"activation_wait": activation_wait} if activation_wait is not None else {}
+    ))
+  except QuestionCardOutOfDate:
+    raise
+  except Exception:
+    _get_logger().warning(
+      "open owner requests were not published chat_id=%s", chat_id, exc_info=True,
+    )
+    if not any(block.get("question_id") == card["question_id"]
+               for block in sink.assistant_blocks):
+      _publish_unshown_requests_notice(sink)
+      return
+    # The card committed and only its live broadcast failed: it is saved and
+    # shown on reload, and it stays the turn's last item.
+  publish_owner_input_changed(chat_id, "question", request_card_id=card["question_id"])
+
+
 def _selected_result_context(db, chat_id: str, run_token: str, raw_message: str):
   """Rebuild only the result-bearing prompt segment for this exact run."""
   from app.goal_dependencies import owed_dependency_results
@@ -3143,7 +3284,16 @@ def _selected_result_context(db, chat_id: str, run_token: str, raw_message: str)
     db, chat_id, raw_message, run_id=run_token,
   )
   active_text = build_active_waits_context(db, chat_id, run_token)
-  return "\n\n".join(part for part in (active_text, wait_text, dependency_text) if part), wait_ids, dependency_ids
+  from app.owner_input_requests import (
+    build_open_requests_context, owner_wrote_past_open_card,
+  )
+  requests_text = build_open_requests_context(
+    db, chat_id,
+    owner_wrote_instead=owner_wrote_past_open_card(db, chat_id, run_token),
+  )
+  return "\n\n".join(
+    part for part in (active_text, requests_text, wait_text, dependency_text) if part
+  ), wait_ids, dependency_ids
 
 
 async def _admit_with_selected_results(
@@ -4823,6 +4973,16 @@ async def _complete_turn(
   incorporate_activity_delivery = (
     ending_status == "completed" and bool(activity_results)
   )
+  if ending_status == "completed" and we_own_gen and not parked:
+    try:
+      await _publish_open_owner_requests(chat_id, sink, run_gen)
+    except Exception:
+      # Showing the requests is never worth the turn itself: they stay open
+      # and unshown for the next turn end, and the turn is still saved.
+      _get_logger().warning(
+        "open owner requests were not published chat_id=%s", chat_id, exc_info=True,
+      )
+      _publish_unshown_requests_notice(sink)
   try:
     await sink.finalize(
       incorporate_activity_delivery=incorporate_activity_delivery,
@@ -6335,14 +6495,19 @@ async def _run_chat_impl_with_db(
     if typed_reply:
       user_message = f"{typed_reply}\n\n{user_message}"
 
-  goal_brief_refresh = None
+  # What in-turn compaction may summarize away is restored, read fresh, at the
+  # provider's post-compaction boundary (app/compaction_context.py). A
+  # top-level turn may gain a Goal or open requests mid-turn, so it always
+  # carries a refresher; a helper has only its assignment brief to restore.
+  compaction_refresh = None
   if chat_id:
-    from app.goals import compaction_brief_refresh, turn_goal_brief
+    from app.compaction_context import compaction_context_refresh
+    from app.goals import turn_goal_brief
     goal_context = turn_goal_brief(db, chat_id, run_token, delegated=run_policy is not None)
     if goal_context:
       user_message = f"{user_message}\n\n{goal_context}"
     if goal_context or (run_policy is None and run_token):
-      goal_brief_refresh = compaction_brief_refresh(
+      compaction_refresh = compaction_context_refresh(
         chat_id, run_token, delegated=run_policy is not None,
       )
 
@@ -6876,7 +7041,7 @@ async def _run_chat_impl_with_db(
         connector_plan=connector_turn_plan,
         coordination_enabled=coordination_tools_enabled,
         helper_host_key=helper_host_key,
-        goal_brief_refresh=goal_brief_refresh,
+        compaction_refresh=compaction_refresh,
         app_room=app_room,
       )
       new_session_id = runner_result.get("session_id")
@@ -7067,7 +7232,7 @@ async def _run_chat_impl_with_db(
           connector_plan=connector_turn_plan,
           helper_host_key=helper_host_key,
           data_dir=settings.data_dir,
-          goal_brief_refresh=goal_brief_refresh,
+          compaction_refresh=compaction_refresh,
           run_generation=run_gen,
         )
       else:
@@ -7086,7 +7251,7 @@ async def _run_chat_impl_with_db(
             connector_plan=connector_turn_plan,
             coordination_enabled=coordination_tools_enabled,
             provider_id=provider_id,
-            goal_brief_refresh=goal_brief_refresh,
+            compaction_refresh=compaction_refresh,
             fork_from=fork_from,
             run_generation=run_gen,
             app_room=app_room,

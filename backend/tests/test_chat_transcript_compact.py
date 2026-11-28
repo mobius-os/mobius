@@ -892,6 +892,7 @@ def test_runtime_route_does_not_select_transcript_json(
     "pending_messages": [],
     "pending_revision": 0,
     "pending_question_id": None,
+    "open_request_card_id": None,
     "updated_at": created.json()["updated_at"],
     "waits": [],
     "background_helpers": {"count": 0, "items": []},

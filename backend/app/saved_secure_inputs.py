@@ -119,7 +119,12 @@ async def _run_consumer(spec: dict, values: dict[str, str], chat_id: str) -> int
 async def _publish_and_start(chat_id: str, request_id: str, result: dict, db) -> None:
   if result.get("queued"):
     from app.chat_event_sink import get_active_sink
-    event = {"type": "answers_applied", "question_id": request_id, "answers": result["answers"]}
+    if result.get("entry"):
+      # One entry of a request-list card; the rest of the card stays open.
+      event = {"type": "input_request_settled", "question_id": result.get("question_id"),
+               "request_id": request_id, "kind": "secret", "state": result["state"]}
+    else:
+      event = {"type": "answers_applied", "question_id": request_id, "answers": result["answers"]}
     sink = get_active_sink(chat_id)
     bc = get_broadcast(chat_id)
     if sink is not None:
@@ -137,7 +142,14 @@ async def _publish_and_start(chat_id: str, request_id: str, result: dict, db) ->
     await start_queued_owner_continuation(chat_id, db)
 
 
-async def finish(chat_id: str, request_id: str, status: str, outcome: str, *, generation: int | None = None, orphan_only: bool = False) -> dict:
+async def finish(
+  chat_id: str, request_id: str, status: str, outcome: str, *,
+  generation: int | None = None, orphan_only: bool = False,
+  question_id: str | None = None, revision: int | None = None,
+) -> dict:
+  """Settle one sealed operation. A secret entry's owner Cancel passes the
+  card ``question_id`` and entry ``revision`` it was shown, which the writer
+  requires to be current."""
   from app.chat import current_run_generation
   async with chat_queue.get_transition_lock(chat_id), chat_queue.get_lock(chat_id):
     if orphan_only and request_id in _tasks:
@@ -148,13 +160,14 @@ async def finish(chat_id: str, request_id: str, status: str, outcome: str, *, ge
       return {"status": "cancelled"}
     result = await await_ack(get_writer().submit(SettleSecureInput(
       chat_id=chat_id, request_id=request_id, status=status, outcome=outcome,
+      question_id=question_id, revision=revision,
     )))
     with SessionLocal() as db:
       await _publish_and_start(chat_id, request_id, result, db)
     return result
 
 
-async def _consume(chat_id: str, request_id: str, spec: dict, values: dict[str, str], generation: int) -> None:
+async def _consume(chat_id: str, request_id: str, spec: dict, values: dict[str, str], generation: int | None) -> None:
   try:
     try:
       code = await _run_consumer(spec, values, chat_id)
@@ -177,15 +190,26 @@ async def _consume(chat_id: str, request_id: str, spec: dict, values: dict[str, 
     values.clear()
 
 
-async def submit(chat_id: str, request_id: str, values: dict[str, str], generation: int) -> dict:
-  """Return only after claim and backend task ownership; never wait for a human."""
+async def submit(
+  chat_id: str, request_id: str, values: dict[str, str], generation: int | None,
+  *, revision: int | None = None,
+) -> dict:
+  """Return only after claim and backend task ownership; never wait for a human.
+
+  ``generation`` fences a legacy barring card against a Stop racing the
+  submission. A secret entry of the request-list card passes None: turns run
+  around that card, so a new turn is not a Stop. Stop still cancels its
+  running consumer (`cancel_running`) and settles it as outcome unknown, and
+  the entry's single receipt claim fences every repeat.
+  """
   from app.chat import current_run_generation
   try:
     async with chat_queue.get_transition_lock(chat_id), chat_queue.get_lock(chat_id):
-      if current_run_generation(chat_id) != generation:
+      if generation is not None and current_run_generation(chat_id) != generation:
         values.clear()
         return {"status": "cancelled"}
-      claim = await await_ack(get_writer().submit(ClaimSecureInput(chat_id=chat_id, request_id=request_id)))
+      claim = await await_ack(get_writer().submit(ClaimSecureInput(
+        chat_id=chat_id, request_id=request_id, revision=revision)))
       if claim["status"] != "claimed":
         values.clear()
         return {"status": claim["status"]}
@@ -198,7 +222,12 @@ async def submit(chat_id: str, request_id: str, values: dict[str, str], generati
       task.add_done_callback(completed)
       bc = get_broadcast(chat_id)
       if bc is not None:
-        bc.publish({"type": "secure_input_consuming", "request_id": request_id, "status": "consuming"})
+        if claim.get("question_id"):
+          bc.publish({"type": "input_request_settled", "question_id": claim["question_id"],
+                      "request_id": request_id, "kind": "secret",
+                      "state": {"status": "consuming"}})
+        else:
+          bc.publish({"type": "secure_input_consuming", "request_id": request_id, "status": "consuming"})
       return {"status": "consuming"}
   except BaseException:
     values.clear()

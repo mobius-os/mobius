@@ -6,8 +6,9 @@ dies with the turn's process group with no record anyone is waiting. This file
 is the mechanics for the observable/timed owner — `declare_wait`, which runs a
 read-only check on an interval and resumes this exact Goal, when one owns it,
 or otherwise this chat when the condition is met,
-surviving server restarts. Owner actions belong to saved cards, including
-`wait_for_decision` for an existing card in another chat; recurring work is a cron app.
+surviving server restarts. Owner actions belong to owner requests
+(`owner_input`), and `wait_for_decision` follows an existing card in another
+chat; recurring work is a cron app.
 
 ## When to declare a wait
 
@@ -28,9 +29,9 @@ When NOT to use it:
   deadline. Do not poll the peer chat, add a timer, or ask for an interrupt.
 - **Something finishing within the current turn** — poll it inline.
 - **Polling the partner** — never monitor whether the owner has acted. If the
-  decision already has a saved card elsewhere, use `wait_for_decision` below.
-  Otherwise ask through the real clarifying-question tool;
-  an owner question already parks the turn durably and keeps the action visible.
+  decision already has a card elsewhere, use `wait_for_decision` below.
+  Otherwise record an owner request with `owner_input`: it is durable, shown
+  when your turn ends, and its answer starts the next turn, so it needs no Wait.
   For an outside-chat action, use concrete choices such as **Done**, **Need
   help**, and **Not now**, adapted to the task. Do not end with only “tell me
   when…”. Don't monitor state nobody has been asked to change. Open-ended or
@@ -43,16 +44,22 @@ When NOT to use it:
 Do independent work first. If your remaining next step is another chat's
 saved Q&A or approval, call `wait_for_decision(chat_id: "SOURCE_CHAT",
 question_id: "EXACT_CARD")`. The source chat's open card id is its
-`pending_question_id` (`mapi "/api/chats/SOURCE_CHAT?limit=1"`); a peer may
-also name it. Only an open top-level Goal can subscribe;
+`open_request_card_id`, the one card that shows every open request, approvals
+included, or `pending_question_id` for a barring card an older chat still shows
+(`mapi "/api/chats/SOURCE_CHAT?limit=1"`); a peer may also name it. The request
+card is replaced each time that chat's turn ends, so its result can be
+**superseded**; follow the newer card if the decision is still open. It
+also resolves as answered when the owner answers any entry of that card, so
+check that the entry you follow was answered before acting on it. Only an open top-level Goal can subscribe;
 helpers return the condition to their parent. Use the existing card: never
 copy it, poll its answer, or ask a peer to interrupt you later. Claim-owned
 work uses the confirmed claim dependency instead; approval is not completion.
 
 A successful subscription gives this exact Goal a visible **Waiting** handoff
 and **Open decision** link. End normally; no deadline applies to human choices.
-Already-settled cards return their saved outcome immediately. Restart cards and
-sealed secure-input cards cannot be followed; use their own owning workflows.
+Already-settled cards return their saved outcome immediately. A barring Restart
+or sealed secure-input card saved by an earlier release cannot be followed; use
+its own owning workflow.
 
 Results are facts, never permission. An approval authorizes only its own
 executor. Interpret the actual **Not now** answer within your own Goal's
@@ -167,7 +174,7 @@ its fired-but-undelivered follow-up. Inspect the returned `disposition`:
 must end before future delivery can be withdrawn. Provider input and tool
 effects from earlier attempts are never undone. Use Stop to interrupt a current
 turn; delivered history stays.
-Restart-activation Waits remain owned by their Restart cards.
+Restart-activation Waits remain owned by the card that shows their restart.
 
 ## What happens on resume
 
@@ -179,8 +186,10 @@ instructions: verify the real current state through its owning source (the
 check may be stale by minutes), then do what you promised and report to the
 owner. If the turn was mid-run when the condition fired, the result queues and
 arrives after the live turn settles and any open owner-input or recovery
-barrier is resolved. Saved Q&A and sealed-input cards are never answered or
-bypassed by a Wait. A manual restart-recovery hold still requires owner Resume.
+barrier is resolved. A Wait never answers an owner request. The request-list
+card never delays the result; only a barring approval, Restart or secure-input
+card saved by an earlier release holds it until settled. A manual restart-recovery hold still
+requires owner Resume.
 A wait declared inside a Goal is delivered only to that same Goal; an unrelated
 turn in the chat cannot consume its result. A stopped or dismissed Goal does not
 automatically resume from it.

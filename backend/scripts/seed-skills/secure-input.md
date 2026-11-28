@@ -1,36 +1,44 @@
 # Secure input
 
 Use this skill when the owner needs to supply a password, API key, token,
-private username, or other secret that must stay out of the LLM API and the
-chat transcript, including adding or saving a key in their key vault
-(Settings › Keys). The card is a live-chat primitive, not for background work.
+private username, or other value that should not pass through the LLM API or
+enter the chat transcript, including adding or saving a key in their key vault
+(Settings › Keys). Never ask for one in chat, and redirect an owner who offers
+to paste one.
 
-## Default: saved sealed pause
+## Default: a sealed secret request
 
-Prepare the narrow local consumer, explain what it will do, and finish all
-other work and closeout **before** invoking the helper. The card is the final
-action of the turn, exactly like Möbius's saved Q&A and approval cards.
+Prepare the narrow local consumer and explain what it will do, then record a
+secret request with `owner_input` (`op: "add"`, `kind: "secret"`, a stable
+`key`). Recording it does **not** end your turn, wait for an answer, or receive
+values; keep doing the work that does not need the credential and say in your
+closing message what the card is for. When your turn ends, the platform shows
+the request as a sealed entry of the one card that holds every open request.
+That card never holds the chat: the owner submits or cancels this entry on its
+own, and its consumer's outcome then starts your next turn.
+The request is not an answer: never continue as if values were provided, and
+put the work that needs them in `blocks`.
 
-Call `request_secret` with `preset: "owner_credentials"`. This requests the
-current password, new username, new password and confirmation. The tool saves
-the safe request and returns a receipt immediately. It does
-**not** wait for an answer or receive values. On a confirmed receipt, end the
-turn with **no further text or tools**. Do not append “I'll wait,” poll, or run
-a background consumer. No answer and no permission may be inferred from the
-receipt. The saved card blocks further work until it is submitted or cancelled.
+For the owner's own Möbius sign-in, pass `preset: "owner_credentials"`. This
+requests the current password, new username, new password and confirmation.
 
-For another local consumer, call `request_secret` with a `title`, optional
-`description`, `fields` such as `[{"name":"api_key","type":"password","label":"API key"}]`,
-the consumer `command` as an argv list (`["python3", "/data/path/to/safe-consumer.py"]`),
-and an absolute `cwd` when it is not `/data`. The same card is available from
-`python3 /data/platform/backend/scripts/secure-input.py run` for shells without
-the tool.
+For another local consumer, pass a `title`, optional `description`, `fields`
+such as `[{"name":"api_key","type":"password","label":"API key"}]`, the
+consumer `command` as an argv list (`["python3", "/data/path/to/safe-consumer.py"]`),
+and an absolute `cwd` when it is not `/data`. The same request is recorded by
+`python3 /data/platform/backend/scripts/secure-input.py run --title ... --field
+name:type:label -- <command>` (and `secure-input.py owner-credentials`) for
+shells without the tool; it uses the current directory as `cwd` and derives
+the key from the title unless you pass `--key`.
 
 Möbius persists only the prompts, pre-authored command, working directory and
-safe lifecycle status. Unsubmitted cards survive agent completion and server
-restarts with no human deadline. Only one owner-input card may be open per chat.
-A lost save response is recovered by retrying the **identical** request; a
-failed save is not a waiting card and never means credentials were provided.
+safe lifecycle status. An open request and its card survive agent completion
+and server restarts with no human deadline. The consumer is fixed when the
+request is added: to change it, withdraw the request and add a new one. Only
+a submission or cancel on the card settles it; an agent can never resolve a
+secret request itself. A
+refused or unconfirmed request records nothing and never means credentials
+were provided; retrying the identical request is safe.
 
 Any authenticated participant that can read the card may submit or cancel it;
 there is no separate card-answer role. For a value already held in an
@@ -39,12 +47,13 @@ of model-visible arguments with:
 
 ```bash
 python3 /data/platform/backend/scripts/secure-input.py submit-saved \
-  --chat-id <chat-id> --request-id <card-id> \
+  --chat-id <chat-id> --request-id <request-id> \
   --field-file field=/path/to/value
 ```
 
-Use `--field-env field=ENV_NAME` for an environment value. This preserves the
-submission path; it cannot undo earlier disclosure to a model.
+`<request-id>` is the request's `id` from the open list, accepted once a card
+shows it. Use `--field-env field=ENV_NAME` for an environment value. This
+preserves the submission path; it cannot undo earlier disclosure to a model.
 
 When submitted, the backend runs the consumer once with one JSON object
 on stdin. Values exist only transiently in memory. The consumer must never log,
@@ -56,7 +65,7 @@ only fixed outcome codes become a safe receipt and resume the chat.
 The consumer runs from the saved working directory with a minimal runtime
 environment, not the publishing agent's session. Do not depend on `AGENT_TOKEN`
 or other turn-only credentials. Prepare a self-contained narrow local operation;
-if it needs additional authority, resolve that before opening the card rather
+if it needs additional authority, resolve that before recording the request rather
 than saving credentials in its execution specification.
 
 ## API keys and service tokens: save to the key vault, then borrow
@@ -90,7 +99,7 @@ instead, mark a key-file part `multiline` in its `parts`. Secret parts sent by
 these recipes are at least eight characters. It never replaces a key
 that already has that name: it leaves that key as it was and fails. A failed
 consumer's receipt does not say why and the submitted value is discarded, so
-before opening the card check `mapi /api/keys` for the name; if it exists,
+before recording the request check `mapi /api/keys` for the name; if it exists,
 ask the owner whether to replace it and add `--replace` only when they said
 so. After a failed receipt, check the list again before asking the owner a
 second time. It writes to the vault directly, so the owner gets no
@@ -102,7 +111,8 @@ exact `sites`, an optional `inject` for a new key, and your closing `message`.
 If you may already use it there, or the owner already said no, it answers at
 once with no card (`answered_without_card`, with `granted`, `paused` or
 `denied`) and your turn continues. Otherwise it saves a key card in this chat
-and ends your turn like any other owner card: the chat waits for the owner,
+and ends your turn, the one owner card that does (everything else is asked
+with `owner_input` and shown after your turn ends): the chat waits for the owner,
 nothing else tells them (no notification is sent), and their answer resumes
 you as **Allow** or **Not now**, so do not poll. A new key is pasted on that
 card, never into chat.
@@ -151,7 +161,9 @@ unreachable after submission/consumption and are never intentionally written
 to disk. A process crash lets the OS reclaim that memory; it does not create a
 recovery copy.
 
-A background or scheduled agent must not open a live card, but may answer an
-existing card it can access. The explicitly approved reveal
+A background or scheduled run may record a secret request, shown when the run
+ends, but never waits on it; it may also answer an existing card it can access.
+In a chat an app created, a secret request is refused. A helper asks its
+parent instead. The explicitly approved reveal
 path is exceptional: it remains a live, transient handoff to the current model;
 never convert it into a persisted secret or use it to bypass sealed execution.

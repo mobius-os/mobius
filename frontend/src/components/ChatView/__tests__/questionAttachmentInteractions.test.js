@@ -129,12 +129,14 @@ test('pasting into question two keeps the file with that answer, upload gates su
     // Incomplete: tappable to find the missing answer, never submittable.
     assert.equal(submit(card.result.current).props.disabled, false)
     assert.equal(submit(card.result.current).props['aria-disabled'], true)
-    const hint = tree => elements(tree).find(node => node.props?.className === 'qcard__submit-hint')
-    assert.equal(hint(card.result.current), undefined, 'no hint before a Submit attempt')
+    const hint = tree => elements(tree).find(node => node.props?.className?.split?.(' ').includes('qcard__submit-hint'))
+    assert.equal(hint(card.result.current).props.children, '', 'the announcer is mounted empty before a Submit attempt')
     submit(card.result.current).props.onClick({ currentTarget: { closest: () => null } })
     assert.equal(posted, undefined, 'an incomplete click guides; it never submits')
-    assert.equal(hint(card.result.current)?.props.children, 'Answer each question before submitting')
-    assert.equal(submit(card.result.current).props['aria-describedby'], hint(card.result.current).props.id)
+    assert.equal(hint(card.result.current).props.children, 'Answer each question before submitting')
+    assert.equal(submit(card.result.current).props['aria-describedby'], undefined, 'the label already says it; nothing repeats it')
+    // The hint is the button's own label, so asking for it moves nothing.
+    assert.equal(submit(card.result.current).props.children, 'Answer each question before submitting')
     const file = new File(['notes'], 'notes.txt', { type: 'text/plain' })
     const uploading = editor(card.result.current, 'Second?').props.onPasteFiles([file])
     await tick()

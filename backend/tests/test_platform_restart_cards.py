@@ -29,6 +29,7 @@ from app.database import SessionLocal
 from app.platform_restart import activation_notice, activation_wait_verdict
 from app.routes import chats_stream
 from app.timeutil import now_naive_utc
+from tests import owner_input_fixtures as inputs
 
 
 @pytest.fixture(autouse=True)
@@ -642,12 +643,7 @@ def test_authenticated_agent_from_another_chat_dispatches_restart_once(
   )
   answerer_auth = {"Authorization": f"Bearer {answerer_token}"}
   try:
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert saved.status_code == 200, saved.text
-    qid = saved.json()["question_id"]
+    qid = inputs.save_legacy_restart(sink)
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
       block = list(transcript_rows.history(row))[-1]["blocks"][-1]
@@ -696,24 +692,14 @@ def test_route_sends_written_restart_feedback_without_restart_authority(
     expires_delta=timedelta(minutes=5),
   )
   try:
-    # The restart card shares the 20,000-character closing-message limit.
-    over = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={"message": "x" * 20_001},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert over.status_code == 422
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request",
-      json={"message": "The fix is committed and tested." + " " + "y" * 19_967},
-      headers={"Authorization": f"Bearer {token}"},
-    )
-    assert saved.status_code == 200, saved.text
-    qid = saved.json()["question_id"]
+    sink.publish({"type": "text", "content": "The fix is committed and tested."})
+    qid = inputs.save_legacy_restart(sink)
     with SessionLocal() as read:
       row = read.get(models.Chat, chat.id)
-      block = list(transcript_rows.history(row))[-1]["blocks"][-1]
-      assert block["message"] == "The fix is committed and tested." + " " + "y" * 19_967
-      assert len(block["message"]) == 20_000
+      message = list(transcript_rows.history(row))[-1]
+      block = message["blocks"][-1]
+      # The turn's closing text is saved with its card, before it.
+      assert message["blocks"][0]["content"] == "The fix is committed and tested."
       prompt = block["questions"][0]["question"]
       wait_id = block["platform_action"]["wait_id"]
     response = client.post(
@@ -1084,13 +1070,9 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
         headers={"Authorization": f"Bearer {token}"},
       )
       assert promoted.status_code == 200, promoted.text
-    saved = client.post(
-      f"/api/chats/{chat.id}/restart-request", json={},
-      headers={"Authorization": f"Bearer {token}"},
-    )
+    inputs.save_legacy_restart(sink)
   finally:
     unregister_active_sink(chat.id, sink)
-  assert saved.status_code == 200, saved.text
   if objective is not None:
     from app import chat as chat_mod
 
@@ -1107,7 +1089,7 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
     return block["questions"][0]["question"]
 
 
-def test_restart_card_names_proved_served_boot_debt(
+def test_restart_card_reports_proved_served_boot_debt(
   client, chat, db, monkeypatch, tmp_path,
 ):
   import subprocess
@@ -1130,10 +1112,13 @@ def test_restart_card_names_proved_served_boot_debt(
   )
 
   assert platform_restart.pending_restart_paths() == [path]
-  assert path in _save_restart_card(client, chat, db)
+  # The card says there are changes to load; the paths stay in its requirement.
+  assert _save_restart_card(client, chat, db).startswith(
+    "Restart Möbius to load platform changes?"
+  )
 
 
-def test_restart_card_names_uncommitted_edits_the_restart_would_also_load(
+def test_restart_card_discloses_unsaved_edits_the_restart_would_also_load(
   client, chat, db, monkeypatch,
 ):
   # A restart serves the whole tree, so another chat's unfinished edit goes
@@ -1150,12 +1135,12 @@ def test_restart_card_names_uncommitted_edits_the_restart_would_also_load(
 
   question = _save_restart_card(client, chat, db)
 
-  assert "tested platform changes in backend/app/routes/identity.py" in question
-  assert (
-    "also load uncommitted edits in backend/app/models.py, "
-    "backend/app/system_prompts.py" in question
-  )
-  assert question.endswith("unavailable for tens of seconds.")
+  assert question.startswith("Restart Möbius to load platform changes?")
+  assert "also loads unsaved edits" in question
+  assert "another chat's unfinished work" in question
+  # The entry says what a restart does; it never lists files.
+  assert "backend/" not in question
+  assert question.endswith("for tens of seconds.")
 
 
 def test_restart_card_stays_plain_when_the_tree_is_clean(
@@ -1170,7 +1155,7 @@ def test_restart_card_stays_plain_when_the_tree_is_clean(
   question = _save_restart_card(client, chat, db)
 
   assert question.startswith("Restart Möbius now?")
-  assert "uncommitted" not in question
+  assert "unsaved" not in question
 
 
 def test_uncommitted_restart_paths_lists_only_restart_loaded_working_edits(

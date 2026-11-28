@@ -1142,7 +1142,8 @@
 }
 
 .chat__tool-detail.chat__memory-detail,
-.chat__tool-detail.chat__app-activity-detail {
+.chat__tool-detail.chat__app-activity-detail,
+.chat__tool-detail.chat__asked-detail {
   box-sizing: border-box;
   gap: 10px;
   max-height: min(320px, 50vh);
@@ -1559,6 +1560,19 @@
 
 .chat__skill-list li {
   min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* "Asked a question": what a card asked, read like the skill list above. */
+.chat__asked-prompt {
+  color: var(--text);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+.chat__asked-prompt .md-paragraph { margin: 0; padding: 0; line-height: inherit; }
+.chat__asked-options {
+  margin: 2px 0 0;
+  padding-left: 1.2em;
   overflow-wrap: anywhere;
 }
 

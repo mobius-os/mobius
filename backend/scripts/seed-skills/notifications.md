@@ -1,6 +1,6 @@
 # Notifications
 
-When and how to send push notifications, why saved question cards need no push from you, and the rule against ever executing an outbound-channel script live. This file is the source of truth for notification policy. `Read` it before sending a push or writing a script that does.
+When and how to send push notifications, why owner requests need no push from you, and the rule against ever executing an outbound-channel script live. This file is the source of truth for notification policy. `Read` it before sending a push or writing a script that does.
 
 Send push notifications for meaningful events — not routine confirmations. If the partner has the chat open, the notify endpoint suppresses the push itself; no guard needed on your side.
 
@@ -9,8 +9,9 @@ Send push notifications for meaningful events — not routine confirmations. If 
 ## When to notify
 
 - A long-running task finishes (app built, data imported).
-- Something needs the partner's attention that no saved card covers (an error,
-  for example). A question goes on a card, which notifies by itself.
+- Something needs the partner's attention that no owner request covers (an
+  error, for example). A question is an owner request, whose card notifies by
+  itself.
 - The partner explicitly asks to be notified.
 
 ---
@@ -38,14 +39,17 @@ than implying it is done. The matching push target is `/shell/?settings=SECTION`
 
 ---
 
-## Saved owner-input cards notify for you
+## Owner-input cards notify for you
 
-When you save a `request_question`, `request_approval`, `request_restart`, or
-sealed secure-input card, Möbius sends the owner one "Möbius needs your answer"
-notification for that card. Its tap opens this chat at the open question, and it
-stays quiet while the owner is already watching the chat. Do not call
+Requests recorded with `owner_input` (questions, approvals, restarts and secure
+input) are shown on a card when the turn ends, and Möbius sends the owner one
+"Möbius needs your answer" notification when that card shows a request, or a
+revision of one, they have not been shown before. A background or scheduled
+run that republishes the same open requests sends nothing new. Its tap opens
+this chat at the card, and it stays quiet while the owner is already watching
+the chat. Do not call
 `notify_owner` for a card: a second push would only duplicate it. Asking in
-prose without a card sends nothing and is not a way to wait for the owner.
+prose without a request sends nothing and is not a way to wait for the owner.
 
 ---
 

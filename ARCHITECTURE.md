@@ -1681,9 +1681,9 @@ A per-chat Stop also returns `stop_receipt: {chat_id, run_id}` when it ended run
 ## Owner questions
 
 Owner questions have one advertised lifecycle: the provider-neutral
-`mobius_control.request_question` tool saves a durable terminal card, ends the
-current provider turn, and starts exactly one continuation when the owner
-answers. Codex turns set `tools.experimental_request_user_input.enabled=false`
+`mobius_control.owner_input` tool records a durable request without ending the
+turn, a durable card shows it when the turn ends, and the owner's answer
+starts exactly one continuation. Codex turns set `tools.experimental_request_user_input.enabled=false`
 to exclude the native tool in every collaboration mode; Claude turns disallow
 both `AskUserQuestion` and `request_user_input`. This is a
 capability invariant rather than a prompting preference: agents cannot choose a
@@ -1705,21 +1705,27 @@ Three frontend gates must stay aligned. `AssistantReply.jsx` renders live and sa
 
 ### Saved owner-input pauses
 
-Ordinary choices use `mobius_control.request_question` and
-`POST /api/chats/{id}/question`; approvals use `mobius_control.request_approval`
-and `POST /api/chats/{id}/approval`. Both tools share
-the control server's `owner_approval.py` library and `save_owner_question`
-(`mobius_control_mcp.py call <tool>` is the command-line fallback).
-This is an application decision, not the provider's sandbox-permission or
-clarifying-question protocol. The route uses the active `ChatEventSink` and
-`QuestionCommit` to save an ordinary question with
-`response_mode: "continuation"` before returning a receipt. No SDK future,
-held HTTP request, or new approval table is involved. A same-run, same-payload
-retry has the same question identity; a different open question conflicts.
-The receipt is neither an answer nor consent. Agent guidance makes publishing
-the card the final action: all explanation, preparation and closeout precede
-it; no text or tools follow. The saved marker blocks normal sends and queue
-promotion until owner response or Stop, with no human timeout or idle agent.
+Every owner input, ordinary question, approval, restart and secret alike, is
+asked through `mobius_control.owner_input` (`POST /api/chats/{id}/input-requests`;
+`mobius_control_mcp.py call owner_input` is the command-line fallback), which
+records a durable request and never ends the turn (see the request list
+below). This is an application decision, not the provider's sandbox-permission
+or clarifying-question protocol. When the turn ends by itself, the platform
+saves a card with `response_mode: "continuation"` through the active
+`ChatEventSink` and `QuestionCommit` save-before-broadcast path, after all of
+the turn's output, so the card is terminal by construction. No SDK future,
+held HTTP request, or new approval table is involved. Recording is neither an
+answer nor consent. Every request, of every kind, is an entry of one
+non-barring card. The one exception is the key vault's `request_key`
+(`POST /api/chats/{id}/key-request`), which saves its own key card mid-turn
+when the owner must answer. That key card, cards saved by an earlier release
+(a lone approval, restart or secure-input card, or an old question card) and a
+native provider question are **barring**: their
+marker blocks normal sends and queue promotion until owner response or Stop,
+with no human timeout or idle agent. A helper's `ask_parent` question and a
+saved key card are the results that still end a turn at a tool boundary
+(Claude's PostToolUse hook, Codex's `POST /api/chats/{id}/turn-end`, the
+sink's recorded receipt or saved key card).
 
 `Finalize` preserves the exact still-open continuation marker.
 `FinishRun` also preserves it except on explicit Stop; neither resurrects a
@@ -1732,6 +1738,44 @@ row until that queue promotion (unlike `"new"`, which has already started).
 Both answer paths use `answers_applied` and identity-keyed answer carry.
 Native question futures retain their existing answer/cancel behavior and
 share the same open-card slot as a compatibility path for existing sessions.
+
+**Owner-input request list** (`owner_input_requests.py`, contract in
+`OWNER_INPUT_REQUESTS_DESIGN.md`, which owns the per-kind card entries, answer
+paths and Stop behaviour). An agent records what it needs as durable rows
+(`owner_input_requests`) through the top-level `owner_input` tool without
+ending its turn. The open list is re-delivered to the root agent, never to
+helpers, at every turn start (a bounded summary,
+`context_budget.OPEN_REQUESTS_CONTEXT_CHARS`), prefixed to an owner message
+steered into a running turn, and with the Goal brief after an in-turn provider
+compaction (`compaction_context.py`), together with the requests settled since
+the chat's last completed run (key, who settled it, the answer, an approval's
+`option_chosen`, a withdrawal's reason); `list` returns both. Only the owner
+settles an `approval`, `restart` or `secret`; an agent may resolve only a
+`question`.
+
+Publication happens at turn end only: when a root run completes with rows open
+and no barring card, `_publish_open_owner_requests` saves one
+`input_requests: true` card holding every open request, oldest first, through
+the `QuestionCommit` save-before-broadcast path, superseding the previous list
+card; a turn that ends with nothing open retires it. Each entry settles on its
+own, answering its row in the same writer transaction as the owner's action;
+what an entry settled is kept in the block's `request_states`.
+
+The chat has two markers, and only one bars. `pending_question_id` is the
+**barring** card: a key card, a card saved by an earlier release or a native
+provider question. Every admission and recovery guard reads it, and it alone.
+`open_request_card_id` is the **shown, non-barring** request-list card: owner
+messages, Wait results, helper results and other continuations start
+normally around it, and transcript-tail rebuilds (`_tail_open_question_state`)
+never turn it into a barrier. It is answerable only while it is the current
+list card. A question or approval answer, full or partial, clears it unless
+a secret or unpressed restart entry it did not settle remains, which stays
+usable on that card; a Restart now press or a secret outcome settles only its
+entry and leaves the card open. A barring card or a transcript replacement retires it, leaving its
+rows open and unshown until the next turn end. Waiting projections go through
+`questions.owner_waiting_card_id`, taking the list card from the request rows
+(the card that still shows an open request), and it counts as waiting only
+while no turn runs.
 
 Saved options may explicitly set `on_answer: "close"` (default `"resume"`).
 Every newly saved option receives an immutable ID; the browser sends actual
@@ -1765,12 +1809,13 @@ Both transitions use the existing outbox transaction and replay lock. No
 separate failure database or logout lifetime is introduced. The server's queue
 continues to own turn ordering, and each question card owns its answer draft.
 
-Platform restarts use the narrower `mobius_control.request_restart` and
-`POST /api/chats/{id}/restart-request`. The caller supplies no command, commit,
-or option identity. The server derives an immutable action from the relevant
-committed restart-loadable source and adds server-generated option ids to a
-typed card with one **Restart now** action and an ordinary written-response
-path. A selected **Restart now** is an owner action dispatched by the platform,
+Platform restarts are an `owner_input` request of kind `restart`. The caller
+supplies no command, commit, or option identity. When the card is shown, the
+server derives an immutable action from the relevant committed
+restart-loadable source and the current boot, and gives the restart entry
+(or, on a card saved by an earlier release, the typed card) a
+server-generated option id for one **Restart now** action beside an ordinary
+written-response path. A selected **Restart now** is an owner action dispatched by the platform,
 not a synthetic Yes message or a new agent turn. Written feedback atomically
 cancels that card's activation wait and queues a normal continuation without
 granting restart authority. The durable execution claim precedes the side
@@ -1795,10 +1840,17 @@ activation wait; ordinary question,
 secure-input, manual-crash, usage and unrelated wait barriers retain their own
 lifecycle.
 
-Sealed inputs use the same continuation question, with safe `secure_input`
-metadata rendered by `SecureInputCard`. `QuestionCommit` atomically creates a
-private `SavedSecureInput` row containing only command/cwd/action/status, never
-values or a saved agent environment. The helper returns the saved receipt.
+Sealed inputs are an `owner_input` request of kind `secret` (or
+`secure-input.py run`, which records the same request), shown as an entry of
+the request-list card with safe `secure_input` metadata (on cards saved by an
+earlier release, on the block, rendered by `SecureInputCard`). The request row
+holds only prompts, labels and the pre-authored consumer. `QuestionCommit`
+atomically creates a private `SavedSecureInput` row (keyed by the request id
+for an entry, by the card id on an earlier card) containing only
+command/cwd/action/status, never values or a saved agent environment. Values
+go only to `POST /api/secure-inputs/{chat}/{id}/submit`; an entry is
+claimable only while the chat's current card shows the revision the owner
+filled in.
 `ClaimSecureInput` commits pending → consuming before backend-owned execution;
 values travel solely through RAM/stdin, output is discarded, and execution is
 limited to two minutes. `SettleSecureInput` commits a fixed safe result, answer
@@ -1812,11 +1864,20 @@ neither ever repeats the consumer. Pending cards survive restart indefinitely;
 submitted values do not. Existing transient requests and explicitly approved
 reveal preserve their live one-use behavior, not a persisted secret path.
 
-Regression coverage: `test_owner_approvals.py` drives the actual control-tool
-dispatch, helper, authenticated route, writer, answer queue, and terminal
-transition. It covers creation retries, save/broadcast failures, immediate
-and late answers, duplicate submissions, stopped/interrupted/failed runs,
-foreign run authority, and native-question overlap.
+Regression coverage: `test_owner_input_sensitive_requests.py` and
+`test_owner_input_mixed_card.py` cover the three sensitive kinds end to end as
+entries of the one card (claim at add, follower results, immutable bindings,
+composition and ordering, mixed partial answers, grant only by explicit
+option, boot-bound restart, at-most-once dispatch across duplicates, lost
+commits, supersession and the ready boot, one-use sealed entries across a
+republish, values never stored or broadcast, nothing held,
+Stop/branch/replacement/deletion, legacy barring cards).
+`test_owner_approvals.py` drives the actual control-tool dispatch,
+authenticated route, turn-end publication, writer, answer queue, and terminal
+transition, plus the recorded-receipt turn-end rendezvous. It covers retries,
+save/broadcast failures, immediate and late answers, duplicate submissions,
+stopped/interrupted/failed runs, foreign run authority, and native-question
+overlap.
 
 ## Chat persistence — single-writer actor
 

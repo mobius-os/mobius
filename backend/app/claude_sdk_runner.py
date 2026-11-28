@@ -6,11 +6,12 @@ same event shapes the rest of the backend already understands.
 
 Design choices:
 
-- Owner questions use the provider-neutral Möbius `request_question` control:
-  it saves a durable terminal card and starts exactly one continuation when
-  answered. Claude's native `AskUserQuestion` / `request_user_input` tools are
-  excluded on new and resumed turns so a visually identical, process-bound
-  wait cannot bypass that lifecycle.
+- Owner questions use the provider-neutral Möbius `owner_input` control: the
+  request is recorded without ending the turn, shown on a durable card when
+  the turn ends, and its answer starts exactly one continuation. Claude's
+  native `AskUserQuestion` / `request_user_input` tools are excluded on new and
+  resumed turns so a visually identical, process-bound wait cannot bypass that
+  lifecycle.
 - `ClaudeSDKClient` is used instead of one-shot `query()` because
   Möbius needs the bidirectional control surface: explicit `connect()`,
   `query()`, streaming `receive_response()`, and external
@@ -94,13 +95,9 @@ from app.claude_events import (
 from app.claude_sdk_contract import transport_process_pid
 from app.owner_card_receipts import turn_end_receipt_id
 from app.platform_tools import (
-  APPROVAL_TOOL_NAME,
   ASK_PARENT_TOOL_NAME,
   CONTROL_SERVER_NAME,
   KEY_TOOL_NAME,
-  QUESTION_TOOL_NAME,
-  RESTART_TOOL_NAME,
-  SECRET_TOOL_NAME,
 )
 from app.process_groups import (
   isolated_process_group_id,
@@ -229,8 +226,8 @@ _CLAUDE_NATIVE_SCHEDULING_TOOLS = (
   "CronCreate",
 )
 # Owner input also has one platform-owned lifecycle. These native tools wait
-# inside a provider process, while Möbius's request_question card is durable
-# across turn settlement and restart.
+# inside a provider process, while Möbius's owner_input requests and their
+# cards are durable across turn settlement and restart.
 _CLAUDE_NATIVE_OWNER_INPUT_TOOLS = (
   "AskUserQuestion",
   "request_user_input",
@@ -256,45 +253,29 @@ _CLAUDE_BUILTIN_HELPER_TOOLS = (
   "Agent",
   "Task",
 )
-# The tools through which a turn can save an owner-input card: the platform's
-# card tools, plus Bash for the `mobius_control_mcp.py call` / `secure-input`
-# command-line fallbacks, which print the same receipt. Naming them keeps the card-end
-# hook from cutting on an unrelated tool that merely echoes receipt-shaped JSON
-# — notably a Task result quoting a child agent's card.
+# The tools whose result can end a turn: a helper's recorded question
+# (`ask_parent`) and the key vault's saved `request_key` card, plus Bash for
+# the `mobius_control_mcp.py call ask_parent` and `call request_key`
+# command-line fallbacks, which print the same receipts. Owner-input requests
+# never end a turn (they are shown when it ends by itself); the key card is
+# the one owner card that does. Naming the tools
+# keeps the hook from cutting on an unrelated tool that merely echoes
+# receipt-shaped JSON — notably a Task result quoting a child agent's receipt.
 _CLAUDE_TURN_END_TOOLS = (
-  f"mcp__{CONTROL_SERVER_NAME}__{APPROVAL_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{ASK_PARENT_TOOL_NAME}",
-  f"mcp__{CONTROL_SERVER_NAME}__{QUESTION_TOOL_NAME}",
-  f"mcp__{CONTROL_SERVER_NAME}__{RESTART_TOOL_NAME}",
-  f"mcp__{CONTROL_SERVER_NAME}__{SECRET_TOOL_NAME}",
   f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}",
   "Bash",
 )
-# Owner cards whose save hands the turn to the owner; the visible-answer check
-# runs just before one is saved (see `answer_check.reason`). Not every call
-# ends the turn: a key request often answers at once without a card, and the
-# turn goes on (see `_ANSWER_CHECK_KEY_TOOL`). Membership also keeps these
-# calls out of the after-step note.
-_ANSWER_CHECK_CARD_TOOLS = frozenset(
-  f"mcp__{CONTROL_SERVER_NAME}__{name}"
-  for name in (
-    APPROVAL_TOOL_NAME, KEY_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME, SECRET_TOOL_NAME,
-  )
-)
-# The cards whose save needs the turn's closing `message`. A key request may
-# carry one, but often answers at once without saving a card and drops it; a
-# secret card has none.
-_ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS = frozenset(
-  f"mcp__{CONTROL_SERVER_NAME}__{name}"
-  for name in (APPROVAL_TOOL_NAME, QUESTION_TOOL_NAME, RESTART_TOOL_NAME)
-)
-# A hold before a key request is forgotten once the request returns: if it
-# answered at once, the turn goes on, and its end-of-turn check must still see
-# what the hold covered.
+# The one owner card saved mid-turn, so the visible-answer check runs just
+# before it is saved (see `answer_check.reason`); owner-input requests are
+# shown after the end-of-turn check. Not every key request ends the turn: it
+# often answers at once without a card, and the turn goes on, so a hold before
+# it is forgotten once the request returns and the end-of-turn check still
+# sees what the hold covered. It is also kept out of the after-step note.
 _ANSWER_CHECK_KEY_TOOL = f"mcp__{CONTROL_SERVER_NAME}__{KEY_TOOL_NAME}"
 # The CLI reads a hook matcher of only letters, digits, `_` and `|` as a list
-# of exact tool names, so only these calls pay the PreToolUse round trip.
-_ANSWER_CHECK_CARD_MATCHER = "|".join(sorted(_ANSWER_CHECK_CARD_TOOLS))
+# of exact tool names, so only this call pays the PreToolUse round trip.
+_ANSWER_CHECK_CARD_MATCHER = _ANSWER_CHECK_KEY_TOOL
 
 
 def _system_prompt_with_register(skill_text: str) -> str:
@@ -785,18 +766,21 @@ class ActiveClaudeClient:
     return True
 
   def claim_owner_card_end(self) -> bool:
-    """Own this turn's end at the saved owner card, cutting no generation yet.
+    """Own this turn's end at a turn-ending result, cutting no generation yet.
 
-    A saved question / approval / secure-input card is the terminal action of
-    the turn: the owner's answer resumes the chat in a LATER turn, so nothing
-    said after the card could be delivered. The PostToolUse card-end hook calls
-    this while the card's tool result is still inside the CLI, then refuses to
-    continue the agent loop — so the next model request is never made and there
-    is no post-card generation to interrupt.
+    A helper's recorded question to its parent (`ask_parent`) or a saved key
+    card (`request_key`) is the terminal action of the turn: the answer
+    resumes the chat in a LATER turn, so nothing said after it could be
+    delivered. (Owner-input requests never end a turn; their cards are shown
+    after the turn ends by itself.) The
+    PostToolUse turn-end hook calls this while the receipt is still inside the
+    CLI, then refuses to continue the agent loop — so the next model request
+    is never made and there is no post-receipt generation to interrupt.
 
     Tagged `card` so the terminal branch classifies the result as a clean
-    completion, not a resumable "Paused" note; the chat's durable pending-question marker already owns
-    resumption. Returns False when Stop or another card already owns the cut.
+    completion, not a resumable "Paused" note; the recorded helper question
+    or the key card already owns resumption. Returns False when Stop or
+    another receipt already owns the cut.
     """
     if self._finished.done():
       return False
@@ -859,9 +843,10 @@ class ActiveClaudeClient:
   def turn_cut_owned(self) -> bool:
     """Whether Möbius — not the provider — ended this turn deliberately.
 
-    True for a Stop and a saved owner card, so the terminal branch
-    can tell our own ending apart from a provider abort. A card end normally
-    cuts through the PostToolUse hook rather than `client.interrupt()`.
+    True for a Stop and a turn-ending receipt (a recorded helper question or
+    a saved key card), so the terminal branch can tell our own ending apart
+    from a provider abort. A receipt end cuts through the PostToolUse hook
+    rather than `client.interrupt()`.
     """
     return self._interrupt_owner is not None
 
@@ -874,7 +859,7 @@ class ActiveClaudeClient:
 
   @property
   def owner_card_end(self) -> bool:
-    """Whether a continuation owner-input card ended this turn."""
+    """Whether a turn-ending receipt (a helper question or key card) ended this turn."""
     return self._interrupt_owner == "card"
 
   async def stop(self, timeout: float = 2.0) -> bool:
@@ -1182,7 +1167,7 @@ async def run_claude_sdk_turn(
   connector_plan=None,
   coordination_enabled: bool = True,
   provider_id: str = "claude",
-  goal_brief_refresh=None,
+  compaction_refresh=None,
   fork_from: dict | None = None,
   run_generation: int | None = None,
   app_room=None,
@@ -1256,7 +1241,7 @@ async def run_claude_sdk_turn(
       )
     if tool_name in _CLAUDE_NATIVE_OWNER_INPUT_TOOLS:
       return PermissionResultDeny(
-        message="Use a Möbius saved owner-input card instead."
+        message="Use the Möbius owner_input tool instead."
       )
     if run_policy is not None:
       top_level_controls = {
@@ -1292,8 +1277,8 @@ async def run_claude_sdk_turn(
   ) -> dict[str, Any]:
     del tool_use_id, context
     trigger = _precompact_log_trigger(hook_input)
-    if goal_brief_refresh is not None:
-      goal_brief_refresh.mark_compacted()
+    if compaction_refresh is not None:
+      compaction_refresh.mark_compacted()
     log.info(
       "Claude context compacted for chat %s (trigger=%s)",
       chat_id, trigger,
@@ -1336,32 +1321,63 @@ async def run_claude_sdk_turn(
       },
     }
 
-  async def goal_brief_after_compaction_hook(
+  async def context_after_compaction_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
     context: dict[str, Any],
   ) -> dict[str, Any]:
     del tool_use_id, context
-    if goal_brief_refresh is None or hook_input.get("agent_id"):
+    if compaction_refresh is None or hook_input.get("agent_id"):
       return {"continue_": True}
-    brief = await goal_brief_refresh.take()
-    if not brief:
+    restored = await compaction_refresh.take()
+    if not restored:
       return {"continue_": True}
     return {"continue_": True, "hookSpecificOutput": {
-      "hookEventName": "PostToolUse", "additionalContext": brief,
+      "hookEventName": "PostToolUse", "additionalContext": restored,
+    }}
+
+  # The bundled CLI runs SessionStart hooks with source "compact" inside its
+  # compaction, for automatic, reactive and manual compaction of the root
+  # agent (never a subagent's), and adds their additionalContext to the
+  # messages the compacted turn continues from, so the very next model
+  # request carries it. The Python SDK's HookEvent type does not list
+  # SessionStart, but the CLI accepts the callback (verified against SDK
+  # 0.2.181 / CLI 2.1.323 with a mock API: PreCompact, then this callback,
+  # then the continuation request carrying its text). PostToolUse above stays
+  # as the fallback; the refresher delivers once either way. The CLI spills
+  # additionalContext over about 10,000 characters to a file and shows a 2 KB
+  # preview, which is why the restored text leads with where each part is
+  # read whole.
+  async def context_after_compaction_session_start_hook(
+    hook_input: dict[str, Any],
+    tool_use_id: str | None,
+    context: dict[str, Any],
+  ) -> dict[str, Any]:
+    del tool_use_id, context
+    if (compaction_refresh is None or hook_input.get("source") != "compact"
+        or hook_input.get("agent_id")):
+      return {"continue_": True}
+    # Its arrival is itself the compaction signal, as with Codex's hook.
+    compaction_refresh.mark_compacted()
+    restored = await compaction_refresh.take()
+    if not restored:
+      return {"continue_": True}
+    return {"continue_": True, "hookSpecificOutput": {
+      "hookEventName": "SessionStart", "additionalContext": restored,
     }}
 
   # Fires after every root-agent tool result and ENDS THE TURN when that result
-  # is this turn's saved owner card. `continue_: False` refuses the next model
-  # request while the receipt is still inside the CLI, so the response is cut at
-  # the card and no post-card text can be generated — instead of racing an
-  # interrupt against generation the receipt already started. Möbius never
+  # is this turn's turn-ending receipt (a helper's ask_parent or a key card).
+  # `continue_: False` refuses the next model request while the receipt is
+  # still inside the CLI, so the response is cut at the receipt and no text
+  # after it can be generated — instead of racing an interrupt against
+  # generation the receipt already started. Möbius never
   # filters what a provider does emit; this removes the cause, not the evidence.
   #
   # Observed terminal for the cut (SDK 0.2.153): subtype "success",
   # is_error False, stop_reason "tool_use", terminal_reason "hook_stopped",
   # result "". The `stopReason` string is not rendered anywhere and the session
-  # stays resumable, which is how the owner's answer continues the chat.
+  # stays resumable, which is how the answer continues the chat.
   async def turn_end_hook(
     hook_input: dict[str, Any],
     tool_use_id: str | None,
@@ -1378,8 +1394,8 @@ async def run_claude_sdk_turn(
     receipt_id = turn_end_receipt_id(hook_input.get("tool_response"))
     if receipt_id is None:
       return {"continue_": True}
-    # Only the card this turn actually saved ends this turn: a tool that merely
-    # printed an old receipt has no matching continuation block here.
+    # Only a receipt this turn actually recorded ends this turn: a tool that
+    # merely printed an old one is unknown to the sink.
     ends_turn = getattr(bc, "ends_turn", None)
     if not callable(ends_turn) or not ends_turn(receipt_id):
       return {"continue_": True}
@@ -1392,7 +1408,7 @@ async def run_claude_sdk_turn(
     )
     return {
       "continue_": False,
-      "stopReason": "Saved owner card ends the turn.",
+      "stopReason": "Recorded question or key card ends the turn.",
     }
 
   # Per-chat model/effort overrides flow in via `agent_settings`
@@ -1427,16 +1443,17 @@ async def run_claude_sdk_turn(
       f"Selected model {_model!r} does not belong to provider {provider_id!r}."
     )
   # The visible-answer check (see `answer_check.reason`) runs at each
-  # hand-back: just before the root agent saves an owner card, and when it
-  # ends its turn. Before a card it declines that one tool call, so the agent
-  # can add what is missing and call the card again; at the end it returns
-  # the turn. After it speaks, it considers only blocks that arrived since (plus
+  # hand-back: just before the root agent saves a key card (`request_key`,
+  # the one owner card saved mid-turn), and when it ends its turn (owner-input
+  # requests are shown only after this end-of-turn check). Before a card it
+  # declines that one tool call, so the agent can add what is missing and
+  # call the card again; at the end it returns the turn. After it speaks, it considers only blocks that arrived since (plus
   # all visible text), so an unchanged retry or continuation passes and a
   # second miss is caught, before a card or at the end, up to
   # answer_check.MAX_REMINDERS per turn. That cap, not the CLI's
   # `stop_hook_active`, bounds how often a Stop is returned. A steer starts a
   # fresh block list, which the identity check below treats as new. A Stop or
-  # a saved owner card owns the turn's end, so neither is reopened.
+  # a saved key card owns the turn's end, so neither is reopened.
   answer_check_reminders = 0
   # (block list, blocks covered by the last reminder, thinking covered by any
   # check that spoke). The after-step note shares the thinking pointer, so one
@@ -1480,7 +1497,7 @@ async def run_claude_sdk_turn(
 
   def _answer_check_since_last_reminder(
     *, before_card: bool, last_assistant_message: object = None,
-    message_required: bool = False, key_request: bool = False,
+    key_request: bool = False,
   ) -> str | None:
     nonlocal answer_check_reminders, answer_check_before_key_hold
     if (
@@ -1496,7 +1513,6 @@ async def run_claude_sdk_turn(
       before_card=before_card,
       reminded=answer_check_reminders > 0,
       last_assistant_message=last_assistant_message,
-      message_required=message_required,
       key_request=key_request,
     )
     if reason is None:
@@ -1542,11 +1558,8 @@ async def run_claude_sdk_turn(
     # it as pending visible text, without publishing it before the save.
     tool_input = hook_input.get("tool_input")
     message = tool_input.get("message") if isinstance(tool_input, dict) else None
-    tool_name = hook_input.get("tool_name")
     reason = _answer_check_since_last_reminder(
-      before_card=True, last_assistant_message=message,
-      message_required=tool_name in _ANSWER_CHECK_MESSAGE_REQUIRED_TOOLS,
-      key_request=tool_name == _ANSWER_CHECK_KEY_TOOL,
+      before_card=True, last_assistant_message=message, key_request=True,
     )
     if reason is None:
       return {"continue_": True}
@@ -1570,7 +1583,7 @@ async def run_claude_sdk_turn(
       _answer_check_forget_key_hold()
     if (
       hook_input.get("agent_id")
-      or hook_input.get("tool_name") in _ANSWER_CHECK_CARD_TOOLS
+      or hook_input.get("tool_name") == _ANSWER_CHECK_KEY_TOOL
       or active_client is None
       or not active_client.accepts_native_prompt
     ):
@@ -1585,7 +1598,7 @@ async def run_claude_sdk_turn(
     }}
 
   async def queued_prompt_hook(hook_input, tool_use_id, context):
-    """A queued prompt cannot start new work after Stop or a saved card."""
+    """A queued prompt cannot start new work after Stop or a turn-ending receipt."""
     del hook_input, tool_use_id, context
     if active_client is not None and not active_client.accepts_native_prompt:
       return {"continue_": False, "stopReason": "This Möbius turn has ended."}
@@ -1662,12 +1675,13 @@ async def run_claude_sdk_turn(
       "cli_path": _claude_cli_path(),
       "stderr": _capture_stderr,
       "hooks": {
-        # The queued-prompt gate keeps Stop and a saved owner card final, so a
+        # The queued-prompt gate keeps Stop and a turn-ending receipt final, so a
         # hook that raises or returns no valid decision refuses the prompt
         # rather than letting it start new work.
-        # The PostToolUse, PreCompact and Stop hooks stay permissive: failing
-        # one closed would turn a completed tool (even the saved card itself)
-        # into an error result, inviting a duplicate.
+        # The PostToolUse, PreCompact, SessionStart and Stop hooks stay
+        # permissive: failing one closed would turn a completed tool (even
+        # the turn-ending receipt itself) into an error result, inviting a
+        # duplicate.
         "UserPromptSubmit": [HookMatcher(
           matcher=None, hooks=[queued_prompt_hook], on_failure="block",
         )],
@@ -1679,13 +1693,16 @@ async def run_claude_sdk_turn(
         ],
         "PostToolUse": [
           HookMatcher(matcher="WebSearch", hooks=[websearch_sources_hook]),
-          HookMatcher(matcher=None, hooks=[goal_brief_after_compaction_hook]),
+          HookMatcher(matcher=None, hooks=[context_after_compaction_hook]),
           HookMatcher(matcher=None, hooks=[turn_end_hook]),
           HookMatcher(matcher=None, hooks=[visible_answer_after_step_hook]),
         ],
         "PreCompact": [
           HookMatcher(matcher=None, hooks=[precompact_hook]),
         ],
+        "SessionStart": [HookMatcher(
+          matcher=None, hooks=[context_after_compaction_session_start_hook],
+        )],
         "Stop": [HookMatcher(matcher=None, hooks=[visible_answer_hook])],
       },
     }
@@ -1969,8 +1986,8 @@ async def run_claude_sdk_turn(
             # Stop writes its own pause note through the stop flow.
             terminal["error"] = None
             if active_client.owner_card_end:
-              # A continuation owner-input card is the turn's NATURAL terminal:
-              # the owner's saved answer resumes the chat, so this is a clean
+              # A turn-ending receipt is the turn's NATURAL terminal: the
+              # answer resumes the chat, so this is a clean
               # completion — never a resumable "Paused" (which would auto-offer
               # Resume and race the pending-question wait).
               terminal["terminal_status"] = "completed"

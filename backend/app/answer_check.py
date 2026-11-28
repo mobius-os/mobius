@@ -16,13 +16,13 @@ folded away. Three shapes leave the owner without what the turn was for:
   page linked above") without ever writing it in visible text.
 
 `reason` checks these where a turn hands control back. When the agent ends its
-turn, all three count. Just before it saves an owner card (a saved card ends
-the turn, so a later check could never reopen it), only images and links do:
-a question, approval or restart card carries the turn's closing message in its
-`message`, so one without it is declined outright, with no reading of
-thinking. A key request may carry one too but is never declined for lacking
-it: it often answers at once without saving a card, and then drops it (and the
-turn goes on, so its caller forgets a hold once the request returns).
+turn, all three count; owner-input requests are shown on a card only after
+that check. Just before the key vault saves its `request_key` card, the one
+card saved mid-turn, only images and links count: a later check could never
+reopen a saved card. A key request may carry a closing message but is never
+declined for lacking one: it often answers at once without saving a card,
+and then drops the message (and the turn goes on, so its caller forgets a
+hold once the request returns).
 `after_step_reason` is the narrower check run after each work step,
 for words written as an extra thinking part. Both return text for the agent,
 or None. They never quote thinking back: asking the model to reproduce even
@@ -100,12 +100,6 @@ _MISSING_ANSWER = (
 _SEEN = "Everything the owner sees from this reply, verbatim: «{visible}»."
 _SEEN_EXCERPT = "The end of the owner's visible reply, verbatim: «…{visible}»."
 _SEEN_NOTHING = "The owner sees no text at all from this reply."
-_NO_CARD_MESSAGE = (
-  "This card has no message, and it is saved only with one. Saving it ends "
-  "your turn, so its `message` carries your closing message, shown to the "
-  "owner above the card: what you did, where things stand, and what the card "
-  "decides."
-)
 _IMAGES = (
   "You viewed {images} this turn, but your visible reply never shows {them}. "
   "If the owner should see {them} (you described {them}, promised to show "
@@ -124,6 +118,8 @@ _END_OF_TURN_NEXT = (
   "Do not mention this check. If nothing is missing, end your turn without "
   "writing anything more."
 )
+# For a caller checking before some other card is saved; the runners check
+# before a card only for a key request.
 _BEFORE_CARD_NEXT = (
   "Do not mention this check. Then call the same card tool again with the "
   "same arguments; this check speaks again only about something new."
@@ -131,11 +127,6 @@ _BEFORE_CARD_NEXT = (
 _BEFORE_KEY_REQUEST_NEXT = (
   "Do not mention this check. Then make the same key request again with the "
   "same arguments; this check speaks again only about something new."
-)
-_BEFORE_MESSAGE_CARD_NEXT = (
-  "Do not mention this check. Put any needed explanation, image or link in "
-  "the card's message and call the same card tool again, keeping its decision "
-  "arguments unchanged; this check speaks again only about something new."
 )
 # Attached to a work step's result (never blocking it), so a note the model
 # wrote as thinking mid-reply is caught without costing an extra model step.
@@ -157,34 +148,23 @@ def reason(
   before_card: bool,
   reminded: bool = False,
   last_assistant_message: object = None,
-  message_required: bool = False,
   key_request: bool = False,
 ) -> str | None:
   """What the owner may be missing from this reply, phrased for the agent.
 
   ``last_assistant_message`` is pending visible text: the CLI's final text at
-  Stop, or a card's closing message before its save. ``message_required``
-  marks a card whose save needs that message (question, approval, restart):
-  one without it is declined, and repairs are directed into it. Other cards'
-  repairs go into visible text, which the owner sees whether or not a card is
-  saved. Before a card, thinking is not read at all; the message rule covers a
-  closing message left out. Once a reminder has spoken this turn
-  (``reminded``), the length rule stays quiet: it has no new evidence, and a
-  reply that ends with more reasoning and nothing more to say, as the reminder
-  allows, must not be returned again for it. ``key_request`` words a hold
-  before a key request, which may never save a card, as a request not made.
+  Stop, or a key request's optional message before its save. Before a key
+  request, thinking is not read: the request may answer at once without a card.
+  Once a reminder has spoken this turn (``reminded``), the length rule stays
+  quiet unless there is new evidence. ``key_request`` words a hold before a
+  key request as a request not made.
   """
   if not isinstance(blocks, list):
     return None
   dispatched = _dispatched_text(blocks)
   visible = _with_undispatched_tail(dispatched, last_assistant_message)
   parts: list[str] = []
-  if before_card:
-    if message_required and not (
-      isinstance(last_assistant_message, str) and last_assistant_message.strip()
-    ):
-      parts.append(_NO_CARD_MESSAGE)
-  elif (
+  if not before_card and (
     # Final text the stream reader has not dispatched yet comes after every
     # thinking block here, so nothing in thinking closes the reply.
     (visible == dispatched and _has_unsaid_draft(
@@ -210,8 +190,7 @@ def reason(
   if before_card and key_request:
     return " ".join([_BEFORE_KEY_REQUEST, *parts, _BEFORE_KEY_REQUEST_NEXT])
   if before_card:
-    next_step = _BEFORE_MESSAGE_CARD_NEXT if message_required else _BEFORE_CARD_NEXT
-    return " ".join([_BEFORE_CARD, *parts, next_step])
+    return " ".join([_BEFORE_CARD, *parts, _BEFORE_CARD_NEXT])
   return " ".join([_END_OF_TURN, *parts, _END_OF_TURN_NEXT])
 
 

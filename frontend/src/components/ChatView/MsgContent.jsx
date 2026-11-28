@@ -1,4 +1,4 @@
-import { Fragment, memo, useMemo } from 'react'
+import { Fragment, memo, useContext, useMemo } from 'react'
 import { useGeneratedFiles } from './hooks/useGeneratedFiles.js'
 import { usePositionedPeerNotes } from './peerTimelineContext.js'
 import {
@@ -21,6 +21,8 @@ import { foldAppActivityOperations, joinRoutineToActivity } from './activityGrou
 import QuestionCard from './QuestionCard.jsx'
 import KeyQuestionCard from './KeyQuestionCard.jsx'
 import { questionCardOpen } from './questionOpen.js'
+import { askedQuestionsActivity, cardLeavesActivityRow } from './askedQuestionsActivity.js'
+import { LocalAnswersContext } from './localAnswersContext.js'
 import SecureInputCard from './SecureInputCard.jsx'
 import Attachments, { attachmentIsGalleryImage, generatedImageHref } from './Attachments.jsx'
 import CompactionCard from './CompactionCard.jsx'
@@ -292,6 +294,7 @@ function MsgContentInner({
   activitySourceBlocks,
 }) {
   const positionedNotes = usePositionedPeerNotes(activityMessageId || msg.id)
+  const localAnswers = useContext(LocalAnswersContext)
   // One identity per message while its files are unchanged: open image
   // previews and document cards derive from this list. It holds every
   // published file; the layout below decides where each one shows.
@@ -397,9 +400,25 @@ function MsgContentInner({
     // into its earlier activity line (joinRoutineToActivity).
     // Folding paged app receipts removes separators between compact runs.
     // Merge only afterward so newly adjacent work shares one disclosure.
+    // A list card the agent carried on past with nothing answered leaves an
+    // "Asked a question" activity row where it was, folding with the
+    // reply's other activity like any tool call.
+    // A card the live stream is rendering is suppressed here, never traced.
+    const tracedEntries = coalescedEntries.map(entry => {
+      if (entry.item?.input_requests !== true) return entry
+      const block = entry.item
+      const traced = cardLeavesActivityRow(block, {
+        answerable: isQuestionAnswerable(block),
+        locallyAnswered: (localAnswers || []).some(record => (
+          String(record.chatId) === String(chatId)
+          && record.body?.question_id === block?.question_id
+        )),
+      }) && !suppressedQuestionKeys?.has(questionKey(block))
+      return traced ? { ...entry, item: askedQuestionsActivity(block) } : entry
+    })
     const finalEntries = mergeAdjacentCompactActivityEntries(
       foldAppActivityOperations(
-        isStreaming ? coalescedEntries : joinRoutineToActivity(coalescedEntries),
+        isStreaming ? tracedEntries : joinRoutineToActivity(tracedEntries),
       ),
     )
     // The rendered tail's entry idx — the anchor for "is this block the tail"
@@ -605,6 +624,13 @@ function MsgContentInner({
               onPrepareAnswer={answerable ? onQuestionSubmitIntent : undefined}
               onCancelAnswer={answerable ? onQuestionSubmitCancel : undefined}
               disabled={!answerable && !answers}
+              inputRequests={block.input_requests === true}
+              requestStates={block.request_states}
+              // By identity, not position: a card answered in part stays the
+              // open card for its secret and restart entries while the turn
+              // its answers started writes below it.
+              entriesOffered={block.input_requests === true && !!answers
+                && !!onQuestionAnswer && block.question_id === liveQuestionId}
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
           </div>

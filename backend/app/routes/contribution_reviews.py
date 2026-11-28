@@ -1239,11 +1239,16 @@ def _chat_handoff(db, chat) -> dict:
   from app.chat_waits import outstanding_waits_for_chat, serialize_wait
   from app.delegations import serialize_background_helpers
   from app.goal_plans import presented_goal
+  from app.owner_input_requests import shown_request_card
+  from app.questions import owner_waiting_card_id
   if chat is None:
     return {"kind": "none", "reason": None}
+  running = is_chat_running(chat.id)
   return project_handoff(
-    owner_input=bool(chat.pending_question_id) or chat.id in secure_inputs.pending_chat_ids(),
-    running=is_chat_running(chat.id),
+    owner_input=bool(owner_waiting_card_id(
+      chat.pending_question_id, shown_request_card(db, chat.id), running=running,
+    )) or chat.id in secure_inputs.pending_chat_ids(),
+    running=running,
     waits=[serialize_wait(wait, db=db) for wait in outstanding_waits_for_chat(db, chat.id)],
     helper_count=serialize_background_helpers(db, chat.id)["count"],
     park=continuation_handoff_for_chat(db, chat.id),

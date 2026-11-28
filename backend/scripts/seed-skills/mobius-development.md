@@ -42,16 +42,23 @@ owns activation and restarts, and `contributing` owns public GitHub actions.
   `refs/mobius/platform-set-aside/retired-<time>-<release>` (the three most
   recently retired stay).
 - **Owner-input cards.** Card access is deliberately uniform: any authenticated
-  participant that can read a Q&A, Restart, or sealed-input card may answer it
-  through that card's ordinary endpoint. The chat access check and exact card
-  identity are the authority boundary; do not add a second card-answer role or
-  token hierarchy.
-- **Restart cards.** `request_restart` binds its card to the current run and
-  ready boot and owns at-most-once admission for that exact action; the worker
-  admits one drain and restart handoff. A lost response, duplicate click, or
-  ambiguous process death must never cause an agent to replay the restart. Any
-  later ready boot resumes every linked Restart-card chat independently, and
-  each resumed agent verifies whether its changes loaded.
+  participant that can read a card may settle any of its entries (question,
+  approval, restart or sealed input) through that entry's ordinary endpoint. The
+  chat access check and exact card identity are the authority boundary; do not
+  add a second card-answer role or token hierarchy.
+- **Owner-input requests.** Agents record what they need on the chat's
+  durable request list (`owner_input`, `app/owner_input_requests.py`); asking
+  never ends a turn, and the platform shows what is open as the turn's last
+  item. Never reintroduce a tool or receipt that cuts a turn at a card; read
+  that module's docstring and the card lifecycle in `app/questions.py` before
+  changing how requests are asked, shown or answered.
+- **Restart entries.** A restart request's card entry is bound, when it is
+  shown, to the publishing run and ready boot and owns at-most-once admission
+  for that exact action; the worker admits one drain and restart handoff. A lost
+  response, duplicate click, or ambiguous process death must never cause an
+  agent to replay the restart. Any later ready boot resumes every chat with a
+  linked restart independently, and each resumed agent verifies whether its
+  changes loaded.
 - **Schema migrations.** SQLAlchemy `create_all` creates missing tables but never
   adds a column to an existing one. A new model field needs a new numbered,
   idempotent function at the append-only end of

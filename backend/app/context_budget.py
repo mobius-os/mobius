@@ -32,6 +32,21 @@ CLAIM_SUMMARY_CHARS = 500
 CLAIM_TEXT_CHARS = 1_000  # a takeover reason or an outcome
 
 
+# The open owner-request list a top-level turn carries, and an in-turn
+# compaction restores, is a summary within these limits; `owner_input` with
+# op list returns every row whole. The whole block body (serialized, ASCII)
+# fits OPEN_REQUESTS_CONTEXT_CHARS, so the block with its preamble and the
+# compaction lead stays under the 10,000 characters Claude Code keeps inline
+# from one hook's additionalContext. Long prompts and blocked-work text are
+# marked excerpts; if the rows still do not fit, they drop their header,
+# option labels, secret field labels and blocked-work text, then, newest
+# first, keep only their identity.
+OPEN_REQUESTS_CONTEXT_CHARS = 7_000
+OPEN_REQUEST_PROMPT_CHARS = 600
+OPEN_REQUEST_WORK_CHARS = 300
+OPEN_REQUEST_COMPACT_PROMPT_CHARS = 160
+
+
 # A change's reply echoes at most this much of one text and this many ids;
 # a refusal names this many ids and counts the rest.
 REPLY_TEXT_CHARS = 4_000

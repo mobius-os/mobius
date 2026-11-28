@@ -7417,6 +7417,18 @@ def _add_channel_feeds(eng) -> None:
       ))
 
 
+def _add_chat_open_request_card(eng) -> None:
+  """Existing chats have no request-list card; NULL is their true state."""
+  from sqlalchemy import inspect as sa_inspect, text
+
+  inspector = sa_inspect(eng)
+  if "chats" not in inspector.get_table_names():
+    return
+  if "open_request_card_id" not in {c["name"] for c in inspector.get_columns("chats")}:
+    with eng.begin() as conn:
+      conn.execute(text("ALTER TABLE chats ADD COLUMN open_request_card_id VARCHAR(64)"))
+
+
 _SCHEMA_MIGRATIONS = (
   # Full IDs are permanent identities, not sequence positions. Append new
   # work in execution order; never renumber a shipped ID to reconcile sources.
@@ -7549,6 +7561,7 @@ _SCHEMA_MIGRATIONS = (
   ("0108_chat_pending_revision", _add_chat_pending_revision),
   ("0109_channel_feeds", _add_channel_feeds),
   ("0110_schedule_state_out_of_app_data", _move_schedule_state_out_of_app_data),
+  ("0111_chat_open_request_card", _add_chat_open_request_card),
 )
 
 

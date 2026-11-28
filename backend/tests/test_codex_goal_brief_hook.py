@@ -20,7 +20,7 @@ from app.codex_sdk_runner import (
   ActiveCodexTurn, _codex_goal_brief_hook_override, _codex_owner_card_hook_override,
   _codex_platform_hook_overrides, _codex_platform_hook_thread_config,
 )
-from app.goals import CompactionBriefRefresh
+from app.compaction_context import CompactionContextRefresh
 
 BRIEF = "FRESH_GOAL_BRIEF"
 DELIVERED = "Context was compacted; current Goal brief follows (read_goal re-reads it).\n" + BRIEF
@@ -87,13 +87,14 @@ def test_thread_trust_covers_each_exact_platform_hook_and_nothing_else(monkeypat
     ))
 
 
-def test_undiscovered_brief_hook_only_loses_in_turn_restore(monkeypatch):
+def test_undiscovered_brief_hook_is_left_untrusted(monkeypatch):
   brief, card = _codex_goal_brief_hook_override(), _codex_owner_card_hook_override()
   _listing(monkeypatch, [_metadata(card, key="card")])
   result = asyncio.run(_codex_platform_hook_thread_config(
     object(), {"HooksListResponse": object}, "/work", {}, [card], optional=[brief],
   ))
-  # Left untrusted, Codex never runs it; the next turn's brief covers it.
+  # Left untrusted, Codex never runs it; the runner's steering fallback
+  # restores instead (test_codex_compaction_restore_fallback).
   assert result["hooks.state"] == {"card": {"trusted_hash": "card-hash"}}
 
   class Broken:
@@ -139,7 +140,7 @@ def _run_turn(monkeypatch, *, delegated, refresh, discovery):
   result = asyncio.run(codex_sdk_runner.run_codex_sdk_turn(
     user_message="work", session_id=None, base_env={}, cwd="/tmp", chat_id="chat",
     bc=_FakeBroadcast(), pending_questions={}, db=None,
-    run_policy=SimpleNamespace() if delegated else None, goal_brief_refresh=refresh,
+    run_policy=SimpleNamespace() if delegated else None, compaction_refresh=refresh,
   ))
   return result, captured
 
@@ -155,7 +156,7 @@ def test_only_a_turn_with_a_goal_brief_refresher_trusts_the_brief_hook(
     calls.append((list(hook_overrides), list(optional)))
     return config
 
-  refresh = CompactionBriefRefresh(lambda: BRIEF) if has_refresh else None
+  refresh = CompactionContextRefresh(lambda: DELIVERED) if has_refresh else None
   result, captured = _run_turn(
     monkeypatch, delegated=delegated, refresh=refresh, discovery=discovery,
   )
@@ -179,7 +180,7 @@ def test_failed_turn_end_hook_discovery_fails_the_delegated_turn_closed(monkeypa
       raise RuntimeError("hooks/list unavailable")
   monkeypatch.setattr(codex_sdk_runner, "control_client", lambda _: Broken())
   result, captured = _run_turn(
-    monkeypatch, delegated=True, refresh=CompactionBriefRefresh(lambda: BRIEF),
+    monkeypatch, delegated=True, refresh=CompactionContextRefresh(lambda: DELIVERED),
     discovery=_codex_platform_hook_thread_config,
   )
   assert "hooks/list unavailable" in result["error"]
@@ -193,7 +194,7 @@ def test_goal_less_coordinator_trusts_lazy_hook_without_changing_turn_input(monk
     calls.append(list(optional))
     return config
 
-  refresh = CompactionBriefRefresh(lambda: "")
+  refresh = CompactionContextRefresh(lambda: "")
   result, captured = _run_turn(monkeypatch, delegated=False, refresh=refresh, discovery=discovery)
   assert result["error"] is None
   assert calls == [[_codex_goal_brief_hook_override()]]
@@ -202,17 +203,17 @@ def test_goal_less_coordinator_trusts_lazy_hook_without_changing_turn_input(monk
 
   async def compact():
     active = ActiveCodexTurn(SimpleNamespace(id="thread-a"), object(), chat_id="chat",
-                             goal_brief_refresh=refresh)
-    return await active.goal_brief_after_compaction("thread-a")
+                             compaction_refresh=refresh)
+    return await active.context_after_compaction("thread-a")
 
   assert asyncio.run(compact()) == ""
   assert not refresh.stale
 
 
-def _active(thread_id="thread-a", load=lambda: BRIEF):
-  refresh = CompactionBriefRefresh(load)
+def _active(thread_id="thread-a", load=lambda: DELIVERED):
+  refresh = CompactionContextRefresh(load)
   return ActiveCodexTurn(SimpleNamespace(id=thread_id), object(), chat_id="chat",
-                         goal_brief_refresh=refresh), refresh
+                         compaction_refresh=refresh), refresh
 
 
 @pytest.mark.asyncio
@@ -220,15 +221,15 @@ async def test_each_compaction_hook_delivers_the_brief_exactly_once():
   # Codex runs the hook only after it compacts: its arrival is the signal.
   active, refresh = _active()
   assert not refresh.stale
-  assert await active.goal_brief_after_compaction("thread-a") == DELIVERED
+  assert await active.context_after_compaction("thread-a") == DELIVERED
   assert not refresh.stale
-  assert await active.goal_brief_after_compaction("thread-a") == DELIVERED
+  assert await active.context_after_compaction("thread-a") == DELIVERED
   assert not refresh.stale
 
 
 @pytest.mark.asyncio
 async def test_an_earlier_unserved_need_is_not_delivered_twice_by_a_later_hook():
-  loads = iter([RuntimeError("db busy"), BRIEF, BRIEF])
+  loads = iter([RuntimeError("db busy"), DELIVERED, DELIVERED])
 
   def load():
     value = next(loads)
@@ -237,32 +238,32 @@ async def test_an_earlier_unserved_need_is_not_delivered_twice_by_a_later_hook()
     return value
 
   active, refresh = _active(load=load)
-  assert await active.goal_brief_after_compaction("thread-a") == ""
+  assert await active.context_after_compaction("thread-a") == ""
   assert refresh.stale
   # The next compaction's hook serves its own need and absorbs the earlier
   # one: one brief, not two, and nothing left over for a third call.
-  assert await active.goal_brief_after_compaction("thread-a") == DELIVERED
+  assert await active.context_after_compaction("thread-a") == DELIVERED
   assert not refresh.stale
 
 
 @pytest.mark.asyncio
 async def test_no_refresher_means_no_brief():
   active = ActiveCodexTurn(SimpleNamespace(id="thread-a"), object(), chat_id="chat")
-  assert await active.goal_brief_after_compaction("thread-a") == ""
+  assert await active.context_after_compaction("thread-a") == ""
 
 
 @pytest.mark.asyncio
 async def test_compaction_hook_for_another_thread_or_ending_turn_is_refused():
   active, refresh = _active()
   with pytest.raises(LookupError):
-    await active.goal_brief_after_compaction("thread-b")
+    await active.context_after_compaction("thread-b")
   stopping, stopping_refresh = _active()
   stopping._interrupt_requested = True
   with pytest.raises(LookupError):
-    await stopping.goal_brief_after_compaction("thread-a")
+    await stopping.context_after_compaction("thread-a")
   active.mark_finished()
   with pytest.raises(LookupError):
-    await active.goal_brief_after_compaction("thread-a")
+    await active.context_after_compaction("thread-a")
   assert not refresh.stale and not stopping_refresh.stale
 
 
@@ -333,7 +334,7 @@ def test_compaction_endpoint_serves_only_the_live_run_on_that_thread(
   calls = []
 
   class Handle:
-    async def goal_brief_after_compaction(self, thread_id):
+    async def context_after_compaction(self, thread_id):
       calls.append(thread_id)
       if thread_id != "thread-a":
         raise LookupError("This turn does not own that Codex thread.")
@@ -393,7 +394,7 @@ def test_installed_codex_restores_brief_in_the_compacted_turn_without_a_model_ca
         brief_calls.append((self.path, self.headers.get("authorization"), body))
         assert self.headers.get("authorization") == f"Bearer {turn_token}"
         context = asyncio.run_coroutine_threadsafe(
-          state["active"].goal_brief_after_compaction(body["thread_id"]), state["loop"],
+          state["active"].context_after_compaction(body["thread_id"]), state["loop"],
         ).result(timeout=10)
         content, kind = json.dumps({"context": context}).encode(), "application/json"
       else:
@@ -478,10 +479,10 @@ def test_installed_codex_restores_brief_in_the_compacted_turn_without_a_model_ca
       )
       if turn_env is not None:
         turn_env.link_thread(links, thread.id)
-      refresh = CompactionBriefRefresh(lambda: BRIEF)
+      refresh = CompactionContextRefresh(lambda: DELIVERED)
       state["refresh"] = refresh
       state["active"] = ActiveCodexTurn(thread, None, chat_id="local-chat",
-                                        goal_brief_refresh=refresh)
+                                        compaction_refresh=refresh)
       turn = state["active"].turn = await thread.turn("Work until done.")
       async for note in turn.stream():
         if note.method == "turn/completed":

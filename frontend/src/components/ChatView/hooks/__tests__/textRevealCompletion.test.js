@@ -189,3 +189,45 @@ test('sparse low-throughput arrivals accumulate fractional credit instead of sta
   send({ type: 'done' })
   await finish()
 })
+
+test('a turn-end card appears only after the reply above it has finished revealing', async () => {
+  await setup()
+  const text = 'Here is where things stand before you decide. '.repeat(20)
+  // A final-only reply, then the card the platform publishes at turn end.
+  send({ type: 'text_final', content: text, text_item_id: 'one' })
+  send({
+    type: 'question', question_id: 'card', input_requests: true,
+    questions: [{ id: 'r1', kind: 'question', question: 'How formal?', options: [] }],
+  })
+  send({ type: 'done' })
+  await settle()
+  const kinds = () => hook.result.current.streamItems.map(item => item.type)
+  let sawPartialText = false
+  for (let i = 0; i < 600 && !ended.length; i++) {
+    await frame()
+    const shown = visible().length
+    if (kinds().includes('question')) {
+      assert.equal(shown, text.length, 'the card never shows beside unrevealed reply text')
+    } else if (shown > 0 && shown < text.length) {
+      sawPartialText = true
+    }
+  }
+  assert.ok(sawPartialText, 'the reply still reveals at its own pace rather than in one jump')
+  assert.deepEqual(kinds(), ['text', 'question'])
+  assert.equal(ended.length, 1)
+  assert.equal(ended[0].text, text)
+  await attached
+})
+
+test('a card replayed in a catch-up burst is shown at once with its reply', async () => {
+  const text = 'Already delivered before reconnect. '.repeat(20)
+  await setup({ replay: [
+    { type: 'text', content: text, text_item_id: 'one' },
+    { type: 'question', question_id: 'card', input_requests: true,
+      questions: [{ id: 'r1', kind: 'question', question: 'How formal?', options: [] }] },
+  ] })
+  assert.equal(visible(), text)
+  assert.deepEqual(hook.result.current.streamItems.map(item => item.type), ['text', 'question'])
+  send({ type: 'done' })
+  await finish()
+})

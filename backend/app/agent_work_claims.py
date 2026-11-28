@@ -505,6 +505,12 @@ def _stage_settle(
   )
 
 
+def stage_release_claim(db: Session, row: models.AgentWorkClaim, *, outcome: str) -> bool:
+  """Release one open claim in the caller's transaction, fenced by revision;
+  False when a concurrent finish or transfer won."""
+  return _stage_settle(db, row, complete=False, outcome=outcome) is not None
+
+
 def _open_claims_for_chat(db: Session, chat_id: str):
   return db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,
@@ -571,10 +577,14 @@ def stage_settle_goal_claims(
   Called by every lifecycle write that moves a Goal out of ``open`` so the
   claim and the Goal end atomically; a restart can never observe an ended
   Goal that still owns an open exact action. A completing Goal completes only
-  the claims it names in ``finished_keys``; every other open claim, and every
-  claim of a stopped or dismissed Goal, is released so followers may reclaim
-  it. The caller may nudge exact-Goal result delivery after commit; immutable
-  subscribed outcomes do not depend on that nudge.
+  the claims it names in ``finished_keys`` and detaches (keeps open, without
+  a Goal) the claim of an approval request the chat still asks; every other
+  open claim, and every claim of a stopped or dismissed Goal, is released so
+  followers may reclaim it, and an open approval for a released claim is
+  withdrawn with it. A detached claim has no Goal left to settle it, so the
+  repair below never releases it; withdrawing the approval does. The caller
+  may nudge exact-Goal result delivery after commit; immutable subscribed
+  outcomes do not depend on that nudge.
   """
   if not goal_id or status == "open":
     return []
@@ -587,16 +597,37 @@ def stage_settle_goal_claims(
     models.AgentWorkClaim.owner_goal_id.is_(None),
     models.AgentWorkClaim.work_key.in_(finished),
   )
+  # An approval the chat still asks its owner outlives the Goal that asked
+  # it (an offer left at a handoff): completion detaches its claim instead
+  # of releasing it, so the owner's later choice still has its action.
+  from app.owner_input_requests import open_approval_work_keys
+  asked = open_approval_work_keys(db, chat_id) if status == "completed" else set()
   for row in db.query(models.AgentWorkClaim).filter(
     models.AgentWorkClaim.owner_chat_id == chat_id,
     or_(owned_by_goal, named_chat_claim) if finished else owned_by_goal,
     models.AgentWorkClaim.completed_at.is_(None),
     models.AgentWorkClaim.released_at.is_(None),
   ).all():
+    if row.work_key in asked and row.work_key not in finished:
+      db.query(models.AgentWorkClaim).filter(
+        models.AgentWorkClaim.id == row.id,
+        models.AgentWorkClaim.revision == row.revision,
+        models.AgentWorkClaim.owner_goal_id == goal_id,
+        models.AgentWorkClaim.completed_at.is_(None),
+        models.AgentWorkClaim.released_at.is_(None),
+      ).update({models.AgentWorkClaim.owner_goal_id: None,
+                models.AgentWorkClaim.updated_at: now_naive_utc()},
+               synchronize_session=False)
+      continue
     complete, outcome = _goal_outcome(status, result, row.work_key in finished)
     item = _stage_settle(db, row, complete=complete, outcome=outcome)
     if item is not None:
       settled.append(item)
+  from app.owner_input_requests import stage_approvals_withdrawn
+  stage_approvals_withdrawn(
+    db, chat_id, {item.work_key for item in settled if item.state == "released"},
+    reason=f"its Goal was {status}, which released the claim on its action",
+  )
   db.flush()
   return settled
 

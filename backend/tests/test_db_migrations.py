@@ -1907,6 +1907,7 @@ def test_run_migrations_records_an_inspectable_append_only_history(tmp_path):
     "0108_chat_pending_revision",
     "0109_channel_feeds",
     "0110_schedule_state_out_of_app_data",
+    "0111_chat_open_request_card",
   ]
   assert second == first
 
@@ -3791,6 +3792,35 @@ def test_goal_dismissal_migration_adds_nullable_chat_pointer(tmp_path):
     assert conn.execute(text(
       "SELECT COUNT(*) FROM schema_migrations "
       "WHERE version = '0024_chat_goal_dismissal'"
+    )).scalar_one() == 1
+
+
+def test_request_card_migration_leaves_existing_chats_without_a_card(tmp_path):
+  eng = create_engine(f"sqlite:///{tmp_path / 'request-card.db'}")
+  _create_schema_with_historical_goal_snapshots(eng)
+  with eng.begin() as conn:
+    conn.execute(text("ALTER TABLE chats DROP COLUMN open_request_card_id"))
+  # The previous release's chat row, written without the new column.
+  _insert_bare_chat(eng, "existing", title="Existing")
+  with eng.begin() as conn:
+    conn.execute(text(
+      "CREATE TABLE IF NOT EXISTS schema_migrations ("
+      "version VARCHAR(128) PRIMARY KEY, applied_at TIMESTAMP NOT NULL)"
+    ))
+    for version in _migration_versions_before("0111_chat_open_request_card"):
+      conn.execute(text(
+        "INSERT INTO schema_migrations (version, applied_at) VALUES (:v, :at)"
+      ), {"v": version, "at": datetime(2026, 11, 1)})
+
+  run_migrations(eng)
+
+  with eng.connect() as conn:
+    assert conn.execute(text(
+      "SELECT id, open_request_card_id FROM chats"
+    )).all() == [("existing", None)]
+    assert conn.execute(text(
+      "SELECT COUNT(*) FROM schema_migrations "
+      "WHERE version = '0111_chat_open_request_card'"
     )).scalar_one() == 1
 
 

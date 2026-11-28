@@ -557,11 +557,12 @@ def test_nested_helper_question_reaches_its_own_parent_never_the_owner(
 def test_compaction_refresh_delivers_the_post_update_assignment_once(
   client, owner_token, db, started,
 ):
-  from app.goals import compaction_brief_refresh, turn_goal_brief
+  from app.compaction_context import compaction_context_refresh
+  from app.goals import turn_goal_brief
   parent, backend, _frontend = _parallel_pair(client, owner_token, db)
   start_brief = turn_goal_brief(db, backend.child_chat_id, "backend-run", delegated=True)
   assert "NEW_BACKEND_CONSTRAINT" not in start_brief
-  refresh = compaction_brief_refresh(backend.child_chat_id, "backend-run", delegated=True)
+  refresh = compaction_context_refresh(backend.child_chat_id, "backend-run", delegated=True)
   # Nothing is owed before a compaction.
   assert asyncio.run(refresh.take()) == ""
 

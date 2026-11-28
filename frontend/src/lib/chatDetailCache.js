@@ -208,6 +208,8 @@ export function chatDetailCacheValue(data = {}) {
       ? data.pending_revision
       : 0,
     pending_question_id: data.pending_question_id || null,
+    // The open request-list card: answerable, but never bars a turn.
+    open_request_card_id: data.open_request_card_id || null,
     waits: Array.isArray(data.waits) ? data.waits : [],
     background_helpers: data.background_helpers
       && typeof data.background_helpers === 'object'

@@ -2,9 +2,10 @@
 
 When a top-level agent needs a key the owner has not given it (a new key, or
 sites a key does not list yet), it asks with the ``request_key`` control. The
-vault records the request; if the owner must answer, the ask is saved as an
-ordinary owner card, so the chat waits for the owner like every other card and
-the answer resumes the agent.
+vault records the request; if the owner must answer, the ask is saved as a
+barring owner card that ends the turn (routes/key_requests.py), so the chat
+waits for the owner and the answer resumes the agent. It is the one owner ask
+outside the `owner_input` request list.
 
 The card only records the owner's answer. The grant itself is the owner's own
 input: the owner's browser answers the vault request through the owner-only

@@ -635,10 +635,11 @@ def _tool_boundary_interrupt_result(
   )
 
 
-_OWNER_CARD_RECEIPT = {
-  "state": "waiting_for_owner",
-  "question_id": "card-9",
-  "next_action": "The turn is over.",
+# A helper's recorded question to its parent and a saved key card are the
+# turn-ending results; owner-input requests never end a turn.
+_OWNER_CARD_RECEIPT = {"state": "turn_end", "turn_end_id": "card-9"}
+_KEY_CARD_RECEIPT = {
+  "state": "waiting_for_owner", "question_id": "card-9", "next_action": "The turn is over.",
 }
 
 
@@ -664,7 +665,7 @@ async def _fire_card_end_hook(options, **overrides) -> dict:
   """Invoke the card-end hook exactly as the CLI does after a tool result."""
   hook_input = {
     "hook_event_name": "PostToolUse",
-    "tool_name": "mcp__mobius_control__request_approval",
+    "tool_name": "mcp__mobius_control__ask_parent",
     "tool_input": {"question": "Deploy?"},
     "tool_response": [{"type": "text", "text": json.dumps(_OWNER_CARD_RECEIPT)}],
     "tool_use_id": "toolu_1",
@@ -722,7 +723,7 @@ async def test_owner_card_hook_cuts_the_turn_before_the_receipt_reaches_the_mode
 
   client = clients[0]
   assert decisions == [
-    {"continue_": False, "stopReason": "Saved owner card ends the turn."},
+    {"continue_": False, "stopReason": "Recorded question or key card ends the turn."},
   ]
   # Generation is cut at its source, so nothing is interrupted; the original
   # prompt is the ONLY query — the card end never requeries.
@@ -743,6 +744,37 @@ async def test_owner_card_hook_cuts_the_turn_before_the_receipt_reaches_the_mode
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("tool_name", ["mcp__mobius_control__request_key", "Bash"])
+async def test_a_saved_key_card_ends_the_turn_at_its_receipt(monkeypatch, tool_name):
+  """The key vault's card is the one owner card saved mid-turn; its receipt
+  (from the tool or its command-line fallback) ends the turn like a helper's
+  recorded question."""
+  decisions: list[dict] = []
+  response = json.dumps(_KEY_CARD_RECEIPT)
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      decisions.append(await _fire_card_end_hook(
+        self.options, tool_name=tool_name,
+        tool_response=(
+          {"stdout": response, "stderr": ""} if tool_name == "Bash"
+          else [{"type": "text", "text": response}]
+        ),
+      ))
+      yield _tool_boundary_interrupt_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  bus = _CardBus()
+  bus.assistant_blocks = []
+  result = await _run_turn("key-card-chat", bc=bus, prompt="fetch the forecast")
+
+  assert decisions == [
+    {"continue_": False, "stopReason": "Recorded question or key card ends the turn."},
+  ]
+  assert result["terminal_status"] == "completed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
   ("label", "overrides"),
   [
@@ -753,8 +785,16 @@ async def test_owner_card_hook_cuts_the_turn_before_the_receipt_reaches_the_mode
     (
       "foreign_card",
       {"tool_response": [{"type": "text", "text": json.dumps(
-        {**_OWNER_CARD_RECEIPT, "question_id": "card-from-last-week"},
+        {**_OWNER_CARD_RECEIPT, "turn_end_id": "card-from-last-week"},
       )}]},
+    ),
+    # A saved card's receipt this turn's sink does not own as a key card
+    # (a request-list card is shown only after the turn ends).
+    (
+      "owner_card_receipt",
+      {"tool_name": "Bash", "tool_response": {"stdout": json.dumps({
+        **_KEY_CARD_RECEIPT, "question_id": "list-card-1",
+      }), "stderr": ""}},
     ),
     # A child agent's own tool: cutting here would end the CHILD, not the turn.
     ("subagent_tool", {"agent_id": "agent-7", "agent_type": "general-purpose"}),
@@ -1452,8 +1492,8 @@ def test_only_known_response_stream_events_prove_a_provider_response(
 def _owner_card_tool_call():
   return AssistantMessage(
     content=[ToolUseBlock(
-      id="toolu-card", name="mcp__mobius_control__request_question",
-      input={"question": "Which branch?"},
+      id="toolu-card", name="mcp__mobius_control__request_key",
+      input={"key": "weather", "reason": "Fetch the forecast."},
     )],
     model="claude-opus-4-8", session_id="sess-1", message_id="msg-card",
   )
@@ -2035,6 +2075,8 @@ async def test_claude_new_and_resumed_turns_exclude_native_owner_questions(
   for name in ("AskUserQuestion", "request_user_input"):
     denied = await clients[0].options.can_use_tool(name, {}, None)
     assert isinstance(denied, PermissionResultDeny)
+    # The refusal names the tool that does ask the owner.
+    assert denied.message == "Use the Möbius owner_input tool instead."
   assert not any(event.get("type") == "question" for event in bus.events)
 
 
@@ -4032,9 +4074,12 @@ async def test_answer_check_never_reopens_a_turn_a_saved_card_ended(monkeypatch)
 async def _fire_pre_card_hook(options, **overrides) -> dict:
   hook_input = {
     "hook_event_name": "PreToolUse",
-    "tool_name": "mcp__mobius_control__request_question",
+    # request_key is the one owner card still saved mid-turn; owner_input
+    # requests are shown at the turn's natural end, behind the Stop check.
+    "tool_name": "mcp__mobius_control__request_key",
     "tool_input": {
-      "questions": [{"question": "How does it look?"}],
+      "key": "openweather",
+      "reason": "Weather.",
       "message": "The new layout is in place; pick a direction below.",
     },
     "tool_use_id": "toolu_q",
@@ -4044,18 +4089,12 @@ async def _fire_pre_card_hook(options, **overrides) -> dict:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("missing", ["image", "message"])
-async def test_answer_check_declines_one_card_save_when_something_is_unshown(monkeypatch, missing):
+async def test_answer_check_declines_one_key_card_save_when_an_image_is_unshown(monkeypatch):
   chat_id = "answer-check-before-card-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
   bus.assistant_blocks = _viewed_before_after(chat_id)
-  if missing == "message":
-    bus.assistant_blocks.append({
-      "type": "text",
-      "content": f"![Before and after](/api/chats/{chat_id}/media/before-after.png)",
-    })
-  card = {"tool_input": {"questions": [{"question": "How does it look?"}]}} if missing == "message" else {}
+  card = {}
 
   class _Client(_FakeClient):
     async def receive_response(self):
@@ -4077,13 +4116,34 @@ async def test_answer_check_declines_one_card_save_when_something_is_unshown(mon
   assert denied["hookEventName"] == "PreToolUse"
   assert denied["permissionDecision"] == "deny"
   reason = denied["permissionDecisionReason"]
-  if missing == "image":
-    assert "before-after.png" in reason
-    assert "This card has no message" not in reason
-  else:
-    assert "This card has no message" in reason
-    assert "before-after.png" not in reason
+  assert "before-after.png" in reason
+  assert "This card has no message" not in reason
   assert decisions[2:] == [{"continue_": True}, {"continue_": True}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing", ["image", "link"])
+async def test_owner_input_open_requests_leave_unshown_content_for_stop(monkeypatch, missing):
+  """owner_input never saves a mid-turn card; Stop checks the final reply."""
+  chat_id = "answer-check-owner-input-unshown-chat"
+  bus = _ChatBus()
+  bus.assistant_blocks = (
+    _viewed_before_after(chat_id) if missing == "image"
+    else _link_only_in_tool_output("Pay on the test checkout page linked above.")
+  )
+  decisions = []
+
+  class _Client(_FakeClient):
+    async def receive_response(self):
+      (pre_card,) = self.options.hooks["PreToolUse"]
+      assert "mcp__mobius_control__owner_input" not in pre_card.matcher.split("|")
+      decisions.append(await _fire_stop_hook(self.options))
+      yield _success_result()
+
+  _install_fake_client(monkeypatch, _Client)
+  await _run_turn(chat_id, bc=bus)
+  assert decisions[0]["decision"] == "block"
+  assert ("before-after.png" if missing == "image" else "link") in decisions[0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -4098,11 +4158,7 @@ async def test_answer_check_before_a_card_is_registered_only_for_owner_card_tool
   # (proved against the bundled CLI in test_claude_subagent_hook_stop_e2e).
   assert re.fullmatch(r"[a-zA-Z0-9_|]+", matcher.matcher)
   assert set(matcher.matcher.split("|")) == {
-    "mcp__mobius_control__request_approval",
     "mcp__mobius_control__request_key",
-    "mcp__mobius_control__request_question",
-    "mcp__mobius_control__request_restart",
-    "mcp__mobius_control__request_secret",
   }
 
 
@@ -4256,12 +4312,11 @@ async def test_answer_check_lets_a_card_through_when_the_reply_is_complete(monke
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("card_tool", ["request_question", "request_approval", "request_restart"])
 @pytest.mark.parametrize("blocks,message", [
   (_closing_draft_in_thinking(), _DRAFT),
   (_ANSWER_ONLY_IN_THINKING, "The deploy failed because the build ran out of memory. " * 10),
 ], ids=["closing-draft", "long-reasoning"])
-async def test_a_card_with_its_closing_message_passes_whatever_the_reasoning(monkeypatch, card_tool, blocks, message):
+async def test_a_key_request_with_a_message_passes_whatever_the_reasoning(monkeypatch, blocks, message):
   decisions: list[dict] = []
   bus = _ChatBus()
   bus.assistant_blocks = list(blocks)
@@ -4269,7 +4324,7 @@ async def test_a_card_with_its_closing_message_passes_whatever_the_reasoning(mon
   class _Client(_FakeClient):
     async def receive_response(self):
       decisions.append(await _fire_pre_card_hook(
-        self.options, tool_name=f"mcp__mobius_control__{card_tool}",
+        self.options, tool_name="mcp__mobius_control__request_key",
         tool_input={"message": message},
       ))
       # Merely considering a card must not publish its text or alter the stream.
@@ -4282,39 +4337,21 @@ async def test_a_card_with_its_closing_message_passes_whatever_the_reasoning(mon
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("card_tool", ["request_question", "request_approval", "request_restart"])
-@pytest.mark.parametrize("message", [None, "", "   ", 5, {"text": _DRAFT}])
-async def test_answer_check_declines_a_card_without_a_closing_message(monkeypatch, card_tool, message):
-  decisions: list[dict] = []
+async def test_owner_input_without_a_visible_reply_is_caught_at_stop(monkeypatch):
+  """Owner-input cards publish at natural turn end, behind the Stop check."""
+  decisions = []
   bus = _ChatBus()
-  # Nothing else is missing: a short lead-in after brief reasoning.
-  bus.assistant_blocks = [
-    {"type": "thinking", "content": "Two options to offer."},
-    {"type": "text", "content": "Two ways to go."},
-  ]
+  bus.assistant_blocks = _closing_draft_in_thinking()
 
   class _Client(_FakeClient):
     async def receive_response(self):
-      card = f"mcp__mobius_control__{card_tool}"
-      decisions.append(await _fire_pre_card_hook(
-        self.options, tool_name=card, tool_input={"message": message},
-      ))
-      # After long reasoning about it, the agent adds the closing message.
-      bus.assistant_blocks.append(
-        {"type": "thinking", "content": "The card needs its closing message. " * 10},
-      )
-      decisions.append(await _fire_pre_card_hook(
-        self.options, tool_name=card, tool_input={"message": _DRAFT},
-      ))
+      decisions.append(await _fire_stop_hook(self.options))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
-  await _run_turn("answer-check-empty-card-message-chat", bc=bus)
-  denied = decisions[0]["hookSpecificOutput"]
-  assert denied["permissionDecision"] == "deny"
-  assert "This card has no message" in denied["permissionDecisionReason"]
-  assert "card's message" in denied["permissionDecisionReason"]
-  assert decisions[1] == {"continue_": True}
+  await _run_turn("answer-check-owner-input-stop-chat", bc=bus)
+  assert decisions[0]["decision"] == "block"
+  assert "visible reply" in decisions[0]["reason"]
 
 
 @pytest.mark.asyncio
@@ -4338,34 +4375,30 @@ async def test_an_unsaved_card_message_does_not_count_as_a_delivered_reply(monke
 
 
 @pytest.mark.asyncio
-async def test_secret_cards_need_no_message_and_keep_reply_text_guidance(monkeypatch):
+async def test_owner_input_secret_card_keeps_stop_reply_text_guidance(monkeypatch):
+  # A sealed owner_input entry is published at natural turn end, not by a
+  # request_secret tool; its unshown image is checked at Stop.
   chat_id = "answer-check-secret-card-chat"
-  decisions: list[dict] = []
+  decisions = []
   bus = _ChatBus()
-  bus.assistant_blocks = _closing_draft_in_thinking()
+  bus.assistant_blocks = _viewed_before_after(chat_id)
 
   class _Client(_FakeClient):
     async def receive_response(self):
-      secret = {"tool_name": "mcp__mobius_control__request_secret", "tool_input": {}}
-      decisions.append(await _fire_pre_card_hook(self.options, **secret))
-      bus.assistant_blocks = _viewed_before_after(chat_id)
-      decisions.append(await _fire_pre_card_hook(self.options, **secret))
+      decisions.append(await _fire_stop_hook(self.options))
       yield _success_result()
 
   _install_fake_client(monkeypatch, _Client)
   await _run_turn(chat_id, bc=bus)
-  assert decisions[0] == {"continue_": True}
-  output = decisions[1]["hookSpecificOutput"]
-  assert output["permissionDecision"] == "deny"
-  assert "before-after.png" in output["permissionDecisionReason"]
-  assert "card's message" not in output["permissionDecisionReason"]
-  assert "This card has no message" not in output["permissionDecisionReason"]
+  assert decisions[0]["decision"] == "block"
+  assert "before-after.png" in decisions[0]["reason"]
+  assert "card's message" not in decisions[0]["reason"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("missing", ["image", "link"])
 @pytest.mark.parametrize("included", [False, True])
-async def test_card_message_participates_in_image_and_link_checks(monkeypatch, missing, included):
+async def test_key_request_message_participates_in_image_and_link_checks(monkeypatch, missing, included):
   chat_id = "answer-check-card-media-chat"
   decisions: list[dict] = []
   bus = _ChatBus()
@@ -4390,8 +4423,8 @@ async def test_card_message_participates_in_image_and_link_checks(monkeypatch, m
     output = decisions[0]["hookSpecificOutput"]
     assert output["permissionDecision"] == "deny"
     assert ("before-after.png" if missing == "image" else "link but shows none") in output["permissionDecisionReason"]
-    assert "card's message" in output["permissionDecisionReason"]
-    assert "decision arguments unchanged" in output["permissionDecisionReason"]
+    assert "visible reply" in output["permissionDecisionReason"]
+    assert "same key request again" in output["permissionDecisionReason"]
 
 
 @pytest.mark.asyncio
@@ -4491,7 +4524,7 @@ async def test_answer_check_after_a_step_notes_once_without_blocking_the_step(mo
       # A delegated child's step and a card tool are not this check's to note.
       decisions.append(await after_step(self.options, agent_id="child-1"))
       decisions.append(await after_step(
-        self.options, tool_name="mcp__mobius_control__request_question",
+        self.options, tool_name="mcp__mobius_control__request_key",
       ))
       decisions.append(await after_step(self.options))
       # The next step with nothing new since is not noted again.

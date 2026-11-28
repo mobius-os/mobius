@@ -643,6 +643,11 @@ def serialize_wait(
     ),
     "met_at": row.met_at.isoformat() if row.met_at else None,
     "created_at": row.created_at.isoformat() if row.created_at else None,
+    # A restart's monitor is armed from the moment the restart is offered, so
+    # a later ready boot can resume the chat; nothing is under way until the
+    # owner asks for it. Other waits have no such step.
+    **({"restart_requested": row.action_approved_at is not None}
+       if row.kind == "platform_activation" else {}),
   }
 
 

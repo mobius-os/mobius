@@ -526,6 +526,11 @@ export function upsertQuestionItem(prev, incoming) {
     if (existing.key_request && !merged.key_request) merged.key_request = existing.key_request
     if (existing.message && !merged.message) merged.message = existing.message
     if (existing.answers && !merged.answers) merged.answers = existing.answers
+    // A replayed card carries the states it was published with; an entry the
+    // stream has since seen settle keeps that newer state.
+    if (existing.request_states) {
+      merged.request_states = { ...(incoming.request_states || {}), ...existing.request_states }
+    }
     if (existing.absorbedTool) merged.absorbedTool = existing.absorbedTool
     if (existing.absorbedToolUseId) {
       merged.absorbedToolUseId = existing.absorbedToolUseId

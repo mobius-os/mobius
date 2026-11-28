@@ -91,7 +91,8 @@ Status: draft for review.
    or denies; only the owner's own input can approve. The card asks where
    the request was made, answered through the owner-only routes: an agent's
    in the chat that asked (the vault keeps that chat; the agent's
-   `request_key` control saves an ordinary owner card, and the card records
+   `request_key` control saves a barring owner card, the one owner ask that
+   is not an `owner_input` request, and the card records
    the owner's answer only once the vault agrees with it, which resumes the
    agent; a `mobius-key-request` fence, a draft of this card that never
    shipped, is shown as ordinary code), and an app's in a dialog over the
@@ -565,7 +566,7 @@ each minted token to the key's redaction set.
 - Asking again while a request for the key waits with another recipe or
   other parts is refused (409): the owner answers the waiting one first.
 - `store-key.py` maps the sealed card's fields (at most eight, matching
-  `request_secret`, so part names are lowercase letters, digits and `_`)
+  a secret request's fields, so part names are lowercase letters, digits and `_`)
   onto parts one to one, with `--part NAME[:plain|:secret[:LABEL]]` (an
   existing part keeps its secrecy unless told), and takes `--basic USER_PART
   PASS_PART`, `--slots JSON` or `--recipe JSON` for the recipe.

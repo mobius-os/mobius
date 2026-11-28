@@ -131,7 +131,9 @@ test('mixed grouped questions describe answering without inventing text-only cho
   assert.equal((html.match(/class="qcard__hint"/g) || []).length, 1)
   assert.equal((html.match(/role="radiogroup"/g) || []).length, 1)
   assert.match(html, /placeholder="Type your answer…"/)
-  assert.doesNotMatch(html, /questions still need|questions to submit|qcard__submit-hint/)
+  assert.doesNotMatch(html, /questions still need|questions to submit/)
+  assert.match(html, /<div class="qcard__submit-hint chat__sr-only" role="status"><\/div>/,
+    'the announcer is mounted empty, so its text is announced when it appears')
 })
 
 test('a ten-question block renders every prompt and preserves every saved reply', () => {
@@ -191,7 +193,7 @@ test('unanswered question cards do not have a stale gray state', () => {
     'unanswered cards should not tell the user the question expired')
   assert.match(component, /const showsAnswerControls = answered \|\| shownAnswerableRef\.current/,
     'answered cards and cards this mount has shown answerable keep their controls')
-  assert.match(component, /\{!completedAction && showsAnswerControls && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
+  assert.match(component, /\{!completedAction && showsAnswerControls && showsSharedSubmit && \([\s\S]*<button[\s\S]*className=\{?[`"]qcard__submit/,
     'submit button should remain in place after an answer is submitted')
   assert.match(component, /let submitLabel = writtenRestartAction \? 'Continue' : 'Submit'[\s\S]*if \(answered\) submitLabel = 'Submitted'[\s\S]*if \(submitting\) submitLabel = 'Submitting…'/,
     'the retained submit button should explain pending and answered states without rewriting legacy Restart cards')
@@ -259,10 +261,24 @@ test('question card css has no stale styling hook', () => {
     'a failed answer should keep its retry notice attached to the card')
 })
 
+test('the announced Submit hint never moves the Submit button', () => {
+  // The hint only announces what the button's own label already shows, so
+  // inserting it on a tap must leave the button exactly where it was.
+  assert.match(component, /className="qcard__submit-hint chat__sr-only"/)
+  const selectors = [...css.matchAll(/([^{}]+)\{/g)].map(match => match[1].trim())
+  assert.deepEqual(selectors.filter(selector => selector.includes('qcard__submit-hint')), [],
+    'no rule may give the visually hidden hint, or the Submit after it, its own spacing')
+})
+
 test('multiple questions read as one compact decision panel', () => {
   assert.match(component, /const grouped = questions\.length > 1/)
-  assert.match(component, /className=\{`qcard\$\{grouped \? ' qcard--grouped'/)
-  assert.match(component, /\{questions\.length\} decisions/)
+  // An ordinary card shows every question; a closed list card only those
+  // answered or settled on it, so the grouped layout follows what is shown.
+  assert.match(component, /visibleQuestions = inputRequests\s*\?[\s\S]*?: questions\n/)
+  assert.match(component, /const shownGrouped = visibleQuestions\.length > 1/)
+  assert.match(component, /className=\{`qcard\$\{shownGrouped \? ' qcard--grouped'/)
+  assert.match(component, /sensitiveShown \? 'requests' : 'decisions'/)
+  assert.match(component, /const groupTitle = `\$\{visibleQuestions\.length\} \$\{groupNoun\}`/)
   assert.match(component, /Answer each question, then submit them together\./)
   assert.match(css, /\.qcard\s*\{[\s\S]*?width:\s*100%;[\s\S]*?margin:\s*10px 0;/)
   assert.match(css, /\.qcard--grouped\s*\{[\s\S]*?overflow:\s*hidden;/)
@@ -392,7 +408,8 @@ test('incomplete cards omit progress counts but still guide a Submit attempt', a
   const html = renderToStaticMarkup(createElement(QuestionCard, {
     chatId: 'hint-chat', questionId: 'hint-q', questions, onAnswer: () => {},
   }))
-  assert.doesNotMatch(html, /qcard__submit-hint|questions still need|questions to submit/)
+  assert.doesNotMatch(html, /questions still need|questions to submit/)
+  assert.match(html, /<div class="qcard__submit-hint chat__sr-only" role="status"><\/div>/)
   const submit = html.match(/<button[^>]*class="qcard__submit[^"]*"[^>]*>/)?.[0] || ''
   assert.match(submit, /qcard__submit--incomplete/)
   assert.match(submit, /aria-disabled="true"/)
@@ -428,4 +445,9 @@ test('a typed-only question opens one line tall, the same as the box under choic
   assert.doesNotMatch(component, /qcard__answer-row--typed/)
   assert.doesNotMatch(css, /qcard__answer-row--typed/)
   assert.match(css, /\.qcard__input\s*\{[^}]*min-height:\s*38px;/, 'one line plus padding')
+})
+
+test('an approval entry header reads like any other entry header', () => {
+  // Every entry is a decision; no kind's header is singled out in the accent.
+  assert.doesNotMatch(css, /\.qcard__q--approval[^{]*\{[^}]*accent/)
 })

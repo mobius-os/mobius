@@ -3,6 +3,7 @@ import { peerMessageCardModel } from './peerMessageCard.js'
 import { appActivityLabel } from './appActivityCard.js'
 import { runningBackgroundTask } from './toolTasks.js'
 import { toolBlockFailed } from './toolResultFormat.js'
+import { ASKED_QUESTIONS_TOOL, askedQuestionsLabel } from './askedQuestionsActivity.js'
 
 // Owner-facing activity labels for raw tool names. Collapsed summary lines
 // (the activity-group header, a running tool's header) speak in activities —
@@ -31,6 +32,8 @@ const ACTIVITY_LABELS = new Map([
   ['Workflow', 'Working in the background'],
   ['TaskOutput', 'Working in the background'],
   ['AskUserQuestion', 'Asking you'],
+  // A request-list card the agent carried on past (askedQuestionsActivity.js).
+  [ASKED_QUESTIONS_TOOL, 'Asking you'],
   ['Skill', 'Using skills'],
   // Image-viewing (owner ref 2026-07-17). Codex will emit ViewImage directly
   // once its ImageViewThreadItem is wired; a Claude image view is a Read of an
@@ -86,6 +89,7 @@ const PAST_LABELS = new Map([
   ['Workflow', 'Worked in the background'],
   ['TaskOutput', 'Worked in the background'],
   ['AskUserQuestion', 'Asked you'],
+  [ASKED_QUESTIONS_TOOL, 'Asked questions'],
   ['Skill', 'Used skills'],
   ['ViewImage', 'Viewed images'],
   ['ImageGen', 'Generated images'],
@@ -137,6 +141,7 @@ const PAST_SINGULAR = new Map([
   ['Generated images', 'Generated an image'],
   ['Tried to generate images', 'Tried to generate an image'],
   ['Used skills', 'Used a skill'],
+  ['Asked questions', 'Asked a question'],
 ])
 
 // A small muted type glyph keyed off the FIRST activity in a settled line
@@ -197,6 +202,7 @@ const CONTROL_TOOLS = new Map([
   ['update_goal', 'GoalControl'],
   ['declare_wait', 'WaitControl'],
   ['cancel_wait', 'WaitControl'],
+  ['owner_input', 'AskControl'],
   ['request_question', 'AskControl'],
   ['request_approval', 'AskControl'],
   ['claim_agent_work', 'WorkClaim'],
@@ -245,6 +251,7 @@ const CONTROL_CALLS = new Map([
   ['promote_goal', ['Starting a Goal:', 'Started a Goal:', 'objective']],
   ['declare_wait', ['Setting a wait:', 'Set a wait:', 'description']],
   ['cancel_wait', ['Cancelling a wait', 'Cancelled a wait']],
+  ['owner_input', ['Noting what I need from you', 'Noted what I need from you']],
   ['request_question', ['Asking you', 'Asked you']],
   ['request_approval', ['Asking for approval:', 'Asked for approval:', 'question']],
   ['request_secret', ['Asking for a secret:', 'Asked for a secret:', 'title']],
@@ -391,6 +398,7 @@ export function toolCallLabel(tool) {
   if (name === 'AppActivity') return appActivityLabel(tool)
   if (name === 'MemoryRecall') return memoryRecallLabel(tool)
   if (name === 'PeerMessage') return peerMessageLabel(tool)
+  if (name === ASKED_QUESTIONS_TOOL) return askedQuestionsLabel(tool)
   const controlCall = controlCallLabel(tool)
   if (controlCall) return controlCall
   if (CATEGORY_ONLY.has(name)) {

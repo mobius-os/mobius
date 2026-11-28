@@ -22,15 +22,16 @@ UPDATE_GOAL_TASKS_TOOL_NAME = "update_goal_tasks"
 WAIT_TOOL_NAME = "declare_wait"
 WAIT_FOR_DECISION_TOOL_NAME = "wait_for_decision"
 CANCEL_WAIT_TOOL_NAME = "cancel_wait"
-APPROVAL_TOOL_NAME = "request_approval"
-QUESTION_TOOL_NAME = "request_question"
-RESTART_TOOL_NAME = "request_restart"
 # An agent asks to use a key; saves a key card when the owner must answer.
+# The one owner ask outside `owner_input`: its card is saved mid-turn and ends
+# the turn (see routes/key_requests.py).
 KEY_TOOL_NAME = "request_key"
 CHECKPOINT_CHAT_TOOL_NAME = "checkpoint_chat"
 NOTIFY_OWNER_TOOL_NAME = "notify_owner"
 OPEN_ITEM_TOOL_NAME = "open_item"
-SECRET_TOOL_NAME = "request_secret"
+# Edits the chat's durable owner-input request list without ending the turn:
+# questions, approvals, restarts and secrets alike.
+OWNER_INPUT_TOOL_NAME = "owner_input"
 # App building is ordinary work a helper may do too; owner-facing interaction
 # (pushes, workspace placement, cards) stays with the top-level turn.
 APP_BUILD_TOOL_NAMES = ("list_apps", "apply_app", "screenshot")
@@ -73,15 +74,12 @@ OWNER_CONTROL_TOOL_NAMES = (
   WAIT_TOOL_NAME,
   WAIT_FOR_DECISION_TOOL_NAME,
   CANCEL_WAIT_TOOL_NAME,
-  APPROVAL_TOOL_NAME,
-  QUESTION_TOOL_NAME,
-  RESTART_TOOL_NAME,
+  OWNER_INPUT_TOOL_NAME,
   KEY_TOOL_NAME,
   *WORK_OWNERSHIP_TOOL_NAMES,
   CHECKPOINT_CHAT_TOOL_NAME,
   NOTIFY_OWNER_TOOL_NAME,
   OPEN_ITEM_TOOL_NAME,
-  SECRET_TOOL_NAME,
   *APP_BUILD_TOOL_NAMES,
 )
 DELEGATED_CONTROL_TOOL_NAMES = (

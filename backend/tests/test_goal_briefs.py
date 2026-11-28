@@ -462,7 +462,7 @@ def test_every_helper_turn_carries_its_fresh_assignment_brief(
   assert "OWNER_CHECKPOINT" not in prompt and "<mobius_goal>" not in prompt
   # Every execution path retains its turn-owned refresh, including a shared
   # Claude host; provider-specific hooks determine the delivery boundary.
-  assert sent["goal_brief_refresh"] is not None
+  assert sent["compaction_refresh"] is not None
 
 
 def test_nested_parent_turn_sees_its_own_helpers(client, owner_token, db, monkeypatch):
@@ -487,36 +487,34 @@ def test_new_helper_policy_points_to_read_goal_for_compaction():
 
 
 def test_compaction_pointer_names_each_levels_own_read(monkeypatch):
-  from app import goals
+  from app import compaction_context, goals, owner_input_requests
   monkeypatch.setattr(goals, "turn_goal_brief", lambda *a, **k: "BRIEF")
+  monkeypatch.setattr(owner_input_requests, "build_open_requests_context", lambda *a, **k: "")
   for delegated, pointer in ((True, "read_goal re-reads it"),
                              (False, "update_goal with no arguments shows the plan")):
-    refresh = goals.compaction_brief_refresh("chat", "run", delegated=delegated)
-    monkeypatch.setattr(refresh, "_load", lambda: "BRIEF")
-    refresh.mark_compacted()
-    assert asyncio.run(refresh.take()) == (
+    assert compaction_context.compaction_context(None, "chat", "run", delegated=delegated) == (
       f"Context was compacted; current Goal brief follows ({pointer}).\nBRIEF")
 
 
 def test_refresh_is_quiet_until_compaction_then_delivers_once():
-  from app.goals import CompactionBriefRefresh
+  from app.compaction_context import CompactionContextRefresh
   loads = []
-  refresh = CompactionBriefRefresh(lambda: loads.append(1) or "<mobius_goal>x</mobius_goal>")
+  refresh = CompactionContextRefresh(lambda: loads.append(1) or "<mobius_goal>x</mobius_goal>")
   assert asyncio.run(refresh.take()) == "" and loads == []
   refresh.mark_compacted()
-  assert "current Goal brief" in asyncio.run(refresh.take())
+  assert asyncio.run(refresh.take()) == "<mobius_goal>x</mobius_goal>"
   assert asyncio.run(refresh.take()) == "" and loads == [1]
-  failing = CompactionBriefRefresh(lambda: 1 / 0)
+  failing = CompactionContextRefresh(lambda: 1 / 0)
   failing.mark_compacted()
   assert asyncio.run(failing.take()) == ""
 
 
 def test_refresh_loader_reads_current_plan_in_its_own_session(client, owner_token, db):
-  from app.goals import compaction_brief_refresh
+  from app.compaction_context import compaction_context_refresh
   chat = _goal_fixture(db)
   helper = _helper(db, chat, "goal-a", "builder", task="build")
   db.commit()
-  refresh = compaction_brief_refresh(helper.child_chat_id, "unused", delegated=True)
+  refresh = compaction_context_refresh(helper.child_chat_id, "unused", delegated=True)
   goal = db.get(models.ChatGoal, "goal-a")
   goal.plan_json = {"tasks": [_task("build", status="running", note="NEW_CONSTRAINT")]}
   db.commit()
@@ -525,18 +523,18 @@ def test_refresh_loader_reads_current_plan_in_its_own_session(client, owner_toke
 
 
 def _stale_refresh(text="FRESH_BRIEF"):
-  from app.goals import CompactionBriefRefresh
-  return CompactionBriefRefresh(lambda: text)
+  from app.compaction_context import CompactionContextRefresh
+  return CompactionContextRefresh(lambda: text)
 
 
 @pytest.mark.asyncio
 async def test_claude_compaction_refreshes_brief_at_next_root_tool_result(monkeypatch):
   clients = _install_fake_client(monkeypatch)
   refresh = _stale_refresh()
-  await _run_turn("chat-claude-refresh", bc=_Bus(), cwd="/data", goal_brief_refresh=refresh)
+  await _run_turn("chat-claude-refresh", bc=_Bus(), cwd="/data", compaction_refresh=refresh)
   hooks = clients[0].options.hooks
   brief_hook = next(hook for matcher in hooks["PostToolUse"] for hook in matcher.hooks
-                    if hook.__name__ == "goal_brief_after_compaction_hook")
+                    if hook.__name__ == "context_after_compaction_hook")
   tool = {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
   assert await brief_hook(tool, "t0", {}) == {"continue_": True}
   await hooks["PreCompact"][0].hooks[0]({"trigger": "auto"}, None, {})
@@ -546,32 +544,6 @@ async def test_claude_compaction_refreshes_brief_at_next_root_tool_result(monkey
   assert refreshed["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
   assert refreshed["hookSpecificOutput"]["additionalContext"].endswith("FRESH_BRIEF")
   assert await brief_hook(tool, "t3", {}) == {"continue_": True}
-
-
-def test_codex_compaction_notification_alone_owes_no_brief(monkeypatch):
-  # Only Codex's post-compaction hook delivers the brief; the runner's own
-  # compaction observation is display-only and arms nothing a later hook or
-  # steer could consume.
-  from tests import test_codex_sdk_runner as harness
-
-  async def no_hook_discovery(codex, sdk, cwd, config, hook_overrides, **_):
-    return config
-
-  monkeypatch.setattr(harness.codex_sdk_runner, "_codex_platform_hook_thread_config",
-                      no_hook_discovery)
-  for kind in ("context_compaction_item", "legacy_notification"):
-    refresh = _stale_refresh()
-    original = harness.codex_sdk_runner.run_codex_sdk_turn
-
-    async def run_with_refresh(**kwargs):
-      return await original(**kwargs, goal_brief_refresh=refresh)
-
-    monkeypatch.setattr(harness.codex_sdk_runner, "run_codex_sdk_turn", run_with_refresh)
-    harness.test_run_codex_sdk_turn_publishes_marker_from_current_and_legacy_events(
-      monkeypatch, kind,
-    )
-    monkeypatch.setattr(harness.codex_sdk_runner, "run_codex_sdk_turn", original)
-    assert not refresh.stale, kind
 
 
 def test_codex_steer_never_carries_the_goal_brief():
@@ -584,7 +556,7 @@ def test_codex_steer_never_carries_the_goal_brief():
     refresh.mark_compacted()  # Even an outstanding need is the hook's alone.
     sink = _FakeSteerSink()
     active = ActiveCodexTurn(object(), turn, chat_id="codex-refresh", sink=sink,
-                             goal_brief_refresh=refresh)
+                             compaction_refresh=refresh)
     registry.register(active)
     try:
       assert await active.steer("ping", [{"role": "user", "content": "ping", "cid": "one"}], ["one"])
@@ -658,7 +630,7 @@ def test_coordinator_turn_carries_brief_and_arms_compaction_refresh(
   ))
   assert captured["user_message"].count("<mobius_goal>") == 1
   assert "read_goal" in captured["user_message"]
-  assert captured["goal_brief_refresh"] is not None
+  assert captured["compaction_refresh"] is not None
 
 
 @pytest.mark.parametrize("provider", ["claude", "codex"])
@@ -680,15 +652,15 @@ def test_goal_less_turn_arms_lazy_refresh_for_mid_turn_promotion(
 
   async def runner(**kwargs):
     assert "<mobius_goal>" not in kwargs["user_message"]
-    refresh = kwargs["goal_brief_refresh"]
+    refresh = kwargs["compaction_refresh"]
     assert refresh is not None
     assert await refresh.take() == ""
     if provider == "claude":
       clients = _install_fake_client(monkeypatch)
-      await _run_turn(chat_id, bc=_Bus(), goal_brief_refresh=refresh)
+      await _run_turn(chat_id, bc=_Bus(), compaction_refresh=refresh)
       hooks = clients[0].options.hooks
       brief_hook = next(hook for matcher in hooks["PostToolUse"] for hook in matcher.hooks
-                        if hook.__name__ == "goal_brief_after_compaction_hook")
+                        if hook.__name__ == "context_after_compaction_hook")
 
       async def compact():
         await hooks["PreCompact"][0].hooks[0]({"trigger": "auto"}, None, {})
@@ -697,10 +669,10 @@ def test_goal_less_turn_arms_lazy_refresh_for_mid_turn_promotion(
     else:
       from app.codex_sdk_runner import ActiveCodexTurn
       active = ActiveCodexTurn(SimpleNamespace(id="thread"), object(), chat_id=chat_id,
-                               goal_brief_refresh=refresh)
+                               compaction_refresh=refresh)
 
       async def compact():
-        return await active.goal_brief_after_compaction("thread")
+        return await active.context_after_compaction("thread")
 
     # Installing either provider boundary with no Goal must add no context.
     assert await compact() == ""
@@ -747,14 +719,14 @@ def test_goal_less_turn_arms_lazy_refresh_for_mid_turn_promotion(
 
 @pytest.mark.asyncio
 async def test_refresh_load_failure_is_retried_without_a_second_compaction():
-  from app.goals import CompactionBriefRefresh
+  from app.compaction_context import CompactionContextRefresh
   calls = []
   def load():
     calls.append(1)
     if len(calls) == 1:
       raise RuntimeError('temporary read failure')
     return 'RECOVERED'
-  refresh = CompactionBriefRefresh(load)
+  refresh = CompactionContextRefresh(load)
   refresh.mark_compacted()
   assert await refresh.take() == '' and refresh.stale
   assert (await refresh.take()).endswith('RECOVERED') and not refresh.stale
@@ -763,7 +735,7 @@ async def test_refresh_load_failure_is_retried_without_a_second_compaction():
 @pytest.mark.asyncio
 async def test_parallel_refreshes_share_one_delivery_and_preserve_new_compaction():
   import threading
-  from app.goals import CompactionBriefRefresh
+  from app.compaction_context import CompactionContextRefresh
   entered, release = threading.Event(), threading.Event()
   calls = []
   def load():
@@ -772,7 +744,7 @@ async def test_parallel_refreshes_share_one_delivery_and_preserve_new_compaction
       entered.set()
       assert release.wait(3)
     return 'CURRENT'
-  refresh = CompactionBriefRefresh(load)
+  refresh = CompactionContextRefresh(load)
   refresh.mark_compacted()
   first = asyncio.create_task(refresh.take())
   try:
@@ -794,21 +766,21 @@ async def test_parallel_refreshes_share_one_delivery_and_preserve_new_compaction
 @pytest.mark.asyncio
 async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp_path):
   from tests.test_helper_hosts import _claude_host, _turn
-  from app.goals import CompactionBriefRefresh
+  from app.compaction_context import CompactionContextRefresh
   host = _claude_host(tmp_path)
   turns = []
   for name in ['a', 'b', 'finished']:
     turn = _turn(tmp_path, dispatch_id=name)
     turn.agent_id = name
     turn.started.set()
-    turn.goal_brief_refresh = CompactionBriefRefresh(lambda n=name: f'ONLY_{n}')
+    turn.compaction_refresh = CompactionContextRefresh(lambda n=name: f'ONLY_{n}')
     host._turn_by_agent[name] = host._turn_by_dispatch[name] = turn
     turns.append(turn)
   turns[-1].done.set()
   try:
     # Current SDK does not identify which agent compacted; no attribution guess.
     await host.pre_compact({'trigger': 'auto'}, None, {})
-    assert not turns[-1].goal_brief_refresh.stale
+    assert not turns[-1].compaction_refresh.stale
     assert await host.post_tool_use({'tool_name': 'Read'}, 'dispatcher-tool', {}) == {}
     for name in ['a', 'b']:
       payload = {'tool_name': 'Read', 'agent_id': name}
@@ -819,7 +791,7 @@ async def test_shared_claude_compaction_restores_each_live_helpers_own_brief(tmp
     assert await host.post_tool_use({'agent_id': 'unknown'}, 'foreign', {}) == {}
     # If a future supported event carries identity, it must not mark siblings.
     await host.pre_compact({'agent_id': 'a', 'trigger': 'auto'}, None, {})
-    assert turns[0].goal_brief_refresh.stale and not turns[1].goal_brief_refresh.stale
+    assert turns[0].compaction_refresh.stale and not turns[1].compaction_refresh.stale
   finally:
     for turn in turns:
       turn.env_file.remove()

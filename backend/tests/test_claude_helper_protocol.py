@@ -225,7 +225,7 @@ async def test_failure_hook_uses_its_actual_event_name_for_goal_brief(tmp_path):
   class Refresh:
     async def take(self):
       return 'Refreshed Goal brief'
-  turn.goal_brief_refresh = Refresh()
+  turn.compaction_refresh = Refresh()
   host._turn_by_agent['agent'] = turn
   result = await host.post_tool_use({
     'agent_id': 'agent', 'tool_name': 'Read',

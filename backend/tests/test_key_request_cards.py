@@ -1,7 +1,9 @@
-"""An agent's key request is an ordinary saved owner card in its own chat.
+"""An agent's key request is a saved owner card in its own chat.
 
-The card waits for the owner like every other card, and it only records an
-answer the owner already gave the vault through the owner-only key routes.
+It is the one owner ask outside the `owner_input` request list: the card is
+saved mid-turn, bars the chat until the owner answers, and ends the turn. It
+only records an answer the owner already gave the vault through the
+owner-only key routes.
 """
 import uuid
 from datetime import timedelta
@@ -14,6 +16,8 @@ from app.chat_event_sink import ChatEventSink, register_active_sink, unregister_
 from app.chat_writer import Barrier, StartTurn, get_writer
 from app.database import SessionLocal
 from app.timeutil import now_naive_utc
+from tests import owner_input_fixtures as inputs
+from tests.owner_input_fixtures import no_wake  # noqa: F401 (fixture)
 from tests.test_keys_routes import DUMMY, nudges, vault  # noqa: F401 (fixtures)
 
 APOD = {"host": "api.nasa.gov", "methods": ["GET"], "paths": ["/planetary/apod"]}
@@ -64,6 +68,48 @@ def other_chat(db, chat):
   return other
 
 
+def test_a_saved_key_card_is_the_turn_ending_result_of_its_own_turn(
+  client, chat, vault, nudges,
+):
+  """Unlike an owner_input request, the saved key card ends the turn: the
+  run's sink recognizes its receipt, and the tool that saved it folds into
+  the card."""
+  from app.chat_event_sink import get_active_sink
+  from app.owner_card_receipts import turn_end_receipt_id
+
+  run_id = f"key-turn-end-{chat.id}"
+  get_writer().submit(StartTurn(
+    chat_id=chat.id, run_token=run_id,
+    user_msg={"role": "user", "content": "Try my key", "ts": 1},
+  )).result(timeout=5)
+  sink = ChatEventSink(create_broadcast(chat.id), chat.id, run_token=run_id)
+  register_active_sink(chat.id, sink)
+  try:
+    with SessionLocal() as db:
+      owner = db.query(models.Owner).first()
+      token = auth_mod.create_agent_token(
+        chat_id=chat.id, owner_username=owner.username,
+        token_epoch=owner.token_epoch, run_id=run_id,
+        expires_delta=timedelta(minutes=5),
+      )
+    headers = {"Authorization": f"Bearer {token}"}
+    sink.publish({"type": "tool_start", "tool": "mcp__mobius_control__request_key",
+                  "tool_use_id": "key-call", "input": {"key": "nasa"}})
+    asked = client.post(f"/api/chats/{chat.id}/key-request", headers=headers, json=ASK)
+    assert asked.status_code == 200, asked.text
+    receipt = asked.json()
+    assert get_active_sink(chat.id) is sink
+    assert turn_end_receipt_id(asked.text) == receipt["question_id"]
+    assert sink.ends_turn(receipt["question_id"]) is True
+    assert sink.has_key_card("some-other-card") is False
+    sink.publish({"type": "tool_output", "tool_use_id": "key-call", "content": asked.text,
+                  "output_complete": True, "output_exit_code": 0})
+    tool = next(b for b in sink.assistant_blocks if b.get("tool_use_id") == "key-call")
+    assert tool["owner_card_question_id"] == receipt["question_id"]
+  finally:
+    unregister_active_sink(chat.id, sink)
+
+
 def _card(chat_id):
   get_writer().submit(Barrier()).result(timeout=5)
   with SessionLocal() as db:
@@ -88,7 +134,7 @@ def test_a_new_key_ask_saves_a_waiting_key_card_in_the_agents_chat(client, chat,
   assert receipt["answer"] == {"status": "pending", "key": "nasa", "id": "agent-nasa",
                                "sites": [APOD], "reason": ASK["reason"]}
   marker, [card] = _card(chat.id)
-  # The same waiting marker every saved card sets, so the chat waits for the owner.
+  # The barring marker, so the chat waits for the owner.
   assert marker == receipt["question_id"] == card["question_id"]
   assert card["key_request"] == {"id": "agent-nasa", "key": "nasa", "reason": ASK["reason"], "sites": [APOD]}
   assert card["message"] == ASK["message"]
@@ -96,6 +142,71 @@ def test_a_new_key_ask_saves_a_waiting_key_card_in_the_agents_chat(client, chat,
   assert question["question"] == "Let your agent send **nasa** to **api.nasa.gov**?"
   assert [option["id"] for option in question["options"]] == ["allow", "deny"]
   assert nudges == [{"type": "key_requests_changed"}]
+
+
+@pytest.mark.asyncio
+async def test_a_key_card_retires_the_open_list_card_until_it_is_answered(
+  client, chat, db, auth, start_agent_run, vault, no_wake, monkeypatch,
+):
+  """The key card bars the chat: saving it retires the open request-list
+  card (and tells every shell so), no list card is shown while it waits, and
+  the next turn's end after the answer shows the requests again."""
+  from app import owner_input_requests as requests
+  from app.routes import key_requests
+
+  chat_id = chat.id
+  for key, prompt in (("target", "Which release target?"), ("tone", "How formal?")):
+    requests.add_request(db, chat_id=chat_id, run_id=None, goal_id=None, key=key,
+                         spec={"prompt": prompt})
+  start_agent_run(chat)
+  await inputs.complete_turn(chat_id, monkeypatch, f"key-{chat_id}-0", db=db)
+  [list_card] = inputs.cards(chat_id)
+  assert inputs.markers(chat_id) == (None, list_card["question_id"])
+
+  changes = []
+  real_publish = key_requests.publish_owner_input_changed
+  monkeypatch.setattr(key_requests, "publish_owner_input_changed",
+                      lambda *args, **kwargs: (changes.append((args, kwargs)),
+                                               real_publish(*args, **kwargs)))
+  asked = client.post(f"/api/chats/{chat_id}/key-request", headers=start_agent_run(chat), json=ASK)
+  assert asked.status_code == 200, asked.text
+  key_id = asked.json()["question_id"]
+  assert inputs.markers(chat_id) == (key_id, None)
+  assert changes == [((chat_id, "question"), {"question_id": key_id, "request_card_id": None})]
+  with SessionLocal() as session:
+    outcome = session.get(models.SavedDecisionCard, (chat_id, list_card["question_id"])).outcome_json
+    rows = requests.open_requests(session, chat_id)
+  assert outcome["kind"] == "superseded"
+  assert len(rows) == 2 and all(row.published_question_id is None for row in rows)
+
+  # The turn that saved the key card ends without a list card.
+  from app import chat as chat_mod
+  from app.chat_event_sink import get_active_sink
+
+  monkeypatch.setattr(chat_mod, "_schedule_continuation", lambda **kwargs: None)
+  monkeypatch.setattr(chat_mod, "_publish_chat_run_finished", lambda *_: None)
+  sink = get_active_sink(chat_id)
+  sink.publish({"type": "text", "content": "Waiting on the key."})
+  with SessionLocal() as session:
+    await chat_mod._complete_turn(
+      bc=sink.bc, sink=sink, db=session, chat_id=chat_id, run_gen=None,
+      provider_id="claude", cost_usd=0, close_browser=False,
+    )
+  assert [card["question_id"] for card in inputs.cards(chat_id)] == [list_card["question_id"], key_id]
+  assert inputs.markers(chat_id) == (key_id, None)
+
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  denied = client.post("/api/keys/requests/agent-nasa/deny", headers=auth, json={"ticket": request["ticket"]})
+  assert denied.status_code == 200, denied.text
+  assert _answer(client, chat, auth, key_id, "deny").status_code == 202
+  assert inputs.markers(chat_id) == (None, None)
+
+  assert inputs.start_turn(chat_id, "after-key", owner_input=False)
+  await inputs.complete_turn(chat_id, monkeypatch, "after-key")
+  shown = inputs.cards(chat_id)[-1]
+  assert shown["input_requests"] is True and shown["question_id"] != list_card["question_id"]
+  assert [entry["request_key"] for entry in shown["questions"]] == ["target", "tone"]
+  assert inputs.markers(chat_id) == (None, shown["question_id"])
 
 
 def test_allow_is_recorded_only_after_the_owner_allowed_it_in_the_vault(client, chat, auth, agent_run, vault):
@@ -409,3 +520,12 @@ def test_a_card_whose_save_failed_midway_leaves_no_request_behind(client, chat, 
   failed = client.post(f"/api/chats/{chat.id}/key-request", headers=headers, json=ASK)
   assert failed.status_code == 503, failed.text
   assert vault.list_requests() == []
+
+
+def test_a_key_ask_names_the_parts_the_owner_pastes(client, chat, agent_run, auth, vault):
+  ask = {**ASK, "key": "pair", "inject": {"type": "basic", "username": "user", "password": "pass"},
+         "parts": [{"name": "user", "label": "User", "secret": False}, {"name": "pass", "label": "Password"}]}
+  asked = client.post(f"/api/chats/{chat.id}/key-request", headers=agent_run, json=ask)
+  assert asked.status_code == 200, asked.text
+  [request] = client.get("/api/keys", headers=auth).json()["requests"]
+  assert [part["name"] for part in request["parts"]] == ["user", "pass"]

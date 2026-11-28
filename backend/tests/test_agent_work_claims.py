@@ -853,7 +853,7 @@ def test_longer_stalled_cycle_is_recovery_not_an_automatic_handoff(db):
 
 @pytest.mark.parametrize("ineligible", ["helper", "goalless", "held", "deleted"])
 def test_ineligible_follower_and_approval_never_claim_a_follow(db, ineligible):
-  from app.routes.owner_approvals import _approval_follower_result
+  from app.routes.owner_input_requests import _approval_follower_result
   owner, first, second = _fixture(db)
   claim_work(db, owner_id=owner.id, chat_id=first.id, run_id="claim-run-first", work_key=KEY, summary="Action")
   if ineligible == "helper":

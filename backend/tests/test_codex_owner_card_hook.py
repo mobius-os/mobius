@@ -20,11 +20,16 @@ def _hook():
 
 
 @pytest.mark.parametrize("wrapper", ["mcp", "shell"])
-def test_hook_waits_for_server_validation_before_returning(monkeypatch, wrapper):
+@pytest.mark.parametrize("receipt", [
+  {"state": "turn_end", "turn_end_id": "this-card"},
+  # A saved key card's receipt: the server ends the turn only for a key card
+  # this exact turn saved.
+  {"state": "waiting_for_owner", "question_id": "this-card", "next_action": "End"},
+])
+def test_hook_waits_for_server_validation_before_returning(monkeypatch, wrapper, receipt):
   monkeypatch.delenv("MOBIUS_THREAD_ENV_LINKS", raising=False)
   hook = _hook()
   monkeypatch.setenv("CHAT_ID", "this-chat")
-  receipt = {"state": "waiting_for_owner", "question_id": "this-card", "next_action": "End"}
   response = {"content": [{"type": "text", "text": json.dumps(receipt)}]}
   if wrapper == "shell":
     response = {"stdout": json.dumps(receipt), "interrupted": False}
@@ -43,7 +48,7 @@ def test_hook_waits_for_server_validation_before_returning(monkeypatch, wrapper)
   {"hook_event_name": "PreToolUse"},
   {"hook_event_name": "PostToolUse", "tool_response": {"state": {"draft": {}}}},
   {"hook_event_name": "PostToolUse", "agent_id": "native-child", "tool_response": {
-    "state": "waiting_for_owner", "question_id": "child-card", "next_action": "End",
+    "state": "turn_end", "turn_end_id": "child-receipt",
   }},
 ])
 def test_hook_does_not_end_turns_from_unrelated_results(monkeypatch, payload):

@@ -70,10 +70,7 @@ from app.agent_activity import (
 from app.peer_message import (
   peer_message_from_call, settle_peer_message,
 )
-from app.owner_card_receipts import (
-  owner_card_receipt_id as _owner_card_receipt_id,
-  turn_end_receipt_id as _turn_end_receipt_id,
-)
+from app.owner_card_receipts import turn_end_receipt_id as _turn_end_receipt_id
 from app.runtime_types import ChatEvent
 from app.screenshot_steps import SAVED_IMAGE_FIELD, saved_screenshot_file
 from app.secure_inputs import redact_reveal_markers
@@ -1237,18 +1234,16 @@ class ChatEventSink:
     if event_type in ("thinking", "thinking_final"):
       self._prepare_thinking_event(event)
 
-    # The helper that creates a saved owner card is transport, not a second
-    # user-visible action.  Mark only a successful, completed receipt whose
-    # exact continuation card is already present in this turn.  That validated
-    # identity lets both the live renderer and historical projection hide the
-    # enclosing command/tool even though its result necessarily arrives AFTER
-    # the card (the clean post-receipt finish boundary above).
-    owner_card_receipt_matches = (
+    # The tool that saves a key card is transport, not a second user-visible
+    # action. Mark only a successful, completed receipt whose exact key card
+    # is already present in this turn. That validated identity lets both the
+    # live renderer and historical projection hide the enclosing command/tool
+    # even though its result necessarily arrives AFTER the card.
+    if (
       turn_end_receipt_id is not None
       and event.get("output_exit_code") in (None, 0)
-      and self.has_continuation_card(turn_end_receipt_id)
-    )
-    if owner_card_receipt_matches:
+      and self.has_key_card(turn_end_receipt_id)
+    ):
       event["owner_card_question_id"] = turn_end_receipt_id
 
     # Accumulate the event into assistant_blocks and decide whether a
@@ -1340,7 +1335,7 @@ class ChatEventSink:
       # A completed provider event is the first universal boundary at which the
       # result is no longer in flight. It covers MCP and command-backed helpers
       # alike, without a timer or a second transport callback. Claude's root
-      # turns have normally already ended themselves at the card (its runner's
+      # turns have normally already ended themselves there (its runner's
       # PostToolUse hook), in which case this is a no-op claim.
       self._request_finish_turn_after_owner_card(turn_end_receipt_id)
     return True
@@ -1581,6 +1576,7 @@ class ChatEventSink:
     *,
     secure_request: dict | None = None,
     activation_wait: dict | None = None,
+    notify_owner: bool = True,
   ) -> None:
     """Save-before-broadcast for an AskUserQuestion card.
 
@@ -1659,43 +1655,49 @@ class ChatEventSink:
     # The saved card owns its owner notification. Start it from the commit,
     # not the broadcast, so a lost live publish cannot drop it, and keep the
     # remote push off this save path (callers may hold the chat locks).
-    from app.owner_input import notify_owner_input_card
-    self._start_side_task(
-      notify_owner_input_card(
-        self.chat_id, event["question_id"], event.get("questions") or [],
-      ),
-      failure_message="owner-input notification failed chat_id=%s",
-      warn=True,
-    )
+    # ``notify_owner`` is False only for a request-list card that re-shows
+    # revisions the owner has already been shown.
+    if notify_owner:
+      from app.owner_input import notify_owner_input_card
+      self._start_side_task(
+        notify_owner_input_card(
+          self.chat_id, event["question_id"], event.get("questions") or [],
+        ),
+        failure_message="owner-input notification failed chat_id=%s",
+        warn=True,
+      )
     # Committed durably — now (and only now) show the card.
     self._publish_activity_frontier()
     self.bc.publish(event)
-    # A continuation card is terminal, but this save path is still inside the
-    # provider's tool call: ending the turn here would reject that in-flight
-    # call before its successful receipt reaches the tool. The turn ends at the
-    # next boundary instead — for Claude in the PostToolUse hook that sees the
-    # receipt, otherwise in `publish()` on the matching completed tool result.
-    # Committing the card here is what makes `has_continuation_card` true by
-    # the time either boundary asks.
+    # A request-list card is saved only after the turn has ended by itself
+    # (`chat._publish_open_owner_requests`), so it is terminal by construction.
+    # A key card (routes/key_requests.py) is saved inside the provider's tool
+    # call: ending the turn here would reject that in-flight call before its
+    # receipt reaches the tool. The turn ends at the next boundary instead —
+    # for Claude in the PostToolUse hook that sees the receipt, for Codex in
+    # its turn-end rendezvous, otherwise in `publish()` on the matching
+    # completed tool result. Committing the card here is what makes
+    # `has_key_card` true by the time either boundary asks.
     # The card is persisted: record the save time so a subsequent throttled
     # snapshot in publish() doesn't redundantly re-commit the same state
     # immediately after.
     self._last_save = time.monotonic()
 
   def _request_finish_turn_after_owner_card(self, question_id: str) -> None:
-    """Claim the clean card end synchronously, then signal it asynchronously.
+    """Claim the clean turn end synchronously, then signal it asynchronously.
 
-    The provider-neutral card-end signal. A runner that already ended its own
-    turn at the card (Claude's root agents do, before the receipt ever reaches
-    the model) reports the end already owned and nothing more happens here.
+    The provider-neutral turn-end signal for a recorded helper question or a
+    saved key card. A runner that already ended its own turn there (Claude's
+    root agents do, before the receipt ever reaches the model) reports the end
+    already owned and nothing more happens here.
 
-    Validate the exact continuation card against this sink's live transcript
-    before touching a runner. The provider's ownership marker must be set in
-    this same callback: its terminal event can already be queued behind the
+    Validate that this turn recorded the exact receipt before touching a
+    runner. The provider's ownership marker must be set in this same
+    callback: its terminal event can already be queued behind the
     completed tool result, so deferring the whole request to a task races that
     terminal and can leak its raw interruption error. Only the actual provider
-    interrupt runs as a side task. Native provider questions have no
-    continuation marker and are never cut here.
+    interrupt runs as a side task. Native provider questions record no
+    receipt and are never cut here.
     """
     if not self.ends_turn(question_id):
       raise ValueError("Turn-end receipt is not current for this turn.")
@@ -1728,21 +1730,24 @@ class ChatEventSink:
     return receipt_id
 
   def ends_turn(self, receipt_id: str) -> bool:
-    """Whether this turn produced this turn-ending receipt: a saved
-    continuation card or a recorded helper question."""
-    return receipt_id in self._turn_end_ids or self.has_continuation_card(receipt_id)
+    """Whether this turn produced this turn-ending receipt: a helper's
+    question to its parent, or a key card it saved.
 
-  def has_continuation_card(self, question_id: str) -> bool:
-    """Whether this turn saved exactly this continuation owner-input card.
-
-    Claude's card-end hook asks before it refuses to continue the agent loop,
-    so an arbitrary receipt-shaped tool result — an old card re-printed, a
-    child agent's receipt quoted in a Task summary — can never end a turn.
+    Claude's card-end hook and Codex's turn-end route ask before ending the
+    turn, so an arbitrary receipt-shaped tool result — an old receipt
+    re-printed, a child agent's receipt quoted in a Task summary — can never
+    end a turn. Owner-input requests never end a turn.
     """
+    return receipt_id in self._turn_end_ids or self.has_key_card(receipt_id)
+
+  def has_key_card(self, question_id: str) -> bool:
+    """Whether this turn saved exactly this key card (`request_key`), the one
+    owner card saved mid-turn."""
     return any(
       block.get("type") == "question"
       and block.get("question_id") == question_id
       and block.get("response_mode") == "continuation"
+      and isinstance(block.get("key_request"), dict)
       for block in self.assistant_blocks
     )
 

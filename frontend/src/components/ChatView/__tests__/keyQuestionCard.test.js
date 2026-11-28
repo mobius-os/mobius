@@ -139,6 +139,10 @@ test('Submit inside the wait answers nothing: no vault call and no card answer',
     await tick()
     assert.deepEqual(calls, [])
     assert.equal(view.result.current.keyCard.guard.early, 'Submit')
+    // The wait is said in view, in the key card's own hint, not in the
+    // visually hidden Submit hint every card carries.
+    const hint = find(view.result.current.card, node => node.props?.className === 'qcard__key-hint')
+    assert.equal(hint?.props.role, 'status')
   } finally { view.unmount() }
 })
 

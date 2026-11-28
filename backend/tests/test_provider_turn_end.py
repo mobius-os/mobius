@@ -178,7 +178,12 @@ def test_json_leading_log_and_standalone_receipt_are_both_framed_records(kind):
   receipt = ({'state': 'turn_end', 'turn_end_id': 'mine'} if kind == 'question' else
              {'state': 'waiting_for_owner', 'question_id': 'mine', 'next_action': 'End'})
   output = json.dumps({'log': 'question saved'}) + '\n' + json.dumps(receipt)
+  # Both are framed; the run's sink decides whether this turn produced it
+  # (a saved card ends a turn only when it is this turn's key card).
   assert turn_end_receipt_id(output) == 'mine'
+  if kind == 'owner-card':
+    from app.owner_card_receipts import owner_card_receipt_id
+    assert owner_card_receipt_id(output) == 'mine'
 
 
 def test_framed_pretty_refusal_never_exposes_its_nested_receipt():
