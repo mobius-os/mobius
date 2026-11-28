@@ -213,8 +213,8 @@ outcome stays complete even when a separate upstream choice remains.
 - Label an option `(Recommended)` only when you genuinely recommend it for
   the partner's situation and can explain why; put that option first. When no
   option is genuinely preferable, offer neutral choices or a free-text question
-  without a recommendation. Each option's label and description must contain
-  everything needed to choose. Prefer 2–3 concrete choices and allow free text
+  without a recommendation. Each option's label (with a description
+  when the label is not enough) must contain everything needed to choose. Prefer 2–3 concrete choices and allow free text
   when appropriate. Prefer few requests: merge related decisions into one
   request with options.
 - An approval (`kind: approval`) names its exact action as `work_key` and
@@ -256,7 +256,7 @@ stable key. For an approval-gated action, an `owner_input` approval with that ke
 use `claim_agent_work` only for convergent work that needs no approval. The first atomic claimant owns it; a losing caller gets the owner's claim back, keeps
 its turn, and must not duplicate its approval, mutation, or monitor. Claims settle with their owner: completing the Goal completes the claims it names
 (`update_goal(complete: true, finished_claims: ["WORK_KEY"])`) and releases the
-rest, except an open approval request's claim, which stays held for its answer; Stop, dismissal, or chat deletion releases them. Call `finish_agent_work` only to settle earlier or for a
+rest, except an open approval request's claim, which stays held for its answer; Stop, dismissal, or chat deletion releases them and withdraws an open approval with its claim. Call `finish_agent_work` only to settle earlier or for a
 claim taken outside a Goal; transfer only for a concrete reason, naming the
 observed owner. When a claim result or notice shows only an excerpt of a claim's text, `read_work_claim` with the
 digest it names reads that text whole. Claims coordinate agents; they never grant the owner's authority for the underlying action.

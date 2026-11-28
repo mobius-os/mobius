@@ -238,14 +238,19 @@ name, and a request whose revision did not change keeps its draft verbatim.
 ### Not acting on a blocked request
 
 The list records what each request blocks. A Goal task named in
-`blocks.tasks` cannot be marked completed while the request is open, and a
+`blocks.tasks` cannot be marked completed while the request is open (only
+that Goal's requests, or one recorded while no Goal was attached, fence it;
+another Goal's request never holds a task that shares an id), and a
 Goal cannot complete while a request of that Goal names one of its tasks
 there (`require_tasks_not_waiting_on_owner`); with a Goal attached, unknown
 task ids are refused. `blocks.work` is a description only. A request with no
 task fence, such as an offer made at a handoff, does not hold completion: when
 the Goal completes, a still-open approval's work claim is detached from the
 Goal and stays held for its answer, unless the Goal names it in
-`finished_claims`. Approvals keep their real fence: the work claim exists but
+`finished_claims`. A Goal that ends unfinished (stopped, cancelled or
+dismissed) releases that claim and withdraws the approval with it, so the
+owner is never offered an action this chat no longer holds; the agent hears
+it as a platform withdrawal. Approvals keep their real fence: the work claim exists but
 the action has no answer. This is guidance plus state, not a validator on
 arbitrary tool calls (Möbius does not police tool use).
 
@@ -395,7 +400,7 @@ stay open on the card.
 | Sealed values delivered once though turns run | one receipt per request reused across cards; republication shows a running consumer in progress; no withdraw while consuming; entry submission is not fenced by run generation (Stop cancels the task and settles it as unknown) | `test_a_consumer_running_across_a_republish_is_shown_in_progress_and_runs_once` |
 | An approval is answered only on its own card | grant only by explicit option id, re-bound in the writer; typed text leaves it open | `test_typed_text_on_an_approval_is_a_message_never_a_grant`, `test_the_writer_rebinds_selections_whatever_a_caller_sends` |
 | Stop ended the barring card | Stop leaves the card open: a pending secret receipt stays pending, a running one settles as outcome unknown, an unpressed restart's wait is cancelled (its button still restarts once) | `test_stop_*` in `test_owner_input_sensitive_requests.py` |
-| A secret's Cancel only for what the owner was shown | Cancel carries the card id and request revision; the writer refuses a mismatch like a submission | `test_a_stale_tabs_cancel_of_a_reworded_secret_cancels_nothing` |
+| A secret's Submit and Cancel only for what the owner was shown | both carry the card id and request revision; the route refuses a mismatch and the writer re-checks them (Submit: the revision) | `test_a_stale_tabs_submit_of_a_reworded_secret_delivers_nothing`, `test_a_stale_tabs_cancel_of_a_reworded_secret_cancels_nothing` |
 | No approval claim without its request | every check, `blocks` included, runs before the claim; a refusal after it (a same-key race) releases it | `test_a_refused_approval_never_takes_the_claim`, `test_an_approval_refused_for_its_blocks_takes_no_claim`, `test_an_approval_losing_a_same_key_race_releases_the_claim_it_took` |
 | An edit never loses a concurrent change or races an owner answer | `update`, `withdraw`, `resolve` and add-on-existing-key mutate the row only at the revision and status they read (server-side; the merge is retried once, then refused with the current state) | `test_an_update_racing_another_update_keeps_both_changes`, `test_an_edit_racing_an_owners_answer_never_overwrites_it` |
 
@@ -461,7 +466,14 @@ whose result stays whole. The settled section (requests settled since the
 last completed turn) takes at most 2,000 of those characters (texts cut to
 200, oldest rows dropped first) and is shown even when nothing is open. After an in-turn provider compaction the list and the settled section
 are restored, read fresh, beside the Goal brief (`compaction_context.py`).
-On Codex, a SessionStart(compact) hook restores both in the request that continues the compacted turn. If the hook is not discovered, or does not deliver by the model's first output after a compaction the runner sees in its event stream, the runner steers the same text into the live turn and the model gets it at its next request; the hook and the steer never both deliver. If Codex accepts the hook's text but drops it, or nothing follows the compaction in that turn, the next turn's start restores it. A steer that arrives during the final answer adds one model request.
+On Codex, a SessionStart(compact) hook restores both in the request that
+continues the compacted turn. If the hook is not discovered, or does not
+deliver by the model's first output after a compaction the runner sees in
+its event stream, the runner steers the same text into the live turn and the
+model gets it at its next request; the hook and the steer never both
+deliver. If Codex accepts the hook's text but drops it, or nothing follows
+the compaction in that turn, the next turn's start restores it. A steer that
+arrives during the final answer adds one model request.
 An owner message steered into a running turn carries
 both with the "the owner wrote" instruction (`routes/chats_stream.py`).
 Helpers never receive them.

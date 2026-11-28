@@ -580,9 +580,11 @@ def stage_settle_goal_claims(
   the claims it names in ``finished_keys`` and detaches (keeps open, without
   a Goal) the claim of an approval request the chat still asks; every other
   open claim, and every claim of a stopped or dismissed Goal, is released so
-  followers may reclaim it. A detached claim has no Goal left to settle it,
-  so the repair below never releases it; withdrawing the approval does. The caller may nudge exact-Goal result delivery after commit; immutable
-  subscribed outcomes do not depend on that nudge.
+  followers may reclaim it, and an open approval for a released claim is
+  withdrawn with it. A detached claim has no Goal left to settle it, so the
+  repair below never releases it; withdrawing the approval does. The caller
+  may nudge exact-Goal result delivery after commit; immutable subscribed
+  outcomes do not depend on that nudge.
   """
   if not goal_id or status == "open":
     return []
@@ -621,6 +623,11 @@ def stage_settle_goal_claims(
     item = _stage_settle(db, row, complete=complete, outcome=outcome)
     if item is not None:
       settled.append(item)
+  from app.owner_input_requests import stage_approvals_withdrawn
+  stage_approvals_withdrawn(
+    db, chat_id, {item.work_key for item in settled if item.state == "released"},
+    reason=f"its Goal was {status}, which released the claim on its action",
+  )
   db.flush()
   return settled
 

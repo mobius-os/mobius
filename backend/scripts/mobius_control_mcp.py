@@ -1837,7 +1837,8 @@ _TOOL_DEFINITIONS = {
           "type": "string", "minLength": 3, "maxLength": 256,
           "description": (
             "approval: canonical lowercase identity of the exact action, "
-            "claimed atomically when the request is added. It never changes: "
+            "claimed only after the request validates; a refused add releases "
+            "it. It never changes: "
             "withdraw the request and add a new one."
           ),
         },
