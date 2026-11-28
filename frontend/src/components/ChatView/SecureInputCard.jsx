@@ -124,8 +124,8 @@ function messageOf(error, fallback) {
  *
  * `describeError(error, action)` turns a failure into owner-facing copy.
  * `revealFlag` keeps the original card's body, which always names
- * `reveal_confirmed`; a request-list entry sends `{fields}` only. `shown`
- * is what Cancel names: a list entry's card id and request revision.
+ * `reveal_confirmed`; a request-list entry sends `{fields}` and `shown`,
+ * its card id and request revision, which Cancel also names.
  */
 export function useSecureSubmission({
   chatId, requestId, fields, reveal = false, revealFlag = true, open,
@@ -168,7 +168,7 @@ export function useSecureSubmission({
       const result = await jsonOrThrow(
         await api.secureInputs.submit(chatId, requestId, revealFlag
           ? { fields: values, reveal_confirmed: revealConfirmed }
-          : { fields: values }),
+          : { ...shown, fields: values }),
         'Secure input failed',
       )
       onStatus(result.status || 'filled')

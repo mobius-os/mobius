@@ -236,9 +236,18 @@ def press_restart(chat_id: str, card: dict, option: str | None = None):
 
 
 def submit_secret(client, headers: dict, chat_id: str, request_id: str,
-                  value: str = SECRET_VALUE):
+                  value: str = SECRET_VALUE, *, shown: dict | None = None):
+  """Submit a secret entry as the tab showing it does: naming its card and
+  revision, by default those of the newest card that shows the request."""
+  if shown is None:
+    card = next((card for card in reversed(cards(chat_id)) if any(
+      question.get("id") == request_id for question in card["questions"])), None)
+    question = next((question for question in card["questions"]
+                     if question.get("id") == request_id), {}) if card else {}
+    shown = {"question_id": card and card["question_id"],
+             "request_revision": question.get("request_revision")}
   return client.post(f"/api/secure-inputs/{chat_id}/{request_id}/submit",
-                     headers=headers, json={"fields": {"api_key": value}})
+                     headers=headers, json={**shown, "fields": {"api_key": value}})
 
 
 def wait_for_secret(request_id: str, timeout: float = 5.0) -> str:

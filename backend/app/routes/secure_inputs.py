@@ -179,9 +179,10 @@ async def submit_secure_input(
     from app.chat import current_run_generation
     from types import SimpleNamespace
     generation = current_run_generation(chat_id)
-    request_row, _card_id, entry = _sealed_entry(db, chat, request_id)
+    request_row, card_id, entry = _sealed_entry(db, chat, request_id)
     if request_row is not None:
-      return await _submit_sealed_entry(request, chat_id, request_id, saved, entry)
+      return await _submit_sealed_entry(
+        request, chat_id, request_id, saved, card_id, entry)
     if chat.pending_question_id != request_id:
       if saved.status in {"completed", "failed", "interrupted"}:
         return {"status": saved.status}
@@ -241,11 +242,15 @@ async def submit_secure_input(
   return {"status": "filled"}
 
 
-async def _submit_sealed_entry(request: Request, chat_id: str, request_id: str, saved, entry):
+async def _submit_sealed_entry(
+  request: Request, chat_id: str, request_id: str, saved, card_id, entry,
+):
   """Hand one secret entry's values to its consumer, at most once.
 
   The values are validated against the labels the entry showed and travel
   only in memory to the consumer; nothing here logs, stores or echoes them.
+  Like Cancel, a submission names the card (`question_id`) and the entry's
+  `request_revision` it was shown on; a tab showing an older one is refused.
   """
   from app import saved_secure_inputs
   from types import SimpleNamespace
@@ -256,7 +261,12 @@ async def _submit_sealed_entry(request: Request, chat_id: str, request_id: str, 
     raise HTTPException(410, detail="Secure input request is no longer open.")
   payload = await _json_object(request)
   values_payload = payload.pop("fields", None)
+  shown_card, shown_revision = payload.get("question_id"), payload.get("request_revision")
   payload.clear()
+  if shown_card != card_id or shown_revision != entry.get("request_revision"):
+    if isinstance(values_payload, dict):
+      values_payload.clear()
+    raise HTTPException(410, detail="Secure input request is no longer open.")
   try:
     values = secure_inputs.validate_submitted_values(
       SimpleNamespace(fields=entry["secure_input"]["fields"]), values_payload)
@@ -267,7 +277,7 @@ async def _submit_sealed_entry(request: Request, chat_id: str, request_id: str, 
       values_payload.clear()
   try:
     result = await saved_secure_inputs.submit(
-      chat_id, request_id, values, None, revision=entry.get("request_revision"))
+      chat_id, request_id, values, None, revision=shown_revision)
   except Exception as exc:
     values.clear()
     raise HTTPException(503, detail=_NOT_ACCEPTED) from exc

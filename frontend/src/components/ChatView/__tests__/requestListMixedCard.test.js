@@ -147,8 +147,8 @@ const publish = {
 }
 const restart = {
   id: 'req-restart', request_key: 'restart', request_revision: 1, kind: 'restart',
-  header: 'Restart Möbius', question: 'Restart Möbius now? This interrupts active turns.',
-  options: [{ id: 'opt-restart', label: 'Restart now', on_answer: 'close', description: 'Drain active work and restart once.' }],
+  header: 'Restart Möbius', question: 'Restart Möbius now? This interrupts active turns for tens of seconds.',
+  options: [{ id: 'opt-restart', label: 'Restart now', on_answer: 'close', description: 'Finish active work, then restart once.' }],
   platform_action: {
     version: 2, type: 'restart', action_id: 'platform-restart:x', restart_option_id: 'opt-restart',
     requirement: {}, status: 'awaiting_owner', wait_id: 'activation-card-1',
@@ -460,7 +460,7 @@ function fakeForm(value) {
 test('a secret is submitted on its own endpoint and leaves no value behind', async () => {
   const states = []
   const card = renderHook(SecretEntry, {
-    chatId: 'mixed-chat', entry: secret, state: null, interactive: true,
+    chatId: 'mixed-chat', cardId: 'card-1', entry: secret, state: null, interactive: true,
     onState: (...args) => states.push(args),
   })
   try {
@@ -473,7 +473,9 @@ test('a secret is submitted on its own endpoint and leaves no value behind', asy
     await tick()
     const [, args, sent] = apiCalls.find(([name]) => name === 'submit')
     assert.deepEqual(args.slice(0, 2), ['mixed-chat', 'req-secret'])
-    assert.deepEqual(sent, { fields: { api_key: 'typed-value-1' } }, 'the documented body, nothing else')
+    assert.deepEqual(sent, {
+      question_id: 'card-1', request_revision: 1, fields: { api_key: 'typed-value-1' },
+    }, 'the documented body, naming the card and revision it shows, nothing else')
     assert.equal(args[2].fields.api_key, '', 'the sent values are dropped once settled')
     assert.equal(input.value, '', 'the field is cleared before the request leaves')
     assert.deepEqual(states, [['req-secret', { status: 'consuming' }]])

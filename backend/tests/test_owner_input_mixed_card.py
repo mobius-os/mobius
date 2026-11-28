@@ -655,6 +655,34 @@ async def test_a_stale_tabs_cancel_of_a_reworded_secret_cancels_nothing(
 
 
 @pytest.mark.asyncio
+async def test_a_stale_tabs_submit_of_a_reworded_secret_delivers_nothing(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, consumer, no_wake,
+):
+  inputs.edit(client, chat.id, run_auth, op="add", key="mail-key", **inputs.secret_body(tmp_path))
+  await inputs.complete_turn(chat.id, monkeypatch, inputs.asking_run_id(chat))
+  old_card = inputs.cards(chat.id)[-1]
+  old_entry = inputs.entry(old_card, "mail-key")
+  reword = inputs.start_run(db, chat.id, "reword")
+  assert inputs.edit(client, chat.id, reword, op="update", key="mail-key",
+                     title="Connect the mail relay").status_code == 200
+  await inputs.complete_turn(chat.id, monkeypatch, "reword")
+  card = inputs.cards(chat.id)[-1]
+  entry = inputs.entry(card, "mail-key")
+
+  # Values typed against the older card or revision never reach the consumer.
+  for shown in ({"question_id": old_card["question_id"], "request_revision": 1},
+                {"question_id": card["question_id"], "request_revision": 1}, {}):
+    stale = inputs.submit_secret(client, auth, chat.id, entry["id"], shown=shown)
+    assert stale.status_code == 410, stale.text
+    assert SECRET_VALUE not in stale.text
+  with SessionLocal() as session:
+    assert session.get(models.SavedSecureInput, entry["id"]).status == "pending"
+
+  current = inputs.submit_secret(client, auth, chat.id, entry["id"])
+  assert current.status_code == 200, current.text
+
+
+@pytest.mark.asyncio
 async def test_a_secret_is_never_answered_in_plain_text(
   client, auth, chat, db, run_auth, monkeypatch, tmp_path, no_wake,
 ):
