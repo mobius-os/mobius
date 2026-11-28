@@ -370,8 +370,9 @@ trusted copy deliberately.
 
 ## Keys with several parts
 
-Status: phases 1 (parts, `basic`, `slots`, the multi-field card) and 2
-(`aws_sigv4`, `jwt_bearer`) are built; phase 3 (`oauth2_refresh`) is not.
+Status: phases 1 (parts, `basic`, `slots`, the multi-field card), 2
+(`aws_sigv4`, `jwt_bearer`) and 3 (`oauth2_refresh` and the sign-in finish)
+are built.
 
 **The gap.** A key today is one value sent in one slot, and a borrow uses one
 key. Many services need more than that:
@@ -523,12 +524,71 @@ each minted token to the key's redaction set.
     required. `lifetime_secs` is 60 to 3600 (default 600). A request may mark
     a part `multiline` so its card shows a box for the key file.
   - **`oauth2_refresh`** `{client_id: <part>, client_secret: <part>,
-    refresh_token: <part>, token_endpoint}`: the vault exchanges the refresh
-    token for an access token and sends that. When the provider rotates the
-    refresh token, the vault saves the new one as a change by
-    `platform:oauth-refresh`, audited like any other. Getting the first
-    refresh token (the browser consent flow) is out of scope here; the owner
-    pastes one or a later connect flow writes it.
+    refresh_token: <part>, token_endpoint, revoke_endpoint?, client_auth?:
+    post|basic}`: a user's own sign-in (Gmail, Calendar). The vault spends
+    the refresh token at the token endpoint (`grant_type=refresh_token`, the
+    client in the form or, with `basic`, as `Authorization: Basic` of the
+    form-encoded id and secret) and sends the access token it gets as
+    `Authorization: Bearer`, cached for its `expires_in` (an hour when the
+    provider doesn't say, a day at most). The endpoints are `https` on an
+    exact host and its usual port, with a path and nothing else (no user,
+    query or fragment, at most 512 characters). `client_secret` and
+    `refresh_token` are always secret and `client_id` always plain (the app
+    shows it to the consent page). Public clients, which have no secret, are
+    not supported. Renewals of one key run one at a time, by key name,
+    and each reads the refresh token afresh, so a provider that rotates it
+    (and may revoke the whole sign-in when one is spent twice) never sees
+    one reused. When it rotates, the vault saves the new one as a change by
+    `platform:oauth-refresh` (`sign-in renewed` in the audit log), only
+    while the key still holds the one it spent, so a renewal never undoes a
+    sign-out or a newer sign-in; the token it bought is cached under the
+    renewed key too. A borrow before anyone signed in answers 409 with code
+    `not_signed_in`, and a refresh token the provider refuses
+    (`invalid_grant`) 409 with code `reauth_required`. That refusal is
+    remembered in memory for exactly the parts and recipe refused, so later
+    borrows hear it without asking the provider until the key's parts or
+    recipe change or it is signed in again. Any other failure is a 502 like
+    an exchange's. A refusal's `code` is in the vault's denied JSON
+    and the server relays it unchanged.
+
+    **Signing in.** A sign-in key is saved and approved before anyone signs
+    in: its recipe fits without the refresh token, and a request that lists
+    that part is refused, so the card only ever asks for the client. The
+    consent itself happens in the browser, started by the app (it builds
+    the provider's consent address; `GET /keys/<key>/oauth2` gives it the
+    client id); the vault finishes it:
+
+    - `GET /api/keys/<key>/oauth2` → `{signed_in, token_host, client_id}`.
+    - `POST /api/keys/<key>/oauth2/exchange` `{code, redirect_uri,
+      code_verifier?}` (a printable code of at most 2048 characters, an
+      `https` redirect of at most 2048, a PKCE verifier): the vault posts
+      `grant_type=authorization_code` to the token endpoint and keeps the
+      refresh token as the key's (a secret part labelled "Sign-in"), audited
+      as `signed in` under the attested caller, and caches the access token.
+      An answer without a refresh token is a 502 saying the provider gave no
+      lasting sign-in (offline access, or consent again, was not asked for).
+      It answers only `{signed_in: true, scope, email}`: `email` comes from
+      the `id_token`'s claims, read without checking its signature because it
+      arrived straight from the approved token endpoint over TLS. Each is
+      relayed only in a strict form (space-separated scope names, a plain
+      address, both bounded) and is null if it holds any secret the vault
+      knows (the client secret, a refresh, access or id token, the code). No
+      access, refresh or id token is ever returned.
+    - `POST /api/keys/<key>/oauth2/disconnect`: revokes the refresh token at
+      the revoke endpoint when the recipe names one (best effort), removes
+      it (`signed out`) and forgets the cached access tokens; answers
+      `{signed_in: false, revoked}`.
+
+    These are open to the owner, top-level agents while the key's Agents
+    switch is on (an agent's sign-in or
+    sign-out notifies the owner, as any value it replaces does) and an app
+    with a live (not paused) grant that has a site on the key; an app without
+    one hears what a borrow without a grant hears. Delegated helpers, app
+    tokens a helper minted and an app's own agent may check but never sign in
+    or out, and shared-browser guests are refused as for a borrow. The
+    server waits for them as long as for a borrow, since they reach a site.
+    Settings › Keys shows a sign-in key's state instead of its refresh token,
+    with Sign out.
 
   Minted access tokens live only in the vault's memory, cached until about a
   minute before they expire, keyed by the key, its recipe and its private
@@ -537,7 +597,10 @@ each minted token to the key's redaction set.
   claim, the key id and the exchange, since `sub` acts as that user. The exchange endpoint is
   part of the recipe the owner approves and is checked like a site (HTTPS,
   443, public address, pinned), but it is not a site the caller can borrow
-  against. A failed exchange answers 502 with the provider's error, redacted.
+  against. A failed exchange (and a failed sign-in renewal) answers 502 in
+  fixed words with only the provider's OAuth error code, and only a standard
+  one (`invalid_client`, `invalid_grant`, ...) that equals no secret it was
+  sent: its free text could repeat a secret in a form redaction misses.
 - **Exchange HMACs and OAuth 1.0a** have no common shape (which fields are
   signed, in what order, how the signature is encoded and named), so they are
   added one provider at a time when someone needs one, not as a generic
@@ -556,7 +619,8 @@ each minted token to the key's redaction set.
   with the card saying so.
 - The card's details say how the key is sent, naming parts by their labels
   (`Authorization: Basic (Account SID and Auth token)`, "an AWS signature
-  (s3, region auto)", "a Google access token for <scope>"), and, for a new
+  (s3, region auto)", "a Google access token for <scope>", "a sign-in renewed
+  by the vault at oauth2.googleapis.com" with its endpoints), and, for a new
   key, give one paste field per part, labelled by the request. Plain parts
   are visible as typed, with the warning above; secret parts are password
   fields, and a multiline part gets a text area that takes a dropped key file
@@ -592,6 +656,18 @@ each minted token to the key's redaction set.
   the owner's: approving a site that mints credentials hands those
   credentials out, so approve only the paths a key needs. For a signed S3
   request the access key's own policy is the real limit on what it may do.
+- A sign-in's token and revoke endpoints are approved with the recipe,
+  connected to by the vault itself with the same pinned public-address rules
+  as a borrow, and never reachable by a borrow of that key (nor are Google's
+  credential-minting hosts). Approving a token endpoint trusts it with the
+  client secret and every refresh token, as approving a site trusts it with
+  a key.
+- An app steers a sign-in only into a key it may already use, and never
+  receives its value. Signing in does choose the account: an app that may
+  use the key can sign it in as any account whose consent it obtains, and
+  every other user of the key (agents, other apps) then acts as that
+  account. The card says so, the audit log names who signed in, and the
+  exchange's answer names the account's email.
 - Body injection widens what a caller can steer only by the declared field.
   A site that stores a request body and shows it later can leak that field,
   just as one that stores headers can leak a header today. The defence is the
@@ -620,7 +696,10 @@ each minted token to the key's redaction set.
    real store and a real service account still need the owner's
    credentials to check.
 3. **`oauth2_refresh`**, then any per-provider signers that are actually
-   asked for.
+   asked for. Built: renewal, rotation, sign-in and sign-out are tested
+   against a stand-in for a provider's token and revoke endpoints, through
+   the vault socket and the server's routes, and checked by hand with a
+   real Google client (Gmail and Calendar borrows, a renewed refresh token).
 
 ## Future work: sandbox for app server code
 

@@ -1164,6 +1164,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
     revoke: (name) => apiFetch(`/keys/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+    // Signs a sign-in key out: the vault revokes its refresh token and forgets it.
+    signOut: (name) => apiFetch(`/keys/${encodeURIComponent(name)}/oauth2/disconnect`, { method: 'POST' }),
     reveal: (name, part) => apiFetch(`/keys/${encodeURIComponent(name)}/value${part && part !== 'value' ? `?part=${encodeURIComponent(part)}` : ''}`),
     approve: (requestId, body = {}) => apiFetch(`/keys/requests/${encodeURIComponent(requestId)}/approve`, {
       method: 'POST',

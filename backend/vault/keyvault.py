@@ -21,6 +21,9 @@ when both match.
 
     METHOD /use/<key>/<host>/<path>?<query>    use a key (apps, agents, owner)
     GET    /keys/<key>/value                   reveal (never for app callers)
+    GET    /keys/<key>/oauth2                  whether a sign-in key is signed in
+    POST   /keys/<key>/oauth2/exchange | /disconnect
+                                               sign it in (an authorization code) or out
     POST   /requests                           an app or an agent asks to use a key
     POST   /requests/<id>/approve | /deny      the owner answers
     DELETE /requests/<id>                      the owner (or the platform) removes one
@@ -172,9 +175,40 @@ GITHUB_TOKEN_PATH_RE = re.compile(r"(?:^|/)installations/[^/]+/access_tokens/?$"
 GOOGLE_CREDENTIAL_HOSTS = frozenset({"iam.googleapis.com", "iamcredentials.googleapis.com"})
 # GitHub refuses an app JWT that lives longer than ten minutes.
 GITHUB_MAX_LIFETIME = 600
+# Recipes sent as a token the vault mints (``jwt_bearer``) or renews from a
+# sign-in (``oauth2_refresh``) itself: ``Authorization: Bearer <token>``.
+TOKEN_RECIPES = ("jwt_bearer", "oauth2_refresh")
 MAX_TOKEN_ANSWER = 64 * 1024
 # A cached token is renewed this long before it expires.
 TOKEN_MARGIN_SECS = 60
+# A sign-in (``oauth2_refresh``): the vault holds an OAuth client and the
+# refresh token a sign-in gave it, and renews access tokens itself. Its token
+# and revoke endpoints are part of the recipe the owner approves.
+OAUTH_CLIENT_AUTH = ("post", "basic")
+MAX_ENDPOINT = 512
+# A provider that leaves out how long its token lasts is taken to mean an
+# hour; no token is kept longer than a day, whatever it says.
+OAUTH_DEFAULT_LIFETIME = 3600
+OAUTH_MAX_LIFETIME = 86400
+# Who renews a sign-in when the provider hands back a new refresh token.
+OAUTH_RENEWER = ("platform", "oauth-refresh")
+SIGN_IN_LABEL = "Sign-in"
+MAX_AUTH_CODE = 2048
+MAX_REDIRECT_URI = 2048
+# What a sign-in's answer may relay from the provider: a standard OAuth error
+# code (RFC 6749 5.2, RFC 7009 and the common ones; any other is left out, so
+# a provider can't pass text through it), the scope it granted
+# (space-separated scope names or URLs) and the email of the account (from its
+# id_token), each only in a strict, bounded form.
+OAUTH_ERRORS = frozenset({
+  "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client", "unsupported_grant_type",
+  "invalid_scope", "access_denied", "unsupported_token_type", "server_error", "temporarily_unavailable",
+})
+OAUTH_SCOPE_RE = re.compile(r"[A-Za-z0-9._:/~+=-]{1,256}(?: [A-Za-z0-9._:/~+=-]{1,256}){0,31}")
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]{1,64}@(?:[A-Za-z0-9-]{1,63}\.){1,8}[A-Za-z]{2,63}")
+PKCE_VERIFIER_RE = re.compile(r"[A-Za-z0-9._~-]{43,128}")
+NOT_SIGNED_IN = "This key isn't signed in yet."
+SIGN_IN_EXPIRED = "The sign-in for this key has expired or was revoked; sign in again."
 MAX_KEYS = 200
 # What the per-app secret store allowed; apps' own keys keep that bound.
 MAX_OWNED_PER_APP = 16
@@ -246,12 +280,21 @@ URL_OVERRIDE_HEADERS = frozenset({"x-original-url", "x-rewrite-url", "x-override
 
 
 class VaultError(Exception):
-  """A request the vault refuses, with an owner- or caller-facing reason."""
+  """A request the vault refuses, with an owner- or caller-facing reason.
 
-  def __init__(self, status: int, reason: str) -> None:
+  ``code``, when set, names the refusal for code that acts on it (an app
+  that shows a sign-in button on ``not_signed_in``); the answer carries it.
+  """
+
+  def __init__(self, status: int, reason: str, *, code: str | None = None) -> None:
     super().__init__(reason)
     self.status = status
     self.reason = reason
+    self.code = code
+
+  def coded(self) -> dict:
+    """The ``code`` field of the refusal's answer, when it has one."""
+    return {"code": self.code} if self.code else {}
 
 
 class GrantRefusal(VaultError):
@@ -393,8 +436,11 @@ def validate_inject(raw) -> dict:
     return _validate_aws(raw)
   if kind == "jwt_bearer":
     return _validate_jwt(raw)
+  if kind == "oauth2_refresh":
+    return _validate_oauth2(raw)
   raise VaultError(400, "A key is sent in a header or a query parameter, as basic, in slots, "
-                   "signed for S3-compatible storage (aws_sigv4), or as a token from a private key (jwt_bearer).")
+                   "signed for S3-compatible storage (aws_sigv4), as a token from a private key (jwt_bearer), "
+                   "or as a token from a sign-in (oauth2_refresh).")
 
 
 _AWS_S3_ONLY = ("The vault signs only for S3-compatible storage (service s3): other AWS APIs choose "
@@ -476,6 +522,60 @@ def _validate_jwt(raw: dict) -> dict:
   return recipe
 
 
+def _validate_oauth2(raw: dict) -> dict:
+  """A sign-in the vault renews: an OAuth client (``client_id``, plain, and
+  ``client_secret``; public clients without a secret are not supported) and
+  the ``refresh_token`` signing in gives, exchanged at ``token_endpoint`` for access tokens sent as
+  ``Authorization: Bearer``. ``client_auth`` sends the client in the form
+  (``post``) or as Basic (``basic``). ``revoke_endpoint``, when given, is where
+  signing out revokes the refresh token."""
+  recipe = {"type": "oauth2_refresh", "client_id": _part_name(raw.get("client_id"), "The client id"),
+            "client_secret": _part_name(raw.get("client_secret"), "The client secret")}
+  recipe["refresh_token"] = _part_name(raw.get("refresh_token"), "The refresh token")
+  if len(set(recipe.values())) != len(recipe):
+    raise VaultError(400, "A sign-in's client id, client secret and refresh token are different parts.")
+  client_auth = raw.get("client_auth") or "post"
+  if client_auth not in OAUTH_CLIENT_AUTH:
+    raise VaultError(400, "A sign-in sends its client in the form (post) or as Basic (basic).")
+  recipe["client_auth"] = client_auth
+  recipe["token_endpoint"] = _endpoint(raw.get("token_endpoint"), "The token endpoint")
+  if raw.get("revoke_endpoint") is not None:
+    recipe["revoke_endpoint"] = _endpoint(raw.get("revoke_endpoint"), "The revoke endpoint")
+  return recipe
+
+
+def _endpoint(raw, what: str) -> str:
+  """An endpoint a recipe names, checked like a site: HTTPS on its usual
+  port, an exact host and a path, nothing else (no user, query or fragment)."""
+  text = raw.strip() if isinstance(raw, str) else ""
+  refusal = VaultError(400, f"{what} is an https address with a path, like https://oauth2.googleapis.com/token.")
+  try:
+    url = urllib.parse.urlsplit(text)
+  except ValueError:
+    raise refusal
+  host = url.hostname or ""
+  if (len(text) > MAX_ENDPOINT or url.scheme != "https" or url.netloc.lower() != host
+      or not HOST_RE.fullmatch(host) or host.startswith("*.")
+      or not url.path.startswith("/") or "?" in text or "#" in text):
+    raise refusal
+  try:
+    normalized_request_path(url.path)
+  except VaultError:
+    raise refusal
+  return f"https://{host}{url.path}"
+
+
+def endpoint_target(endpoint: str) -> tuple[str, str]:
+  """The host and path of an endpoint ``_endpoint`` checked."""
+  url = urllib.parse.urlsplit(endpoint)
+  return url.hostname, url.path
+
+
+def sign_in_part(inject: dict) -> str | None:
+  """The part signing in fills (a sign-in's refresh token), or None."""
+  return inject["refresh_token"] if inject["type"] == "oauth2_refresh" else None
+
+
 def recipe_parts(inject: dict) -> list[str]:
   """The parts a validated recipe sends, in the order it names them."""
   kind = inject["type"]
@@ -488,6 +588,8 @@ def recipe_parts(inject: dict) -> list[str]:
             *([inject["session_token"]] if inject.get("session_token") else [])]
   if kind == "jwt_bearer":
     return [inject["private_key"]]
+  if kind == "oauth2_refresh":
+    return [inject["client_id"], inject["client_secret"], inject["refresh_token"]]
   names = []
   for slot in inject["slots"]:
     names += TEMPLATE_PART_RE.findall(slot["template"]) if slot["type"] == "header" else [slot["part"]]
@@ -495,8 +597,11 @@ def recipe_parts(inject: dict) -> list[str]:
 
 
 def recipe_fits(inject: dict, part_names) -> list[str]:
-  """The parts ``inject`` sends that ``part_names`` lacks (empty when it fits)."""
-  have = set(part_names)
+  """The parts ``inject`` sends that ``part_names`` lacks (empty when it fits).
+
+  A sign-in's refresh token is never lacking: signing in fills it, so a key
+  is saved and approved before anyone signs in (``sign_in_part``)."""
+  have = set(part_names) | {sign_in_part(inject)}
   return [name for name in recipe_parts(inject) if name not in have]
 
 
@@ -1429,8 +1534,16 @@ def signing_refusal(inject: dict, host: str, path: str) -> str | None:
   kind = inject["type"]
   if kind == "aws_sigv4" and inject["service"] != AWS_SIGNED_SERVICE:
     return _AWS_S3_ONLY
-  if kind == "jwt_bearer" and host in GOOGLE_CREDENTIAL_HOSTS:
+  if kind in ("jwt_bearer", "oauth2_refresh") and host in GOOGLE_CREDENTIAL_HOSTS:
     return f"A token from this key can't be sent to {host}: it answers with new credentials."
+  if kind == "oauth2_refresh" and any(
+    # ``path`` is decoded (``normalized_request_path``); compared loosely, so
+    # no spelling of the endpoint reaches it with the key's token.
+    (host, path.rstrip("/").lower()) == (end_host, urllib.parse.unquote(end_path).rstrip("/").lower())
+    for end_host, end_path in (endpoint_target(inject[field]) for field in ("token_endpoint", "revoke_endpoint")
+                               if inject.get(field))
+  ):
+    return "A sign-in's token and revoke endpoints are reached only by the vault itself."
   if kind == "jwt_bearer" and inject.get("exchange") is None and GITHUB_TOKEN_PATH_RE.search(path):
     return "An installation token is made inside the vault (exchange github), never handed to a caller."
   return None
@@ -1443,12 +1556,13 @@ def build_upstream_request(
 ) -> tuple[UpstreamRequest, bytes | None]:
   """Place the key's parts as its recipe says and drop anything that could
   displace them: the caller's own header or query parameter with a slot's
-  name never travels, nor a body field a slot fills. A ``jwt_bearer`` key is
-  sent as the token the vault minted (``bearer``); an ``aws_sigv4`` request
-  is signed last, over exactly what goes out, at ``now``."""
+  name never travels, nor a body field a slot fills. A ``jwt_bearer`` or
+  ``oauth2_refresh`` key is sent as the token the vault minted or renewed
+  (``bearer``); an ``aws_sigv4`` request is signed last, over exactly what
+  goes out, at ``now``."""
   inject, values = loan.inject, loan.values
   added_headers = recipe_headers(inject, values)
-  if inject["type"] == "jwt_bearer":
+  if inject["type"] in TOKEN_RECIPES:
     added_headers = [("Authorization", f"Bearer {bearer}")]
   slots = {name.lower() for name, _ in added_headers}
   if inject["type"] == "aws_sigv4":
@@ -2197,6 +2311,9 @@ class Vault:
         if missing and record is None:
           raise VaultError(400, f"The recipe sends {', '.join(missing)}; list every part it sends in parts.")
         if specs is not None:
+          if any(spec["name"] == sign_in_part(inject) for spec in specs):
+            raise VaultError(400, f"Signing in fills {sign_in_part(inject)}; leave it out of parts, "
+                             "so the owner is never asked to paste it.")
           _refuse_plain_credentials(name, inject, specs)
         if record is None and specs is not None and not _sends_a_secret(inject, specs):
           raise VaultError(400, "The recipe sends no secret part; mark the secret one secret.")
@@ -2562,6 +2679,8 @@ class Vault:
       if refusal:
         raise VaultError(403, refusal)
       used = {part["name"]: part for part in record["parts"] if part["name"] in recipe_parts(inject)}
+      if sign_in_part(inject) is not None and sign_in_part(inject) not in used:
+        raise VaultError(409, NOT_SIGNED_IN, code="not_signed_in")
       values = {part: self._open_part(name, stored) for part, stored in used.items()}
       if inject["type"] == "header":
         if any(ch in values[VALUE_PART] for ch in "\r\n"):
@@ -2574,6 +2693,94 @@ class Vault:
         # Headers can't carry a part with line breaks; a query or body can.
         recipe_headers(inject, values)
       return Loan(inject, values, frozenset(part for part, stored in used.items() if stored.get("secret")))
+
+  # -- sign-ins (``oauth2_refresh``) ----------------------------------------
+  #
+  # Signing in fills a key's refresh token, signing out removes it, and a
+  # provider that rotates it has the vault save the new one. The owner and
+  # the owner's agents may sign a key in or out, and so may an app that may
+  # use the key somewhere: a live (not paused) grant with a site. An app thus
+  # steers a sign-in only into a key it was already granted, and never
+  # receives a value.
+
+  def _sign_in_record(self, name: str, caller: tuple[str, str]) -> dict:
+    """The sign-in key ``name``, once ``caller`` may sign it in or out. The
+    caller holds the lock."""
+    record = self._records.get(name)
+    if caller[0] == "app":
+      grant = app_grant(record["grants"], *app_caller(caller[1])) if record is not None else None
+      if grant is None or grant.get("paused") or not grant["sites"]:
+        # As with a borrow, an app without a grant learns nothing, not even
+        # whether the key exists.
+        raise VaultError(403, f"{caller_name(caller)} may not use this key")
+    elif record is None:
+      raise VaultError(404, f"No key named {name}")
+    elif caller[0] == "agent" and not record["grants"].get("agents"):
+      # As for a borrow or a read: a key kept from agents is kept whole.
+      raise VaultError(403, "Agents are switched off for this key in Settings › Keys.")
+    if record["inject"]["type"] != "oauth2_refresh":
+      raise VaultError(409, f"{name} isn't sent as a sign-in (oauth2_refresh).")
+    return record
+
+  def sign_in_status(self, name: str, caller: tuple[str, str]) -> dict:
+    """Whether sign-in key ``name`` is signed in, where it renews, and its
+    client id (always plain), which an app needs to send the owner
+    to the provider's consent page."""
+    validate_name(name)
+    with self._lock:
+      record = self._sign_in_record(name, caller)
+      inject = record["inject"]
+      client = _part(record, inject["client_id"])
+      return {
+        "signed_in": _part(record, inject["refresh_token"]) is not None,
+        "token_host": endpoint_target(inject["token_endpoint"])[0],
+        "client_id": client["text"],
+      }
+
+  def sign_in_parts(self, name: str, caller: tuple[str, str]) -> tuple[dict, dict]:
+    """Sign-in key ``name``'s recipe and the values of the parts it has, read
+    now: the refresh token only once signed in."""
+    validate_name(name)
+    with self._lock:
+      record = self._sign_in_record(name, caller)
+      inject = copy.deepcopy(record["inject"])
+      values = {part["name"]: self._open_part(name, part) for part in record["parts"]
+                if part["name"] in recipe_parts(inject)}
+    return inject, values
+
+  def save_sign_in(
+    self, name: str, inject: dict, refresh_token: str | None, *,
+    caller: tuple[str, str], replaces: str | None = None,
+  ) -> bool:
+    """Save ``refresh_token`` as sign-in key ``name``'s, or with None remove
+    it (signing out), while the key is still sent with ``inject`` and
+    ``caller`` may still sign it in. A renewal names the token it ``replaces``
+    and is saved only while the key still holds that one, so it never undoes
+    a sign-out or a newer sign-in. Audited under ``caller``; returns whether
+    the key changed."""
+    with self._change():
+      record = self._sign_in_record(name, caller)
+      if record["inject"] != inject:
+        raise VaultError(409, f"How {name} is sent changed meanwhile; try again.")
+      part_name = inject["refresh_token"]
+      current = _part(record, part_name)
+      if replaces is not None and (current is None or self._open_part(name, current) != replaces):
+        return False
+      kept = [part for part in record["parts"] if part["name"] != part_name]
+      if refresh_token is None:
+        if current is None:
+          return False
+        record["parts"] = kept
+        outcome = "signed out"
+      else:
+        if len(kept) >= MAX_PARTS:
+          raise VaultError(400, f"A key has at most {MAX_PARTS} parts.")
+        meta = {"name": part_name, "label": (current or {}).get("label") or SIGN_IN_LABEL, "secret": True}
+        record["parts"] = [*kept, self._seal_part(name, meta, validate_value(refresh_token))]
+        outcome = "sign-in renewed" if replaces is not None else "signed in"
+      self._touch(record)
+      self._audit_change(name, caller_text(caller), outcome)
+    return True
 
   # -- logs and counters (never values) ----------------------------------------
 
@@ -2693,19 +2900,28 @@ def _credential_parts(inject: dict) -> list[str]:
     return [inject["secret_access_key"], *([inject["session_token"]] if inject.get("session_token") else [])]
   if kind == "jwt_bearer":
     return [inject["private_key"]]
+  if kind == "oauth2_refresh":
+    return [inject["client_secret"], inject["refresh_token"]]
   return []
 
 
 def _refuse_plain_credentials(name: str, inject: dict, parts: list[dict]) -> None:
+  """The secret itself stays secret; a sign-in's client id stays plain, since
+  the app shows it to the provider's consent page (``sign_in_status``)."""
   for part in parts:
     if part["name"] in _credential_parts(inject) and not part["secret"]:
       raise VaultError(400, f"Part {part['name']} of {name} is the secret itself, so it stays secret.")
+    if inject["type"] == "oauth2_refresh" and part["name"] == inject["client_id"] and part["secret"]:
+      raise VaultError(400, f"Part {part['name']} of {name} is the client id the consent page shows, "
+                       "so it isn't secret (secret: false).")
 
 
 def _sends_a_secret(inject: dict, parts: list[dict]) -> bool:
   """Whether ``inject`` sends at least one secret part: what it sends is what
-  the vault redacts, so a key sent with only plain parts would be no key."""
-  sent = set(recipe_parts(inject))
+  the vault redacts, so a key sent with only plain parts would be no key. A
+  sign-in's refresh token doesn't count: signing out removes it, and the key
+  keeps its client secret."""
+  sent = set(recipe_parts(inject)) - {sign_in_part(inject)}
   return any(part["secret"] for part in parts if part["name"] in sent)
 
 
@@ -2983,14 +3199,47 @@ def _minted(loan: Loan, request: UpstreamRequest, bearer: str | None) -> list[st
 
 
 class TokenCache:
-  """Tokens minted from private keys, in memory only, until shortly before
-  they expire. Keyed by the key, its recipe and its private part, so any
-  change to them mints afresh; a restart forgets them all."""
+  """Tokens minted from private keys or renewed from sign-ins, in memory
+  only, until shortly before they expire. Keyed by the key, its recipe and
+  the parts it mints from, so any change to them mints afresh; a restart
+  forgets them all."""
 
   def __init__(self) -> None:
     self._lock = threading.Lock()
     self._tokens: dict[str, tuple[str, float]] = {}
     self._minting: dict[str, threading.Lock] = {}
+    self._sign_ins: dict[str, threading.Lock] = {}
+    # Sign-ins the provider refused (``invalid_grant``), by the cache key of
+    # what was refused: borrows are told to sign in again without asking the
+    # provider, until the key's parts or recipe change or it is signed in.
+    self._refused: set[str] = set()
+
+  def refuse(self, key: str) -> None:
+    with self._lock:
+      self._refused.add(key)
+
+  def refused(self, key: str) -> bool:
+    with self._lock:
+      return key in self._refused
+
+  def sign_in_lock(self, name: str) -> threading.Lock:
+    """The lock renewing, signing in and signing out key ``name`` share. By
+    key name, not by its parts: a provider that rotates refresh tokens may
+    revoke the whole sign-in when one is spent twice, so two renewals of one
+    key never overlap, and the second reads the token the first saved."""
+    with self._lock:
+      return self._sign_ins.setdefault(name, threading.Lock())
+
+  def put(self, key: str, token: str, expires: float) -> None:
+    with self._lock:
+      self._tokens[key] = (token, expires)
+
+  def drop_prefix(self, prefix: str) -> None:
+    """Forget every token, and every refusal, whose cache key starts with
+    ``prefix`` (one key's sign-in)."""
+    with self._lock:
+      self._tokens = {k: v for k, v in self._tokens.items() if not k.startswith(prefix)}
+      self._refused = {k for k in self._refused if not k.startswith(prefix)}
 
   def get(self, key: str, mint) -> str:
     """The cached token, or one minted now. Simultaneous borrows of one key
@@ -3015,7 +3264,11 @@ class TokenCache:
       self._tokens.pop(key, None)
 
 
-def _token_answer(host: str, status: int, data: bytes, jwt: str) -> dict:
+def _token_answer(host: str, status: int, data: bytes, *sent: str) -> dict:
+  """The token endpoint's JSON answer. A refusal is a 502 in fixed words
+  with only the provider's standard OAuth ``error`` code (``_oauth2_error``),
+  left out should it equal a secret it was ``sent``: its free text could
+  carry a secret in a form redaction misses."""
   if len(data) > MAX_TOKEN_ANSWER:
     raise VaultError(502, f"{host} answered the token request with too much.")
   try:
@@ -3025,9 +3278,9 @@ def _token_answer(host: str, status: int, data: bytes, jwt: str) -> dict:
   if not isinstance(answer, dict):
     raise VaultError(502, f"{host} didn't answer the token request with JSON ({status}).")
   if status >= 300:
-    said = answer.get("error_description") or answer.get("error") or answer.get("message") or ""
-    said = redact(str(said)[:200].encode(), secret_echoes(jwt)).decode(errors="replace").rstrip(". ")
-    raise VaultError(502, f"{host} refused the token ({status}){': ' + said if said else ''}.")
+    code = _oauth2_error(data)
+    code = None if code in sent else code
+    raise VaultError(502, f"{host} refused the token ({status}{', ' + code if code else ''}).")
   return answer
 
 
@@ -3035,6 +3288,100 @@ def _usable_token(host: str, token) -> str:
   if not isinstance(token, str) or not re.fullmatch(r"[\x21-\x7e]{8,4096}", token):
     raise VaultError(502, f"{host} answered without a usable token.")
   return token
+
+
+def oauth2_token_form(inject: dict, values: dict, grant: dict) -> tuple[list[tuple[str, str]], bytes]:
+  """A request to a sign-in's token or revoke endpoint: the ``grant``'s form
+  fields and the client, in the form (``post``) or as Basic (``basic``, its
+  id and secret form-encoded first, as OAuth 2 says)."""
+  client_id = values[inject["client_id"]]
+  secret = values[inject["client_secret"]]
+  headers = [("Content-Type", "application/x-www-form-urlencoded"), ("Accept", "application/json")]
+  fields = dict(grant)
+  if inject["client_auth"] == "basic":
+    pair = f"{urllib.parse.quote_plus(client_id)}:{urllib.parse.quote_plus(secret)}"
+    headers.append(("Authorization", "Basic " + base64.b64encode(pair.encode()).decode()))
+  else:
+    fields["client_id"] = client_id
+    fields["client_secret"] = secret
+  return headers, urllib.parse.urlencode(fields).encode()
+
+
+def _oauth2_error(data: bytes) -> str | None:
+  """The standard OAuth ``error`` code (``OAUTH_ERRORS``) of a token
+  endpoint's refusal, or None."""
+  try:
+    answer = json.loads(data[:MAX_TOKEN_ANSWER] or b"{}")
+  except ValueError:
+    return None
+  code = answer.get("error") if isinstance(answer, dict) else None
+  return code if isinstance(code, str) and code in OAUTH_ERRORS else None
+
+
+def oauth2_access(host: str, answer: dict, now: float) -> tuple[str, float]:
+  """The access token in a token endpoint's answer and when to stop using
+  it: after ``expires_in`` seconds (an hour when it doesn't say, a day at
+  most)."""
+  lifetime = answer.get("expires_in")
+  if isinstance(lifetime, str) and lifetime.isdigit():
+    lifetime = int(lifetime)
+  if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+    lifetime = OAUTH_DEFAULT_LIFETIME
+  return _usable_token(host, answer.get("access_token")), now + min(lifetime, OAUTH_MAX_LIFETIME)
+
+
+def id_token_email(answer: dict) -> str | None:
+  """The ``email`` an OpenID token endpoint's ``id_token`` names, or None.
+
+  Read without checking its signature: the vault received it straight from
+  the token endpoint the owner approved, over TLS, so it says what that
+  endpoint said; it only tells the caller which account signed in."""
+  try:
+    payload = str(answer.get("id_token") or "").split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+  except (IndexError, ValueError, binascii.Error):
+    return None
+  email = claims.get("email") if isinstance(claims, dict) else None
+  return email if isinstance(email, str) and len(email) <= 254 and EMAIL_RE.fullmatch(email) else None
+
+
+def signed_in_answer(answer: dict, *known: str) -> dict:
+  """What finishing a sign-in answers: that it worked, the ``scope`` granted
+  and the account's ``email``, each only in its strict form and dropped (None)
+  if it holds any ``known`` secret (the client secret, a refresh, access or
+  id token, the code), so a provider can't pass one to the caller there."""
+  scope = answer.get("scope")
+  shown = {"scope": scope if isinstance(scope, str) and len(scope) <= 2048 and OAUTH_SCOPE_RE.fullmatch(scope) else None,
+           "email": id_token_email(answer)}
+  for field, text in shown.items():
+    if text is not None and any(secret and secret in text for secret in known):
+      shown[field] = None
+  return {"signed_in": True, **shown}
+
+
+def _authorization_code_grant(body: dict) -> dict:
+  """The form that finishes a sign-in, from what the caller's redirect got
+  back: the authorization ``code``, the ``redirect_uri`` the sign-in began
+  with, and its PKCE ``code_verifier`` if it used one."""
+  code, redirect, verifier = body.get("code"), body.get("redirect_uri"), body.get("code_verifier")
+  if not isinstance(code, str) or not re.fullmatch(r"[\x21-\x7e]{1,%d}" % MAX_AUTH_CODE, code):
+    raise VaultError(400, f"Send the code the sign-in returned: printable text of at most {MAX_AUTH_CODE} characters.")
+  url = urllib.parse.urlsplit(redirect) if isinstance(redirect, str) else None
+  if (url is None or len(redirect) > MAX_REDIRECT_URI or url.scheme != "https" or not url.hostname
+      or not re.fullmatch(r"[\x21-\x7e]+", redirect)):
+    raise VaultError(400, "Send the redirect_uri the sign-in began with: an https address.")
+  grant = {"grant_type": "authorization_code", "code": code, "redirect_uri": redirect}
+  if verifier is not None:
+    if not isinstance(verifier, str) or not PKCE_VERIFIER_RE.fullmatch(verifier):
+      raise VaultError(400, "A code_verifier is 43 to 128 letters, digits, '-', '.', '_' or '~'.")
+    grant["code_verifier"] = verifier
+  return grant
+
+
+def _sign_in_cache_key(name: str, inject: dict, values: dict) -> str:
+  """Where a sign-in's access token is cached: by its key name (so signing
+  out forgets it, ``TokenCache.drop_prefix``), recipe and parts."""
+  return f"oauth2:{name}:" + hashlib.sha256(json.dumps([inject, values], sort_keys=True).encode()).hexdigest()
 
 
 class VaultHandler(BaseHTTPRequestHandler):
@@ -3092,7 +3439,7 @@ class VaultHandler(BaseHTTPRequestHandler):
     try:
       self._admin(split)
     except VaultError as exc:
-      self._send_json(exc.status, {"error": exc.reason})
+      self._send_json(exc.status, {"error": exc.reason, **exc.coded()})
     except ValueError:
       self._send_json(400, {"error": "Invalid request."})
 
@@ -3146,6 +3493,12 @@ class VaultHandler(BaseHTTPRequestHandler):
       part = query.get("part") or VALUE_PART
       answer = {"name": parts[1], "value": vault.reveal(parts[1], caller, part)}
       self._send_json(200, answer if part == VALUE_PART else {**answer, "part": part})
+    elif method == "GET" and len(parts) == 3 and parts[0] == "keys" and parts[2] == "oauth2":
+      self._send_json(200, vault.sign_in_status(parts[1], parse_caller(self.headers.get("X-Vault-Caller"))))
+    elif method == "POST" and len(parts) == 4 and parts[:1] + parts[2:] == ["keys", "oauth2", "exchange"]:
+      self._send_json(200, self._sign_in(parts[1], self._json_body()))
+    elif method == "POST" and len(parts) == 4 and parts[:1] + parts[2:] == ["keys", "oauth2", "disconnect"]:
+      self._send_json(200, self._sign_out(parts[1]))
     elif method == "GET" and parts == ["usage"]:
       limit = int(query.get("limit") or 100)
       self._send_json(200, {"usage": vault.usage(key=query.get("key") or None, limit=limit)})
@@ -3225,7 +3578,7 @@ class VaultHandler(BaseHTTPRequestHandler):
         path = normalized_request_path(raw_path)
         body = self._read_body()
         loan = self.vault.authorize(name, caller, method, host, path)
-        bearer = self._bearer(name, loan, deadline) if loan.inject["type"] == "jwt_bearer" else None
+        bearer = self._bearer(name, loan, deadline) if loan.inject["type"] in TOKEN_RECIPES else None
         request, body = build_upstream_request(
           method=method, host=host, raw_path=raw_path, raw_query=split.query,
           caller_headers=list(self.headers.items()), loan=loan, body=body, bearer=bearer,
@@ -3236,7 +3589,7 @@ class VaultHandler(BaseHTTPRequestHandler):
           logged_name, caller_label, method, host, raw_path, "denied" if refused else "failed",
           status=exc.status, reason=exc.logged if isinstance(exc, GrantRefusal) else exc.reason,
         )
-        answer = {"error": "denied", "reason": exc.reason}
+        answer = {"error": "denied", "reason": exc.reason, **exc.coded()}
         if isinstance(exc, GrantRefusal) and caller_label.split(":", 1)[0] == "agent":
           # Agents do not widen a key themselves: the owner answers a card.
           answer["ask"] = AGENT_ASK
@@ -3251,6 +3604,8 @@ class VaultHandler(BaseHTTPRequestHandler):
   # -- tokens from private keys -------------------------------------------
 
   def _bearer(self, name: str, loan: Loan, deadline: BorrowDeadline) -> str:
+    if loan.inject["type"] == "oauth2_refresh":
+      return self._renewed(name, deadline)
     inject = loan.inject
     private = loan.values[inject["private_key"]]
     key = hashlib.sha256(json.dumps([name, inject, private], sort_keys=True).encode()).hexdigest()
@@ -3288,6 +3643,104 @@ class VaultHandler(BaseHTTPRequestHandler):
     except ValueError:
       raise VaultError(502, f"{host} didn't say when its token expires.")
     return _usable_token(host, answer.get("token")), float(expires_at)
+
+  # -- sign-ins ------------------------------------------------------------
+
+  def _renewed(self, name: str, deadline: BorrowDeadline) -> str:
+    """An access token for sign-in key ``name``: the cached one, or one its
+    refresh token buys now. Under the key's sign-in lock the parts are read
+    afresh, so a borrow that waited for another's renewal uses the refresh
+    token that renewal saved, never the one it spent."""
+    with self.server.tokens.sign_in_lock(name):
+      inject, values = self.vault.sign_in_parts(name, OAUTH_RENEWER)
+      if inject["refresh_token"] not in values:
+        raise VaultError(409, NOT_SIGNED_IN, code="not_signed_in")
+      key = self._token_key = _sign_in_cache_key(name, inject, values)
+      tokens = self.server.tokens
+      if tokens.refused(key):
+        raise VaultError(409, SIGN_IN_EXPIRED, code="reauth_required")
+      try:
+        return tokens.get(key, lambda: self._renew(name, inject, values, deadline))
+      except VaultError as exc:
+        if exc.code == "reauth_required":
+          tokens.refuse(key)
+        raise
+
+  def _renew(self, name: str, inject: dict, values: dict, deadline: BorrowDeadline) -> tuple[str, float]:
+    """Spend the refresh token once. A provider that hands back another
+    saves it as a change by ``platform:oauth-refresh``, and the token it
+    bought is cached under the renewed parts too, so the next borrow uses it
+    rather than renewing again. A refused refresh token (``invalid_grant``)
+    means signing in again (``reauth_required``)."""
+    refresh = values[inject["refresh_token"]]
+    host, answer = self._sign_in_request(
+      inject, values, {"grant_type": "refresh_token", "refresh_token": refresh}, deadline, renewing=True,
+    )
+    token, expires = oauth2_access(host, answer, time.time())
+    renewed = answer.get("refresh_token")
+    if renewed is not None and renewed != refresh:
+      renewed = _usable_token(host, renewed)
+      if self.vault.save_sign_in(name, inject, renewed, caller=OAUTH_RENEWER, replaces=refresh):
+        self.server.tokens.put(_sign_in_cache_key(name, inject, {**values, inject["refresh_token"]: renewed}),
+                               token, expires)
+    return token, expires
+
+  def _sign_in_request(
+    self, inject: dict, values: dict, grant: dict, deadline: BorrowDeadline, *, renewing: bool = False,
+  ) -> tuple[str, dict]:
+    """POST ``grant`` to the sign-in's token endpoint; its host and answer."""
+    host, path = endpoint_target(inject["token_endpoint"])
+    headers, body = oauth2_token_form(inject, values, grant)
+    status, data = self._token_request(host, path, headers, body, deadline)
+    if renewing and status >= 300 and _oauth2_error(data) == "invalid_grant":
+      raise VaultError(409, SIGN_IN_EXPIRED, code="reauth_required")
+    sent = [value for field, value in grant.items() if field not in ("grant_type", "redirect_uri")]
+    return host, _token_answer(host, status, data, *values.values(), *sent)
+
+  def _sign_in(self, name: str, body: dict) -> dict:
+    """Finish a sign-in: exchange the authorization ``code`` the provider
+    sent back to ``redirect_uri`` (with the PKCE ``code_verifier``, if the
+    sign-in began with one) for a refresh token, and keep it as the key's.
+    Answers only whether it worked, the scope granted and the account's
+    email: never a token."""
+    caller = parse_caller(self.headers.get("X-Vault-Caller"))
+    grant = _authorization_code_grant(body)
+    with self.server.tokens.sign_in_lock(name):
+      inject, values = self.vault.sign_in_parts(name, caller)
+      host, answer = self._sign_in_request(inject, values, grant, BorrowDeadline(time.monotonic()))
+      refresh = answer.get("refresh_token")
+      if refresh is None:
+        raise VaultError(502, f"{host} signed in but gave no lasting sign-in (no refresh token): ask it "
+                         "for offline access, and for consent again if this account signed in before.")
+      refresh = _usable_token(host, refresh)
+      token, expires = oauth2_access(host, answer, time.time())
+      self.vault.save_sign_in(name, inject, refresh, caller=caller)
+      self.server.tokens.drop_prefix(f"oauth2:{name}:")
+      self.server.tokens.put(_sign_in_cache_key(name, inject, {**values, inject["refresh_token"]: refresh}),
+                             token, expires)
+    return signed_in_answer(answer, values[inject["client_secret"]], values.get(inject["refresh_token"]), refresh,
+                            token, str(answer.get("id_token") or ""), grant["code"], grant.get("code_verifier"))
+
+  def _sign_out(self, name: str) -> dict:
+    """Sign key ``name`` out: revoke its refresh token where the recipe says
+    (best effort: a provider that can't be reached still signs out here),
+    then remove it and forget its access tokens."""
+    caller = parse_caller(self.headers.get("X-Vault-Caller"))
+    revoked = False
+    with self.server.tokens.sign_in_lock(name):
+      inject, values = self.vault.sign_in_parts(name, caller)
+      refresh = values.get(inject["refresh_token"])
+      if refresh is not None and inject.get("revoke_endpoint"):
+        host, path = endpoint_target(inject["revoke_endpoint"])
+        headers, body = oauth2_token_form(inject, values, {"token": refresh})
+        try:
+          status, _ = self._token_request(host, path, headers, body, BorrowDeadline(time.monotonic()))
+          revoked = 200 <= status < 300
+        except VaultError:
+          pass
+      self.vault.save_sign_in(name, inject, None, caller=caller)
+      self.server.tokens.drop_prefix(f"oauth2:{name}:")
+    return {"signed_in": False, "revoked": revoked}
 
   def _token_request(self, host, path, headers, body, deadline: BorrowDeadline) -> tuple[int, bytes]:
     connection = None

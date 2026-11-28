@@ -112,6 +112,7 @@ export function sentAs(inject, parts = []) {
   if (inject.type === 'query') return `?${inject.name}=…`
   if (inject.type === 'basic') return `Authorization: Basic (${label(inject.username)} and ${label(inject.password)})`
   if (inject.type === 'aws_sigv4') return `an AWS signature (${inject.service}, region ${inject.region})`
+  if (inject.type === 'oauth2_refresh') return `a sign-in renewed by the vault at ${endpointHost(inject.token_endpoint)}`
   if (inject.type === 'jwt_bearer') {
     const exchange = inject.exchange?.kind
     if (exchange === 'google') return `a Google access token for ${inject.claims?.scope || 'its scope'}`
@@ -141,6 +142,52 @@ export function tokenClaims(inject) {
     : inject.exchange?.kind === 'github' ? `exchanged with GitHub for installation ${inject.exchange.installation_id}`
       : 'sent as it is'
   return [...claims, ...(inject.key_id ? [`key id ${inject.key_id}`] : []), exchange].join(' · ')
+}
+
+/** The host of an endpoint a recipe names (``https://host/path``). */
+function endpointHost(endpoint) {
+  try {
+    return new URL(endpoint).host
+  } catch {
+    return String(endpoint || '')
+  }
+}
+
+/**
+ * Where a sign-in key's tokens come from, for a card that would let an app or
+ * agent sign it in: the token endpoint, the revoke endpoint and how the
+ * client is sent, all part of what Allow approves. Null for any other recipe.
+ */
+export function signInEndpoints(inject) {
+  if (inject?.type !== 'oauth2_refresh') return null
+  return [
+    `renewed at ${inject.token_endpoint}`,
+    ...(inject.revoke_endpoint ? [`signed out at ${inject.revoke_endpoint}`] : []),
+    inject.client_auth === 'basic' ? 'client sent as Basic' : 'client sent in the form',
+  ].join(' · ')
+}
+
+/** What allowing a sign-in key means, said on its card. Null for any other recipe. */
+export function signInNote(inject) {
+  if (inject?.type !== 'oauth2_refresh') return null
+  return `Someone then signs in to an account from the app that asked. The vault keeps that sign-in and renews it at ${endpointHost(inject.token_endpoint)}, `
+    + 'so the app never sees it, and whoever signs in decides which account this key acts as.'
+}
+
+/**
+ * A sign-in key's state on its page: ``signedIn``, and the line saying so.
+ * Null for any other recipe. Signing in fills the recipe's refresh token.
+ */
+export function signInState(key) {
+  const inject = key.inject
+  if (inject?.type !== 'oauth2_refresh') return null
+  const signedIn = keyParts(key).some(part => part.name === inject.refresh_token)
+  const host = endpointHost(inject.token_endpoint)
+  return {
+    signedIn,
+    part: inject.refresh_token,
+    line: signedIn ? `Signed in · renewed by the vault at ${host}` : 'Not signed in yet. Sign in from the app that uses it.',
+  }
 }
 
 /**
@@ -454,6 +501,9 @@ export function usageWhat(entry, names) {
   else if (outcome === 'added') text = `${who} added it`
   else if (outcome === 'updated') text = `${who} changed it`
   else if (outcome === 'released') text = `${who} gave it up`
+  else if (outcome === 'signed in') text = `${who} signed it in`
+  else if (outcome === 'signed out') text = `${who} signed it out`
+  else if (outcome === 'sign-in renewed') text = `${who} renewed its sign-in`
   else if (outcome.startsWith('revoked app:')) text = `${subjectApp()} lost it (app deleted)`
   else if (outcome.startsWith('granted app:')) text = `${who} let ${subjectApp()} use it`
   else if (outcome.startsWith('denied app:')) text = `${who} said no to ${subjectApp()}`

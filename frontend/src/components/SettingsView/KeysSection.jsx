@@ -12,7 +12,7 @@ import { Switch } from '@openai/apps-sdk-ui/components/Switch'
 import { api, isSharedBrowserAuth, jsonOrThrow } from '../../api/client.js'
 import {
   BEARER, relativeTime, savedByApp, replaceWarning, siteLine, sentToLine, usedByLine, lastUseByCaller, usedByRows, newKeyName, requestFormKey, shownRequests, requestAppName, requestAppPaused, usageWhat,
-  REQUESTS_SHOWN, VAULT_DOWN, keyParts, partLabel,
+  REQUESTS_SHOWN, VAULT_DOWN, keyParts, partLabel, signInState,
 } from '../../lib/keysSettingsText.js'
 import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import KeyRequest from './KeyRequest.jsx'
@@ -332,6 +332,8 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
   const usage = usageQuery.data?.usage || []
   const grantedApps = key.grants?.apps || []
   const rows = usedByRows(key, names, lastUseByCaller(usage))
+  // A sign-in key's refresh token is shown as its sign-in, never as a value to paste.
+  const signIn = signInState(key)
   const setGrants = grants => save(recordFor(key, { grants }))
   const updateApp = (id, change) => setGrants({
     apps: grantedApps.map(grant => (grant.id === id ? { ...grant, ...change } : grant)),
@@ -343,9 +345,10 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
 
       <Group title="Key">
         <div className="settings-list">
-          {keyParts(key).map(part => (
+          {keyParts(key).filter(part => part.name !== signIn?.part).map(part => (
             <ValueRow key={part.name} keyRecord={key} part={part} names={names} save={save} busy={busy} />
           ))}
+          {signIn && <SignInRow name={key.name} state={signIn} />}
         </div>
       </Group>
 
@@ -398,6 +401,47 @@ function KeyDetail({ keyRecord: key, onDeleted }) {
 
       <DeleteKey name={key.name} onDeleted={onDeleted} />
     </div>
+  )
+}
+
+/**
+ * A sign-in key's sign-in: whether someone signed in (from the app that uses
+ * it), and Sign out, which revokes it at the provider and forgets it.
+ */
+function SignInRow({ name, state }) {
+  const queryClient = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  async function signOut() {
+    setBusy(true)
+    setError('')
+    try {
+      await jsonOrThrow(await api.keys.signOut(name), 'Sign out')
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setBusy(false)
+      await queryClient.invalidateQueries({ queryKey: KEYS_QUERY })
+    }
+  }
+  return (
+    <>
+      <div className="settings-item">
+        <span className="settings-item__icon" aria-hidden="true"><Globe {...ICON} /></span>
+        <span className="settings-item__body">
+          <span className="settings-item__title">Sign-in</span>
+          <span className="settings-item__sub settings-item__sub--wrap">{state.line}</span>
+        </span>
+        {state.signedIn && (
+          <span className="settings-actions settings-keys-value__actions">
+            <button type="button" className="settings__btn settings__btn--outline settings__btn--sm" onClick={signOut} disabled={busy}>
+              {busy ? 'Signing out…' : 'Sign out'}
+            </button>
+          </span>
+        )}
+      </div>
+      {error && <p className="settings-item-panel settings-message settings-message--error" role="alert">{error}</p>}
+    </>
   )
 }
 

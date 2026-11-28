@@ -76,12 +76,14 @@ class VaultTimeout(RuntimeError):
 
 
 class VaultRefused(RuntimeError):
-  """The vault refused; ``reason`` is caller-facing."""
+  """The vault refused; ``reason`` is caller-facing, and ``code`` (or None)
+  names the refusal for code that acts on it (``not_signed_in``)."""
 
-  def __init__(self, status: int, reason: str) -> None:
+  def __init__(self, status: int, reason: str, code: str | None = None) -> None:
     super().__init__(reason)
     self.status = status
     self.reason = reason
+    self.code = code
 
 
 def vault_dir() -> Path:
@@ -102,18 +104,24 @@ def _settle(response: httpx.Response) -> dict:
   except ValueError:
     body = {}
   if response.status_code >= 400:
-    raise VaultRefused(response.status_code, str(body.get("error") or "The key vault refused."))
+    code = body.get("code")
+    raise VaultRefused(response.status_code, str(body.get("error") or "The key vault refused."),
+                       code if isinstance(code, str) else None)
   return body
 
 
 async def vault_call(
   method: str, path: str, payload: dict | None = None, *, caller: str | None = None,
+  timeout: float = 10,
 ) -> dict:
-  """One operation on the vault socket, on behalf of an attested caller."""
+  """One operation on the vault socket, on behalf of an attested caller.
+
+  ``timeout`` is longer for an operation that reaches a site (signing a key
+  in or out, ``sign_in_wait_secs``)."""
   transport = httpx.AsyncHTTPTransport(uds=str(vault_socket()))
   try:
     async with httpx.AsyncClient(
-      transport=transport, base_url="http://vault", timeout=10,
+      transport=transport, base_url="http://vault", timeout=timeout,
     ) as client:
       response = await client.request(
         method, path, json=payload, headers=_caller_headers(caller),
@@ -479,6 +487,22 @@ def _borrow_wait_secs() -> int:
   return _vault_rules().BORROW_DEADLINE_SECS + _BORROW_GRACE_SECS
 
 
+def sign_in_wait_secs() -> int:
+  """How long signing a key in or out may take: the vault reaches the
+  sign-in's token or revoke endpoint within a borrow's deadline."""
+  return _borrow_wait_secs()
+
+
+async def confirm_live_app(app_id: int, nonce: str | None) -> None:
+  """Raise ``AppGone`` unless the app the token names (``nonce``: a trash or
+  a data wipe since rotates it) is still installed. Holds the app's lock only
+  for the check, so the vault call after it never blocks its storage."""
+  if not nonce:
+    raise AppGone(app_id)
+  async with for_live_app(int(app_id), nonce):
+    pass
+
+
 async def borrow(
   app_id: int, nonce: str | None, method: str, target: str, *,
   caller: str, headers: list[tuple[str, str]], body: bytes | None,
@@ -493,10 +517,7 @@ async def borrow(
   only ever match that installation's grants, which the purge withdraws: an
   app that later reuses the id never inherits it.
   """
-  if not nonce:
-    raise AppGone(app_id)
-  async with for_live_app(int(app_id), nonce):
-    pass
+  await confirm_live_app(app_id, nonce)
   return await vault_use(method, target, caller=caller, headers=headers, body=body)
 
 

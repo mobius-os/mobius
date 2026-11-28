@@ -84,7 +84,12 @@ service `s3`, the only AWS service the vault signs for) uses an `aws_sigv4`
 recipe, and the access key's own policy is what limits a signed request; a
 Google service account (its JSON file as one part, with `claims.scope`), a
 GitHub App (its PEM, `claims.iss` and an installation id) or a direct signed
-token use `jwt_bearer`. Pass the recipe
+token use `jwt_bearer`. A user's own sign-in (OAuth 2, such as Gmail or
+Calendar for the owner's account) uses `oauth2_refresh`: the card asks only
+for the OAuth client (`client_id` as `--part client_id:plain:Client ID`, and
+`client_secret`), never a refresh token, which signing in fills inside the
+vault (`POST /api/keys/<key>/oauth2/exchange` with the code the consent page
+returned; the app that uses the key does this). Pass the recipe
 to `store-key.py` with `--recipe JSON`; when asking with `request_key`
 instead, mark a key-file part `multiline` in its `parts`. Secret parts sent by
 these recipes are at least eight characters. It never replaces a key

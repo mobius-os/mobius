@@ -8,7 +8,7 @@ import { createSsrRenderServer } from './ssrRenderServer.mjs'
 const vite = await createSsrRenderServer()
 const {
   approvalBody, newKeyParts, partsFilled, keyParts, partLabel, sentAs, requestWording, tokenClaims, plainPartsNote,
-  signedRequestLimit,
+  signedRequestLimit, signInEndpoints, signInNote, signInState, usageWhat,
 } = await vite.ssrLoadModule('/src/lib/keysSettingsText.js')
 after(() => vite.close())
 
@@ -94,4 +94,44 @@ test('a card for a storage key says its own access policy is what limits a signe
   assert.match(signedRequestLimit({ type: 'aws_sigv4', service: 's3', region: 'auto' }), /key's own policy decides what a signed request may do/)
   assert.equal(signedRequestLimit(BASIC), null)
   assert.equal(signedRequestLimit(null), null)
+})
+
+const SIGN_IN = {
+  type: 'oauth2_refresh', client_id: 'client_id', client_secret: 'client_secret', refresh_token: 'refresh_token',
+  client_auth: 'post', token_endpoint: 'https://oauth2.googleapis.com/token', revoke_endpoint: 'https://oauth2.googleapis.com/revoke',
+}
+const CLIENT = [{ name: 'client_id', label: 'Client ID', secret: false }, { name: 'client_secret', label: 'Client secret', secret: true }]
+
+test('a sign-in key reads as a sign-in the vault renews, with the endpoints Allow approves', () => {
+  assert.equal(sentAs(SIGN_IN), 'a sign-in renewed by the vault at oauth2.googleapis.com')
+  assert.equal(signInEndpoints(SIGN_IN),
+    'renewed at https://oauth2.googleapis.com/token · signed out at https://oauth2.googleapis.com/revoke · client sent in the form')
+  assert.equal(signInEndpoints({ ...SIGN_IN, revoke_endpoint: undefined, client_auth: 'basic' }),
+    'renewed at https://oauth2.googleapis.com/token · client sent as Basic')
+  assert.match(signInNote(SIGN_IN), /whoever signs in decides which account this key acts as/)
+  assert.equal(signInEndpoints(BASIC), null)
+  assert.equal(signInNote(BASIC), null)
+})
+
+test('a new sign-in key is pasted as its client only, never a refresh token', () => {
+  assert.deepEqual(newKeyParts(ask({ inject: SIGN_IN, parts: CLIENT })).map(part => part.name), ['client_id', 'client_secret'])
+})
+
+test('a sign-in key says on its page whether it is signed in', () => {
+  const key = { name: 'gmail', inject: SIGN_IN, parts: CLIENT }
+  assert.deepEqual(signInState(key), {
+    signedIn: false, part: 'refresh_token', line: 'Not signed in yet. Sign in from the app that uses it.',
+  })
+  const signedIn = signInState({ ...key, parts: [...CLIENT, { name: 'refresh_token', label: 'Sign-in', secret: true }] })
+  assert.equal(signedIn.signedIn, true)
+  assert.equal(signedIn.line, 'Signed in · renewed by the vault at oauth2.googleapis.com')
+  assert.equal(signInState({ name: 'x', inject: BASIC, parts: PARTS }), null)
+})
+
+test("a sign-in's changes read as sentences in the key's activity", () => {
+  const at = '2026-11-27T18:00:00Z'
+  assert.equal(usageWhat({ caller: 'app:8:x', outcome: 'signed in', host: '-', ts: at }, { 8: 'Mail' }), 'Mail signed it in')
+  assert.equal(usageWhat({ caller: 'owner', outcome: 'signed out', host: '-', ts: at }, {}), 'You signed it out')
+  assert.equal(usageWhat({ caller: 'platform:oauth-refresh', outcome: 'sign-in renewed', host: '-', ts: at }, {}),
+    'Möbius renewed its sign-in')
 })
