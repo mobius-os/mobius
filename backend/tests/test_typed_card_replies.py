@@ -92,7 +92,7 @@ def _chat(db, card, turn_content, reason="question_answer", earlier=()):
   return chat
 
 
-def test_typed_reply_turn_answers_visibly_and_routes_a_new_card_answer_to_its_message(
+def test_typed_reply_turn_answers_visibly_and_updates_a_request_still_open(
   db,
 ):
   content = "- Ship it?: why is option one safer?"
@@ -100,7 +100,9 @@ def test_typed_reply_turn_answers_visibly_and_routes_a_new_card_answer_to_its_me
   note = typed_reply_context(db, chat, content, answered_by_owner=True)
   assert _wrote("Owner wrote", "why is option one safer?") in note
   assert "not in thinking" in note
-  assert "the card's `message`" in note
+  assert "update its request (owner_input op update)" in note
+  # No card field the request tool does not have.
+  assert "`message`" not in note
 
 
 def test_answer_from_an_agent_is_not_framed_as_the_owners_message(db):

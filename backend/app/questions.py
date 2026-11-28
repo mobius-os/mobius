@@ -365,9 +365,8 @@ def typed_reply_context(
       "Treat it as their message, not a choice. If it asks something, "
       "objects, or asks for an explanation, answer it in your visible reply, "
       "not in thinking: an answer kept in thinking or promised for later never "
-      "reaches them. Save a new card only if the decision is still open, and "
-      "if you do, put that answer in the card's `message` (the turn's closing "
-      "message, shown above the card), not in text before it."
+      "reaches them. If the decision is still open, also update its request "
+      "(owner_input op update); it is shown again after your reply."
     )
   return ""
 
