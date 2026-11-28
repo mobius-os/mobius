@@ -9,6 +9,11 @@ import {
 // ~500ms threshold — comfortably inside this — so a genuine long-press is still
 // suppressed; a keyboard contextmenu arriving later inherits no stale pointer type.
 const POINTER_PROVENANCE_MS = 1500
+// A touch/pen release within this distance of its press is a tap (a thumb tap
+// routinely drifts past the 10px hold slop), and only if shorter than a
+// deliberate hold would take to settle.
+const TAP_SLOP_PX = 24
+const TAP_MAX_MS = 700
 
 // Builder-mode shortcuts hosted on the top-left logo cluster. The explicit header
 // button is the discoverable one-tap path; the mark remains a mode indicator (180deg
@@ -43,6 +48,12 @@ export function prefersReducedMotion() {
 
 export function useLogoModeGesture({
   onToggleMode, brandRef, enabled = true, drawerOpen = false, builderModeActive = false,
+  // Touch/pen taps are activated HERE, not by the browser's click: the brand
+  // cancels its touchstart so Chrome never runs its own long-press gesture on
+  // it. That gesture buzzes at ~500ms even with contextmenu prevented, which
+  // stacked a second haptic on the hold's single completion pulse whenever the
+  // finger stayed down. With no browser click, a touch tap calls onTap.
+  onTap,
   // The live captured-scene descriptor or null. The hold hands its compression off
   // to this descriptor: while an animated mode change owns the logo, the mark holds
   // .84 and springs back at the scene's completion instead of
@@ -86,6 +97,10 @@ export function useLogoModeGesture({
   // (detail 0) is never the compat click, so a stale flag can't eat the next Enter
   // (review §13).
   const suppressClickRef = useRef(false)
+  // The touch/pen press that may still resolve as a tap on release, kept apart
+  // from pressRef so a thumb that drifts past the hold slop (abandoning the
+  // HOLD) can still open the drawer, as the browser's own tap slop used to allow.
+  const tapCandidateRef = useRef(null)
 
   const writeProgress = useCallback((p) => {
     const el = brandRef?.current
@@ -140,6 +155,7 @@ export function useLogoModeGesture({
     // armed. The mode flip is synchronous, so the descriptor class takes over the
     // logo's scale in the SAME batched paint (endPress resets --hold-progress to 0,
     // but the is-beat-held animation's backwards fill holds .84 through the delay).
+    tapCandidateRef.current = null
     const receipt = onToggleMode?.('hold')
     // A completed hold can be a deliberate no-op when Standard is the empty New
     // Chat landing, with no concrete screen to seed into Builder. Release the
@@ -194,6 +210,9 @@ export function useLogoModeGesture({
     suppressClickRef.current = false
     const pressedAt = performance.now()
     pressRef.current = { pressStamp: e.timeStamp, frameAt: pressedAt, charged: 0, x: e.clientX, y: e.clientY, pointerId: e.pointerId, pointerType: e.pointerType }
+    tapCandidateRef.current = e.pointerType === 'mouse'
+      ? null
+      : { pointerId: e.pointerId, x: e.clientX, y: e.clientY, stamp: e.timeStamp }
     setHolding(true)
     writeProgress(0)
     stopRaf()
@@ -212,20 +231,36 @@ export function useLogoModeGesture({
     const decision = decidePointerMove(dx, dy, press.pointerType)
     if (decision === 'swipe') {
       // Swipe-right flips the mode; slop suppresses the trailing tap. Honest cause.
+      tapCandidateRef.current = null
       onToggleMode?.('swipe')
       endPress({ suppressClick: true })
     } else if (decision === 'cancel') {
-      // Movement beyond the hold slop — abandon the HOLD (no mode flip). The click
-      // is left to the browser: if this really became a scroll or drag it emits no
-      // click, and if it was only a drifting thumb the tap still opens the drawer.
+      // Movement beyond the hold slop — abandon the HOLD (no mode flip). Whether
+      // it was still a tap is decided on release: a mouse by its native click, a
+      // drifting thumb by the wider touch tap slop (releaseAsTap).
       endPress({ suppressClick: false })
     }
     // 'continue' → keep holding; the rAF loop keeps filling the ring.
   }, [onToggleMode, endPress])
 
+  // Resolve a touch/pen release as a tap: within a thumb-sized slop and short of
+  // a deliberate hold. Arms the click guard so a browser that still synthesizes a
+  // click for a cancelled touchstart can never toggle the drawer twice.
+  const releaseAsTap = useCallback((e, candidate) => {
+    if (!candidate || candidate.pointerId !== e.pointerId) return
+    const dx = e.clientX - candidate.x
+    const dy = e.clientY - candidate.y
+    if (Math.hypot(dx, dy) > TAP_SLOP_PX) return
+    if (e.timeStamp - candidate.stamp >= TAP_MAX_MS) return
+    suppressClickRef.current = true
+    onTap?.()
+  }, [onTap])
+
   const onPointerUp = useCallback((e) => {
+    const candidate = tapCandidateRef.current
+    tapCandidateRef.current = null
     const press = pressRef.current
-    if (!press || e.pointerId !== press.pointerId) return
+    if (!press || e.pointerId !== press.pointerId) { releaseAsTap(e, candidate); return }
     // Classify the release by ELAPSED TIME + DISPLACEMENT, never by liveness
     // (review §4): a delayed final rAF must not let a ≥450ms release fall through
     // as a tap, and a fast flick whose only movement lands on this event is still
@@ -238,18 +273,22 @@ export function useLogoModeGesture({
     // Swipe-right flips ONLY for touch/pen (finding F12); a mouse drag past the slop
     // hits the movedBeyondSlop cancel just below, so a mouse never toggles the mode.
     if (swipeAllowed(press.pointerType) && isSwipeRight(dx, dy)) { onToggleMode?.('swipe'); endPress({ suppressClick: true }); return }
-    // Displacement past the hold slop only rules out the mode FLIP; the browser
-    // decides tap-vs-drag for the click (see endPress).
-    if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: false }); return }
+    // Displacement past the hold slop only rules out the mode FLIP; a mouse's
+    // native click and a touch tap's wider slop (releaseAsTap) still decide
+    // tap-vs-drag.
+    if (movedBeyondSlop(dx, dy)) { endPress({ suppressClick: false }); releaseAsTap(e, candidate); return }
     if (holdComplete(elapsed)) { completeHold(); return } // held long enough → flip
-    // A genuine short tap → let the native click open the drawer, unchanged.
+    // A genuine short tap: a mouse keeps its native click; touch/pen taps are
+    // activated here because their touchstart was cancelled (see onTap).
     endPress({ suppressClick: false })
-  }, [onToggleMode, endPress, completeHold])
+    releaseAsTap(e, candidate)
+  }, [onToggleMode, endPress, completeHold, releaseAsTap])
 
-  // The browser took the gesture (normally a native pan). Abandon the hold; it
-  // owns whether a click still follows, so nothing is suppressed here.
+  // The browser took the gesture (rare once touchstart is cancelled; a mouse or
+  // pen can still be taken). Abandon the hold and any pending touch tap.
   const onPointerCancel = useCallback((e) => {
     const press = pressRef.current
+    tapCandidateRef.current = null
     if (!press || (e && e.pointerId !== press.pointerId)) return
     endPress({ suppressClick: false })
   }, [endPress])
@@ -335,6 +374,18 @@ export function useLogoModeGesture({
       document.removeEventListener('visibilitychange', onHidden)
     }
   }, [endPress])
+
+  // Cancel the brand's touchstart (non-passive; React's touch listeners are
+  // passive) so the browser runs no tap or long-press gesture on it: no
+  // long-press haptic, menu or text selection. Pointer events still arrive, and
+  // onPointerUp activates taps itself (see onTap). Single-finger only.
+  useEffect(() => {
+    const el = brandRef?.current
+    if (!el || !enabled) return undefined
+    const onTouchStart = (e) => { if (e.touches.length === 1 && e.cancelable) e.preventDefault() }
+    el.addEventListener('touchstart', onTouchStart, { passive: false })
+    return () => el.removeEventListener('touchstart', onTouchStart, { passive: false })
+  }, [brandRef, enabled])
 
   // Cancel a live rAF on unmount so a hold in flight can't tick a dead component.
   useEffect(() => () => { stopRaf() }, [stopRaf])
