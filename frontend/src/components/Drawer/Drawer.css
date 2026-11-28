@@ -52,6 +52,14 @@
   width: min(360px, 90vw);
 }
 
+/* Opening focuses the panel itself (tabIndex=-1) so keyboard users start
+   inside it. It is a focus target, not a control: after typing, Chrome treats
+   that programmatic focus as keyboard focus and would ring the whole panel.
+   Its rows and buttons keep their own focus-visible rings. */
+.drawer:focus {
+  outline: none;
+}
+
 .drawer-close-shield {
   z-index: 94;
   pointer-events: none;
