@@ -3511,13 +3511,15 @@
   /* The tray, not the pill, takes the extra side inset, so cards keep their
      10px edge gap while the text row stays exactly where it was. */
   --tray-pad-inline: 6px;
-  /* In a short keyboard viewport a fixed 96px card can exceed the pill's
-     entire half-room budget before the input row is counted. Spend that budget
-     in one place: preserve the row's 40px action target, then compact the
-     pending card to its 24px remove-control badge before taking space from the
-     conversation. */
+  /* With the keyboard open, half the visible room is ~230px on a phone: a
+     full 96px card plus its chrome left the text ~4 lines. The words are what
+     the owner is writing, so they are paid first: the pending card gives back
+     height until the text area can show six lines (16px × 1.45 plus its 8px
+     padding), and only once the card is down to its 24px remove-control badge
+     does the text shrink below that. The pill's total stays inside the same
+     half-room budget, so the conversation keeps the larger share. */
   --composer-input-floor: 24px;
-  --composer-row-floor: 40px;
+  --composer-text-floor: calc(6 * 16px * 1.45 + 8px);
   --composer-stack-chrome: calc(
     var(--tray-pad-top) + var(--tray-pad-bottom)
     + var(--pill-gap)
@@ -3529,7 +3531,7 @@
     calc(
       var(--composer-room, 100dvh) * 0.5
       - var(--composer-stack-chrome)
-      - var(--composer-row-floor)
+      - var(--composer-text-floor)
     ),
     var(--attach-card)
   );
