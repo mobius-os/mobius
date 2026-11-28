@@ -344,3 +344,32 @@ test('attachments preserve the text column and height budget in a short viewport
     expect(await text(page)).toBe(source)
   }
 })
+
+// The caret sits at the end of the text, so it is in view exactly when the
+// editor's own scroller is at its bottom.
+const caretInView = page => page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => (
+  scroller.scrollHeight > scroller.clientHeight
+  && scroller.scrollTop >= scroller.scrollHeight - scroller.clientHeight - 6
+))
+
+test('the caret at the end stays in view when the box shrinks or a draft is restored', async ({ page }) => {
+  await page.setViewportSize({ width: 412, height: 915 })
+  await open(page)
+  await page.keyboard.insertText('One line of a long draft.\n'.repeat(30))
+  await expect.poll(() => caretInView(page)).toBe(true)
+  // The keyboard opening halves the room under the caret.
+  await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '300px'))
+  await expect.poll(() => caretInView(page)).toBe(true)
+
+  // A draft restored from outside (returning to the chat) shows its end,
+  // where the caret is, not the top of the text.
+  await page.locator('.chat__markdown-input .cm-content').evaluate(element => element.blur())
+  await page.evaluate(() => window.composerFixture.replace('A restored line of the draft.\n'.repeat(40) + 'the end'))
+  await expect.poll(() => text(page)).toMatch(/the end$/)
+  await expect.poll(() => caretInView(page)).toBe(true)
+
+  // A scroll the owner made to reread earlier text is not undone by a resize.
+  await page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => { scroller.scrollTop = 0 })
+  await page.evaluate(() => document.querySelector('.chat').style.setProperty('--composer-room', '400px'))
+  await expect.poll(() => page.locator('.chat__markdown-input .cm-scroller').evaluate(scroller => scroller.scrollTop)).toBe(0)
+})
