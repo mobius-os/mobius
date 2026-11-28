@@ -250,7 +250,6 @@
   font-weight: 600;
   letter-spacing: 0;
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */
-  /* Accent tint in builder mode, as the color cue paired with the logo twist. */
   /* The wordmark squeezes with the mark (gentler, anchored at the logo side)
      so the brand reads as one object under the thumb. */
   display: inline-block;
@@ -751,7 +750,7 @@
   flex: none;
 }
 /* Builder mode: the persistent 180° twist, a small accent flame behind the
-   mark (below), and the wordmark accent tint. */
+   mark (below), and a faint accent glow behind the wordmark. */
 .shell__brand--builder .shell__logo {
   --logo-twist: 180deg;
 }
@@ -867,7 +866,8 @@
   100% { transform: translate(1px, -16px); opacity: 0; }
 }
 .shell__brand--builder .shell__wordmark {
-  color: var(--accent);
+  /* Text stays in the theme text colour: the flame is the accent cue. */
+  color: var(--text);
   text-shadow: 0 0 7px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 /* Same-beat timing (polish item 5 + round 4 item 1): the logo and wordmark
@@ -925,9 +925,8 @@
 .shell__brand.is-snapping .shell__logo {
   animation: shell-logo-snap 140ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
-/* The wordmark tint keeps pace with the one-shot mode beat. Its faint halo and
-   the logo's matching drop-shadow are static settled-state cues, with no
-   perpetual header animation. */
+/* The wordmark keeps pace with the one-shot mode beat. Its faint glow is a
+   static settled-state cue; the flame behind the mark is the builder accent. */
 .shell__bar[data-mode-phase="entering"] .shell__wordmark { transition-duration: 220ms; }
 .shell__bar[data-mode-phase="exiting"] .shell__wordmark { transition-duration: 140ms; }
 @keyframes shell-logo-ignite {
@@ -1022,9 +1021,9 @@
 @media (prefers-reduced-motion: reduce) {
   .shell__connection-status-icon { animation: none !important; }
   .shell__connection-status-label { transition: none; }
-  /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
+  /* The mark flip switches INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not). The
-     static shared halo needs no special reduced-motion branch. The hold
+     static wordmark glow needs no special reduced-motion branch. The hold
      compression remains immediate direct feedback, with no animated release. */
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }

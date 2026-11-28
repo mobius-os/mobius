@@ -612,7 +612,8 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(logoRule, /transition:\s*rotate 300ms cubic-bezier/)
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
-  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
+  // The wordmark stays in the text colour; the flame carries the builder accent.
+  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[^}]*?color:\s*var\(--text\)/)
   // INSTANT flip (empty tree) completion keeps the immediate ignite/snap (0.84→1);
   // an ANIMATED beat emits is-beat-held instead (round 4 item 1). Polish item 5's
   // same-beat timing survives (280ms ignite, not 480ms).
