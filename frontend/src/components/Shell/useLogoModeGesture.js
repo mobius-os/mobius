@@ -205,9 +205,10 @@ export function useLogoModeGesture({
     // right-click-style contextmenu (review: item C), but only while FRESH (finding 5).
     lastPointerTypeRef.current = e.pointerType
     lastPointerTypeAtRef.current = performance.now()
-    // Primary button only: a mouse right-click or a pen barrel button is never a
+    // Primary pointer and button only: a mouse right-click, a pen barrel button,
+    // or a second finger landing while another touches the screen is never a
     // tap or hold (touch always reports button 0).
-    if (e.button !== 0) return
+    if (e.button !== 0 || e.isPrimary === false) return
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
     const pressedAt = performance.now()

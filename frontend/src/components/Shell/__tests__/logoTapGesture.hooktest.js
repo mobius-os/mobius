@@ -79,6 +79,14 @@ test('a mouse keeps its native click and a pen barrel button is ignored', (t) =>
   assert.equal(h.taps.length, 0)
 })
 
+test('a secondary touch, with another finger already down elsewhere, never taps or holds', (t) => {
+  const h = harness(t)
+  h.down({ pointerId: 7, isPrimary: false, timeStamp: 0 }); h.up({ pointerId: 7, isPrimary: false, timeStamp: 100 })
+  h.down({ pointerId: 8, isPrimary: false, timeStamp: 200 }); h.up({ pointerId: 8, isPrimary: false, timeStamp: 900 })
+  assert.equal(h.taps.length, 0)
+  assert.deepEqual(h.modes, [])
+})
+
 test('a second finger can neither steal nor clear the first finger\'s tap', (t) => {
   const h = harness(t)
   h.down({ pointerId: 1, timeStamp: 0 })
