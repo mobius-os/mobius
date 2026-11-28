@@ -250,8 +250,12 @@
   font-weight: 600;
   letter-spacing: 0;
   color: var(--text); /* CONTRACT: high-contrast text on the opaque --bg of .shell__bar */
-  /* Accent tint in builder mode, as the color cue paired with the logo twist. */
-  transition: color 300ms ease;
+  /* The wordmark squeezes with the mark (gentler, anchored at the logo side)
+     so the brand reads as one object under the thumb. */
+  display: inline-block;
+  transform-origin: left center;
+  scale: calc(1 - var(--hold-progress, 0) * 0.08);
+  transition: color 300ms ease, scale 160ms ease;
 }
 
 /* Shown only while this Möbius runs on the staging launcher, so a developer
@@ -745,15 +749,125 @@
   align-items: center;
   flex: none;
 }
-/* Builder mode: the persistent 180° twist + the wordmark accent tint. */
+/* Builder mode: the persistent 180° twist, a small accent flame behind the
+   mark (below), and a faint accent glow behind the wordmark. */
 .shell__brand--builder .shell__logo {
   --logo-twist: 180deg;
-  filter: drop-shadow(
-    0 0 5px color-mix(in srgb, var(--accent) 26%, transparent)
-  );
+}
+
+/* ── Builder flame ("Silk Wick") ──────────────────────────────────────────
+   Three soft tongues and one ember rise from a violet bed behind the mark.
+   Each tongue flickers on its own irregular keyframes and a coprime duration,
+   so the combined motion never visibly repeats. Performance contract: the
+   elements exist only in builder mode, are tiny (≤ 44px box), and animate
+   only transform and opacity with no filters or blurs, so browsers can run
+   them on the compositor without repainting the gradients each frame.
+   Reduced motion keeps a static flame. */
+.shell__logo-wrap { isolation: isolate; }
+.shell__logo { position: relative; z-index: 1; }
+.shell__flame {
+  --flame: var(--accent);
+  --flame-hot: color-mix(in srgb, var(--accent) 62%, white);
+  --flame-veil: color-mix(in srgb, var(--accent) 30%, transparent);
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  margin: -24px 0 0 -22px;
+  pointer-events: none;
+  z-index: 0;
+  animation: shell-flame-kindle 520ms cubic-bezier(0.2, 0.9, 0.3, 1) both;
+}
+/* The bed: a static violet glow, gently breathing in opacity. */
+.shell__flame::before {
+  content: "";
+  position: absolute;
+  inset: 8px 6px 4px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at 50% 60%, var(--flame) 0%, var(--flame-veil) 48%, transparent 72%);
+  animation: shell-flame-breathe 6.2s ease-in-out infinite alternate;
+}
+.shell__flame-tongue {
+  position: absolute;
+  bottom: 12px;
+  width: 9px;
+  height: 22px;
+  border-radius: 50% 50% 45% 45% / 70% 70% 30% 30%;
+  background: radial-gradient(ellipse 50% 60% at 50% 72%, var(--flame-hot) 0%, var(--flame) 45%, var(--flame-veil) 70%, transparent 100%);
+  transform-origin: 50% 100%;
+  will-change: transform, opacity;
+}
+.shell__flame-tongue:nth-child(1) {
+  left: 8px; height: 27px;
+  animation: shell-flame-lick-a 3.05s ease-in-out infinite;
+}
+.shell__flame-tongue:nth-child(2) {
+  left: 17px; height: 31px; width: 10px;
+  animation: shell-flame-lick-b 4.25s ease-in-out -1s infinite;
+}
+.shell__flame-tongue:nth-child(3) {
+  left: 27px; height: 25px;
+  animation: shell-flame-lick-c 5.15s ease-in-out -3s infinite;
+}
+.shell__flame-ember {
+  position: absolute;
+  left: 24px;
+  bottom: 34px;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--flame-hot);
+  opacity: 0;
+  will-change: transform, opacity;
+  animation: shell-flame-ember 8s ease-out 1.5s infinite;
+}
+@keyframes shell-flame-kindle {
+  from { opacity: 0; transform: scale(0.6) translateY(4px); }
+  60% { opacity: 1; transform: scale(1.12) translateY(-1px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes shell-flame-breathe {
+  from { opacity: 0.55; }
+  37% { opacity: 0.8; }
+  61% { opacity: 0.62; }
+  to { opacity: 0.9; }
+}
+@keyframes shell-flame-lick-a {
+  0% { transform: translateY(0) scale(1, 1) skewX(0deg); opacity: 0.8; }
+  14% { transform: translateY(-1px) scale(0.86, 1.18) skewX(-6deg); opacity: 1; }
+  29% { transform: translateY(0.5px) scale(1.08, 0.88) skewX(4deg); opacity: 0.62; }
+  47% { transform: translateY(-2px) scale(0.9, 1.26) skewX(-3deg); opacity: 0.95; }
+  63% { transform: translateY(0) scale(1.02, 0.94) skewX(7deg); opacity: 0.7; }
+  81% { transform: translateY(-1px) scale(0.94, 1.12) skewX(-5deg); opacity: 0.9; }
+  100% { transform: translateY(0) scale(1, 1) skewX(0deg); opacity: 0.8; }
+}
+@keyframes shell-flame-lick-b {
+  0% { transform: translateY(0) scale(1, 1) skewX(2deg); opacity: 0.9; }
+  19% { transform: translateY(-2px) scale(0.88, 1.22) skewX(-4deg); opacity: 1; }
+  33% { transform: translateY(-0.5px) scale(0.96, 1.04) skewX(5deg); opacity: 0.75; }
+  58% { transform: translateY(-3px) scale(0.82, 1.32) skewX(-7deg); opacity: 0.98; }
+  72% { transform: translateY(0.5px) scale(1.06, 0.9) skewX(3deg); opacity: 0.68; }
+  89% { transform: translateY(-1.5px) scale(0.92, 1.16) skewX(-2deg); opacity: 0.92; }
+  100% { transform: translateY(0) scale(1, 1) skewX(2deg); opacity: 0.9; }
+}
+@keyframes shell-flame-lick-c {
+  0% { transform: translateY(0) scale(1, 1) skewX(-2deg); opacity: 0.7; }
+  23% { transform: translateY(-1.5px) scale(0.9, 1.2) skewX(6deg); opacity: 0.95; }
+  41% { transform: translateY(0.5px) scale(1.1, 0.86) skewX(-3deg); opacity: 0.55; }
+  56% { transform: translateY(-1px) scale(0.95, 1.1) skewX(4deg); opacity: 0.85; }
+  78% { transform: translateY(-2.5px) scale(0.84, 1.28) skewX(-6deg); opacity: 1; }
+  100% { transform: translateY(0) scale(1, 1) skewX(-2deg); opacity: 0.7; }
+}
+@keyframes shell-flame-ember {
+  0% { transform: translate(0, 0); opacity: 0; }
+  12% { opacity: 1; }
+  55% { transform: translate(-2px, -9px); opacity: 0.8; }
+  100% { transform: translate(1px, -16px); opacity: 0; }
 }
 .shell__brand--builder .shell__wordmark {
-  color: var(--accent);
+  /* Text stays in the theme text colour: the flame is the accent cue. */
+  color: var(--text);
   text-shadow: 0 0 7px color-mix(in srgb, var(--accent) 30%, transparent);
 }
 /* Same-beat timing (polish item 5 + round 4 item 1): the logo and wordmark
@@ -811,9 +925,8 @@
 .shell__brand.is-snapping .shell__logo {
   animation: shell-logo-snap 140ms cubic-bezier(0.25, 0.8, 0.25, 1);
 }
-/* The wordmark tint keeps pace with the one-shot mode beat. Its faint halo and
-   the logo's matching drop-shadow are static settled-state cues, with no
-   perpetual header animation. */
+/* The wordmark keeps pace with the one-shot mode beat. Its faint glow is a
+   static settled-state cue; the flame behind the mark is the builder accent. */
 .shell__bar[data-mode-phase="entering"] .shell__wordmark { transition-duration: 220ms; }
 .shell__bar[data-mode-phase="exiting"] .shell__wordmark { transition-duration: 140ms; }
 @keyframes shell-logo-ignite {
@@ -823,6 +936,54 @@
 @keyframes shell-logo-snap {
   from { scale: 0.84; }
   to { scale: 1; }
+}
+/* Navigation tap pulse: the same squeeze-and-spring on every drawer toggle,
+   open and close alike. The mark squeezes; the wordmark follows gently,
+   anchored at the logo side so it never slides. Both leaves stay on their own
+   compositor layer (will-change below): opening mounts the whole drawer in the
+   same frame, and a pulse that needed the main thread froze through that work
+   on a phone, so the text only moved on close. A hold-owned beat or the
+   ignite/snap flourish suppresses the pulse so a builder toggle never
+   double-animates. */
+.shell__logo,
+.shell__wordmark {
+  will-change: scale;
+}
+.shell__brand.is-tap-pulse-a:not(.is-beat-held):not(.is-igniting):not(.is-snapping) .shell__logo {
+  animation: shell-logo-tap-a 300ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+.shell__brand.is-tap-pulse-b:not(.is-beat-held):not(.is-igniting):not(.is-snapping) .shell__logo {
+  animation: shell-logo-tap-b 300ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+.shell__brand.is-tap-pulse-a:not(.is-beat-held):not(.is-igniting):not(.is-snapping) .shell__wordmark {
+  animation: shell-wordmark-tap-a 300ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+.shell__brand.is-tap-pulse-b:not(.is-beat-held):not(.is-igniting):not(.is-snapping) .shell__wordmark {
+  animation: shell-wordmark-tap-b 300ms cubic-bezier(0.3, 0.7, 0.4, 1) both;
+}
+@keyframes shell-logo-tap-a {
+  0% { scale: 1; }
+  30% { scale: 0.86; }
+  68% { scale: 1.05; }
+  100% { scale: 1; }
+}
+@keyframes shell-logo-tap-b {
+  0% { scale: 1; }
+  30% { scale: 0.86; }
+  68% { scale: 1.05; }
+  100% { scale: 1; }
+}
+@keyframes shell-wordmark-tap-a {
+  0% { scale: 1; }
+  30% { scale: 0.93; }
+  68% { scale: 1.025; }
+  100% { scale: 1; }
+}
+@keyframes shell-wordmark-tap-b {
+  0% { scale: 1; }
+  30% { scale: 0.93; }
+  68% { scale: 1.025; }
+  100% { scale: 1; }
 }
 /* Screen-reader-only mode announcement (standard clip technique). */
 .shell__sr-only {
@@ -860,9 +1021,9 @@
 @media (prefers-reduced-motion: reduce) {
   .shell__connection-status-icon { animation: none !important; }
   .shell__connection-status-label { transition: none; }
-  /* The mark flip + tint switch INSTANTLY; the completion spring/snap is skipped
+  /* The mark flip switches INSTANTLY; the completion spring/snap is skipped
      (the JS still fires the haptics — motion is dropped, feedback is not). The
-     static shared halo needs no special reduced-motion branch. The hold
+     static wordmark glow needs no special reduced-motion branch. The hold
      compression remains immediate direct feedback, with no animated release. */
   .shell__logo { transition: none; }
   .shell__wordmark { transition: none; }
@@ -875,6 +1036,14 @@
   .shell__brand.is-snapping .shell__logo,
   .shell__brand.is-beat-held-a .shell__logo,
   .shell__brand.is-beat-held-b .shell__logo { animation: none; }
+  /* !important: the pulse selectors (several :not() guards) and the per-tongue
+     nth-child rules outrank these, and reduced motion must always win. */
+  .shell__brand .shell__logo,
+  .shell__brand .shell__wordmark,
+  .shell__flame,
+  .shell__flame::before,
+  .shell__flame-tongue { animation: none !important; }
+  .shell__flame-ember { animation: none !important; opacity: 0; }
 }
 
 /* Desktop productivity shell: the workspace starts at the very top, while a

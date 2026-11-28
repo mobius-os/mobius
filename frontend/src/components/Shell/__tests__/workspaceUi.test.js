@@ -461,8 +461,28 @@ test('the SINGLE tap keeps its drawer job — instant, NO setTimeout on the tap 
   assert.match(shellBrand, /aria-expanded=\{navigationOpen\}/)
   const onClick = shellBrand.match(/onClick=\{\(e\) => \{[\s\S]*?\n {8}\}\}/)?.[0] || ''
   assert.match(onClick, /if \(logoGesture\.consumeSuppressedClick\(e\.detail\)\) return/)
-  assert.match(onClick, /onToggleNavigation\(\)/)
+  assert.match(onClick, /activateNavigation\(\)/)
   assert.doesNotMatch(onClick, /setTimeout\(/, 'the tap path must carry no timer')
+  // A click (mouse, keyboard) and a gesture-resolved touch tap share ONE
+  // activation that toggles the drawer synchronously.
+  const activation = shellBrand.match(/const activateNavigation = \(\) => \{[\s\S]*?\n {2}\}/)?.[0] || ''
+  assert.match(activation, /onToggleNavigation\(\)/)
+  assert.doesNotMatch(activation, /setTimeout\(/)
+  assert.match(shellBrand, /onTap: activateNavigation/)
+})
+
+test('touch taps on the brand bypass the browser gesture, so a hold buzzes exactly once', () => {
+  // Chrome Android runs its own long-press on an uncancelled touch and buzzes at
+  // ~500ms even with contextmenu prevented, doubling the hold's single pulse.
+  // The brand cancels its single-finger touchstart (non-passive) and resolves the
+  // tap itself on pointerup, within a thumb-sized slop, never after a hold/swipe.
+  assert.match(logoGestureSrc, /el\.addEventListener\('touchstart', onTouchStart, \{ passive: false \}\)/)
+  assert.match(logoGestureSrc, /e\.touches\.length === 1 && e\.cancelable\) e\.preventDefault\(\)/)
+  assert.match(logoGestureSrc, /const TAP_SLOP_PX = 24/)
+  assert.match(logoGestureSrc, /e\.pointerType === 'mouse'\s*\? null/)
+  // Hold completion and swipes consume the candidate; a tap re-arms the click guard.
+  assert.match(logoGestureSrc, /tapCandidateRef\.current = null\s*\n\s*const receipt = onToggleMode\?\.\('hold'\)/)
+  assert.match(logoGestureSrc, /suppressClickRef\.current = true\s*\n\s*onTap\?\.\(\)/)
 })
 
 test('HOLD (~450ms) and touch swipe-right flip the mode; the hook never touches the drawer', () => {
@@ -502,13 +522,14 @@ test('the press state machine is pointer-captured, keyed, and classified by time
   // duplicated the browser's own tap-vs-drag decision with a stricter 10px slop, so
   // an ordinary drifting thumb tap on the brand silently failed to open the drawer.
   // Abandoned presses (movement, cancel, lost capture) must leave the click alone.
-  assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: false \}\); return \}/)
+  // Touch/pen drift still resolves as a tap within the wider tap slop.
+  assert.match(logoGestureSrc, /if \(movedBeyondSlop\(dx, dy\)\) \{ endPress\(\{ suppressClick: false \}\); releaseAsTap\(e, candidate\); return \}/)
   assert.equal((logoGestureSrc.match(/endPress\(\{ suppressClick: false \}\)/g) || []).length, 5,
     'the abandon paths (move-cancel, up-with-drift, pointercancel, lost capture) plus '
     + 'the plain tap all leave the click to the browser')
   assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
   // §6: a drawer-open from any path cancels a live hold.
-  assert.match(logoGestureSrc, /if \(drawerOpen && pressRef\.current\) endPress/)
+  assert.match(logoGestureSrc, /if \(!drawerOpen\) return[\s\S]*?tapCandidateRef\.current = null\s*\n\s*if \(pressRef\.current\) endPress\(\{ suppressClick: true \}\)/)
   // §13: a keyboard click (detail 0) is never suppressed.
   assert.match(logoGestureSrc, /if \(detail === 0\) return false/)
 })
@@ -591,7 +612,8 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(logoRule, /transition:\s*rotate 300ms cubic-bezier/)
   // The 180° twist is a var flip in builder mode (not a transform override).
   assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?--logo-twist:\s*180deg/)
-  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?color:\s*var\(--accent\)/)
+  // The wordmark stays in the text colour; the flame carries the builder accent.
+  assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[^}]*?color:\s*var\(--text\)/)
   // INSTANT flip (empty tree) completion keeps the immediate ignite/snap (0.84→1);
   // an ANIMATED beat emits is-beat-held instead (round 4 item 1). Polish item 5's
   // same-beat timing survives (280ms ignite, not 480ms).
@@ -615,12 +637,11 @@ test('the logo mark IS the indicator (CHARGE): compress on hold + spring/snap + 
   assert.match(shellCss, /\.shell__bar\[data-mode-phase="entering"\] \.shell__wordmark \{ transition-duration: 220ms; \}/)
   assert.match(shellCss, /\.shell__bar\[data-mode-phase="exiting"\] \.shell__wordmark \{ transition-duration: 140ms; \}/)
   assert.match(shell, /<header[\s\S]*?className="shell__bar"[\s\S]*?style=\{brandBeatStyle \|\| undefined\}[\s\S]*?data-mode-phase=\{modeView\.active\?\.phase \|\| undefined\}/)
-  // Builder mode gets a faint static halo shared by the logo and wordmark.
-  // Both shadows live on the existing leaves and have no animation/transition.
+  // Builder mode: the mark carries the flame (below) instead of a drop-shadow;
+  // the wordmark keeps its faint static glow. Neither leaf animates itself.
   const builderLogo = shellCss.match(/\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?\}/)?.[0] || ''
   const builderWordmark = shellCss.match(/\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?\}/)?.[0] || ''
-  assert.match(builderLogo, /filter:\s*drop-shadow\(/)
-  assert.match(builderLogo, /var\(--accent\) 26%/)
+  assert.doesNotMatch(builderLogo, /filter:/)
   assert.match(builderWordmark, /text-shadow:/)
   assert.match(builderWordmark, /var\(--accent\) 30%/)
   assert.doesNotMatch(`${builderLogo}\n${builderWordmark}`, /animation:|transition:/)
@@ -675,11 +696,26 @@ test('logo pointer provenance EXPIRES so a keyboard context menu reaches the nat
   assert.match(shellBrand, /logoGesture\.onKeyDown\(\)/)
 })
 
-test('the Builder brand indicator is static and has no perpetual frame loop', () => {
+test('the Builder flame is compositor-only and has no perpetual frame loop', () => {
+  // The old living halo wrote CSS vars from a rAF loop every frame, competing
+  // with chat scrolling. The flame (owner choice 2026-11-28, "Silk Wick") is
+  // pure CSS: no JS loop, no per-frame var writes, and its keyframes animate
+  // only transform and opacity so the compositor runs them off the main thread.
   assert.doesNotMatch(shellBrand, /useLivingHalo|haloRef|logo-halo|requestAnimationFrame/)
   assert.doesNotMatch(shell, /haloActive=/)
   assert.doesNotMatch(shellCss, /shell__logo-halo|@keyframes [^{]*halo/)
-  assert.match(shellCss, /\.shell__brand--builder \.shell__logo\s*\{[\s\S]*?filter:\s*drop-shadow/)
+  // Mounted only in builder mode.
+  assert.match(shellBrand, /\{builderModeActive && \(\s*<span className="shell__flame" aria-hidden="true">/)
+  const flameKeyframes = shellCss.match(/@keyframes shell-flame-[\w-]+\s*\{[\s\S]*?\n\}/g) || []
+  assert.ok(flameKeyframes.length >= 5)
+  for (const block of flameKeyframes) {
+    const props = [...block.matchAll(/([a-z-]+)\s*:/g)].map(m => m[1])
+    for (const prop of props) assert.ok(['transform', 'opacity'].includes(prop), `${prop} in ${block.slice(0, 40)}`)
+  }
+  assert.doesNotMatch(shellCss.match(/\.shell__flame[\s\S]*?@keyframes shell-flame-kindle/)?.[0] || '', /filter:|blur\(/)
+  // Reduced motion keeps a still flame.
+  // !important: the pulse :not() guards and per-tongue nth-child rules outrank it.
+  assert.match(shellCss, /prefers-reduced-motion[\s\S]*?\.shell__brand \.shell__logo,\s*\.shell__brand \.shell__wordmark,\s*\.shell__flame,\s*\.shell__flame::before,\s*\.shell__flame-tongue \{ animation: none !important; \}/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?text-shadow:/)
 })
 

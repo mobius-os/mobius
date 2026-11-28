@@ -26,6 +26,10 @@ const ShellBrand = memo(function ShellBrand({
   onToggleNavigation,
 }) {
   const keyboardModeClickRef = useRef(false)
+  // Every navigation tap (open AND close) plays one squeeze-and-spring pulse on
+  // the mark. Two identical keyframes alternate so a quick second tap restarts
+  // the pulse by swapping the animation name, with no remount.
+  const [tapPulse, setTapPulse] = useState('')
   // The launcher side is fixed for a whole boot and switching it reloads the
   // page, so one read per mount is enough. Production shows nothing.
   const [onStaging, setOnStaging] = useState(false)
@@ -36,7 +40,14 @@ const ShellBrand = memo(function ShellBrand({
       .catch(() => {})
     return () => { live = false }
   }, [])
+  // The one navigation activation shared by a browser click (mouse, keyboard)
+  // and a gesture-resolved touch tap: pulse the brand, then toggle the drawer.
+  const activateNavigation = () => {
+    setTapPulse(p => (p === 'a' ? 'b' : 'a'))
+    onToggleNavigation()
+  }
   const logoGesture = useLogoModeGesture({
+    onTap: activateNavigation,
     onToggleMode,
     brandRef,
     enabled: true,
@@ -62,7 +73,8 @@ const ShellBrand = memo(function ShellBrand({
         className={`shell__brand${logoGesture.holding ? ' is-holding' : ''}`
           + `${logoGesture.flourish ? ` is-${logoGesture.flourish}` : ''}`
           + `${beatHeld ? ` is-beat-held is-beat-held-${beatParity}` : ''}`
-          + `${builderModeActive ? ' shell__brand--builder' : ''}`}
+          + `${builderModeActive ? ' shell__brand--builder' : ''}`
+          + `${tapPulse ? ` is-tap-pulse-${tapPulse}` : ''}`}
         // The epoch the logo release is scheduled against — always the live beat's id
         // so a rapid hold→retoggle keeps it equal to the root data-mode-epoch.
         data-logo-beat-epoch={beatHeld ? transition.id : undefined}
@@ -122,11 +134,26 @@ const ShellBrand = memo(function ShellBrand({
           // A hold/swipe/drag consumes only its trailing pointer click. Keyboard
           // activation (detail 0) always retains the navigation action.
           if (logoGesture.consumeSuppressedClick(e.detail)) return
-          onToggleNavigation()
+          activateNavigation()
         }}
-        onAnimationEnd={logoGesture.onAnimationEnd}
+        onAnimationEnd={(e) => {
+          // The wordmark's pulse ends with the mark's; neither is a flourish.
+          if (/^shell-(logo|wordmark)-tap-/.test(e.animationName || '')) {
+            if (e.animationName.startsWith('shell-logo-tap-')) setTapPulse('')
+            return
+          }
+          logoGesture.onAnimationEnd(e)
+        }}
       >
         <span className="shell__logo-wrap">
+          {builderModeActive && (
+            <span className="shell__flame" aria-hidden="true">
+              <span className="shell__flame-tongue" />
+              <span className="shell__flame-tongue" />
+              <span className="shell__flame-tongue" />
+              <span className="shell__flame-ember" />
+            </span>
+          )}
           {/* Decorative and pointer-inert: the button owns long presses, so mobile
               browsers cannot raise a native image preview over the gesture. */}
           <img
