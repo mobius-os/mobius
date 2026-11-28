@@ -359,8 +359,8 @@ def find_open(db: Session, chat_id: str, ref: str) -> models.OwnerInputRequest:
   """Resolve an id or key to this chat's open request, never another chat's.
 
   Agents name a request by key; the platform's own edits (a withdrawal at
-  publication) use the id. A request that is no longer open is named with what closed it, so an edit
-  that lost a race with an answer says so."""
+  publication) use the id. A request that is no longer open is named with
+  what closed it, so an edit that lost a race with an answer says so."""
   matches = (models.OwnerInputRequest.id == ref) | (models.OwnerInputRequest.key == ref)
   row = (
     db.query(models.OwnerInputRequest)
