@@ -59,6 +59,15 @@ async def _mixed_card(client, chat, run_auth, monkeypatch, tmp_path):
   return inputs.cards(chat.id)[-1]
 
 
+def _cancel_secret(client, auth, chat_id, card, entry, *, revision=None):
+  """The secret entry's Cancel, naming the card and revision it was shown on."""
+  return client.post(
+    f"/api/secure-inputs/{chat_id}/{entry['id']}/cancel", headers=auth,
+    json={"question_id": card["question_id"],
+          "request_revision": entry["request_revision"] if revision is None else revision},
+  )
+
+
 def _post(client, auth, chat_id, card, answers=None, selected=None):
   body = {"hidden": True, "question_id": card["question_id"], "content": "Restart now"}
   if answers is not None:
@@ -503,7 +512,7 @@ async def test_cancelling_a_secret_entry_settles_it_and_leaves_the_card_open(
   card = await _mixed_card(client, chat, run_auth, monkeypatch, tmp_path)
   entry = inputs.entry(card, "mail-key")
 
-  cancelled = client.post(f"/api/secure-inputs/{chat.id}/{entry['id']}/cancel", headers=auth)
+  cancelled = _cancel_secret(client, auth, chat.id, card, entry)
   again = inputs.submit_secret(client, auth, chat.id, entry["id"])
 
   assert cancelled.status_code == 200 and cancelled.json() == {"status": "cancelled"}
@@ -514,6 +523,39 @@ async def test_cancelling_a_secret_entry_settles_it_and_leaves_the_card_open(
   assert inputs.markers(chat.id) == (None, card["question_id"])
   assert {inputs.request_row(k).status
           for k in ("changelog-tone", "publish-notes", "restart")} == {"open"}
+
+
+@pytest.mark.asyncio
+async def test_a_stale_tabs_cancel_of_a_reworded_secret_cancels_nothing(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, consumer, no_wake,
+):
+  inputs.edit(client, chat.id, run_auth, op="add", key="mail-key", **inputs.secret_body(tmp_path))
+  await inputs.complete_turn(chat.id, monkeypatch, inputs.asking_run_id(chat))
+  old_card = inputs.cards(chat.id)[-1]
+  old_entry = inputs.entry(old_card, "mail-key")
+  reword = inputs.start_run(db, chat.id, "reword")
+  assert inputs.edit(client, chat.id, reword, op="update", key="mail-key",
+                     title="Connect the mail relay").status_code == 200
+  await inputs.complete_turn(chat.id, monkeypatch, "reword")
+  card = inputs.cards(chat.id)[-1]
+  entry = inputs.entry(card, "mail-key")
+  assert entry["id"] == old_entry["id"] and entry["request_revision"] == 2
+
+  # A tab still showing the older card, or the older revision, cancels nothing.
+  assert _cancel_secret(client, auth, chat.id, old_card, old_entry).status_code == 410
+  assert _cancel_secret(client, auth, chat.id, card, entry, revision=1).status_code == 410
+  # The writer refuses it too, whatever reaches it.
+  assert get_writer().submit(SettleSecureInput(
+    chat_id=chat.id, request_id=entry["id"], status="cancelled", outcome="cancelled",
+    question_id=card["question_id"], revision=1,
+  )).result(timeout=5) == {"status": "closed"}
+  assert inputs.request_row("mail-key").status == "open"
+  with SessionLocal() as session:
+    assert session.get(models.SavedSecureInput, entry["id"]).status == "pending"
+
+  current = _cancel_secret(client, auth, chat.id, card, entry)
+  assert current.status_code == 200 and current.json() == {"status": "cancelled"}
+  assert inputs.request_row("mail-key").status == "answered"
 
 
 @pytest.mark.asyncio

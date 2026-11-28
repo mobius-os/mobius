@@ -142,7 +142,14 @@ async def _publish_and_start(chat_id: str, request_id: str, result: dict, db) ->
     await start_queued_owner_continuation(chat_id, db)
 
 
-async def finish(chat_id: str, request_id: str, status: str, outcome: str, *, generation: int | None = None, orphan_only: bool = False) -> dict:
+async def finish(
+  chat_id: str, request_id: str, status: str, outcome: str, *,
+  generation: int | None = None, orphan_only: bool = False,
+  question_id: str | None = None, revision: int | None = None,
+) -> dict:
+  """Settle one sealed operation. A secret entry's owner Cancel passes the
+  card ``question_id`` and entry ``revision`` it was shown, which the writer
+  requires to be current."""
   from app.chat import current_run_generation
   async with chat_queue.get_transition_lock(chat_id), chat_queue.get_lock(chat_id):
     if orphan_only and request_id in _tasks:
@@ -153,6 +160,7 @@ async def finish(chat_id: str, request_id: str, status: str, outcome: str, *, ge
       return {"status": "cancelled"}
     result = await await_ack(get_writer().submit(SettleSecureInput(
       chat_id=chat_id, request_id=request_id, status=status, outcome=outcome,
+      question_id=question_id, revision=revision,
     )))
     with SessionLocal() as db:
       await _publish_and_start(chat_id, request_id, result, db)

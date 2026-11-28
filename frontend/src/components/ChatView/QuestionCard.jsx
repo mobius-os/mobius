@@ -677,6 +677,7 @@ export default function QuestionCard({
             <div key={q.id ?? qi} className="qcard__q qcard__q--secret" data-question-index={qi}>
               <SecretEntry
                 chatId={chatId}
+                cardId={questionId}
                 entry={q}
                 state={state}
                 interactive={entryInteractive}

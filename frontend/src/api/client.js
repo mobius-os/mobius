@@ -1151,9 +1151,11 @@ export const api = {
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/submit`,
       { method: 'POST', body: JSON.stringify(payload) },
     ),
-    cancel: (chatId, requestId) => apiFetch(
+    // A request-list card's secret entry names the card and the revision it
+    // shows (`{ question_id, request_revision }`), so a stale tab cancels nothing.
+    cancel: (chatId, requestId, shown = {}) => apiFetch(
       `/secure-inputs/${encodeURIComponent(chatId)}/${encodeURIComponent(requestId)}/cancel`,
-      { method: 'POST', body: JSON.stringify({}) },
+      { method: 'POST', body: JSON.stringify(shown) },
     ),
   },
   // Settings › Keys. Only reveal (the owner's Show) ever returns a value.

@@ -87,7 +87,7 @@ function SealedStatus({ state }) {
  * Values exist only in the uncontrolled inputs until Submit takes and clears
  * them; `onState` hears the receipt's new status (never a value).
  */
-export function SecretEntry({ chatId, entry, state, interactive, onState }) {
+export function SecretEntry({ chatId, cardId, entry, state, interactive, onState }) {
   const secure = entry.secure_input || {}
   const fields = secure.fields || []
   const open = interactive && !state
@@ -114,6 +114,8 @@ export function SecretEntry({ chatId, entry, state, interactive, onState }) {
     formRef, submitting, cancelling, error, submit, cancel,
   } = useSecureSubmission({
     chatId, requestId: entry.id, fields, revealFlag: false, open,
+    // Cancel binds to what this card shows, as a submission does.
+    shown: { question_id: cardId, request_revision: entry.request_revision },
     onStatus: status => onState(entry.id, { status }),
     describeError: secretActionError,
     // Nothing resends a sealed submit or cancel. When no verdict came back,

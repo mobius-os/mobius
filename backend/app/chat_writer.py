@@ -356,13 +356,19 @@ class ClaimSecureInput(_Command):
 
 @dataclass
 class SettleSecureInput(_Command):
-  """Commit a fixed safe outcome and its single owner-answer continuation."""
+  """Commit a fixed safe outcome and its single owner-answer continuation.
+
+  The owner's Cancel of a secret entry names the card (``question_id``) and
+  the entry ``revision`` it was shown on, exactly like a submission's claim.
+  """
 
   chat_id: str = ""
   run_token: str = ""
   request_id: str = ""
   status: str = "failed"
   outcome: str = ""
+  question_id: str | None = None
+  revision: int | None = None
 
 
 @dataclass
@@ -5176,8 +5182,11 @@ class ChatWriterActor:
     if cmd.status == "cancelled" and (
       chat is None or request.status != "open" or not chat.open_request_card_id
       or request.published_question_id != chat.open_request_card_id
+      or cmd.question_id != chat.open_request_card_id
+      or cmd.revision != request.revision
     ):
-      # Cancel is the owner's choice on the card that shows the entry now.
+      # Cancel is the owner's choice on the card that shows the entry now, at
+      # the revision they were shown: a stale tab cancels nothing.
       return {"status": "closed"}
     row.status = cmd.status
     row.outcome = SAFE_OUTCOMES[cmd.outcome]

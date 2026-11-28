@@ -284,6 +284,7 @@ async def _submit_sealed_entry(request: Request, chat_id: str, request_id: str, 
 async def cancel_secure_input(
   chat_id: str,
   request_id: str,
+  request: Request,
   principal: Principal = Depends(get_chat_view_principal),
   db: Session = Depends(get_db),
 ):
@@ -292,7 +293,9 @@ async def cancel_secure_input(
   The capability-based cancel is for the local helper on exit; if that process
   dies the card would otherwise sit in the chat's one-per-chat slot with no way
   for a participant to clear it. Authenticated chat access stands in for the
-  capability here.
+  capability here. A secret entry's Cancel names the card (`question_id`) and
+  the entry's `request_revision` it was shown on; a tab showing an older card
+  or revision is refused like a stale submission.
   """
   require_chat_embed_operation(principal, "chat:send")
   require_active_chat_access(db, chat_id, principal)
@@ -301,12 +304,22 @@ async def cancel_secure_input(
   if saved is not None:
     from app import saved_secure_inputs
     from app.chat import current_run_generation
-    request_row, _card_id, entry = _sealed_entry(db, chat, request_id)
+    request_row, card_id, entry = _sealed_entry(db, chat, request_id)
     if request_row is not None:
-      # The writer re-checks that the current card still shows the entry.
-      if entry is None or saved.status != "pending":
+      payload = await _json_object(request)
+      shown_card, shown_revision = payload.get("question_id"), payload.get("request_revision")
+      if saved.status != "pending":
         raise HTTPException(409, detail="Secure input request is no longer open.")
-      result = await saved_secure_inputs.finish(chat_id, request_id, "cancelled", "cancelled")
+      if (entry is None or shown_card != card_id
+          or shown_revision != entry.get("request_revision")):
+        raise HTTPException(410, detail="Secure input request is no longer open.")
+      # The writer re-checks both against the card that shows the entry now.
+      result = await saved_secure_inputs.finish(
+        chat_id, request_id, "cancelled", "cancelled",
+        question_id=shown_card, revision=shown_revision,
+      )
+      if result["status"] == "closed":
+        raise HTTPException(410, detail="Secure input request is no longer open.")
       if result["status"] != "cancelled":
         raise HTTPException(409, detail="Secure input request is no longer open.")
       return {"status": result["status"]}

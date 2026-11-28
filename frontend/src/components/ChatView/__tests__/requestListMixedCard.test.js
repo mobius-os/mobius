@@ -662,6 +662,20 @@ function filledSecret(extra = {}) {
   return { card, input, formNode }
 }
 
+test('a secret entry cancels only the card and revision it shows', async () => {
+  const card = renderHook(QuestionCard, props({ onAnswer: () => true }))
+  try {
+    assert.equal(entry(card.result.current, 'secret').props.cardId, 'card-1')
+  } finally { card.unmount() }
+  const shown = filledSecret({ cardId: 'card-1', entry: { ...secret, request_revision: 3 } })
+  try {
+    await byClass(shown.card.result.current, 'secure-card__cancel')[0].props.onClick()
+    await tick()
+    assert.deepEqual(apiCalls.filter(([name]) => name === 'cancel').map(([, args]) => args),
+      [['mixed-chat', 'req-secret', { question_id: 'card-1', request_revision: 3 }]])
+  } finally { shown.card.unmount() }
+})
+
 test('filled sealed fields are wiped on cancel, when the entry stops being open, and on unmount', async () => {
   const cancelled = filledSecret()
   try {

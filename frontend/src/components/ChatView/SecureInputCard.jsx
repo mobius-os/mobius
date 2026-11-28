@@ -124,11 +124,12 @@ function messageOf(error, fallback) {
  *
  * `describeError(error, action)` turns a failure into owner-facing copy.
  * `revealFlag` keeps the original card's body, which always names
- * `reveal_confirmed`; a request-list entry sends `{fields}` only.
+ * `reveal_confirmed`; a request-list entry sends `{fields}` only. `shown`
+ * is what Cancel names: a list entry's card id and request revision.
  */
 export function useSecureSubmission({
   chatId, requestId, fields, reveal = false, revealFlag = true, open,
-  onStatus, describeError, afterFailure,
+  onStatus, describeError, afterFailure, shown,
 }) {
   const formRef = useRef(null)
   const [submitting, setSubmitting] = useState(false)
@@ -190,7 +191,7 @@ export function useSecureSubmission({
     setCancelling(true)
     try {
       await jsonOrThrow(
-        await api.secureInputs.cancel(chatId, requestId),
+        await api.secureInputs.cancel(chatId, requestId, shown),
         'Could not cancel',
       )
       // Values typed but never submitted leave with the form.
