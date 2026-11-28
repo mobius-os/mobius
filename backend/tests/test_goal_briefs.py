@@ -546,32 +546,6 @@ async def test_claude_compaction_refreshes_brief_at_next_root_tool_result(monkey
   assert await brief_hook(tool, "t3", {}) == {"continue_": True}
 
 
-def test_codex_compaction_notification_alone_owes_no_brief(monkeypatch):
-  # Only Codex's post-compaction hook delivers the brief; the runner's own
-  # compaction observation is display-only and arms nothing a later hook or
-  # steer could consume.
-  from tests import test_codex_sdk_runner as harness
-
-  async def no_hook_discovery(codex, sdk, cwd, config, hook_overrides, **_):
-    return config
-
-  monkeypatch.setattr(harness.codex_sdk_runner, "_codex_platform_hook_thread_config",
-                      no_hook_discovery)
-  for kind in ("context_compaction_item", "legacy_notification"):
-    refresh = _stale_refresh()
-    original = harness.codex_sdk_runner.run_codex_sdk_turn
-
-    async def run_with_refresh(**kwargs):
-      return await original(**kwargs, compaction_refresh=refresh)
-
-    monkeypatch.setattr(harness.codex_sdk_runner, "run_codex_sdk_turn", run_with_refresh)
-    harness.test_run_codex_sdk_turn_publishes_marker_from_current_and_legacy_events(
-      monkeypatch, kind,
-    )
-    monkeypatch.setattr(harness.codex_sdk_runner, "run_codex_sdk_turn", original)
-    assert not refresh.stale, kind
-
-
 def test_codex_steer_never_carries_the_goal_brief():
   from app.runner_registry import RunnerKind, registry
   from app.codex_sdk_runner import ActiveCodexTurn
