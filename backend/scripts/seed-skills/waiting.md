@@ -48,7 +48,9 @@ question_id: "EXACT_CARD")`. The source chat's open card id is its
 included, or `pending_question_id` for a barring card an older chat still shows
 (`mapi "/api/chats/SOURCE_CHAT?limit=1"`); a peer may also name it. The request
 card is replaced each time that chat's turn ends, so its result can be
-**superseded**; follow the newer card if the decision is still open. Only an open top-level Goal can subscribe;
+**superseded**; follow the newer card if the decision is still open. It
+also resolves as answered when the owner answers any entry of that card, so
+check that the entry you follow was answered before acting on it. Only an open top-level Goal can subscribe;
 helpers return the condition to their parent. Use the existing card: never
 copy it, poll its answer, or ask a peer to interrupt you later. Claim-owned
 work uses the confirmed claim dependency instead; approval is not completion.

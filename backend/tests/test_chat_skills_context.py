@@ -243,6 +243,11 @@ def test_owner_requests_never_end_the_turn_and_keep_decline_claim_boundaries():
   assert "An approval, restart or secret is settled only on the card, never by you" in asking
   assert "**Not now** choice that resumes the chat, not `on_answer: \"close\"`" in asking
   assert "release the approval's work claim with `finish_agent_work(..., release=true)`" in asking
+  assert "Withdrawing an approval releases its claim itself; no second call is needed" in asking
+  assert "Prefer few requests: merge related decisions into one request with options" in asking
+  # Only a request fencing this Goal's tasks holds its completion.
+  assert ("Only this Goal's requests that name its tasks in `blocks.tasks` keep it from "
+          "completing; an offer made at a handoff does not") in asking
   # The removed card tools and their turn-ending mechanics stay gone.
   for retired in ("request_question", "request_approval", "request_restart",
                   "request_secret", "last action of the turn", "card's `message`",
@@ -390,8 +395,10 @@ def test_goal_responsibility_requires_truthful_outcome_or_real_handoff():
   # A blocked branch asks at once and the rest of the Goal keeps moving.
   assert "a request holds only the tasks named in its `blocks`" in planning_normalized
   assert "do not hold questions back until nothing else can proceed" in planning_normalized
-  assert ("A task named there cannot be completed while its request is open, and the Goal "
-          "cannot be completed while any request is open") in planning_normalized
+  assert ("A task named there cannot be completed while its request is open, so the Goal "
+          "cannot be completed while such a request is open") in planning_normalized
+  assert "does not hold completion" in planning_normalized
+  assert "cannot be completed while any request is open" not in planning_normalized
   assert "Otherwise record an owner request with `owner_input`" in waiting_normalized
   assert "clarifying-question tool" not in waiting_normalized
   assert "A temporary approval gate or outage is not capitulation" in planning_normalized

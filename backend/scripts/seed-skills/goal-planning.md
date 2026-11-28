@@ -102,7 +102,10 @@ request; do not use it to mean “continue after this dependency is ready.”
 - **Owner decision:** a request holds only the tasks named in its `blocks`;
   keep working the other branches, and do not hold questions back until
   nothing else can proceed. A task named there cannot be completed while its
-  request is open, and the Goal cannot be completed while any request is open.
+  request is open, so the Goal cannot be completed while such a request is
+  open; a request that names no task of this Goal (an offer at a handoff, or
+  only `blocks.work`) does not hold completion, and an open approval's claim
+  stays held for its answer after the Goal completes.
   The answer resumes the same Goal. An answer covering only some requests
   leaves the rest open; keep going with what it unblocked.
 - **Platform restart:** record `owner_input` with `kind: "restart"` as
