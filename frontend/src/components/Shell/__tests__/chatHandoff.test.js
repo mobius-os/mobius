@@ -500,8 +500,14 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
     'only a classifier-approved complete cache may enter runtime reuse or fallback')
   assert.match(chatView,
-    /cacheIsSafeFallback = activationCacheReusable[\s\S]*err\?\.message !== 'CHAT_NOT_FOUND'/,
+    /cacheIsSafeFallback = \(\s*\(activationCacheReusable && cacheCoversSavedAnchor\) \|\| latestCacheReadableOffline\s*\)[\s\S]{0,200}err\?\.message !== 'CHAT_NOT_FOUND'/,
     'an explicit missing resource dominates stale cache history and remains non-sendable')
+  assert.match(chatView,
+    /const latestCacheReadableOffline = !searchActivation\s*&& activationServerUnreachable\(err\)\s*&& \['paintable', 'stream-catchup'\]\.includes\(chatCacheEntryState\(activationCache\)\)/,
+    'only an unreachable server lets the cached latest window open in place of an unresolved saved address')
+  assert.match(chatView,
+    /if \(offlineLatestFallbackRef\.current === String\(activationIdentity\)\) \{[\s\S]{0,200}reenterSavedLocation\(\)/,
+    'the next successful activation restores the saved position the offline frame could not show')
 })
 
 test('only a loaded transcript lets runtime evidence attach a stream or reread history', () => {

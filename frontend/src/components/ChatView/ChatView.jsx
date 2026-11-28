@@ -50,6 +50,7 @@ import {
 } from './scroll/policy.js'
 import {
   activationRetryDelay,
+  activationServerUnreachable,
   chatEntryFrame,
   liveControlsReady,
   answerBeforeActivationError,
@@ -640,6 +641,9 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const activationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
+  // The chat whose failed activation opened its cached latest messages in
+  // place of a saved reading position the server could not be asked for.
+  const offlineLatestFallbackRef = useRef(null)
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
@@ -1246,6 +1250,7 @@ export default function ChatView({
     revealConversationTail,
     revealPendingQuestion,
     revealAnchor,
+    reenterSavedLocation,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
@@ -2648,6 +2653,12 @@ export default function ChatView({
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
       commitRuntimeSnapshot(transition)
+      if (offlineLatestFallbackRef.current === String(activationIdentity)) {
+        // The server answered: restore the saved position the offline frame
+        // could not show, as an ordinary entry would.
+        offlineLatestFallbackRef.current = null
+        reenterSavedLocation()
+      }
       activationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
@@ -2971,12 +2982,23 @@ export default function ChatView({
           return
         }
         // Offline degradation may use a complete cached restoration window,
-        // but never a truncated one that cannot resolve the saved address.
-        const cacheIsSafeFallback = activationCacheReusable
-          && cacheCoversSavedAnchor
+        // but never a truncated one that cannot resolve the saved address
+        // while the server could answer. When it cannot be reached at all (a
+        // restart), the cached latest messages open read-only instead; the
+        // saved reading position is kept, unresolved, and restored after the
+        // next successful read. A search or decision reveal still waits.
+        const latestCacheReadableOffline = !searchActivation
+          && activationServerUnreachable(err)
+          && ['paintable', 'stream-catchup'].includes(chatCacheEntryState(activationCache))
+        const cacheIsSafeFallback = (
+          (activationCacheReusable && cacheCoversSavedAnchor) || latestCacheReadableOffline
+        )
           && err?.message !== 'CHAT_READING_ANCHOR_NOT_FOUND'
           && err?.message !== 'CHAT_NOT_FOUND'
         if (cacheIsSafeFallback) {
+          if (!(activationCacheReusable && cacheCoversSavedAnchor)) {
+            offlineLatestFallbackRef.current = String(activationIdentity)
+          }
           applyMessagesToView(activationCache.messages, activationCache.offset)
         } else {
           // The mounted state was seeded from cache before validation. Clear an
@@ -3053,6 +3075,7 @@ export default function ChatView({
     pendingQueue.hydrateFromTranscript,
     reconcileFailedSendOutbox,
     retireUnownedRuntimeStream,
+    reenterSavedLocation,
     retryActivation,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,

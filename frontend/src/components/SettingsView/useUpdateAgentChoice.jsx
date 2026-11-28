@@ -16,7 +16,8 @@ export function UpdateAgentPicker({ onChoice }) {
   const registry = registryQuery.data || {}
   const catalog = catalogProviders(registry)
   const availability = resolveProviderAvailability(statusQuery)
-  const saved = prefsQuery.data?.selected_agent
+  const { prefs, unavailable: prefsUnavailable } = modelQueries.prefs.view(prefsQuery)
+  const saved = prefs?.selected_agent
   const selected = draft || {
     provider: saved?.provider || '',
     model: saved?.model || '',
@@ -26,7 +27,7 @@ export function UpdateAgentPicker({ onChoice }) {
     if (!availability.configuredProviders.has(provider)) return []
     const info = providerInfoFor(provider, statusQuery.data)
     const models = (catalog[provider] || [])
-      .filter(model => !prefsQuery.data?.hidden_ids?.includes(model.id)
+      .filter(model => !prefs?.hidden_ids?.includes(model.id)
         || (selected.provider === provider
           && selectedCatalogModel(registry, provider, selected.model) === model.id))
       .map(model => ({ ...model, name: model.label || model.id }))
@@ -34,7 +35,7 @@ export function UpdateAgentPicker({ onChoice }) {
   })
   // Each consecutive provider run is a group, retaining global MRU order.
   const groups = []
-  for (const row of orderPickerModels(rows, prefsQuery.data?.recent_ids)) {
+  for (const row of orderPickerModels(rows, prefs?.recent_ids)) {
     const last = groups.at(-1)
     if (last?.key === row.provider) last.models.push(row.model)
     else groups.push({ key: row.provider, label: row.info.label, Logo: row.info.Logo, models: [row.model] })
@@ -42,7 +43,7 @@ export function UpdateAgentPicker({ onChoice }) {
   const effectiveModel = selectedCatalogModel(registry, selected.provider, selected.model)
   const entry = rows.find(row => row.provider === selected.provider && row.model.id === effectiveModel)?.model
   const efforts = modelEfforts(providerInfoFor(selected.provider, statusQuery.data).efforts, entry)
-  const failed = registryQuery.isError || prefsQuery.isError || prefsQuery.data?.unavailable || statusQuery.isError
+  const failed = registryQuery.isError || prefsUnavailable || statusQuery.isError
   const loading = registryQuery.isPending || prefsQuery.isPending || prefsQuery.isFetching || statusQuery.isPending
   const notice = failed ? 'Could not load your agents. Close this picker and try again.'
     : loading ? 'Loading your agents…'

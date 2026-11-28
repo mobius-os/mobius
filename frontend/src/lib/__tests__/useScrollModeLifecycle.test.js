@@ -1730,3 +1730,63 @@ test('late peer projection repairs the same reading coordinate before an observe
     hook.unmount()
   } finally { restoreBrowser() }
 })
+
+function mountWithUnreadableSavedRow(chatId) {
+  globalThis.localStorage.setItem('chat-reading-position', JSON.stringify({
+    [chatId]: { kind: 'ANCHOR_AT', key: 'old-row', offset: 96, at: 1 },
+  }))
+  const mounted = mountTailController(chatId)
+  const oldRow = fakeElement({ dataset: { key: 'old-row' }, offsetTop: 60, offsetHeight: 40 })
+  const tailQuery = mounted.scroll.querySelector.bind(mounted.scroll)
+  let oldRowCommitted = false
+  mounted.scroll.querySelector = selector => (
+    oldRowCommitted && selector.includes('data-key="old-row"') ? oldRow : tailQuery(selector)
+  )
+  const commitOldRow = () => {
+    oldRowCommitted = true
+    const messages = [{ role: 'user', cid: 'old-row', content: 'Older' }, ...mounted.args.messages]
+    mounted.args.messagesRef.current = messages
+    mounted.hook.rerender({ ...mounted.args, messages })
+  }
+  return { ...mounted, commitOldRow }
+}
+
+const savedPosition = chatId => JSON.parse(
+  globalThis.localStorage.getItem('chat-reading-position') || '{}',
+)[chatId]
+
+test('after an offline frame showed the latest messages, the next read restores the saved row', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, commitOldRow } = mountWithUnreadableSavedRow('offline-restart')
+    const offline = hook.result.current.capturePaginationRequest().mode
+    assert.notEqual(offline.key, 'old-row', 'offline, the latest cached messages show')
+    assert.equal(savedPosition('offline-restart')?.key, 'old-row',
+      'showing the latest offline keeps the saved position')
+
+    // ChatView commits the server window and this request together.
+    commitOldRow()
+    hook.result.current.reenterSavedLocation()
+    const restored = hook.result.current.capturePaginationRequest().mode
+    assert.equal(restored.kind, 'ANCHOR_AT')
+    assert.equal(restored.key, 'old-row', 'the server window restores the saved row')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})
+
+test('a reader who moved while offline keeps their place when the server returns', () => {
+  const restoreBrowser = installBrowserEnvironment()
+  try {
+    const { hook, commitOldRow } = mountWithUnreadableSavedRow('offline-moved')
+    hook.result.current.followLatest()
+    commitOldRow()
+    hook.result.current.reenterSavedLocation()
+    assert.notEqual(hook.result.current.capturePaginationRequest().mode.key, 'old-row',
+      'an explicit reader choice made offline is never overridden')
+    hook.unmount()
+  } finally {
+    restoreBrowser()
+  }
+})

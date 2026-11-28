@@ -306,6 +306,10 @@ export default function useScrollMode({
   // permanently destroyed the reader's position and every later return was
   // "broken" for good rather than for one visit.
   const savedLocationUnresolvedRef = useRef(false)
+  // Asks the entry restore to try that unresolved location again once a
+  // later committed window may contain it (see reenterSavedLocation).
+  const [savedLocationRetry, setSavedLocationRetry] = useState(0)
+  const handledSavedLocationRetryRef = useRef(0)
   const gestureWindowUntilRef = useRef(0)
   const pendingGestureTimerRef = useRef(0)
   const pendingGestureReleaseRafRef = useRef(0)
@@ -1012,6 +1016,13 @@ export default function useScrollMode({
     return true
   }, [scrollRef, supersedePendingReaderGesture, transitionMode, writeMode])
 
+  // The tail was shown only because the saved location could not be read
+  // (the server was unreachable). After the next committed window, restore
+  // that location as a fresh entry would, unless the reader has moved since.
+  const reenterSavedLocation = useCallback(() => {
+    setSavedLocationRetry(retry => retry + 1)
+  }, [])
+
   const freezeForegroundReturn = useCallback(() => {
     const nextMode = modeForForegroundReturn(scrollRef.current)
     return nextMode
@@ -1235,6 +1246,14 @@ export default function useScrollMode({
       transitionMode(decision.mode, 'lifecycle:restore')
       if (initialEntryPhaseRef.current === 'cache-validating') {
         onCachedCoordinateReady?.()
+      }
+    }
+    if (handledSavedLocationRetryRef.current !== savedLocationRetry) {
+      handledSavedLocationRetryRef.current = savedLocationRetry
+      // Only a location this visit failed to resolve, and only while the
+      // reader has not chosen another place since, re-enters restore.
+      if (savedLocationUnresolvedRef.current && !readerLocationExplicitRef.current) {
+        transitionMode({ kind: 'INITIAL' }, 'lifecycle:saved-location-retry')
       }
     }
     attemptEntryRestore()
@@ -2416,6 +2435,7 @@ export default function useScrollMode({
     messageCount,
     chatId,
     initialEntryPhase,
+    savedLocationRetry,
     onCachedCoordinateReady,
     rememberAppliedMode,
     ownsReadingPosition,
@@ -2581,6 +2601,7 @@ export default function useScrollMode({
     revealConversationTail,
     revealPendingQuestion,
     revealAnchor,
+    reenterSavedLocation,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,

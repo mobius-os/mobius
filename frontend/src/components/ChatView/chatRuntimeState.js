@@ -17,6 +17,17 @@ export function isSideQuestionMessage(message) {
   return message?.kind === 'side_question'
 }
 
+/** True when a failed chat activation never reached a working server: the
+ * device or proxy could not connect, the read timed out, or the server
+ * answered as a restarting or failing service does (408 or 5xx). */
+export function activationServerUnreachable(error) {
+  const message = String(error?.message || '')
+  return (error?.name === 'TypeError'
+      && /failed to fetch|networkerror|load failed|fetch failed/i.test(message))
+    || error?.name === 'TimeoutError'
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|5\d\d)$/.test(message)
+}
+
 const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
 
 /** Delay before quietly retrying a failed chat activation, or null to stop.
@@ -26,11 +37,8 @@ const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
  * least as long as the read timeout: one load in flight at a time. */
 export function activationRetryDelay(error, attempt, readTimeoutMs) {
   const message = String(error?.message || '')
-  const transientNetworkError = error?.name === 'TypeError'
-    && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
-  const transient = transientNetworkError
-    || error?.name === 'TimeoutError'
-    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
+  const transient = activationServerUnreachable(error)
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:425|429)$/.test(message)
     || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
   const delay = transient ? ACTIVATION_RETRY_DELAYS_MS[attempt] : undefined
   if (delay === undefined) return null

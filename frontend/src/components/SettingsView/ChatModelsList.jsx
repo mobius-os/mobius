@@ -20,8 +20,8 @@ export default function ChatModelsList({ provider }) {
   const [error, setError] = useState('')
   const rows = catalogProviders(registryQuery.data)?.[provider]
   const models = Array.isArray(rows) ? rows : []
-  const hidden = new Set(prefsQuery.data?.hidden_ids || [])
-  const unavailable = !!prefsQuery.data?.unavailable
+  const { prefs, unavailable } = modelQueries.prefs.view(prefsQuery)
+  const hidden = new Set(prefs?.hidden_ids || [])
 
   const setVisible = async (modelId, visible) => {
     setError('')
