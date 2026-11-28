@@ -419,7 +419,9 @@ test('a lost Restart now response is reconciled from what the server recorded', 
   assert.deepEqual(await reconcileUnknownPress({
     questionId: 'card-1', requestId: 'req-restart', readDetail: async () => { throw new Error('offline') },
   }), { kind: 'unknown' })
-  assert.equal(entryVerdictFromDetail(card({ ...block, answers: { x: 'y' } }), 'card-1', 'req-restart').kind, 'unknown')
+  // A card answered in part stays open for the restart its answer left.
+  assert.equal(entryVerdictFromDetail(card({ ...block, answers: { 'How formal?': 'Casual' } }), 'card-1', 'req-restart').kind, 'open')
+  assert.equal(entryVerdictFromDetail(card({ ...block, answers: { [restart.question]: 'Not yet' } }), 'card-1', 'req-restart').kind, 'unknown')
 })
 
 test('two presses in the same tick send one request', async () => {
@@ -567,6 +569,51 @@ test('a submitted card keeps only the entries answered or settled on it', () => 
     assert.equal(submit(card.result.current).props.children, 'Submitted')
   } finally { card.unmount() }
   assert.deepEqual(shownEntries(mixed, { answers: {}, states: {}, closed: false }), mixed)
+})
+
+test('a card answered in part that is still open keeps its secret and restart usable', async () => {
+  const pressed = []
+  const card = renderHook(QuestionCard, props({
+    answeredMap: { 'How formal?': 'Casual' }, submittedOptions: {}, entriesOffered: true,
+    onRestartEntry: async press => { pressed.push(press); return {} },
+  }))
+  try {
+    const shown = byClass(card.result.current, 'qcard__q').map(node => node.props['data-question-index'])
+    assert.deepEqual(shown, [0, 1, 3], 'the answer, the secret and the restart; the unanswered approval waits')
+    assert.equal(option(card.result.current, 'Publish'), undefined)
+    assert.equal(entry(card.result.current, 'secret').props.interactive, true)
+    const restartEntry = entry(card.result.current, 'restart')
+    assert.equal(restartEntry.props.interactive, true)
+    assert.equal(restartEntry.props.reply, null, 'the answers were sent: no reply box is left to send')
+    assert.equal(restartEntry.props.onSubmitReply, undefined)
+    restartEntry.props.onChoose()
+    assert.equal(entry(card.result.current, 'restart').props.chosen, true, 'Restart now can still be chosen')
+    await entry(card.result.current, 'restart').props.onPress()
+    assert.deepEqual(pressed, [{ questionId: 'card-1', requestId: 'req-restart', selectedOptions: { 'req-restart': ['opt-restart'] } }])
+    assert.equal(submit(card.result.current).props.children, 'Submitted')
+  } finally { card.unmount() }
+
+  // Once the next card replaces it, only what was answered here stays.
+  const replaced = renderHook(QuestionCard, props({
+    answeredMap: { 'How formal?': 'Casual' }, submittedOptions: {}, entriesOffered: false,
+  }))
+  try {
+    assert.deepEqual(byClass(replaced.result.current, 'qcard__q').map(node => node.props['data-question-index']), [1])
+  } finally { replaced.unmount() }
+  const answers = { 'How formal?': 'Casual' }
+  assert.deepEqual(shownEntries(mixed, { answers, closed: true, offered: true }).map(q => q.id), ['req-secret', 'req-tone', 'req-restart'])
+  assert.deepEqual(shownEntries(mixed, { answers, closed: true, offered: true,
+    states: { 'req-secret': { status: 'cancelled' } } }).map(q => q.id), ['req-secret', 'req-tone', 'req-restart'])
+  assert.deepEqual(shownEntries(mixed, { answers, closed: true }).map(q => q.id), ['req-tone'])
+})
+
+test('a restart entry with no reply box offers only Restart now', () => {
+  const html = renderToStaticMarkup(createElement(StaticQuestionCard, props({
+    questions: [tone, restart], answeredMap: { 'How formal?': 'Casual' }, submittedOptions: {}, entriesOffered: true,
+    onRestartEntry: () => Promise.resolve({}),
+  })))
+  assert.match(html, /class="qcard__hint">Restart now</)
+  assert.doesNotMatch(html, /or reply below|Reply instead of restarting/)
 })
 
 test('a superseded card shows only what settled on it, without a Submit', () => {

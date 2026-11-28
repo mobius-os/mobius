@@ -263,7 +263,7 @@ export function RestartEntry({
       {open && (
         <>
           <div className="qcard__hint">
-            {action.observation?.observed_at ? 'Restart again, or reply below' : 'Restart now, or reply below'}
+            {action.observation?.observed_at ? 'Restart again' : 'Restart now'}{reply ? ', or reply below' : ''}
           </div>
           <div className="qcard__opts" role="radiogroup" aria-labelledby={textId}>
             <div

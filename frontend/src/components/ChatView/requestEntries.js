@@ -71,15 +71,25 @@ function answerGiven(value) {
 }
 
 
+/** Whether an entry acts on its own (a secret, a restart) and is still unsettled. */
+export function selfSettlingOpen(entry, { answers = {}, states = {} } = {}) {
+  return [SECRET, RESTART].includes(entryKind(entry))
+    && !entryState(states, entry) && !answerGiven(answers[entry.question])
+}
+
+
 /**
  * The entries a card still shows. An open card shows every entry. Once the
  * card is no longer answerable it keeps only what was answered or settled on
- * it: the rest were never answered here and come back on the next card.
+ * it: the rest were never answered here and come back on the next card. A
+ * card answered in part that is still the chat's open card (`offered`) also
+ * keeps its unsettled secret and restart entries, which stay usable on it.
  */
-export function shownEntries(questions, { answers = {}, states = {}, closed = false } = {}) {
+export function shownEntries(questions, { answers = {}, states = {}, closed = false, offered = false } = {}) {
   if (!closed) return questions
   return questions.filter(entry => (
     entryState(states, entry) || answerGiven(answers[entry.question])
+    || (offered && selfSettlingOpen(entry, { answers, states }))
   ))
 }
 
@@ -142,9 +152,9 @@ export function entryVerdictFromDetail(detail, questionId, requestId) {
   const state = block?.request_states?.[requestId]
   if (state && typeof state === 'object' && state.status) return { kind: 'settled', state }
   if (detail?.open_request_card_id !== questionId) return { kind: 'gone' }
-  if (block && (block.questions || []).some(entry => entry?.id === requestId) && !block.answers) {
-    return { kind: 'open' }
-  }
+  // A card answered in part stays open for the entries its answer left.
+  const entry = (block?.questions || []).find(candidate => candidate?.id === requestId)
+  if (entry && !answerGiven(block.answers?.[entry.question])) return { kind: 'open' }
   return { kind: 'unknown' }
 }
 

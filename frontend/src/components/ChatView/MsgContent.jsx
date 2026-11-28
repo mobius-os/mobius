@@ -626,6 +626,11 @@ function MsgContentInner({
               disabled={!answerable && !answers}
               inputRequests={block.input_requests === true}
               requestStates={block.request_states}
+              // By identity, not position: a card answered in part stays the
+              // open card for its secret and restart entries while the turn
+              // its answers started writes below it.
+              entriesOffered={block.input_requests === true && !!answers
+                && !!onQuestionAnswer && block.question_id === liveQuestionId}
               pendingCardRef={answerable ? pendingQuestionRef : undefined}
             />
           </div>

@@ -217,6 +217,9 @@ export default function QuestionCard({
   requestStates,
   // Press Restart now on one entry; defaults to the chat's entry actions.
   onRestartEntry,
+  // The list card is still the chat's open card. Once answered in part it
+  // stays open only for its secret and restart entries, which act on their own.
+  entriesOffered = false,
   // Callback ref that publishes this card's node to the "Möbius asked you
   // something — tap to answer" offscreen observer. Set only by the surface
   // rendering the answerable tail question, and only while the card is still
@@ -324,8 +327,11 @@ export default function QuestionCard({
   // branch) keeps only the entries answered or settled on it. The others were
   // never answered here: they come back on the next card.
   const listClosed = inputRequests && (answered || (disabled && !locallyQueued))
+  // Answered in part but still the open card: what the answer left of the
+  // secret and restart entries stays usable here.
+  const stillOffered = inputRequests && answered && entriesOffered
   const visibleQuestions = inputRequests
-    ? shownEntries(questions, { answers: displayAnswers, states, closed: listClosed })
+    ? shownEntries(questions, { answers: displayAnswers, states, closed: listClosed, offered: stillOffered })
     : questions
   const shownGrouped = visibleQuestions.length > 1
   // Restart and secret entries settle on their own; questions, approvals and
@@ -465,6 +471,14 @@ export default function QuestionCard({
       }
       return { ...prev, [question]: label }
     })
+  }
+
+  // Choosing Restart now is not an answer, so it stays possible on a card
+  // that is still offered after its shared answers were submitted.
+  function chooseRestart(question, label) {
+    if (disabled || (selectionLocked && !stillOffered)) return
+    setOtherTexts(prev => ({ ...prev, [question]: '' }))
+    setAnswers(prev => ({ ...prev, [question]: label }))
   }
 
   function setOtherText(question, text) {
@@ -626,11 +640,13 @@ export default function QuestionCard({
   // questions and approvals counts requests rather than decisions.
   const sensitiveShown = inputRequests && visibleQuestions.some(q => entryKind(q) === RESTART || entryKind(q) === SECRET)
   let groupNoun = sensitiveShown ? 'requests' : 'decisions'
-  if (listClosed) groupNoun = answered ? 'answered' : 'settled here'
+  if (listClosed && !stillOffered) groupNoun = answered ? 'answered' : 'settled here'
   const groupTitle = `${visibleQuestions.length} ${groupNoun}`
   // A list card says nothing its Submit button does not already say.
   const groupCopy = inputRequests ? '' : 'Answer each question, then submit them together.'
   const entryInteractive = !disabled && !selectionLocked
+  // A secret or restart entry the submitted answers left stays usable.
+  const ownEntryInteractive = entryInteractive || (stillOffered && !submitting)
   // The shared Submit belongs to questions, approvals and restart replies. A
   // card of only secrets has none, and a restart that would be its only entry
   // sends its reply with its own Continue, as the legacy Restart card did. A
@@ -680,7 +696,7 @@ export default function QuestionCard({
                 cardId={questionId}
                 entry={q}
                 state={state}
-                interactive={entryInteractive}
+                interactive={ownEntryInteractive}
                 onState={noteEntryState}
               />
             </div>
@@ -696,23 +712,24 @@ export default function QuestionCard({
               <RestartEntry
                 entry={q}
                 state={state}
-                interactive={entryInteractive}
+                interactive={ownEntryInteractive}
                 textId={restartTextId}
                 chosen={Boolean(restartOption) && answers[q.question] === restartOption.label}
-                onChoose={() => restartOption && selectOption(q.question, restartOption.label)}
+                onChoose={() => restartOption && chooseRestart(q.question, restartOption.label)}
                 onPress={pressRestart && selection
                   ? () => pressRestart({ questionId, requestId: q.id, selectedOptions: selection })
                   : undefined}
                 onState={noteEntryState}
                 answeredText={answeredText}
                 onInternalNav={onInternalNav}
-                onSubmitReply={onlyRestartReplies
+                onSubmitReply={onlyRestartReplies && !stillOffered
                   ? questionCard => handleSubmit(questionCard, null)
                   : undefined}
                 replyReady={canSubmit}
                 replySubmitting={submitting}
                 replyError={onlyRestartReplies && !answered && !locallyQueued ? submitError : ''}
-                reply={(
+                // The shared answers were already sent: only Restart now is left.
+                reply={stillOffered && !answeredText ? null : (
                   <div className="qcard__answer-row">
                     <div className={`qcard__composer${otherTexts[q.question] || answeredText ? ' qcard__composer--active' : ''}`}>
                       <CustomAnswerArea

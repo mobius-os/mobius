@@ -140,17 +140,113 @@ async def test_one_submission_answers_a_question_and_an_approval_and_leaves_the_
   answered = inputs.request_row("publish-notes")
   assert answered.status == "answered" and answered.answered_by == "card"
   assert answered.answer_json == {"text": "Publish", "selected": ["0"]}
-  # The secret and the restart stay open, unshown until the next card.
+  # The secret and the restart act on their own, so they stay usable on this
+  # card, which stays open for them; nothing else is left on it.
   for key in ("mail-key", "restart"):
     row = inputs.request_row(key)
-    assert row.status == "open" and row.published_question_id is None
-  assert inputs.markers(chat.id) == (None, None)
+    assert row.status == "open" and row.published_question_id == card["question_id"]
+  assert inputs.markers(chat.id) == (None, card["question_id"])
   with SessionLocal() as session:
     secret = session.get(models.SavedSecureInput, inputs.entry(card, "mail-key")["id"])
     assert secret.status == "pending"
-  # The unpressed restart's wait goes with the card; the next card links a new one.
   restart_wait = inputs.entry(card, "restart")["platform_action"]["wait_id"]
-  assert inputs.wait_row(restart_wait).status == "cancelled"
+  assert inputs.wait_row(restart_wait).status == "armed"
+
+
+@pytest.mark.asyncio
+async def test_after_a_partial_answer_the_secret_and_restart_still_work_on_the_same_card(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, boot, consumer, no_wake,
+):
+  dispatched = []
+
+  async def restart_worker(*args, **kwargs):
+    dispatched.append(True)
+
+  monkeypatch.setattr("app.restart_util.restart_this_worker", restart_worker)
+  card = await _mixed_card(client, chat, run_auth, monkeypatch, tmp_path)
+  secret, restart = inputs.entry(card, "mail-key"), inputs.entry(card, "restart")
+  assert _post(client, auth, chat.id, card,
+               answers={QUESTION["prompt"]: "Casual"}).status_code == 202
+
+  submitted = inputs.submit_secret(client, auth, chat.id, secret["id"])
+  assert submitted.status_code == 200 and submitted.json() == {"status": "consuming"}, submitted.text
+  assert inputs.wait_for_secret(secret["id"]) == "completed"
+  assert consumer["seen"] == [{"api_key": SECRET_VALUE}]
+  press = _post(client, auth, chat.id, card,
+                selected={restart["id"]: [restart["platform_action"]["restart_option_id"]]})
+  assert press.status_code == 202, press.text
+  assert press.json()["state"]["status"] == "restart_requested"
+  assert dispatched == [True]
+  assert inputs.wait_row(restart["platform_action"]["wait_id"]).action_approved_at is not None
+  assert {inputs.request_row(k).status for k in ("mail-key", "restart", "changelog-tone")} == {"answered"}
+  # The approval was never answered: it waits for the next card.
+  approval = inputs.request_row("publish-notes")
+  assert approval.status == "open" and approval.published_question_id is None
+
+
+@pytest.mark.asyncio
+async def test_the_next_turn_end_moves_what_a_partial_answer_left_to_a_new_card(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, boot, no_wake,
+):
+  card = await _mixed_card(client, chat, run_auth, monkeypatch, tmp_path)
+  assert _post(client, auth, chat.id, card,
+               answers={QUESTION["prompt"]: "Casual"}).status_code == 202
+
+  inputs.start_turn(chat.id, "continuation")
+  await inputs.complete_turn(chat.id, monkeypatch, "continuation")
+
+  newer = inputs.cards(chat.id)[-1]
+  assert newer["question_id"] != card["question_id"]
+  assert {q["request_key"] for q in newer["questions"]} == {"mail-key", "publish-notes", "restart"}
+  assert inputs.markers(chat.id) == (None, newer["question_id"])
+  old_wait = inputs.entry(card, "restart")["platform_action"]["wait_id"]
+  assert inputs.wait_row(old_wait).status == "cancelled"
+  from app.chat_writer import RestartCardStateChanged
+  with pytest.raises(RestartCardStateChanged):
+    inputs.press_restart(chat.id, card)
+
+
+@pytest.mark.asyncio
+async def test_a_partly_answered_card_takes_no_second_set_of_answers(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, boot, no_wake,
+):
+  card = await _mixed_card(client, chat, run_auth, monkeypatch, tmp_path)
+  approval = inputs.entry(card, "publish-notes")
+  assert _post(client, auth, chat.id, card,
+               answers={QUESTION["prompt"]: "Casual"}).status_code == 202
+
+  again = _post(client, auth, chat.id, card, answers={APPROVAL["prompt"]: "Publish"},
+                selected={approval["id"]: ["0"]})
+
+  assert again.status_code == 410, again.text
+  assert inputs.request_row("publish-notes").status == "open"
+  assert inputs.cards(chat.id)[-1]["answers"] == {QUESTION["prompt"]: "Casual"}
+
+
+@pytest.mark.asyncio
+async def test_a_partial_answer_closes_the_card_once_nothing_acting_on_its_own_is_left(
+  client, auth, chat, db, run_auth, monkeypatch, tmp_path, boot, consumer, no_wake,
+):
+  inputs.edit(client, chat.id, run_auth, op="add", key="mail-key", **inputs.secret_body(tmp_path))
+  inputs.edit(client, chat.id, run_auth, op="add", key="changelog-tone", **QUESTION)
+  inputs.edit(client, chat.id, run_auth, op="add", key="publish-notes", **APPROVAL)
+  inputs.edit(client, chat.id, run_auth, op="add", key="restart", kind="restart")
+  await inputs.complete_turn(chat.id, monkeypatch, inputs.asking_run_id(chat))
+  card = inputs.cards(chat.id)[-1]
+  secret, restart = inputs.entry(card, "mail-key"), inputs.entry(card, "restart")
+  assert _cancel_secret(client, auth, chat.id, card, secret).status_code == 200
+
+  # Written feedback settles the restart without restarting, so nothing that
+  # acts on its own is left and the card closes.
+  assert _post(client, auth, chat.id, card, answers={
+    QUESTION["prompt"]: "Casual", restart["question"]: "Not yet",
+  }).status_code == 202
+
+  assert inputs.markers(chat.id) == (None, None)
+  assert inputs.request_row("restart").status == "answered"
+  assert inputs.wait_row(restart["platform_action"]["wait_id"]).status == "cancelled"
+  approval = inputs.request_row("publish-notes")
+  assert approval.status == "open" and approval.published_question_id is None
 
 
 @pytest.mark.asyncio
@@ -844,9 +940,15 @@ async def test_a_secret_is_claimable_only_on_the_current_card_at_the_shown_revis
       chat_id=chat.id, request_id=entry["id"], revision=revision)).result(timeout=5)
 
   assert claim(entry["request_revision"] + 1) == {"status": "closed"}
-  # Answering the question closes the card; the secret waits for the next one.
-  assert _post(client, auth, chat.id, card,
-               answers={QUESTION["prompt"]: "Casual"}).status_code == 202
+  # Once a newer card shows the request, the older one no longer offers it.
+  inputs.start_turn(chat.id, "republish")
+  await inputs.complete_turn(chat.id, monkeypatch, "republish")
+  newer = inputs.cards(chat.id)[-1]
+  assert newer["question_id"] != card["question_id"]
+  with SessionLocal() as session:
+    row = session.get(models.OwnerInputRequest, entry["id"])
+    row.published_question_id = card["question_id"]
+    session.commit()
   assert claim(entry["request_revision"]) == {"status": "closed"}
   late = inputs.submit_secret(client, auth, chat.id, entry["id"])
   assert late.status_code == 410

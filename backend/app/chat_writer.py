@@ -8442,10 +8442,14 @@ def apply_answers_to_last_question(
     stage_decision_outcome(db, chat, block.get("question_id"),
       "closed_without_reply" if block.get("answer_turn") == "none" else "answered",
       card=block, source_run_id=assistant_message_run_id(message.get("id")) or "")
-    from app.owner_input_requests import stage_card_answers
+    from app.owner_input_requests import self_settling_entries_left, stage_card_answers
     stage_card_answers(db, chat.id, block)
-    if block.get("input_requests") and chat.open_request_card_id == block.get("question_id"):
-      # Answered, fully or in part: what is left open is shown on the next card.
+    if (block.get("input_requests") and chat.open_request_card_id == block.get("question_id")
+        and not self_settling_entries_left(
+          block, block.get("answers") or {}, block.get("selected_options") or {})):
+      # Answered, fully or in part: what is left open is shown on the next
+      # card. A secret or unpressed restart entry acts on its own, so while
+      # one is left the card stays open for it until the next card replaces it.
       chat.open_request_card_id = None
 
   def sync_live_answer(match_id: str | None) -> bool:
@@ -8482,10 +8486,11 @@ def apply_answers_to_last_question(
           if isinstance(block.get("platform_action"), dict):
             return False
           if (block.get("input_requests")
-              and question_id != chat.open_request_card_id):
+              and (question_id != chat.open_request_card_id or block.get("answers"))):
             # Route checks run before the writer, and a turn end can
             # republish in between: a superseded list card's answer must
-            # not land on requests a newer card now shows.
+            # not land on requests a newer card now shows. A card already
+            # answered stays open only for its entries that act on their own.
             from app.questions import QuestionNoLongerOpen
             raise QuestionNoLongerOpen("The question is no longer accepting answers.")
           from app.owner_input_requests import (
