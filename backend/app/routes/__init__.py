@@ -112,6 +112,7 @@ contribution_relay_router = _load("contribution_relay")
 platform_router = _load("platform")
 published_router = _load("published")
 connect_router = _load("connect")
+connect_offers_router = _load("connect_offers")
 keys_router = _load("keys")
 app_secrets_compat_router = _load("app_secrets_compat")
 browser_access_router = _load("browser_access")
@@ -186,5 +187,6 @@ __all__ = [
   "projects_router",
   "project_copies_router",
   "project_handle_invites_router",
+  "connect_offers_router",
   "shared_apps_router",
 ]

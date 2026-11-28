@@ -137,6 +137,11 @@ def _download_runner(base_url: str) -> bytes:
     raise OutboundConnectError(
       "Couldn’t reach the other person’s Möbius.",
     ) from exc
+  return validated_runner_source(source)
+
+
+def validated_runner_source(source: bytes) -> bytes:
+  """The bytes, if they are a plausibly sized Connect runner script."""
   if len(source) > _MAX_RUNNER_BYTES:
     raise OutboundConnectError("That Connect runner is unexpectedly large.")
   if not source.startswith(b"#!/usr/bin/env python3") or b"Mobius Connect runner" not in source[:4096]:
@@ -395,8 +400,27 @@ def _discard(profile_id: str) -> None:
 
 def _create_profile(label: str, command: str, agent: bool = False) -> dict:
   base_url, code = parse_pairing_command(command)
-  source = _download_runner(base_url)
-  profile_id = "o_" + secrets.token_hex(8)
+  return _create_paired_profile(label, base_url, code, agent)
+
+
+def new_profile_id() -> str:
+  return "o_" + secrets.token_hex(8)
+
+
+def _create_paired_profile(
+  label: str, base_url: str, code: str, agent: bool = False, *,
+  source: bytes | None = None, profile_id: str | None = None,
+) -> dict:
+  """Pair a new runner with ``base_url`` using its one-time ``code``.
+
+  A caller that fetched the runner through its own transport passes
+  ``source``; one that must recognise this profile after a crash passes the
+  ``profile_id`` it recorded first.
+  """
+  source = validated_runner_source(source) if source is not None else _download_runner(base_url)
+  profile_id = profile_id or new_profile_id()
+  if not _ID_RE.fullmatch(profile_id) or _profile_dir(profile_id).exists():
+    raise OutboundConnectError("That access profile already exists.")
   meta = {
     "id": profile_id,
     "label": label,
@@ -436,6 +460,58 @@ def _create_profile(label: str, command: str, agent: bool = False) -> dict:
 
 async def create_profile(label: str, command: str, agent: bool = False) -> dict:
   return await asyncio.to_thread(_create_profile, label, command, agent)
+
+
+async def create_paired_profile(
+  label: str, base_url: str, code: str, agent: bool = False, *,
+  source: bytes | None = None, profile_id: str | None = None,
+) -> dict:
+  return await asyncio.to_thread(
+    lambda: _create_paired_profile(
+      label, base_url, code, agent, source=source, profile_id=profile_id,
+    ),
+  )
+
+
+def _complete_interrupted_pairing(profile_id: str) -> bool:
+  """Finish a profile whose runner paired before this process could record it.
+
+  The runner saves its sign-in only after the other Möbius accepted the code,
+  so a saved sign-in for the recorded address proves pairing happened. The
+  profile becomes ``active`` and supervision relaunches its runner.
+  """
+  if not _ID_RE.fullmatch(str(profile_id or "")):
+    return False
+  with _lock:
+    meta = _read_json(_meta_path(profile_id))
+    if not meta or meta.get("status") not in {"connecting", "active"}:
+      return False
+    if meta.get("status") == "active":
+      return True
+    conns = connect_runner._connections(_read_json(_runner_config_path(profile_id)) or {})
+    if len(conns) != 1 or not conns[0].get("token") or not conns[0].get("host_id"):
+      return False
+    try:
+      saved_base = connect_runner._validated_base_url(str(conns[0].get("url") or ""))
+    except ValueError:
+      return False
+    if saved_base != meta.get("base_url"):
+      return False
+    meta["status"] = "active"
+    _atomic_json(_meta_path(profile_id), meta)
+    return True
+
+
+async def complete_interrupted_pairing(profile_id: str) -> bool:
+  return await asyncio.to_thread(_complete_interrupted_pairing, profile_id)
+
+
+def profile_status(profile_id: str) -> str | None:
+  """A saved profile's recorded status, or None when there is no such profile."""
+  if not _ID_RE.fullmatch(str(profile_id or "")):
+    return None
+  meta = _read_json(_meta_path(profile_id))
+  return str(meta.get("status")) if meta else None
 
 
 def _process_identity(pid: int) -> tuple[int, int] | None:
