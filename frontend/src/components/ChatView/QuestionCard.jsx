@@ -3,6 +3,7 @@ import { InlineMarkdown, StandardMarkdown } from './markdown/BlockRenderer.jsx'
 import { INTERACTIVE_TARGET } from '../../lib/interactiveTarget.js'
 import { ChevronRight } from '@openai/apps-sdk-ui/components/Icon'
 import { LocalAnswersContext } from './localAnswersContext.js'
+import { ChatSurfaceHiddenContext } from './chatSurfaceHiddenContext.js'
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import './QuestionCard.css'
 import {
@@ -161,6 +162,21 @@ export function CustomAnswerArea({
 }
 
 
+/**
+ * A touch tap on an answer while the owner is typing (in this card's reply
+ * box or the composer) must not close the phone keyboard. Taking focus is
+ * what dismisses it, so the press leaves focus where it is; the click still
+ * picks. Mouse presses keep their default so description text stays
+ * selectable. The same rule as the shell's logo tap and composer buttons.
+ */
+function keepTypingFocus(event) {
+  if (event.pointerType === 'mouse') return
+  const active = document.activeElement
+  if (active?.tagName === 'INPUT' || active?.tagName === 'TEXTAREA' || active?.isContentEditable) {
+    event.preventDefault()
+  }
+}
+
 export default function QuestionCard({
   chatId,
   questions,
@@ -207,7 +223,37 @@ export default function QuestionCard({
   const initialFilesRef = useRef(null)
   if (initialFilesRef.current === null) initialFilesRef.current = restoredQuestionFiles(readQuestionDraft(draftKey).files, questions)
   const attachTargetRef = useRef(null)
-  const { files, addFiles, removeFile, clearFiles, discardFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
+  const { files, addFiles, removeFile, clearFiles, restoreFiles, discardFiles } = useFileUpload({ chatId, initialFiles: initialFilesRef.current })
+
+  // The workspace keeps this chat mounted in both worlds (Standard and
+  // Builder), so this card may have a twin the owner is typing into while
+  // this copy is hidden. The saved draft is the one shared record: a hidden
+  // copy never writes it (its state is stale), and a copy coming into view
+  // adopts it before its first visible frame, the rule the composer follows.
+  // The draft records only finished files, so uploads this copy had in
+  // flight when it was hidden stay with it rather than being dropped.
+  const surfaceHidden = useContext(ChatSurfaceHiddenContext)
+  const wasHiddenRef = useRef(surfaceHidden)
+  const uploadsAtHideRef = useRef(new Set())
+  // The render that reveals this copy still holds its stale input; nothing
+  // from it may be saved before the adoption below has committed.
+  const draftStale = surfaceHidden || wasHiddenRef.current
+  useLayoutEffect(() => {
+    const wasHidden = wasHiddenRef.current
+    wasHiddenRef.current = surfaceHidden
+    if (surfaceHidden) {
+      if (!wasHidden) {
+        uploadsAtHideRef.current = new Set(files.filter(file => file.status === 'uploading').map(file => file.id))
+      }
+      return
+    }
+    if (!wasHidden) return
+    const saved = readQuestionDraft(draftKey)
+    setAnswers(saved.answers)
+    setOtherTexts(saved.otherTexts)
+    const ownUploads = files.filter(file => uploadsAtHideRef.current.has(file.id))
+    restoreFiles([...restoredQuestionFiles(saved.files, questions), ...ownUploads])
+  }, [surfaceHidden, files, draftKey, questions, restoreFiles])
   const readyFiles = files.filter(file => file.status === 'done')
   // The limit covers the whole card, matching the server's per-submission cap.
   function addAnswerFiles(list, question) {
@@ -272,8 +318,9 @@ export default function QuestionCard({
       if (files.length) discardFiles()
       return
     }
+    if (draftStale) return
     writeQuestionDraft(draftKey, { answers, otherTexts, files })
-  }, [draftKey, answers, otherTexts, files, answered, discardFiles])
+  }, [draftKey, answers, otherTexts, files, answered, discardFiles, draftStale])
 
   const unanswered = unansweredQuestions(questions, answers, otherTexts, readyFiles)
   const allAnswered = unanswered.length === 0
@@ -590,8 +637,9 @@ export default function QuestionCard({
                   <div
                     key={oi}
                     className={`qcard__opt${isActive ? ' qcard__opt--on' : ''}${dimmed ? ' qcard__opt--dim' : ''}${inactive ? ' qcard__opt--static' : ''}`}
-                    onPointerDown={inactive ? undefined : () => {
+                    onPointerDown={inactive ? undefined : (event) => {
                       pointerSelectionRef.current = textSelectionSnapshot()
+                      keepTypingFocus(event)
                     }}
                     // A tap on the explanation text picks the choice too.
                     // Its links, image previews (including the portaled
