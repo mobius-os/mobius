@@ -162,6 +162,52 @@ def test_sweep_materializes_live_reply_before_interruption_marker():
   ]
 
 
+def test_sweep_does_not_call_an_already_saved_reply_unsaved():
+  """A turn whose reply was finalized but whose ending (the promote or Goal
+  settlement after it) failed is swept too. Its response is in the
+  transcript, so the note must say what actually failed, not "could not be
+  saved"."""
+  _seed(
+    "wedged-saved",
+    messages=[
+      {"role": "user", "content": "help", "ts": 10},
+      {"role": "assistant", "id": "rt-wedged-saved", "content": "Done.",
+       "ts": 11, "blocks": [{"type": "text", "content": "Done."}]},
+    ],
+  )
+  assert "wedged-saved" in _sweep()
+  _drain_writer()
+  status, _pending, messages, live = _state("wedged-saved")
+  assert status is None
+  assert live is None
+  assert len(messages) == 2
+  assert messages[-1]["content"] == "Done."
+  assert messages[-1]["blocks"][-1] == {
+    "type": "error",
+    "message": chat_mod.WEDGED_SAVED_REPLY_MESSAGE,
+    "resumable": True,
+  }
+
+
+def test_sweep_does_not_credit_an_earlier_id_less_reply_to_this_run():
+  """A trailing id-less assistant row may belong to an earlier turn, so it
+  never proves this run's reply was saved."""
+  _seed(
+    "wedged-legacy",
+    messages=[
+      {"role": "user", "content": "help", "ts": 10},
+      {"role": "assistant", "content": "Earlier.", "ts": 11,
+       "blocks": [{"type": "text", "content": "Earlier."}]},
+    ],
+  )
+  assert "wedged-legacy" in _sweep()
+  _drain_writer()
+  _status, _pending, messages, _live = _state("wedged-legacy")
+  assert messages[-1]["blocks"][-1]["message"] == (
+    "This response could not be saved. You can resume the turn."
+  )
+
+
 def test_sweep_keeps_unanswered_question_terminal_without_second_resume():
   _seed(
     "wedged-question",

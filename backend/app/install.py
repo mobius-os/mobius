@@ -587,12 +587,21 @@ def _assert_service_transition_safe(
 def _sync_service_aliases(
   db: Session, *, app: models.App, manifest: dict,
 ) -> None:
-  """Replace only this app's explicit transition routes in the transaction."""
-  aliases = _manifest_service_aliases(manifest)
-  db.query(models.AppServiceAlias).filter(
+  """Replace only this app's explicit transition routes in the transaction.
+
+  The difference is staged as ORM changes, not issued as an immediate bulk
+  DELETE: an install must not take SQLite's database-wide write lock until its
+  final commit (see ``_prepare_app_row``). Unchanged aliases keep their row.
+  """
+  wanted = set(_manifest_service_aliases(manifest))
+  current = db.query(models.AppServiceAlias).filter(
     models.AppServiceAlias.app_id == app.id,
-  ).delete(synchronize_session=False)
-  for alias in aliases:
+  ).all()
+  for row in current:
+    if row.service_id not in wanted:
+      db.delete(row)
+  kept = {row.service_id for row in current}
+  for alias in sorted(wanted - kept):
     db.add(models.AppServiceAlias(service_id=alias, app_id=app.id))
 
 
@@ -3167,9 +3176,14 @@ async def _prepare_app_row(
 
   if existing:
     app = existing
+    # Stage, do not flush. The first write statement in a SQLite transaction
+    # takes the database-wide write lock and holds it to commit; an update
+    # then spends tens of seconds on git, merge, file writes and compile, and
+    # every other writer (chat saves included) times out behind it. The
+    # session never autoflushes, so these changes reach the database only in
+    # the short final commit.
     app.name = manifest["name"]
     app.description = manifest.get("description", "")
-    db.flush()
 
     if adopting_previous_id:
       old_slug = app.slug
@@ -3325,10 +3339,11 @@ def _commit_prepared_app(
 ) -> None:
   """Make prepared source durable, then reveal a recovered pinned app.
 
-  Reinstall performs awaited filesystem work and may flush row metadata long
-  before its final commit, so it must not hold the drawer's blocking process
-  lock for the whole operation. A tombstoned app stays outside the live pinned
-  identity set while that work is made durable. Its visibility transition is
+  Reinstall performs awaited filesystem work before its final commit (a fresh
+  install even flushes its new row early, because it needs the id), so it
+  must not hold the drawer's blocking process lock for the whole operation.
+  A tombstoned app stays outside the live pinned identity set while that work
+  is made durable. Its visibility transition is
   then one short, independently committed drawer mutation.
 
   If the revival commit fails, the fully prepared app remains safely hidden

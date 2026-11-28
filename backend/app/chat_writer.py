@@ -1352,6 +1352,11 @@ class RecoverWedgedRun(_Command):
   # wait that resolves itself) instead of closed as an interrupted failure.
   parked_until: datetime | None = None
   park_reason: str | None = None
+  # Used instead of `interruption_block` when the run's reply is already in
+  # the transcript and no unsaved live snapshot remains: the turn's ending
+  # failed, not its response, so the generic "could not be saved" would
+  # misreport what was lost.
+  saved_reply_block: dict | None = None
 
 
 @dataclass
@@ -5584,6 +5589,25 @@ class ChatWriterActor:
       )
 
   def _promote_pending(self, db, cmd: PromotePending) -> dict:
+    """Run one promotion; a lock timeout anywhere in it is a `CommitDropped`.
+
+    Row inserts (the promoted transcript rows) execute before the commit, so
+    SQLite's busy timeout can surface at any statement, not only at
+    ``commit()``. Rolled back, the whole promotion is undone and the queue
+    caller may resubmit it.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+      return self._promote_pending_once(db, cmd)
+    except OperationalError as exc:
+      if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+        raise
+      log.warning("PromotePending rolled back behind a lock: %s", exc)
+      db.rollback()
+      raise CommitDropped("PromotePending rolled back behind a lock") from exc
+
+  def _promote_pending_once(self, db, cmd: PromotePending) -> dict:
     """Move pending follow-ups into the transcript and mark the run.
 
     Replicates `promote_pending_messages_locked`: builds the next-turn
@@ -5664,8 +5688,8 @@ class ChatWriterActor:
       settlement = self._settle_unhanded_goal(db, chat, cmd)
       if settlement is not None:
         return settlement
-      if (retired_control or rejected_changed) and not _commit_or_rollback(db):
-        raise _PersistFailed("PromotePending could not retire stale control")
+      if retired_control or rejected_changed:
+        _commit_or_drop(db, "PromotePending could not retire stale control")
       return {"history": [], "promoted": None, "session_id": chat.session_id}
     existing = transcript_rows.read_all(db, chat)
     from app.continuations import (
@@ -5928,8 +5952,7 @@ class ChatWriterActor:
                        "code": "goal_settlement_unfinished"})
       target["blocks"] = blocks
       transcript_rows.update_at(db, chat, target_seq, target)
-      if not _commit_or_rollback(db):
-        raise _PersistFailed("Goal settlement recovery note did not persist")
+      _commit_or_drop(db, "Goal settlement recovery note did not persist")
       return {"history": [], "promoted": None, "session_id": chat.session_id,
               "settlement_error": note}
     return self._admit_goal_settlement(db, chat, prior, goal=goal)
@@ -5986,15 +6009,15 @@ class ChatWriterActor:
     """Persist an already-authorized run and fence its token only after commit.
 
     Callers own queue/history, root/Goal attribution, and admission policy.
-    Nothing here grants provider execution permission or retries a failed ack.
+    Nothing here grants provider execution permission or retries; a dropped
+    commit raises `CommitDropped` so the submitting caller can decide to.
     """
     chat.live_assistant = {
       "id": run.id, "role": "assistant", "blocks": [], "ts": assistant_ts,
     }
     chat.active_assistant_message_id = run.id
     db.add(run)
-    if not _commit_or_rollback(db):
-      raise _PersistFailed(failure_message)
+    _commit_or_drop(db, failure_message)
     self._run_token_owner[chat.id] = run.id
     if run.goal_id is not None:
       _publish_goal_runtime_changed(db, chat.id)
@@ -6419,6 +6442,7 @@ class ChatWriterActor:
     from datetime import UTC, datetime
 
     from app.models import Chat, ChatRun
+    from app.chat_message_identity import assistant_message_run_id
 
     if cmd.terminal_status not in ("failed", "interrupted"):
       raise _PersistFailed(
@@ -6488,10 +6512,6 @@ class ChatWriterActor:
         else:
           transcript_rows.append(db, chat, live)
 
-      note = copy.deepcopy(cmd.interruption_block)
-      if not isinstance(note, dict) or note.get("type") != "error":
-        raise _PersistFailed("RecoverWedgedRun requires an error block")
-
       recovery_identity = (
         live
         if isinstance(live, dict) and live.get("id") is not None
@@ -6500,9 +6520,28 @@ class ChatWriterActor:
       # assistant_index also adopts a trailing id-less assistant row (the
       # rolling-upgrade rule); a different explicit id is never patched.
       recovery_index = transcript_rows.assistant_index(db, chat, recovery_identity)
+      previous = (
+        transcript_rows.at(db, chat, recovery_index)
+        if recovery_index >= 0 else None
+      )
+      reply_was_saved = (
+        cmd.saved_reply_block is not None
+        and not (isinstance(live, dict) and live.get("blocks"))
+        and previous is not None
+        # Only this run's own row proves its reply was saved: the trailing
+        # id-less fallback could be an earlier turn's reply.
+        and assistant_message_run_id(previous.get("id")) == cmd.run_token
+        and any(block.get("type") == "text" and block.get("content")
+                for block in previous.get("blocks") or [])
+      )
+      note = copy.deepcopy(
+        cmd.saved_reply_block if reply_was_saved else cmd.interruption_block
+      )
+      if not isinstance(note, dict) or note.get("type") != "error":
+        raise _PersistFailed("RecoverWedgedRun requires an error block")
+
       pending = list(chat.pending_messages or [])
-      if recovery_index >= 0:
-        previous = transcript_rows.at(db, chat, recovery_index)
+      if previous is not None:
         blocks = copy.deepcopy(previous.get("blocks") or [])
         finalize_blocks(blocks)
         # Keep unanswered question cards as the terminal affordance.  The
@@ -6903,6 +6942,22 @@ class _PersistFailed(Exception):
   without poisoning the actor.  Distinct from `SQLAlchemyError`, so it
   does NOT trigger a session recreate (the session is fine; the write was
   legitimately impossible)."""
+
+
+class CommitDropped(_PersistFailed):
+  """The command's whole transaction was rolled back by a transient database
+  error (normally SQLite's busy timeout behind another writer's lock).
+
+  Unlike an ack timeout this is definitive: nothing from the command landed,
+  so the caller may submit the same command again as though it were simply
+  late. Raised only where the rollback covers every change the command made.
+  """
+
+
+def _commit_or_drop(db, failure_message: str) -> None:
+  """Commit, or raise `CommitDropped` after rolling the whole command back."""
+  if not _commit_or_rollback(db):
+    raise CommitDropped(failure_message)
 
 
 class _SelectedResultUnavailable(_PersistFailed):
