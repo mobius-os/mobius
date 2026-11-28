@@ -1411,17 +1411,47 @@ def stage_unpressed_restart_wait_withdrawn(db: Session, chat_id: str, question_i
   }, synchronize_session=False)
 
 
+def self_settling_entries_left(
+  card: dict[str, Any], answers: dict[str, Any], selections: dict[str, Any] | None,
+) -> set[str]:
+  """Entries of a request-list card that settle on their own (a secret's
+  sealed form, an unpressed restart) and that this submission leaves open.
+
+  They stay usable on the same card after a partial answer: neither is
+  answered through the shared answers path, so closing the card would only
+  hide them until the next turn end. An entry already settled on its own is
+  not counted, nor a restart this submission answers with written feedback.
+  """
+  if not card.get("input_requests"):
+    return set()
+  settled = card.get("request_states") or {}
+  left = set()
+  for question in card.get("questions") or []:
+    request_id, kind = question.get("id"), entry_kind(question)
+    if kind not in (SECRET, RESTART) or not request_id or request_id in settled:
+      continue
+    written = answers.get(question.get("question"), answers.get(request_id))
+    if kind == RESTART and written not in (None, "", []):
+      continue
+    left.add(request_id)
+  return left
+
+
 def stage_card_answers(db: Session, chat_id: str, card: dict[str, Any]) -> None:
   """Record a submitted card's answers on their requests, in the caller's
   transaction. A request the owner left blank stays open and is shown again.
 
   An answer applies only to the revision the owner was shown: a request that
   has since changed stays open, so the owner answers what is actually asked.
+  A secret or unpressed restart entry the submission leaves open stays on
+  this card (`self_settling_entries_left`), and so does a restart entry's
+  activation wait; every other unanswered request waits for the next card.
   """
   answers = card.get("answers") or {}
   selections = card.get("selected_options") or {}
   if not card.get("input_requests"):
     return
+  still_shown = self_settling_entries_left(card, answers, selections)
   for question in card.get("questions") or []:
     request_id = question.get("id")
     kind = entry_kind(question)
@@ -1443,7 +1473,8 @@ def stage_card_answers(db: Session, chat_id: str, card: dict[str, Any]) -> None:
     if not answered:
       # Not answered here: it must be shown again on the next card. A row a
       # newer card already shows keeps that card.
-      if row.published_question_id == card.get("question_id"):
+      if (row.published_question_id == card.get("question_id")
+          and request_id not in still_shown):
         row.published_question_id = None
       continue
     row.status = "answered"
@@ -1455,9 +1486,12 @@ def stage_card_answers(db: Session, chat_id: str, card: dict[str, Any]) -> None:
     row.answered_by = CARD_ANSWER
     row.answered_at = now_naive_utc()
     row.updated_at = row.answered_at
-  # The card no longer offers its restart entry: written feedback settled it
-  # without a restart, or it waits for the next card, which links a new wait.
-  stage_unpressed_restart_wait_withdrawn(db, chat_id, card.get("question_id") or "")
+  if not any(entry_kind(question) == RESTART and question.get("id") in still_shown
+             for question in card.get("questions") or []):
+    # The card no longer offers its restart entry: written feedback settled
+    # it without a restart, or it waits for the next card, which links a new
+    # wait.
+    stage_unpressed_restart_wait_withdrawn(db, chat_id, card.get("question_id") or "")
 
 
 # ---- One entry settled on its own ------------------------------------------
