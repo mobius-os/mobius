@@ -212,8 +212,17 @@ export function findDrawerMenuItem(menu, chats = [], apps = []) {
   return items.find(item => item?.id === menu.id) || null
 }
 
-// What a screen reader hears for an Apps-row icon: its name plus the same
-// status its dot shows ("Needs you" outranks "New", as on screen).
+// The one status marker an Apps-row icon shows, most important first:
+// needs you, then building, then new. Null when the icon is idle.
+export function appTileMarker({ needsYou = false, fresh = false, building = false } = {}) {
+  if (needsYou) return 'needs'
+  if (building) return 'building'
+  return fresh ? 'new' : null
+}
+
+// What a screen reader hears for an Apps-row icon: its name plus its status.
+// "Needs you" outranks "New"; building is announced alongside either, since
+// the label has room for both even where the icon shows only one marker.
 export function appTileLabel(name, { needsYou = false, fresh = false, building = false } = {}) {
   const parts = [name || 'App']
   if (needsYou) parts.push('needs you')
