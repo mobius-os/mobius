@@ -170,7 +170,8 @@ export default function ChatSettingsPanel({
   const prefsQuery = modelQueries.prefs.useQuery()
   const providerStatusQuery = authQueries.provider.statuses.useQuery()
   const registry = registryQuery.data
-  const prefs = prefsQuery.data
+  // Last-known preferences stay in use while the server cannot be read.
+  const { prefs } = modelQueries.prefs.view(prefsQuery)
   const availability = resolveProviderAvailability(providerStatusQuery)
   const availabilitySettled = (
     availability.phase !== PROVIDER_AVAILABILITY_PHASE.LOADING

@@ -110,6 +110,10 @@ export const persistOptions = {
 //   - ['platform','status']                 → last-known release identity
 //   - ['github','status']                   → GitHub login and scope flags
 //   - ['identity-summary']                  → Möbius handle, avatar fingerprint, mode
+// The model picker persists what it needs to offer the owner's own choices
+// while the server restarts or after a cold offline open:
+//   - ['models', 'registry']                → the model catalogue
+//   - ['owner', 'model-prefs']              → hidden/recent models, saved agent
 // Everything else under ['auth'] and ['identity'] stays in memory: the
 // setup-status gate is short-lived, and the full Möbius identity carries the
 // private email, the avatar address and the account's deployments. A shared-browser guest uses
@@ -121,6 +125,8 @@ const PERSISTED_FULL_KEYS = new Set([
   JSON.stringify(['platform', 'status']),
   JSON.stringify(['github', 'status']),
   JSON.stringify(['identity-summary']),
+  JSON.stringify(['models', 'registry']),
+  JSON.stringify(['owner', 'model-prefs']),
 ])
 
 export function shouldPersistQueryKey(queryKey) {

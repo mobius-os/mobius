@@ -29,8 +29,8 @@ test('confirming resolves the exact choice and permits another independent job',
   assert.equal(await next, null)
 })
 
-function mockCatalog(t, prefs = { hidden_ids: ['hidden'], recent_ids: ['claude-test'] }) {
-  const query = data => ({ data, isPending: false, isError: false })
+function mockCatalog(t, prefs = { hidden_ids: ['hidden'], recent_ids: ['claude-test'] }, { prefsReadFailed = false } = {}) {
+  const query = (data, isError = false) => ({ data, isPending: false, isError })
   t.mock.method(modelQueries.registry, 'useQuery', () => query({
     providers: {
       codex: [{ id: 'codex-test', label: 'Codex Test', effort_levels: ['low', 'high'] }, { id: 'hidden' }],
@@ -41,7 +41,7 @@ function mockCatalog(t, prefs = { hidden_ids: ['hidden'], recent_ids: ['claude-t
   }))
   t.mock.method(modelQueries.prefs, 'useQuery', () => query({
     selected_agent: { provider: 'codex', model: 'codex-test', effort: 'high' }, ...prefs,
-  }))
+  }, prefsReadFailed))
   t.mock.method(authQueries.provider.statuses, 'useQuery', () => query({
     codex: { configured: true }, claude: { configured: true }, mobius: { configured: true, available: false },
   }))
@@ -66,7 +66,8 @@ test('the update picker respects MRU, hidden models, availability and model effo
 })
 
 test('an unavailable preference read cannot silently launch a different choice', t => {
-  mockCatalog(t, { unavailable: true, hidden_ids: [], recent_ids: [] })
+  // The latest read failed: React Query keeps the last-known preferences beside the error.
+  mockCatalog(t, undefined, { prefsReadFailed: true })
   const hook = renderHook(() => UpdateAgentPicker({ onChoice: () => {} }))
   assert.equal(hook.result.current.props.confirmDisabled, true)
   assert.match(hook.result.current.props.notice, /Could not load/)

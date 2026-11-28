@@ -120,18 +120,46 @@ for (const [name, query, path, body, expected] of [
   })
 }
 
-test('real preference query degrades to show-all, marked unavailable, only after four failed reads', async () => {
-  const originalFetch = globalThis.fetch
-  const client = new QueryClient()
-  let attempts = 0
+function failingPrefsServer() {
+  const server = { attempts: 0 }
   globalThis.fetch = async url => {
     assert.equal(new URL(url, 'https://example.test').pathname, '/api/owner/model-prefs')
-    attempts += 1
+    server.attempts += 1
     return Response.json({ detail: 'unavailable' }, { status: 503 })
   }
+  return server
+}
+
+test('an unreachable server keeps the owner\'s last-known model choices instead of showing every model', async () => {
+  const originalFetch = globalThis.fetch
+  const client = new QueryClient()
+  const known = { hidden_ids: ['hidden-model'], recent_ids: ['recent-model'],
+    selected_agent: { provider: 'claude', model: 'recent-model', effort: 'high' } }
+  client.setQueryData(modelQueries.prefs.key, known)
+  const server = failingPrefsServer()
   try {
-    assert.deepEqual(await client.fetchQuery(modelQueries.prefs.options()), { hidden_ids: [], recent_ids: [], unavailable: true })
-    assert.equal(attempts, 4, 'query retry must not multiply the read budget')
+    await assert.rejects(client.fetchQuery(modelQueries.prefs.options()))
+    assert.equal(server.attempts, 4, 'query retry must not multiply the read budget')
+    const state = client.getQueryState(modelQueries.prefs.key)
+    assert.deepEqual(state.data, known)
+    assert.deepEqual(modelQueries.prefs.view({ data: state.data, isError: state.status === 'error' }),
+      { prefs: known, unavailable: true })
+  } finally {
+    client.clear()
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a preference set never read degrades to show-all, marked unavailable, only after four failed reads', async () => {
+  const originalFetch = globalThis.fetch
+  const client = new QueryClient()
+  const server = failingPrefsServer()
+  try {
+    await assert.rejects(client.fetchQuery(modelQueries.prefs.options()))
+    assert.equal(server.attempts, 4, 'query retry must not multiply the read budget')
+    const state = client.getQueryState(modelQueries.prefs.key)
+    assert.deepEqual(modelQueries.prefs.view({ data: state.data, isError: state.status === 'error' }),
+      { prefs: { hidden_ids: [], recent_ids: [] }, unavailable: true })
   } finally {
     client.clear()
     globalThis.fetch = originalFetch

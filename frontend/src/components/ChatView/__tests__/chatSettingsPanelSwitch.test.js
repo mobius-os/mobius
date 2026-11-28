@@ -31,11 +31,18 @@ const request = {
   switchId: 'switch-1',
 }
 
-function render(providerSwitchState) {
+function render(providerSwitchState, { prefs = { hidden_ids: [] }, prefsReadFailed = false } = {}) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   try {
     client.setQueryData(modelQueries.registry.key, registry)
-    client.setQueryData(modelQueries.prefs.key, { hidden_ids: [] })
+    if (prefs) client.setQueryData(modelQueries.prefs.key, prefs)
+    if (prefsReadFailed) {
+      // The latest read failed: React Query keeps any last-known list beside
+      // the error. Render the settled failure, not the remount's own retry.
+      client.setQueryDefaults(modelQueries.prefs.key, { retryOnMount: false })
+      client.getQueryCache().build(client, { queryKey: modelQueries.prefs.key })
+        .setState({ status: 'error', error: new Error('model prefs fetch failed: 503') })
+    }
     client.setQueryData(authQueries.provider.statuses.key, statuses)
     return renderToStaticMarkup(createElement(QueryClientProvider, { client },
       createElement(ChatSettingsPanel, {
@@ -70,4 +77,16 @@ test('a failed switch keeps the retryable confirmation with the server reason', 
   const html = render({ status: 'error', request, error: 'Could not switch this chat to the new provider.', result: null })
   assert.match(html, /role="alert"[^>]*>Could not switch this chat to the new provider\./)
   assert.match(html, />Switch provider</)
+})
+
+test('an unreadable preference read keeps the owner\'s hidden models hidden in the chat picker', () => {
+  const html = render(null, { prefs: { hidden_ids: ['gpt-x'] }, prefsReadFailed: true })
+  assert.match(html, /Claude X/)
+  assert.doesNotMatch(html, /GPT-X/, 'the last-known hidden model stays hidden')
+})
+
+test('a preference set never read still offers every model when the read fails', () => {
+  const html = render(null, { prefs: null, prefsReadFailed: true })
+  assert.match(html, /Claude X/)
+  assert.match(html, /GPT-X/)
 })

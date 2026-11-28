@@ -144,8 +144,13 @@ test('short-lived auth queries do NOT persist despite sharing the head', () => {
   )
 })
 
+test('the model picker\'s catalogue and the owner\'s model choices persist for offline opens', () => {
+  assert.equal(shouldPersistQueryKey(['models', 'registry']), true)
+  assert.equal(shouldPersistQueryKey(['owner', 'model-prefs']), true)
+})
+
 test('unrelated keys do not persist', () => {
-  assert.equal(shouldPersistQueryKey(['models', 'registry']), false)
+  assert.equal(shouldPersistQueryKey(['models', 'catalog-probe']), false)
   assert.equal(shouldPersistQueryKey(['app-token', 'some-app']), false)
   assert.equal(shouldPersistQueryKey(['owner', 'walkthrough']), false)
 })
@@ -162,7 +167,7 @@ test('explicit reload handoff preserves the complete loaded chat window', async 
         content: `line-${index}`,
       })),
     })
-    client.setQueryData(['models', 'registry'], { mustNotPersist: true })
+    client.setQueryData(['app-token', 'some-app'], { mustNotPersist: true })
 
     await flushPersistedQueryCache(client)
     const persisted = await get('mobius-query-cache')

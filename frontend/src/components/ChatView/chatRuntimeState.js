@@ -17,6 +17,40 @@ export function isSideQuestionMessage(message) {
   return message?.kind === 'side_question'
 }
 
+/** True when a failed chat activation never reached a working server: the
+ * device or proxy could not connect, the read timed out, or the server
+ * answered as a restarting or failing service does (408 or 5xx). */
+export function activationServerUnreachable(error) {
+  const message = String(error?.message || '')
+  return (error?.name === 'TypeError'
+      && /failed to fetch|networkerror|load failed|fetch failed/i.test(message))
+    || error?.name === 'TimeoutError'
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|5\d\d)$/.test(message)
+}
+
+const READABLE_CACHE_STATES = new Set(['paintable', 'stream-catchup'])
+
+/** Whether a failed activation opens the chat's cached latest messages,
+ * read-only, in place of a saved reading position the cache cannot resolve.
+ * Only an unreachable server allows it: a server that answered could have
+ * resolved the position, and a search or decision reveal must land on its
+ * own row. `latestCacheState` classifies the cache with no reading anchor. */
+export function opensOfflineLatestFrame({ error, searchActivation, latestCacheState }) {
+  return !searchActivation
+    && activationServerUnreachable(error)
+    && READABLE_CACHE_STATES.has(latestCacheState)
+}
+
+/** Whether an activation keeps the offline latest frame on screen while it
+ * asks the server again. The saved position still makes the cache `missing`,
+ * but hiding the frame on every quiet retry would blank a readable chat for
+ * the whole restart. Reuse of the cache still needs the classifier's proof. */
+export function activationKeepsOfflineFrame({ offlineFrameShown, cacheState, latestCacheState }) {
+  return offlineFrameShown
+    && cacheState === 'missing'
+    && READABLE_CACHE_STATES.has(latestCacheState)
+}
+
 const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
 
 /** Delay before quietly retrying a failed chat activation, or null to stop.
@@ -26,11 +60,8 @@ const ACTIVATION_RETRY_DELAYS_MS = [1000, 3000, 8000, 15000, 30000]
  * least as long as the read timeout: one load in flight at a time. */
 export function activationRetryDelay(error, attempt, readTimeoutMs) {
   const message = String(error?.message || '')
-  const transientNetworkError = error?.name === 'TypeError'
-    && /failed to fetch|networkerror|load failed|fetch failed/i.test(message)
-  const transient = transientNetworkError
-    || error?.name === 'TimeoutError'
-    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:408|425|429|5\d\d)$/.test(message)
+  const transient = activationServerUnreachable(error)
+    || /^(?:CHAT_RUNTIME_FAILED|CHAT_LOAD_FAILED)_(?:425|429)$/.test(message)
     || message === 'CHAT_RUNTIME_OUT_OF_ORDER'
   const delay = transient ? ACTIVATION_RETRY_DELAYS_MS[attempt] : undefined
   if (delay === undefined) return null

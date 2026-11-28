@@ -33,7 +33,7 @@ test('chat display readiness admits only coordinate-complete cached transcripts'
     /const initialSavedAnchorKey = savedReadingAnchorKey\(chatId\)[\s\S]*const initialCacheEntryState = chatCacheEntryState\([\s\S]*savedReadingAnchorHasNestedPart\(chatId\)[\s\S]*initialCacheEntryState === 'missing'[\s\S]*'cache-validating'/,
     'mount paints a safe cache or mounts an exact-part cache behind validation')
   assert.match(chatView,
-    /const activationCacheEntryState = chatCacheEntryState\([\s\S]*setLoading\(activationCacheEntryState === 'missing'\)[\s\S]*activationCacheEntryState === 'validating'[\s\S]*'cache-validating'/,
+    /const activationCacheEntryState = chatCacheEntryState\([\s\S]*const activationShownCacheState = keepsOfflineFrame\s*\? activationLatestCacheState\s*: activationCacheEntryState[\s\S]*setLoading\(activationShownCacheState === 'missing'\)[\s\S]*activationCacheEntryState === 'validating'[\s\S]*'cache-validating'/,
     'a retained chat revalidates cache coverage on every visible activation')
   assert.match(scrollMode,
     /initialEntryPhaseRef\.current !== 'cached'[\s\S]*initialEntryPhaseRef\.current !== 'stream-catchup'[\s\S]*initialEntryPhaseRef\.current !== 'ready'[\s\S]*forceRevealRef/,
@@ -152,7 +152,7 @@ test('activation presents a confirmed running transcript while stream catch-up r
     /runtime\.requested_anchor_found === false[\s\S]*if \(runtimeAnchorMatch\)[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*retireSavedReadingPosition\(chatId\)[\s\S]*anchorRetired = true/,
     'only an authoritative absent row retires the saved coordinate')
   assert.match(initialLoad,
-    /if \(activationCacheEntryState !== 'missing' && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages, msgs\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
+    /if \(activationShownCacheState !== 'missing' && !anchorRetired\) \{[\s\S]*applyMessagesToView\(refreshed\.messages, refreshed\.offset\)[\s\S]*settleRuntime\(runtime, refreshed\.messages, msgs\)[\s\S]*return[\s\S]*const renderFrames = coldTranscriptRenderFrames/,
     'a complete warm window, including nested-coordinate validation, must settle atomically before the cold prefix scheduler')
   assert.match(chatView,
     /cacheIsSafeFallback[\s\S]*CHAT_READING_ANCHOR_NOT_FOUND[\s\S]*applyMessagesToView\(\[\], 0\)[\s\S]*setLoadError\(!cacheIsSafeFallback && retry == null\)/,
@@ -207,7 +207,7 @@ test('a staging chat cannot leave the outgoing transcript held on a wedged reque
 test('a fresh empty chat settles before interruptible transcript work', () => {
   const emptySettlement = chatView.indexOf('if (refreshed.messages.length === 0)')
   const warmTransition = chatView.indexOf(
-    "if (activationCacheEntryState !== 'missing' && !anchorRetired)",
+    "if (activationShownCacheState !== 'missing' && !anchorRetired)",
     emptySettlement,
   )
 
@@ -500,8 +500,29 @@ test('cold activation keeps one composer visible but refuses sends until runtime
     /const activationCacheReusable = \(\s*activationCacheEntryState === 'paintable'[\s\S]*activationCacheEntryState === 'stream-catchup'/,
     'only a classifier-approved complete cache may enter runtime reuse or fallback')
   assert.match(chatView,
-    /cacheIsSafeFallback = activationCacheReusable[\s\S]*err\?\.message !== 'CHAT_NOT_FOUND'/,
+    /cacheIsSafeFallback = \(\s*\(activationCacheReusable && cacheCoversSavedAnchor\) \|\| latestCacheReadableOffline\s*\)[\s\S]{0,200}err\?\.message !== 'CHAT_NOT_FOUND'/,
     'an explicit missing resource dominates stale cache history and remains non-sendable')
+  assert.match(chatView,
+    /const latestCacheReadableOffline = opensOfflineLatestFrame\(\{\s*error: err, searchActivation, latestCacheState: activationLatestCacheState,\s*\}\)/,
+    'only an unreachable server lets the cached latest window open in place of an unresolved saved address')
+  assert.match(chatView,
+    /chatId: String\(activationIdentity\), attempts: 0, timer: null,\s*\}\s*offlineLatestFallbackRef\.current = null/,
+    'another chat never inherits an offline frame')
+  assert.match(chatView,
+    /const keepsOfflineFrame = activationKeepsOfflineFrame\(\{\s*offlineFrameShown: offlineLatestFallbackRef\.current === String\(activationIdentity\),\s*cacheState: activationCacheEntryState,\s*latestCacheState: activationLatestCacheState,\s*\}\)/,
+    'a retry recognises the offline frame its failed activation opened')
+  assert.match(chatView,
+    /setLoading\(activationShownCacheState === 'missing'\)[\s\S]{0,600}keepsOfflineFrame \|\| \(activationEntryPhase === 'cache-validating' && current === 'cached'\)\s*\? current/,
+    'a retry keeps that frame visible instead of reclosing its entry gate')
+  assert.match(chatView,
+    /if \(activationShownCacheState !== 'missing' && !anchorRetired\) \{\s*startTransition/,
+    'the server answer replaces a kept frame in one commit, not cold slices')
+  assert.match(chatView,
+    /if \(activationCacheReusable && typeof activationCache\?\.updated_at === 'string'\)/,
+    'a kept frame never satisfies runtime-only reuse: the retry still reads the saved position')
+  assert.match(chatView,
+    /if \(offlineLatestFallbackRef\.current === String\(activationIdentity\)\) \{[\s\S]{0,200}reenterSavedLocation\(\)/,
+    'the next successful activation restores the saved position the offline frame could not show')
 })
 
 test('only a loaded transcript lets runtime evidence attach a stream or reread history', () => {

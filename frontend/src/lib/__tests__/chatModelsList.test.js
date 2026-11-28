@@ -11,11 +11,16 @@ const { default: ChatModelsList } = await vite.ssrLoadModule('/src/components/Se
 const { modelQueries } = await vite.ssrLoadModule('/src/hooks/queries.js')
 after(() => vite.close())
 
-function render({ registry, hidden = [], prefs = { hidden_ids: hidden }, provider = 'claude' }) {
+function render({ registry, hidden = [], prefs = { hidden_ids: hidden }, prefsReadFailed = false, provider = 'claude' }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: Infinity } } })
   try {
     client.setQueryData(modelQueries.registry.key, registry)
     client.setQueryData(modelQueries.prefs.key, prefs)
+    if (prefsReadFailed) {
+      // The latest read failed: React Query keeps the last-known list beside the error.
+      client.getQueryCache().find({ queryKey: modelQueries.prefs.key })
+        .setState({ status: 'error', error: new Error('model prefs fetch failed: 503') })
+    }
     return renderToStaticMarkup(createElement(QueryClientProvider, { client },
       createElement(ChatModelsList, { provider })))
   } finally {
@@ -36,10 +41,11 @@ test('each of this provider\'s models is listed with its picker switch state', (
 })
 
 test('an unreadable saved list locks the switches and says so instead of showing a wrong state', () => {
-  const html = render({ registry, prefs: { hidden_ids: [], unavailable: true } })
+  const html = render({ registry, hidden: ['claude-haiku-x'], prefsReadFailed: true })
   const switches = html.match(/<button[^>]*role="switch"[^>]*>/g) || []
   assert.equal(switches.length, 2)
   for (const tag of switches) assert.match(tag, /disabled=""/)
+  assert.match(html, /Claude Haiku X[\s\S]*role="switch"[^>]*aria-checked="false"/, 'last-known state stays shown')
   assert.match(html, /role="alert"[^>]*>Could not load which models are shown\./)
 })
 

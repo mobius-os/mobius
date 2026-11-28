@@ -440,19 +440,40 @@ function useModelRegistryQuery(options) {
 }
 
 async function fetchModelPrefs() {
-  // After the same bounded retry budget as registry reads, an unreadable
-  // preference set resolves to "hide nothing" so the chat picker still offers
-  // every model. `unavailable` tells editors this is not the saved state, so
-  // they never show it as such. React Query cannot retry a resolved fallback.
+  // The same bounded retry budget as registry reads, spent inside one fetch so
+  // React Query does not multiply it. A read that still fails throws: React
+  // Query then keeps the last-known preferences (restored from disk after a
+  // reload) instead of replacing them, so a restart never makes the picker
+  // forget the owner's choices. Readers decide what an unreadable,
+  // never-loaded set means (see `modelPrefsView`).
+  let lastError
   for (let attempt = 0; attempt <= MODEL_READ_RETRY_COUNT; attempt += 1) {
     try {
       const res = await api.owner.modelPrefs.get()
       const data = await jsonOrThrow(res, 'model prefs fetch failed:')
       return { hidden_ids: data?.hidden_ids || [], recent_ids: data?.recent_ids || [],
         selected_agent: data?.selected_agent || null }
-    } catch {
-      if (attempt === MODEL_READ_RETRY_COUNT) return { hidden_ids: [], recent_ids: [], unavailable: true }
+    } catch (error) {
+      lastError = error
     }
+  }
+  throw lastError
+}
+
+const SHOW_ALL_MODEL_PREFS = Object.freeze({ hidden_ids: [], recent_ids: [] })
+
+/**
+ * What a preferences reader shows. `prefs` is the last-known saved set, even
+ * while the server is unreachable; only when none was ever read and the read
+ * failed does it fall back to hiding nothing, so a chat picker still offers
+ * every model. `unavailable` means the server could not confirm `prefs` just
+ * now, so editors and confirmations never present it as the saved state.
+ */
+function modelPrefsView(prefsQuery) {
+  const unavailable = prefsQuery.isError
+  return {
+    prefs: prefsQuery.data ?? (unavailable ? SHOW_ALL_MODEL_PREFS : undefined),
+    unavailable,
   }
 }
 
@@ -878,6 +899,7 @@ export const modelQueries = {
     fetch: fetchModelPrefs,
     options: modelPrefsQueryOptions,
     useQuery: useModelPrefsQuery,
+    view: modelPrefsView,
     saveChanges: saveModelPrefsChanges,
     invalidate: (queryClient) => queryClient.invalidateQueries({ queryKey: modelPrefsKey }),
   },

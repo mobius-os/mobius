@@ -49,7 +49,9 @@ import {
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
 import {
+  activationKeepsOfflineFrame,
   activationRetryDelay,
+  opensOfflineLatestFrame,
   chatEntryFrame,
   liveControlsReady,
   answerBeforeActivationError,
@@ -640,6 +642,9 @@ export default function ChatView({
   // back-stack — and contradicts the project's no-hard-reload principle).
   const [loadNonce, setLoadNonce] = useState(0)
   const activationRecoveryRef = useRef({ chatId: null, attempts: 0, timer: null })
+  // The chat whose failed activation opened its cached latest messages in
+  // place of a saved reading position the server could not be asked for.
+  const offlineLatestFallbackRef = useRef(null)
   const retryActivation = useCallback(() => {
     // Retry at the activation owner: preserve the complete cached transcript,
     // draft/files, scroll/cache, and the same ChatView while re-running only
@@ -1246,6 +1251,7 @@ export default function ChatView({
     revealConversationTail,
     revealPendingQuestion,
     revealAnchor,
+    reenterSavedLocation,
     reapplyActiveMode,
     settleSendIntent,
     settleStreamingPin,
@@ -2553,6 +2559,7 @@ export default function ChatView({
       activationRecoveryRef.current = {
         chatId: String(activationIdentity), attempts: 0, timer: null,
       }
+      offlineLatestFallbackRef.current = null
     }
     setActivationPhase('pending')
     let cancelled = false
@@ -2603,10 +2610,23 @@ export default function ChatView({
       activationCacheEntryState === 'paintable'
       || activationCacheEntryState === 'stream-catchup'
     )
+    const activationLatestCacheState = chatCacheEntryState(activationCache)
+    // A retry after an unreachable server keeps the readable offline frame
+    // the failed activation opened; its settled entry phase stays as it is.
+    const keepsOfflineFrame = activationKeepsOfflineFrame({
+      offlineFrameShown: offlineLatestFallbackRef.current === String(activationIdentity),
+      cacheState: activationCacheEntryState,
+      latestCacheState: activationLatestCacheState,
+    })
+    // What this activation shows while it reads. Runtime reuse and the
+    // fallback below keep the stricter classifier state.
+    const activationShownCacheState = keepsOfflineFrame
+      ? activationLatestCacheState
+      : activationCacheEntryState
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setLoading(activationCacheEntryState === 'missing')
+    setLoading(activationShownCacheState === 'missing')
     const activationEntryPhase = activationCacheEntryState === 'paintable'
       ? 'cached'
       : activationCacheEntryState === 'validating'
@@ -2615,7 +2635,7 @@ export default function ChatView({
     setInitialEntryPhase(current => (
       // Mount-time layout validation can finish before this passive activation
       // effect runs. Do not re-close a cache gate the scroll owner just proved.
-      activationEntryPhase === 'cache-validating' && current === 'cached'
+      keepsOfflineFrame || (activationEntryPhase === 'cache-validating' && current === 'cached')
         ? current
         : activationEntryPhase
     ))
@@ -2648,6 +2668,12 @@ export default function ChatView({
         throw new Error('CHAT_RUNTIME_OUT_OF_ORDER')
       }
       commitRuntimeSnapshot(transition)
+      if (offlineLatestFallbackRef.current === String(activationIdentity)) {
+        // The server answered: restore the saved position the offline frame
+        // could not show, as an ordinary entry would.
+        offlineLatestFallbackRef.current = null
+        reenterSavedLocation()
+      }
       activationRecoveryRef.current.attempts = 0
       const running = !!runtime.running
       setRecoveryRunId(runtime.recovery_run_id || null)
@@ -2912,7 +2938,7 @@ export default function ChatView({
       // cold. Slicing its replacement would destroy retained expanded details
       // and clamp the reader through each prefix. Runtime reuse/fallback still
       // requires the stronger activationCacheReusable proof above.
-      if (activationCacheEntryState !== 'missing' && !anchorRetired) {
+      if (activationShownCacheState !== 'missing' && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
           settleRuntime(runtime, refreshed.messages, msgs)
@@ -2971,12 +2997,23 @@ export default function ChatView({
           return
         }
         // Offline degradation may use a complete cached restoration window,
-        // but never a truncated one that cannot resolve the saved address.
-        const cacheIsSafeFallback = activationCacheReusable
-          && cacheCoversSavedAnchor
+        // but never a truncated one that cannot resolve the saved address
+        // while the server could answer. When it cannot be reached at all (a
+        // restart), the cached latest messages open read-only instead; the
+        // saved reading position is kept, unresolved, and restored after the
+        // next successful read. A search or decision reveal still waits.
+        const latestCacheReadableOffline = opensOfflineLatestFrame({
+          error: err, searchActivation, latestCacheState: activationLatestCacheState,
+        })
+        const cacheIsSafeFallback = (
+          (activationCacheReusable && cacheCoversSavedAnchor) || latestCacheReadableOffline
+        )
           && err?.message !== 'CHAT_READING_ANCHOR_NOT_FOUND'
           && err?.message !== 'CHAT_NOT_FOUND'
         if (cacheIsSafeFallback) {
+          if (!(activationCacheReusable && cacheCoversSavedAnchor)) {
+            offlineLatestFallbackRef.current = String(activationIdentity)
+          }
           applyMessagesToView(activationCache.messages, activationCache.offset)
         } else {
           // The mounted state was seeded from cache before validation. Clear an
@@ -3053,6 +3090,7 @@ export default function ChatView({
     pendingQueue.hydrateFromTranscript,
     reconcileFailedSendOutbox,
     retireUnownedRuntimeStream,
+    reenterSavedLocation,
     retryActivation,
     setActiveAssistantMessageId,
     setGoalPresentationLocalState,
