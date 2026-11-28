@@ -1,5 +1,6 @@
 import { trayHelpers } from './goalHelpers.js'
 import { LocalAnswersContext } from './localAnswersContext.js'
+import { ChatSurfaceHiddenContext } from './chatSurfaceHiddenContext.js'
 import {
   chatCompactingKind,
   compactionNotice,
@@ -6333,6 +6334,7 @@ export default function ChatView({
             elastic min-height out of the spacer formula at all times. */}
         <AppBlockChatContext.Provider value={appBlockChat}>
         <LocalAnswersContext.Provider value={localAnswerIntents}>
+        <ChatSurfaceHiddenContext.Provider value={hidden}>
         <PeerTimelineContext.Provider value={peerTimeline}>
         <ul className="chat__list" style={{ minHeight: 0 }}>
           {displayedMessages.flatMap((msg, i) => {
@@ -6460,6 +6462,7 @@ export default function ChatView({
           })()}
         </ul>
         </PeerTimelineContext.Provider>
+        </ChatSurfaceHiddenContext.Provider>
         </LocalAnswersContext.Provider>
         </AppBlockChatContext.Provider>
 

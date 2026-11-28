@@ -15,8 +15,9 @@ import { getAuthHeaders, BASE, chatPath } from '../../api/client.js'
  *   releaseFiles: (files: Array) => void,
  * }}
  */
-export default function useFileUpload({ chatId, initialFiles = [], onFilesChange }) {
-  const normalizedInitialFiles = initialFiles.map((file, index) => ({
+/** A saved draft file as a chip: saved drafts keep metadata, not chip ids. */
+function restoredFile(file, index) {
+  return {
     id: file.id || `restored-${index}-${file.name || 'file'}`,
     name: file.name,
     size: file.size,
@@ -25,8 +26,11 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
     status: file.status || 'done',
     error: file.error || null,
     group: file.group,
-  }))
-  const [files, setFiles] = useState(() => normalizedInitialFiles)
+  }
+}
+
+export default function useFileUpload({ chatId, initialFiles = [], onFilesChange }) {
+  const [files, setFiles] = useState(() => initialFiles.map(restoredFile))
   // Keep a ref in sync so the unmount cleanup can revoke object URLs
   // without closing over a stale `files` state value.
   const filesRef = useRef(files)
@@ -208,7 +212,15 @@ export default function useFileUpload({ chatId, initialFiles = [], onFilesChange
   }, [clearFiles, discardUpload])
 
   const restoreFiles = useCallback((fileList) => {
-    const restored = Array.isArray(fileList) ? fileList : []
+    const restored = Array.isArray(fileList) ? fileList.map(restoredFile) : []
+    // Chips the restored list drops are let go like removed ones: their
+    // previews are freed and an upload still in flight is discarded on arrival.
+    const kept = new Set(restored.map(file => file.id))
+    for (const file of filesRef.current) {
+      if (kept.has(file.id)) continue
+      if (file.objectUrl) URL.revokeObjectURL(file.objectUrl)
+      if (file.status === 'uploading') discardedIds.current.add(file.id)
+    }
     commitFiles(restored)
   }, [commitFiles])
 

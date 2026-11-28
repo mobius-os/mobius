@@ -176,3 +176,34 @@ test('discard never deletes by the local name of a failed upload', t => {
   assert.deepEqual(calls.map(call => call.url.split('/').pop()), ['done.txt'])
   hook.unmount()
 })
+
+test('files restored from a saved draft become removable chips, one at a time', t => {
+  const { hook } = setup(t)
+  // Saved drafts keep file metadata only; restoring must not leave chips
+  // that share an undefined id, or removing one would remove them all.
+  hook.result.current.restoreFiles([record('a.txt'), record('b.txt')])
+  const [a, b] = hook.result.current.files
+  assert.ok(a.id && b.id && a.id !== b.id)
+  hook.result.current.removeFile(a.id)
+  assert.deepEqual(hook.result.current.files.map(file => file.name), ['b.txt'])
+  hook.unmount()
+})
+
+test('restoring a draft lets go of the chips it drops: previews freed, late uploads discarded', async t => {
+  const { hook, calls } = setup(t)
+  const revoked = []
+  t.mock.method(URL, 'createObjectURL', () => 'blob:preview')
+  t.mock.method(URL, 'revokeObjectURL', url => revoked.push(url))
+  const pending = hook.result.current.addFiles([new File(['abc'], 'shot.png', { type: 'image/png' })])
+  await tick()
+  hook.result.current.restoreFiles([record('saved.txt')])
+  assert.deepEqual(revoked, ['blob:preview'])
+  assert.deepEqual(hook.result.current.files.map(file => file.name), ['saved.txt'])
+  // The dropped upload finishes after all: it is deleted, not shown.
+  calls.find(call => call.options.method === 'POST')
+    .resolve({ ok: true, json: async () => [record('shot.png')] })
+  await pending
+  assert.ok(calls.some(call => call.options.method === 'DELETE' && call.url.endsWith('/uploads/shot.png')))
+  assert.deepEqual(hook.result.current.files.map(file => file.name), ['saved.txt'])
+  hook.unmount()
+})
