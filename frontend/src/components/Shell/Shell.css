@@ -760,10 +760,10 @@
    Three soft tongues and one ember rise from a violet bed behind the mark.
    Each tongue flickers on its own irregular keyframes and a coprime duration,
    so the combined motion never visibly repeats. Performance contract: the
-   elements exist only in builder mode, are tiny (≤ 44px box), paint their
-   gradients once, and animate only transform and opacity, so the compositor
-   runs them without main-thread work; no filters or blurs. Reduced motion
-   keeps a static flame. */
+   elements exist only in builder mode, are tiny (≤ 44px box), and animate
+   only transform and opacity with no filters or blurs, so browsers can run
+   them on the compositor without repainting the gradients each frame.
+   Reduced motion keeps a static flame. */
 .shell__logo-wrap { isolation: isolate; }
 .shell__logo { position: relative; z-index: 1; }
 .shell__flame {
@@ -1037,14 +1037,14 @@
   .shell__brand.is-snapping .shell__logo,
   .shell__brand.is-beat-held-a .shell__logo,
   .shell__brand.is-beat-held-b .shell__logo { animation: none; }
-  .shell__brand.is-tap-pulse-a .shell__logo,
-  .shell__brand.is-tap-pulse-b .shell__logo,
-  .shell__brand.is-tap-pulse-a .shell__wordmark,
-  .shell__brand.is-tap-pulse-b .shell__wordmark { animation: none; }
+  /* !important: the pulse selectors (several :not() guards) and the per-tongue
+     nth-child rules outrank these, and reduced motion must always win. */
+  .shell__brand .shell__logo,
+  .shell__brand .shell__wordmark,
   .shell__flame,
   .shell__flame::before,
-  .shell__flame-tongue { animation: none; }
-  .shell__flame-ember { animation: none; opacity: 0; }
+  .shell__flame-tongue { animation: none !important; }
+  .shell__flame-ember { animation: none !important; opacity: 0; }
 }
 
 /* Desktop productivity shell: the workspace starts at the very top, while a

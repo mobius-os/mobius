@@ -205,7 +205,9 @@ export function useLogoModeGesture({
     // right-click-style contextmenu (review: item C), but only while FRESH (finding 5).
     lastPointerTypeRef.current = e.pointerType
     lastPointerTypeAtRef.current = performance.now()
-    if (e.pointerType === 'mouse' && e.button !== 0) return
+    // Primary button only: a mouse right-click or a pen barrel button is never a
+    // tap or hold (touch always reports button 0).
+    if (e.button !== 0) return
     if (pressRef.current) return // a press is already live — ignore a second pointer
     suppressClickRef.current = false
     const pressedAt = performance.now()
@@ -257,8 +259,12 @@ export function useLogoModeGesture({
   }, [onTap])
 
   const onPointerUp = useCallback((e) => {
-    const candidate = tapCandidateRef.current
-    tapCandidateRef.current = null
+    // Only this pointer's own release may consume its tap candidate; a second
+    // finger lifting must not steal or clear the first finger's tap.
+    const candidate = tapCandidateRef.current?.pointerId === e.pointerId
+      ? tapCandidateRef.current
+      : null
+    if (candidate) tapCandidateRef.current = null
     const press = pressRef.current
     if (!press || e.pointerId !== press.pointerId) { releaseAsTap(e, candidate); return }
     // Classify the release by ELAPSED TIME + DISPLACEMENT, never by liveness
@@ -288,7 +294,7 @@ export function useLogoModeGesture({
   // pen can still be taken). Abandon the hold and any pending touch tap.
   const onPointerCancel = useCallback((e) => {
     const press = pressRef.current
-    tapCandidateRef.current = null
+    if (e && tapCandidateRef.current?.pointerId === e.pointerId) tapCandidateRef.current = null
     if (!press || (e && e.pointerId !== press.pointerId)) return
     endPress({ suppressClick: false })
   }, [endPress])
@@ -298,6 +304,8 @@ export function useLogoModeGesture({
   const onLostPointerCapture = useCallback((e) => {
     const press = pressRef.current
     if (!press || (e && e.pointerId !== press.pointerId)) return
+    // The browser took the pointer away: its release is no longer a tap.
+    tapCandidateRef.current = null
     endPress({ suppressClick: false })
   }, [endPress])
 
@@ -353,7 +361,10 @@ export function useLogoModeGesture({
   // mode behind the open drawer (review §6). suppressClick so the eventual pointer
   // release can't close the drawer the user just opened.
   useEffect(() => {
-    if (drawerOpen && pressRef.current) endPress({ suppressClick: true })
+    if (!drawerOpen) return
+    // A pending tap must not undo an open that came from elsewhere.
+    tapCandidateRef.current = null
+    if (pressRef.current) endPress({ suppressClick: true })
   }, [drawerOpen, endPress])
 
   // Cancel a live hold on any interruption that ends the gesture's validity: the
@@ -363,7 +374,10 @@ export function useLogoModeGesture({
   // toggle the mode with no current gesture. lostpointercapture is handled by
   // onLostPointerCapture (wired on the brand button).
   useEffect(() => {
-    const cancel = () => { if (pressRef.current) endPress({ suppressClick: true }) }
+    const cancel = () => {
+      tapCandidateRef.current = null
+      if (pressRef.current) endPress({ suppressClick: true })
+    }
     const onHidden = () => { if (typeof document !== 'undefined' && document.visibilityState === 'hidden') cancel() }
     window.addEventListener('blur', cancel)
     window.addEventListener('pagehide', cancel)

@@ -529,7 +529,7 @@ test('the press state machine is pointer-captured, keyed, and classified by time
     + 'the plain tap all leave the click to the browser')
   assert.match(logoGestureSrc, /if \(holdComplete\(elapsed\)\) \{ completeHold\(\); return \}/)
   // §6: a drawer-open from any path cancels a live hold.
-  assert.match(logoGestureSrc, /if \(drawerOpen && pressRef\.current\) endPress/)
+  assert.match(logoGestureSrc, /if \(!drawerOpen\) return[\s\S]*?tapCandidateRef\.current = null\s*\n\s*if \(pressRef\.current\) endPress\(\{ suppressClick: true \}\)/)
   // §13: a keyboard click (detail 0) is never suppressed.
   assert.match(logoGestureSrc, /if \(detail === 0\) return false/)
 })
@@ -713,7 +713,8 @@ test('the Builder flame is compositor-only and has no perpetual frame loop', () 
   }
   assert.doesNotMatch(shellCss.match(/\.shell__flame[\s\S]*?@keyframes shell-flame-kindle/)?.[0] || '', /filter:|blur\(/)
   // Reduced motion keeps a still flame.
-  assert.match(shellCss, /prefers-reduced-motion[\s\S]*?\.shell__flame,\s*\.shell__flame::before,\s*\.shell__flame-tongue \{ animation: none; \}/)
+  // !important: the pulse :not() guards and per-tongue nth-child rules outrank it.
+  assert.match(shellCss, /prefers-reduced-motion[\s\S]*?\.shell__brand \.shell__logo,\s*\.shell__brand \.shell__wordmark,\s*\.shell__flame,\s*\.shell__flame::before,\s*\.shell__flame-tongue \{ animation: none !important; \}/)
   assert.match(shellCss, /\.shell__brand--builder \.shell__wordmark\s*\{[\s\S]*?text-shadow:/)
 })
 
