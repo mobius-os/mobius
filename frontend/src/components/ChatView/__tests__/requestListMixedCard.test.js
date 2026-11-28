@@ -887,3 +887,13 @@ test('a live barring card retires the open list card, and a list card never bars
   assert.deepEqual(cardMarkersAfterLiveCard('list-card', { inputRequests: true }),
     { openRequestCardId: 'list-card' })
 })
+
+test('an option without a description renders as its label alone', () => {
+  const bare = { ...publish, options: [{ id: '0', label: 'Publish' }, { id: '1', label: 'Not now', description: 'Keep them as a draft.' }] }
+  const html = renderToStaticMarkup(createElement(StaticQuestionCard, props({ questions: [bare], onAnswer: () => true })))
+  assert.equal((html.match(/class="qcard__opt-desc"/g) || []).length, 1, 'only the described option has a description')
+  assert.doesNotMatch(html, /undefined|aria-describedby=""/)
+  const publishChoice = html.match(/<div class="qcard__opt-choice"[^>]*>(?:(?!qcard__opt-choice).)*?Publish/s)?.[0] || ''
+  assert.ok(publishChoice, html)
+  assert.doesNotMatch(publishChoice, /aria-describedby/)
+})
