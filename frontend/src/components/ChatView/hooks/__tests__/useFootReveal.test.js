@@ -227,6 +227,57 @@ test('the hook moves the rows per frame from reader scrolls only, and restores t
   })
 })
 
+test('opening a command group by tap, click or Enter never moves hidden rows', () => {
+  // The tapped header is held still by a scroll repair right after the tap.
+  // Counting a tap as scrolling read that repair as the reader's own motion:
+  // the hidden rows (the Goal, helpers, waits) rose or sank whenever a group
+  // was opened or closed.
+  withWindow(({ flush, advance }) => {
+    const foot = fakeEl()
+    const layer = fakeEl()
+    const scroller = fakeScroller({ scrollTop: BOTTOM })
+    const header = {}
+    renderHook(() => useFootReveal({ current: scroller }, { current: foot }, { current: layer }, true))
+    scroller.emit('wheel')
+    scroller.move(BOTTOM - 600)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '142px')
+    advance(READER_SCROLL_WINDOW_MS + 1)
+
+    scroller.emit('touchstart', { type: 'touchstart', touches: [{}] })
+    scroller.emit('touchend', { type: 'touchend', touches: [] })
+    scroller.move(BOTTOM - 400)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '142px', 'a tap is not scrolling')
+
+    scroller.emit('pointerdown', { pointerType: 'mouse', target: header })
+    scroller.move(BOTTOM - 300)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '142px', 'a click on content is not scrolling')
+
+    scroller.emit('keydown', { key: 'Enter', target: header })
+    scroller.move(BOTTOM - 250)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '142px', 'activating a control is not scrolling')
+
+    // A real drag still counts, through its momentum after the lift.
+    scroller.emit('touchstart', { type: 'touchstart', touches: [{}] })
+    scroller.emit('touchmove', { type: 'touchmove', touches: [{}] })
+    scroller.emit('touchend', { type: 'touchend', touches: [] })
+    advance(100)
+    scroller.move(BOTTOM - 200)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '92px')
+
+    // So do the scroll keys and a drag on the scrollbar itself.
+    advance(READER_SCROLL_WINDOW_MS + 1)
+    scroller.emit('keydown', { key: 'PageDown', target: header })
+    scroller.move(BOTTOM - 150)
+    flush()
+    assert.equal(foot.v('--foot-hide'), '42px')
+  })
+})
+
 test('with no transcript the rows show and nothing listens', () => {
   withWindow(() => {
     const foot = fakeEl()

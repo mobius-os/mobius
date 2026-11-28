@@ -22,13 +22,17 @@
      the conversation's end. While following they stay as they are, so a
      streamed reply running a frame ahead of the follow never moves them.
    - Only the reader's own scrolling moves them. A scroll counts as the
-     reader's while a wheel, key, touch or scrollbar drag is in progress or
-     happened within READER_SCROLL_WINDOW_MS, and each such scroll extends
-     the window so momentum after a lift still counts. Anything else (scroll
-     to bottom, anchor repairs, restores, the controller's follow writes) is
-     programmatic and ignored. The controller does not expose its own gesture
-     window, so this mirrors its input set read-only with the same 250ms
-     quiet edge (GESTURE_SETTLE_MS) rather than sharing state.
+     reader's while a wheel, scroll key, touch or scrollbar drag is in
+     progress or happened within READER_SCROLL_WINDOW_MS, and each such
+     scroll extends the window so momentum after a lift still counts. A tap,
+     click or Enter that activates a control in the transcript (opening a
+     command group) is not scrolling: it opens no window, so the position
+     repair that keeps the tapped header still never moves the rows.
+     Anything else (scroll to bottom, anchor repairs, restores, the
+     controller's follow writes) is programmatic and ignored. The controller
+     does not expose its own gesture window, so this keeps its own read-only,
+     with the same 250ms quiet edge (GESTURE_SETTLE_MS) rather than sharing
+     state.
    - A layout change in the same frame can only shrink the counted motion
      (readerScrollMotion), so an older page prepended above a scrolling
      reader, which the controller compensates in scrollTop, is not counted as
@@ -44,6 +48,7 @@ export const READER_SCROLL_WINDOW_MS = 250
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
 // Scroll-controller modes that hold the view at the conversation's live end.
 const LIVE_END_MODES = new Set(['FOLLOW_BOTTOM', 'PIN_USER_MSG'])
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 
 // Shown, with no previous frame to measure motion from.
 export const FOOT_REVEAL_SHOWN = Object.freeze({
@@ -138,6 +143,7 @@ export default function useFootReveal(scrollRef, footRef, layerRef, active) {
     const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now())
     let readerUntil = 0
     let touches = 0
+    let dragged = false
     let pressing = false
     let readerScrolled = false
     let height = layerTravel(layer, foot)
@@ -161,13 +167,25 @@ export default function useFootReveal(scrollRef, footRef, layerRef, active) {
       if (!frame) frame = window.requestAnimationFrame(update)
     }
     const noteInput = () => { readerUntil = now() + READER_SCROLL_WINDOW_MS }
+    // Contact counts while a finger is down; after the lift only a touch that
+    // moved (momentum) keeps counting. A tap that ends without moving opens
+    // no window: what it activates may repair the scroll position next.
     const noteTouch = (event) => {
       touches = event.touches ? event.touches.length : 0
-      noteInput()
+      if (event.type === 'touchstart') dragged = false
+      else if (event.type === 'touchmove') dragged = true
+      if (dragged) noteInput()
     }
-    // A mouse drag on the scrollbar; touch contact is tracked by touch events.
+    // Keys that scroll the transcript itself; Space or Enter on a focused
+    // control activates it instead.
+    const noteKey = (event) => {
+      if (SCROLL_KEYS.has(event.key) || (event.key === ' ' && event.target === scroller)) noteInput()
+    }
+    // A mouse drag on the scrollbar, which targets the scroller itself; a
+    // click on content inside it is not scrolling. Touch contact is tracked
+    // by touch events.
     const notePress = (event) => {
-      if (event.pointerType !== 'mouse') return
+      if (event.pointerType !== 'mouse' || event.target !== scroller) return
       pressing = true
       noteInput()
     }
@@ -187,7 +205,8 @@ export default function useFootReveal(scrollRef, footRef, layerRef, active) {
     update()
     const passive = { passive: true }
     scroller.addEventListener('scroll', onScroll, passive)
-    for (const type of ['wheel', 'keydown']) scroller.addEventListener(type, noteInput, passive)
+    scroller.addEventListener('wheel', noteInput, passive)
+    scroller.addEventListener('keydown', noteKey, passive)
     for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) scroller.addEventListener(type, noteTouch, passive)
     scroller.addEventListener('pointerdown', notePress, passive)
     window.addEventListener('pointerup', noteRelease, passive)
@@ -208,7 +227,8 @@ export default function useFootReveal(scrollRef, footRef, layerRef, active) {
     modes?.observe(scroller, { attributes: true, attributeFilter: ['data-scroll-mode'] })
     return () => {
       scroller.removeEventListener('scroll', onScroll)
-      for (const type of ['wheel', 'keydown']) scroller.removeEventListener(type, noteInput)
+      scroller.removeEventListener('wheel', noteInput)
+      scroller.removeEventListener('keydown', noteKey)
       for (const type of ['touchstart', 'touchmove', 'touchend', 'touchcancel']) scroller.removeEventListener(type, noteTouch)
       scroller.removeEventListener('pointerdown', notePress)
       window.removeEventListener('pointerup', noteRelease)
