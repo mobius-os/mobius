@@ -1747,8 +1747,11 @@ ending its turn. The open list is re-delivered to the root agent, never to
 helpers, at every turn start (a bounded summary,
 `context_budget.OPEN_REQUESTS_CONTEXT_CHARS`), prefixed to an owner message
 steered into a running turn, and with the Goal brief after an in-turn provider
-compaction (`compaction_context.py`). Only the owner settles an `approval`,
-`restart` or `secret`; an agent may resolve only a `question`.
+compaction (`compaction_context.py`), together with the requests settled since
+the chat's last completed run (key, who settled it, the answer, an approval's
+`option_chosen`, a withdrawal's reason); `list` returns both. Only the owner
+settles an `approval`, `restart` or `secret`; an agent may resolve only a
+`question`.
 
 Publication happens at turn end only: when a root run completes with rows open
 and no barring card, `_publish_open_owner_requests` saves one
@@ -1765,9 +1768,10 @@ provider question. Every admission and recovery guard reads it, and it alone.
 messages, Wait results, helper results and other continuations start
 normally around it, and transcript-tail rebuilds (`_tail_open_question_state`)
 never turn it into a barrier. It is answerable only while it is the current
-list card. A question or approval answer, full or partial, clears it; a
-Restart now press or a secret outcome settles only its entry and leaves the
-card open. A barring card or a transcript replacement retires it, leaving its
+list card. A question or approval answer, full or partial, clears it unless
+a secret or unpressed restart entry it did not settle remains, which stays
+usable on that card; a Restart now press or a secret outcome settles only its
+entry and leaves the card open. A barring card or a transcript replacement retires it, leaving its
 rows open and unshown until the next turn end. Waiting projections go through
 `questions.owner_waiting_card_id`, taking the list card from the request rows
 (the card that still shows an open request), and it counts as waiting only

@@ -25,8 +25,8 @@ card) answers it.
 3. A secret value reaches the model, the transcript, a log, or this list.
 4. A restart or approved action runs twice, or runs for a request the owner
    did not answer in its current form.
-5. A request silently disappears: every request ends answered, withdrawn (with
-   a reason), or superseded by a named successor.
+5. A request silently disappears: every request ends answered or withdrawn
+   (with a reason), and the agent's next turn reports how it ended.
 
 ## Why a single card slot could not express it
 
@@ -62,13 +62,13 @@ Table `owner_input_requests`, one row per request:
 | - | - |
 | `id` | stable identity, survives every republication; drafts and answers key on it |
 | `chat_id`, `goal_id`, `created_by_run_id` | ownership |
-| `key` | agent-chosen stable name, unique per chat among open rows; `add` with an existing open key is an update, so a retry or a post-compaction re-ask cannot duplicate |
+| `key` | agent-chosen stable name, unique per chat among open rows and the only reference an agent passes; `add` with an existing open key merges exactly like `update`, so a retry or a post-compaction re-ask cannot duplicate, and an identical re-add changes nothing |
 | `revision` | bumps on every *material* edit (prompt, fields, options, action binding) |
 | `spec_json` | header, prompt, context, fields (below) |
 | `blocks_json` | Goal task ids and/or a plain-language description of the work that waits |
-| `status` | `open`, `answered`, `withdrawn`, `superseded` |
+| `status` | `open`, `answered`, `withdrawn` |
 | `answer_json`, `answered_revision`, `answered_by`, `answered_at` | the answer and the revision it was given against |
-| `outcome_json` | withdrawal reason, or successor id |
+| `outcome_json` | how it was settled: withdrawal or resolve reason, and who settled it |
 | `published_revision`, `published_question_id` | which revision the owner has been shown, and in which card |
 
 Rows are the authority for *what is being asked*. The transcript block is the
@@ -97,11 +97,30 @@ below.
 ### One tool
 
 `owner_input` with `op`: `add`, `update`, `withdraw`, `resolve`, `list`, and
-`kind` on `add`. Every result
-returns the complete open list (id, key, revision, status, what it blocks,
-whether the owner has seen the current revision, and any answers not yet
-consumed). The same list is injected at the start of every turn next to
-`active_waits`. The model's memory is therefore never the source of truth,
+`kind` on `add`. A request is named by `key`; `id` appears only in results
+(the sealed submit path uses it). Every result returns the complete open list
+(id, key, revision, status, what it blocks, whether the owner has seen the
+current revision) and names what happened: `add` is `created`, `revised` or
+`unchanged` (an identical re-add bumps no revision), with one short
+`next_action`; `update` is `revised` or `unchanged`; `withdraw` is `withdrawn`,
+plus `released` for an approval (its work claim is released when this chat
+owns it and it is neither completed nor answered, so no second call is
+needed); `resolve` is `resolved`; `list` returns `open` and `settled`.
+
+**What was settled.** The same open list is injected at the start of every
+turn next to `active_waits`, together with the requests settled since the
+chat's last successfully completed run (`settled_since_last_turn`: closed
+after that run started, newest last, at most ten). Each settled entry names
+its `key`, `kind`, `status` (`answered` or `withdrawn`) and who settled it
+(`owner`, `agent:owner_message`, `agent:found`, `agent` or `platform`); an
+answer carries the selected option ids and labels and any typed text (a
+secret only its consumer outcome, never values; a restart its recorded
+outcome); an approval carries `option_chosen` (true only when the owner
+selected an explicit option of the answered revision; the agent reads which
+from its label); a withdrawal or agent resolve carries its reason. The block
+renders whenever something is open or was settled. The `list` result, a
+steered owner message and the compaction restore carry the same section.
+The model's memory is therefore never the source of truth,
 which is what makes this survive compaction, restart and provider switch, and
 why it is provider-neutral: neither Claude's `AskUserQuestion`/`defer` nor
 Codex's native question tool is involved.
@@ -195,9 +214,12 @@ name, and a request whose revision did not change keeps its draft verbatim.
 - The owner may submit with some requests unanswered. Answered requests are
   recorded and removed from the list handed back as "answered"; unanswered
   ones stay `open` and reappear on the next card ("carried over"). A question
-  or approval answer, full or partial, clears `open_request_card_id`; a Restart
-  now press or a secret outcome settles only its own entry and leaves the card
-  open. An answer to a list card that
+  or approval answer, full or partial, clears `open_request_card_id` unless
+  the card still has a secret or unpressed restart entry it did not settle:
+  those act on their own, so they stay usable on the same card (their rows
+  keep `published_question_id`) until the continuation turn's end republishes.
+  A Restart now press or a secret outcome settles only its own entry and
+  leaves the card open. An answer to a list card that
   is no longer the current one is refused with the ordinary 410 "no longer
   accepting answers", in the route and again inside the writer. Save-only
   answers (`question-answers`) are refused for list cards, since no turn would
@@ -206,20 +228,26 @@ name, and a request whose revision did not change keeps its draft verbatim.
   has moved on, the whole submission is refused (410, `code: card_out_of_date`)
   before anything is written; the updated card follows at the next turn end
   and keeps the drafts of unchanged requests.
-- Answers reach the agent as a continuation whose text lists each answered
-  request by key, plus the remaining open list. Typed replies keep the
-  "treat as a message, not a choice" framing.
+- The continuation's text, composed for the transcript, lists each answered
+  request; what the agent acts on is the settled section built from the rows
+  (above), keyed by request `key`, plus the remaining open list. Typed replies
+  keep the "treat as a message, not a choice" framing.
 - `on_answer: "close"` stays per option and applies only when every submitted
   selection is a close option and nothing remains open.
 
 ### Not acting on a blocked request
 
-The list records what each request blocks. A Goal task named there cannot be
-marked completed while the request is open, and a Goal cannot complete while
-its chat has any open request (`require_tasks_not_waiting_on_owner`). Approvals keep
-their real fence: the work claim exists but the action has no answer, and the
-tool result says so on every call. This is guidance plus state, not a
-validator on arbitrary tool calls (Möbius does not police tool use).
+The list records what each request blocks. A Goal task named in
+`blocks.tasks` cannot be marked completed while the request is open, and a
+Goal cannot complete while a request of that Goal names one of its tasks
+there (`require_tasks_not_waiting_on_owner`); with a Goal attached, unknown
+task ids are refused. `blocks.work` is a description only. A request with no
+task fence, such as an offer made at a handoff, does not hold completion: when
+the Goal completes, a still-open approval's work claim is detached from the
+Goal and stays held for its answer, unless the Goal names it in
+`finished_claims`. Approvals keep their real fence: the work claim exists but
+the action has no answer. This is guidance plus state, not a validator on
+arbitrary tool calls (Möbius does not police tool use).
 
 ### Background and scheduled runs
 
@@ -264,10 +292,12 @@ one can submit. For a new approval, every check that could refuse the request
 runs first, then its `work_key` is claimed with `claim_work`: a chat that
 loses the claim to a peer, or finds the action completed, records no request
 and gets the `held_by_peer`/`completed` follower result (with the open list).
-Re-adding the same key does not claim again. An approval's `work_key`, a
-secret's consumer and every request's kind are immutable: `update` may change
-wording only, and changing the action means withdrawing (releasing the claim
-with `finish_agent_work`) and adding a new request. `resolve` is refused for
+Every check includes `blocks`, and a refusal after the claim (such as losing
+a same-key race with a different `work_key`) leaves no claim behind. Re-adding
+the same key does not claim again. An approval's `work_key`, a secret's
+consumer and every request's kind are immutable: `update` may change wording
+only, and changing the action means withdrawing (which releases the claim this
+chat holds) and adding a new request. `resolve` is refused for
 these kinds; `withdraw` is allowed, except for a secret whose consumer is
 running (its fixed outcome settles it). `blocks`, the open snapshot (each
 row's `kind`, an approval's `work_key`, a secret's field labels), the
@@ -330,9 +360,10 @@ stay open on the card.
   writer (`require_card_answers_current` → `validate_saved_answer`), and typed
   text, even text equal to a label, reaches the agent as a message and leaves
   the approval open for the next card. A stale revision refuses the whole
-  submission. Declining releases nothing; the agent settles its claim. Any
-  submitted answer closes the card (`open_request_card_id`
-  cleared), and the rest is republished at the next turn end.
+  submission. Declining releases nothing; the agent settles its claim. A
+  submitted answer closes the card (`open_request_card_id` cleared) unless an
+  unsettled secret or unpressed restart entry remains on it, which stays
+  usable there; the rest is republished at the next turn end.
 - restart: a message carrying only `selected_options: {<entry id>: [<restart
   option id>]}` and `question_id` is routed to `ResolvePlatformRestartCard`
   with `request_id`. It is accepted only while this card shows the open
@@ -346,8 +377,10 @@ stay open on the card.
   only; a secret entry in the answers path is refused (409). The claim
   (`ClaimSecureInput`, entry mode) requires the chat's current card to show
   the revision the owner filled in and moves the one receipt pending →
-  consuming; the fixed outcome (`SettleSecureInput`, entry mode, or Cancel)
-  answers the row whatever card now shows it, records `request_states`, and
+  consuming; the fixed outcome (`SettleSecureInput`, entry mode) answers the
+  row whatever card now shows it. Cancel carries the card id and the entry's
+  request revision and is refused, like a submission, when either no longer
+  matches. Either outcome records `request_states`, and
   queues one hidden continuation exactly like a partial answer, without
   closing the card. A later ready boot settles an open restart entry
   ("Möbius restarted", `_settle_activation_entry`).
@@ -362,6 +395,9 @@ stay open on the card.
 | Sealed values delivered once though turns run | one receipt per request reused across cards; republication shows a running consumer in progress; no withdraw while consuming; entry submission is not fenced by run generation (Stop cancels the task and settles it as unknown) | `test_a_consumer_running_across_a_republish_is_shown_in_progress_and_runs_once` |
 | An approval is answered only on its own card | grant only by explicit option id, re-bound in the writer; typed text leaves it open | `test_typed_text_on_an_approval_is_a_message_never_a_grant`, `test_the_writer_rebinds_selections_whatever_a_caller_sends` |
 | Stop ended the barring card | Stop leaves the card open: a pending secret receipt stays pending, a running one settles as outcome unknown, an unpressed restart's wait is cancelled (its button still restarts once) | `test_stop_*` in `test_owner_input_sensitive_requests.py` |
+| A secret's Cancel only for what the owner was shown | Cancel carries the card id and request revision; the writer refuses a mismatch like a submission | `<test>` |
+| No approval claim without its request | every check, `blocks` included, runs before the claim; a refusal after it (a same-key race) releases it | `test_a_refused_approval_never_takes_the_claim`, `<test>` |
+| An edit never loses a concurrent change or races an owner answer | `update`, `withdraw`, `resolve` and add-on-existing-key mutate the row only at the revision and status they read (server-side; the merge is retried once, then refused with the current state) | `<test>` |
 
 The activation barrier is unchanged: an **approved** wait still holds later
 input until the ready-boot continuation (`activation_barrier_wait_id`), and an
@@ -369,7 +405,8 @@ unpressed entry's wait is not approved, so it holds nothing.
 
 **Ending without an answer.** A retired or superseded list card, a transcript
 replacement or a partial answer leaves its unanswered rows open and unshown,
-for the next card. Stop leaves the list card open (above). Deletion leaves
+for the next card; after a partial answer, secret and unpressed restart
+entries stay usable on the same card until that next card. Stop leaves the list card open (above). Deletion leaves
 rows as they are, and a branch copies no rows and no receipts, so its copy of
 the card refuses answers and sealed submissions.
 
@@ -402,6 +439,16 @@ activation through `request_states`. Stopping a chat while its key card waits
 clears that card without a turn end, so requests the key card retired stay
 open but unshown until the next turn ends.
 
+A chat that follows a list card with `wait_for_decision` resolves on any
+answer to that card, not on its own entry: a follower must check that the
+entry it follows was answered, and is woken (superseded) when the card is
+republished. Following one request rather than its card is not built.
+
+An older client against a backend rolled back across this change could render
+a secret entry as a free-text question, and the old backend would accept a
+typed answer to it. Rolling back across this change while secret entries are
+open is unsupported.
+
 **Keeping the list in view.** The injected copy is a bounded summary: its
 body fits `context_budget.OPEN_REQUESTS_CONTEXT_CHARS` (7,000 ASCII
 characters; the whole block with its preamble at most about 8,000), so it
@@ -410,10 +457,13 @@ about 10,000). Long prompts and blocked-work text become marked excerpts;
 if that is not enough, rows drop header, option labels, secret field labels
 and blocked-work text, then, newest first, keep only their identity. Rows so
 cut are marked `shortened` and the preamble says to call `owner_input` list,
-whose result stays whole. After an in-turn provider compaction the list is
-restored, read fresh, beside the Goal brief (`compaction_context.py`), and an
-owner message steered into a running turn carries it with the "the owner
-wrote" instruction (`routes/chats_stream.py`). Helpers never receive it.
+whose result stays whole. The settled section (requests settled since the
+last completed turn) is bounded the same way and shown even when nothing is
+open. After an in-turn provider compaction the list and the settled section
+are restored, read fresh, beside the Goal brief (`compaction_context.py`).
+<!-- CODEX-GUARANTEE --> An owner message steered into a running turn carries
+both with the "the owner wrote" instruction (`routes/chats_stream.py`).
+Helpers never receive them.
 
 ## Saved data
 
@@ -430,14 +480,17 @@ on its covering index. Chat detail, `/runtime` and list rows carry
 ## Failure cases covered
 
 - **Concurrency/ordering:** answer arrives while a run is active; two tools
-  `add` the same key at once; a continuation starts between supersede and
-  republish; Stop races publication.
+  `add` the same key at once; two edits of one request at once, or an edit
+  racing an owner answer (each edit is conditional on the revision and status
+  it read); a continuation starts between supersede and republish; Stop races
+  publication.
 - **Partial failure/retry:** `add` response lost and retried (same key, no
   duplicate); card commit fails at turn end (rows stay open, unpublished, next
   turn end retries; no orphan card); a submission naming a revised request
   (refused whole, `card_out_of_date`).
 - **Unbounded growth:** cap on open requests per chat and on spec size;
-  settled rows retained for history but excluded from injection.
+  settled rows retained for history; only those settled since the last
+  completed turn are injected, at most ten.
 - **Restart/shutdown:** process dies after rows commit and before publication:
   boot invents no turn or card (open requests no card shows are routine: after
   Stop, a partial answer, a failed turn), the next turn start hands the rows
