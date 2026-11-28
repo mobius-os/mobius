@@ -49,8 +49,9 @@ import {
   olderHistoryShouldLoad,
 } from './scroll/policy.js'
 import {
+  activationKeepsOfflineFrame,
   activationRetryDelay,
-  activationServerUnreachable,
+  opensOfflineLatestFrame,
   chatEntryFrame,
   liveControlsReady,
   answerBeforeActivationError,
@@ -2558,6 +2559,7 @@ export default function ChatView({
       activationRecoveryRef.current = {
         chatId: String(activationIdentity), attempts: 0, timer: null,
       }
+      offlineLatestFallbackRef.current = null
     }
     setActivationPhase('pending')
     let cancelled = false
@@ -2608,10 +2610,23 @@ export default function ChatView({
       activationCacheEntryState === 'paintable'
       || activationCacheEntryState === 'stream-catchup'
     )
+    const activationLatestCacheState = chatCacheEntryState(activationCache)
+    // A retry after an unreachable server keeps the readable offline frame
+    // the failed activation opened; its settled entry phase stays as it is.
+    const keepsOfflineFrame = activationKeepsOfflineFrame({
+      offlineFrameShown: offlineLatestFallbackRef.current === String(activationIdentity),
+      cacheState: activationCacheEntryState,
+      latestCacheState: activationLatestCacheState,
+    })
+    // What this activation shows while it reads. Runtime reuse and the
+    // fallback below keep the stricter classifier state.
+    const activationShownCacheState = keepsOfflineFrame
+      ? activationLatestCacheState
+      : activationCacheEntryState
     remapAnchorMatch(activationAnchorMatch)
     chatIdStaleRef.current = false
     setLoadError(false)
-    setLoading(activationCacheEntryState === 'missing')
+    setLoading(activationShownCacheState === 'missing')
     const activationEntryPhase = activationCacheEntryState === 'paintable'
       ? 'cached'
       : activationCacheEntryState === 'validating'
@@ -2620,7 +2635,7 @@ export default function ChatView({
     setInitialEntryPhase(current => (
       // Mount-time layout validation can finish before this passive activation
       // effect runs. Do not re-close a cache gate the scroll owner just proved.
-      activationEntryPhase === 'cache-validating' && current === 'cached'
+      keepsOfflineFrame || (activationEntryPhase === 'cache-validating' && current === 'cached')
         ? current
         : activationEntryPhase
     ))
@@ -2923,7 +2938,7 @@ export default function ChatView({
       // cold. Slicing its replacement would destroy retained expanded details
       // and clamp the reader through each prefix. Runtime reuse/fallback still
       // requires the stronger activationCacheReusable proof above.
-      if (activationCacheEntryState !== 'missing' && !anchorRetired) {
+      if (activationShownCacheState !== 'missing' && !anchorRetired) {
         startTransition(() => {
           applyMessagesToView(refreshed.messages, refreshed.offset)
           settleRuntime(runtime, refreshed.messages, msgs)
@@ -2987,9 +3002,9 @@ export default function ChatView({
         // restart), the cached latest messages open read-only instead; the
         // saved reading position is kept, unresolved, and restored after the
         // next successful read. A search or decision reveal still waits.
-        const latestCacheReadableOffline = !searchActivation
-          && activationServerUnreachable(err)
-          && ['paintable', 'stream-catchup'].includes(chatCacheEntryState(activationCache))
+        const latestCacheReadableOffline = opensOfflineLatestFrame({
+          error: err, searchActivation, latestCacheState: activationLatestCacheState,
+        })
         const cacheIsSafeFallback = (
           (activationCacheReusable && cacheCoversSavedAnchor) || latestCacheReadableOffline
         )
