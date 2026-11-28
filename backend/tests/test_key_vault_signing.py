@@ -309,7 +309,7 @@ def test_a_refused_exchange_is_reported_without_the_assertion(vault, client):
     "exchange": {"kind": "google"}}})
   answer = _use(client, "drive")
   assert answer.status_code == 502
-  assert answer.json()["reason"] == "oauth2.googleapis.com refused the token (400): Invalid JWT Signature."
+  assert answer.json()["reason"] == "oauth2.googleapis.com refused the token (400, invalid_grant)."
   assert vault.usage(key="drive")[0]["outcome"] == "failed"
 
 

@@ -5,8 +5,8 @@ import { api, jsonOrThrow } from '../../api/client.js'
 import useDialogFocus from '../../hooks/useDialogFocus.js'
 import useKeyAnswerGuard, { earlyAnswerHint } from './useKeyAnswerGuard.js'
 import {
-  approvalBody, newKeyParts, partLabel, partsFilled, plainPartsNote, requestWording, sentAs, signedRequestLimit, siteLine,
-  tokenClaims,
+  approvalBody, newKeyParts, partLabel, partsFilled, plainPartsNote, requestWording, sentAs, signedRequestLimit, signInEndpoints,
+  signInNote, siteLine, tokenClaims,
 } from '../../lib/keysSettingsText.js'
 import { keyFileDropProps } from '../../lib/keyFileDrop.js'
 import './settingsButtons.css'
@@ -57,6 +57,7 @@ export function useKeyAnswer(request, names) {
 export function KeyRequestBody({ request, words, note = true }) {
   const sites = request.sites || []
   const signedLimit = signedRequestLimit(words.slot || request.key_inject)
+  const signIn = signInNote(words.slot)
   return (
     <>
       {request.reason && (
@@ -67,12 +68,14 @@ export function KeyRequestBody({ request, words, note = true }) {
       {words.warning && <Alert color="warning" variant="soft" description={words.warning} />}
       {note && <p className="settings-keys__muted">{words.note}</p>}
       {signedLimit && <p className="settings-keys__muted">{signedLimit}</p>}
+      {signIn && <p className="settings-keys__muted">{signIn}</p>}
       <details className="settings-keys__details">
         <summary>Details</summary>
         <ul className="settings-keys__details-list">
           {sites.map((site, index) => <li key={`${site.host}-${index}`}>{siteLine(site)}</li>)}
           {words.slot && <li>Sent as <code>{sentAs(words.slot, request.parts)}</code></li>}
           {tokenClaims(words.slot) && <li>Token: {tokenClaims(words.slot)}</li>}
+          {signInEndpoints(words.slot) && <li>Sign-in: {signInEndpoints(words.slot)}</li>}
           {newKeyParts(request) && <li>In {request.parts.length} parts: {request.parts.map(partLabel).join(', ')}</li>}
           {words.keptSlot && (
             <li>

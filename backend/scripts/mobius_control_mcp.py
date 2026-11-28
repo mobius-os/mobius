@@ -1870,10 +1870,22 @@ _TOOL_DEFINITIONS = {
             "region auto for R2), or {type: jwt_bearer, private_key, alg?: RS256|ES256, key_id?, "
             "claims: {iss?, sub?, aud?, scope?}, lifetime_secs?, exchange?: {kind: google} "
             "| {kind: github, installation_id}}: a Google service account pastes its whole "
-            "JSON file as private_key and names claims.scope; a GitHub App names claims.iss."
+            "JSON file as private_key and names claims.scope; a GitHub App names claims.iss. "
+            "A user's sign-in the vault renews: {type: oauth2_refresh, client_id, client_secret, "
+            "refresh_token, token_endpoint, revoke_endpoint?, client_auth?: post|basic} naming parts, "
+            "with only client_id (secret: false) and client_secret in parts: signing in fills "
+            "refresh_token, through POST /api/keys/<key>/oauth2/exchange."
           ),
           "properties": {
-            "type": {"type": "string", "enum": ["header", "query", "basic", "slots", "aws_sigv4", "jwt_bearer"]},
+            "type": {"type": "string", "enum": [
+              "header", "query", "basic", "slots", "aws_sigv4", "jwt_bearer", "oauth2_refresh",
+            ]},
+            "client_id": {"type": "string"},
+            "client_secret": {"type": "string"},
+            "refresh_token": {"type": "string"},
+            "token_endpoint": {"type": "string", "description": "e.g. https://oauth2.googleapis.com/token"},
+            "revoke_endpoint": {"type": "string", "description": "e.g. https://oauth2.googleapis.com/revoke"},
+            "client_auth": {"type": "string", "enum": ["post", "basic"]},
             "access_key_id": {"type": "string"},
             "secret_access_key": {"type": "string"},
             "session_token": {"type": "string"},

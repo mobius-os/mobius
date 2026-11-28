@@ -19,8 +19,10 @@ on an existing key they replace only what is given.
   second colon: account:plain:Account SID, token:secret:Auth token. --basic
   sends two parts as "Authorization: Basic"; --slots takes the vault's slot
   list as JSON, e.g. '[{"type": "header", "name": "X-Id", "template": "{id}"}]'.
-  --recipe takes any whole send recipe as JSON, such as an aws_sigv4 or
-  jwt_bearer one. On an existing key, --part replaces only the parts it names.
+  --recipe takes any whole send recipe as JSON, such as an aws_sigv4,
+  jwt_bearer or oauth2_refresh one (a sign-in: give only its client parts;
+  signing in fills its refresh token). On an existing key, --part replaces
+  only the parts it names.
 
   --site api.example.com:GET,POST:/v1/*,/v2/*   (methods default to GET,
   paths to /*). Without --header or --query a new key is sent as

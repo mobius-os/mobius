@@ -16,6 +16,9 @@
 - A top-level agent that needs a key on a new site asks with the
   ``request_key`` control, which saves an owner card in its chat; the owner
   answers there or in Settings › Keys, which lists every waiting request.
+- A key sent as a sign-in (``oauth2_refresh``) is signed in and out through
+  ``/api/keys/<name>/oauth2``: an app that may use it finishes the provider's
+  consent there, and the vault keeps the refresh token.
 
 Validation and storage belong to the vault; this module authenticates callers
 and relays.
@@ -93,7 +96,9 @@ def vault_outcomes_as_http():
   except key_vault.VaultTimeout as exc:
     raise HTTPException(504, str(exc)) from exc
   except key_vault.VaultRefused as exc:
-    raise HTTPException(exc.status, exc.reason) from exc
+    # A refusal's code, which callers act on (``not_signed_in``), is passed on too.
+    detail = {"code": exc.code, "message": exc.reason} if exc.code else exc.reason
+    raise HTTPException(exc.status, detail) from exc
 
 
 async def _relay(method: str, path: str, payload: dict | None = None, *, caller: str | None = None) -> dict:
@@ -268,6 +273,88 @@ async def reveal_key(
   helpers, which use keys through /api/keys/use."""
   query = f"?{urlencode({'part': part})}" if part else ""
   return await _relay("GET", f"/keys/{quote(name, safe='')}/value{query}", caller=reader_caller(principal))
+
+
+# -- signing a key in (``oauth2_refresh``) ------------------------------------
+#
+# A sign-in key holds an OAuth client; signing in gives it the refresh token
+# the vault renews access tokens with. The owner, the owner's top-level
+# agents and an app that may use the key somewhere sign it in or out; the
+# vault checks the app's grant. Nobody receives a token: the answers say only
+# whether it is signed in.
+
+async def _sign_in_call(method: str, path: str, principal: Principal, payload: dict | None = None) -> dict:
+  """Relay a sign-in operation for the attested caller; an app's only while
+  the app its token names is still installed, as for a borrow."""
+  caller = _caller(principal)
+  try:
+    if principal.app_id is not None:
+      await key_vault.confirm_live_app(principal.app_id, principal.app_instance_id)
+  except key_vault.AppGone:
+    raise HTTPException(404, "App not found.") from None
+  with vault_outcomes_as_http():
+    return await key_vault.vault_call(method, path, payload, caller=caller, timeout=key_vault.sign_in_wait_secs())
+
+
+def _refuse_helpers_signing_in(principal: Principal) -> None:
+  """Signing in or out decides which account a key acts as for everyone who
+  uses it: the agent that started a helper does it, never the helper (nor
+  an app token it minted) or an app's own agent."""
+  if principal.delegation_id is not None:
+    raise HTTPException(403, "Delegated helpers cannot sign a key in or out; the agent that started you can.")
+  refuse_app_agent(principal, "sign a key in or out")
+
+
+async def _tell_owner_an_agent_signed(db: Session, principal: Principal, name: str, what: str) -> None:
+  """An agent's sign-in replaces the account a key acts as, so the owner
+  hears of it, as of any value an agent replaces."""
+  if not _is_agent(principal):
+    return
+  activity.log_event("key_changed", key=name, chat_id=principal.chat_id, changes=[what])
+  await push.notify_owner_async(
+    db, principal.owner.id,
+    title="An agent changed a saved key",
+    body=f"An agent {what} for “{name}”. Review it in Settings › Keys.",
+    source_type="system",
+    target="/shell/?settings=keys",
+    tag=f"key-changed-{name}",
+  )
+
+
+@router.get("/{name}/oauth2")
+async def sign_in_status(name: str, principal: Principal = Depends(get_principal)) -> dict:
+  """``{signed_in, token_host, client_id}``: whether the key is signed in,
+  where the vault renews it, and its client id (always plain: an app builds
+  the provider's consent address with it)."""
+  return await _sign_in_call("GET", f"/keys/{quote(name, safe='')}/oauth2", principal)
+
+
+@router.post("/{name}/oauth2/exchange", dependencies=[Depends(reject_cross_site)])
+async def sign_in(
+  name: str, body: dict = Body(...),
+  principal: Principal = Depends(get_principal),
+  db: Session = Depends(get_db),
+) -> dict:
+  """Finish a sign-in: the vault exchanges the ``code`` the provider sent to
+  ``redirect_uri`` (and the PKCE ``code_verifier``) for a refresh token it
+  keeps. Answers ``{signed_in, scope, email}``, never a token."""
+  _refuse_helpers_signing_in(principal)
+  payload = {k: body[k] for k in ("code", "code_verifier", "redirect_uri") if k in body}
+  answer = await _sign_in_call("POST", f"/keys/{quote(name, safe='')}/oauth2/exchange", principal, payload)
+  await _tell_owner_an_agent_signed(db, principal, name, "signed it in")
+  return answer
+
+
+@router.post("/{name}/oauth2/disconnect", dependencies=[Depends(reject_cross_site)])
+async def sign_out(
+  name: str, principal: Principal = Depends(get_principal), db: Session = Depends(get_db),
+) -> dict:
+  """Sign the key out: the vault revokes its refresh token where the recipe
+  names a revoke endpoint, then removes it. Answers ``{signed_in, revoked}``."""
+  _refuse_helpers_signing_in(principal)
+  answer = await _sign_in_call("POST", f"/keys/{quote(name, safe='')}/oauth2/disconnect", principal)
+  await _tell_owner_an_agent_signed(db, principal, name, "signed it out")
+  return answer
 
 
 @router.post("/requests/{request_id}/approve", dependencies=[*owner_only, Depends(reject_cross_site)])
