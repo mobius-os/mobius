@@ -123,6 +123,7 @@ from app.routes import (
   projects_router,
   project_copies_router,
   project_handle_invites_router,
+  connect_offers_router,
   shared_apps_router,
   router_import_failures,
 )
@@ -1170,6 +1171,7 @@ app.include_router(fs_router)
 app.include_router(projects_router)
 app.include_router(project_copies_router)
 app.include_router(project_handle_invites_router)
+app.include_router(connect_offers_router)
 app.include_router(shared_apps_router)
 app.include_router(chat_router)
 app.include_router(chat_continuity_router)
