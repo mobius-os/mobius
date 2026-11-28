@@ -349,9 +349,14 @@ async def send_offer(
       # Provably never reached anyone: nothing to keep or revoke.
       _delete("sent", record["id"])
   if delivered_to is not None:
-    record["delivered_to"] = delivered_to
-    _save("sent", record)
-    return _sent_view(record, now)
+    # A withdrawal or an accept may have landed while delivery was in flight;
+    # record the delivery on the current state rather than restoring the old one.
+    async with _state_lock:
+      current = _load("sent", record["id"])
+      if current is not None:
+        current["delivered_to"] = delivered_to
+        _save("sent", current)
+    return _sent_view(current or {**record, "status": "withdrawn"}, now)
   if unconfirmed is not None:
     # It may be waiting in their Connect; it stays listed so it can be withdrawn.
     response.status_code = 202
@@ -615,8 +620,13 @@ async def receive_offer(request: Request, body: InboxEnvelope, db: Session = Dep
     "expires_at": min(details.expires_at, now + OFFER_TTL_SECONDS),
     "host_id": None,
   }
-  _admit_sender(handle, now)
-  _save("received", record)
+  # Concurrent deliveries of one offer, or past the sender's limit, both
+  # passed the early checks; only one of them may store it.
+  async with _state_lock:
+    if any(item.get("delivery_key") == delivery_key for item in _all("received")):
+      return {"status": "received"}
+    _admit_sender(handle, now)
+    _save("received", record)
   access = "full access" if details.agent else "command access"
   await notify_owner_async(
     db, owner.id,

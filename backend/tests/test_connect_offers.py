@@ -214,6 +214,60 @@ def test_withdrawing_during_pairing_undoes_the_access(client, auth, peers):
   assert offers._all("sent") == []
 
 
+def test_a_withdrawal_during_delivery_is_not_undone(client, auth, peers, monkeypatch):
+  deliver = offers._deliver
+
+  async def withdrawn_while_delivering(host, envelope, timeout):
+    outcome = await deliver(host, envelope, timeout)
+    [record] = offers._all("sent")
+    assert client.delete(f"/api/connect/offers/sent/{record['id']}", headers=auth).status_code == 200
+    return outcome
+
+  monkeypatch.setattr(offers, "_deliver", withdrawn_while_delivering)
+  sent = send(client, auth)
+  assert sent.status_code == 200 and sent.json()["status"] == "withdrawn"
+  assert offers._all("sent") == []
+
+
+def test_an_accept_before_the_send_returns_stays_accepted(client, auth, peers, monkeypatch):
+  deliver = offers._deliver
+
+  async def accepted_while_delivering(host, envelope, timeout):
+    outcome = await deliver(host, envelope, timeout)
+    [offer] = received(client, auth)
+    peers["me"] = "bob"
+    accepted = client.post(f"/api/connect/offers/received/{offer['id']}/accept", headers=auth)
+    peers["me"] = "ana"
+    assert accepted.status_code == 200, accepted.text
+    return outcome
+
+  monkeypatch.setattr(offers, "_deliver", accepted_while_delivering)
+  assert send(client, auth).status_code == 200
+  [record] = offers._all("sent")
+  assert record["status"] == "connected" and record["delivered_to"] == HOST
+  assert len(peers["paired"]) == 1
+
+
+def test_one_offer_delivered_twice_at_once_is_stored_once(client, auth, db, peers, monkeypatch):
+  federation = offers.federation_request
+  seen = {}
+
+  async def delivered_again_during_check(method, url, *, json=None, **kwargs):
+    if url.endswith("/inbox"):
+      seen["envelope"] = json
+    elif url.endswith("/check") and "again" not in seen:
+      seen["again"] = None
+      seen["again"] = client.post("/api/connect/offers/inbox", json=seen["envelope"]).status_code
+    return await federation(method, url, json=json, **kwargs)
+
+  monkeypatch.setattr(offers, "federation_request", delivered_again_during_check)
+  assert send(client, auth).status_code == 200
+  assert seen["again"] == 200
+  [offer] = received(client, auth)
+  assert db.query(models.Notification).filter_by(source_id=offer["id"]).count() == 1
+  assert len(offers._all("received")) == 1
+
+
 def test_decline_is_refused_while_an_accept_is_in_progress(client, auth, peers):
   assert send(client, auth).status_code == 200
   [offer] = received(client, auth)
