@@ -9,8 +9,9 @@ the runner's own mode-0600 config file.
 Runner processes deliberately outlive a backend restart.  Their durable
 profile record is the lifecycle owner: every ``_RECONCILE_SECONDS`` the
 supervisor relaunches any ``active`` profile whose runner it neither owns nor
-finds alive, while a runner that exits on its own is recorded as ``ended``
-(exit 0) or ``error`` and is never restarted.
+finds alive, including one killed by a signal.  A runner that exits on its own
+is recorded as ``ended`` (exit 0) or ``error`` and is not restarted until the
+owner reconnects it.
 """
 
 from __future__ import annotations
@@ -56,6 +57,11 @@ _COMMAND_RE = re.compile(
 )
 _lock = threading.RLock()
 _owned_processes: dict[str, subprocess.Popen] = {}
+# Signal-killed runners relaunch after a doubling delay (count, not-before on
+# the monotonic clock), so a runner killed at every start cannot spin.
+_KILL_BACKOFF_MAX_SECONDS = 300
+_KILL_BACKOFF_RESET_SECONDS = 1800
+_kill_backoff: dict[str, tuple[int, float, float]] = {}
 
 
 class OutboundConnectError(RuntimeError):
@@ -229,6 +235,43 @@ async def set_agent_access(profile_id: str, enabled: bool) -> dict:
   return await asyncio.to_thread(_set_agent_access, profile_id, enabled)
 
 
+def _reconnect_profile(profile_id: str) -> dict:
+  """Restart a stopped connection with its saved pairing, as the owner granted it."""
+  with _lock:
+    meta = _read_json(_meta_path(profile_id))
+    if meta is None:
+      raise LookupError(profile_id)
+    if meta.get("status") not in {"ended", "error", "active"}:
+      raise OutboundConnectError("This access can’t be reconnected. Remove it and grant access again.")
+    owned = _owned_processes.get(profile_id)
+    if meta.get("status") == "active" and (
+      (owned is not None and owned.poll() is None) or _process_alive(profile_id)
+    ):
+      # Already connected: a repeated request must not interrupt live access.
+      return _public_profile(meta)
+    conns = connect_runner._connections(_read_json(_runner_config_path(profile_id)) or {})
+    if len(conns) != 1 or not conns[0].get("token"):
+      raise OutboundConnectError(
+        "This access no longer has its saved sign-in. Remove it and grant access again.",
+      )
+    _stop_process_tree(profile_id)
+    _owned_processes.pop(profile_id, None)
+    _kill_backoff.pop(profile_id, None)
+    meta["status"] = "active"
+    _atomic_json(_meta_path(profile_id), meta)
+    try:
+      _launch(profile_id)
+    except (OSError, OutboundConnectError) as exc:
+      meta["status"] = "error"
+      _atomic_json(_meta_path(profile_id), meta)
+      raise OutboundConnectError("The Connect runner could not be started.") from exc
+    return _public_profile(meta)
+
+
+async def reconnect_profile(profile_id: str) -> dict:
+  return await asyncio.to_thread(_reconnect_profile, profile_id)
+
+
 def _saved_profiles() -> list[tuple[str, dict]]:
   profiles = []
   for path in sorted(_profiles_dir().glob("o_*/profile.json")):
@@ -244,8 +287,20 @@ def _needs_relaunch(profile_id: str, meta: dict) -> bool:
   return (
     meta.get("status") == "active"
     and profile_id not in _owned_processes
+    and time.monotonic() >= _kill_backoff.get(profile_id, (0, 0.0, 0.0))[1]
     and not _process_alive(profile_id)
   )
+
+
+def _record_kill(profile_id: str) -> float:
+  """Delay this killed runner's relaunch; a kill long after the last resets."""
+  now = time.monotonic()
+  count, _not_before, last = _kill_backoff.get(profile_id, (0, 0.0, 0.0))
+  if now - last > _KILL_BACKOFF_RESET_SECONDS:
+    count = 0
+  delay = min(_RECONCILE_SECONDS * 2 ** count, _KILL_BACKOFF_MAX_SECONDS)
+  _kill_backoff[profile_id] = (count + 1, now + delay, now)
+  return delay
 
 
 def _download_relaunch_runners() -> dict[str, bytes]:
@@ -629,6 +684,16 @@ def _reconcile_once() -> None:
         )
         if runner_uninstalled:
           meta["status"] = "revoked"
+        elif result < 0 and meta.get("status") == "active":
+          # Killed by a signal (an OOM kill, a process-group sweep during a
+          # restart) rather than exiting on its own: the access is still
+          # granted, so the next pass relaunches it like any orphaned runner.
+          delay = _record_kill(profile_id)
+          log.warning(
+            "outbound Connect %s runner was killed by signal %d; relaunching in %ds",
+            profile_id, -result, delay,
+          )
+          continue
         else:
           meta["status"] = "ended" if result == 0 else "error"
         _atomic_json(_meta_path(profile_id), meta)

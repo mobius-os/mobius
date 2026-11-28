@@ -932,6 +932,96 @@ def test_outbound_reconcile_pid_write_failure_stops_started_runner_and_marks_err
       process.wait(timeout=5)
 
 
+def test_outbound_runner_killed_by_a_signal_keeps_access_and_relaunches(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  killed = "o_" + "7" * 16
+  connect_outbound._atomic_json(connect_outbound._meta_path(killed), {
+    "id": killed, "base_url": "https://friend.example", "status": "active",
+  })
+
+  class Owned:
+    def poll(self):
+      return -9
+
+  owned = {killed: Owned()}
+  monkeypatch.setattr(connect_outbound, "_owned_processes", owned)
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _profile_id: False)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch",
+    lambda profile_id, *args: launched.append(profile_id),
+  )
+  monkeypatch.setattr(connect_outbound, "_download_relaunch_runners", dict)
+  monkeypatch.setattr(connect_outbound, "_kill_backoff", {})
+  clock = [1000.0]
+  monkeypatch.setattr(connect_outbound.time, "monotonic", lambda: clock[0])
+
+  connect_outbound._reconcile_once()
+  connect_outbound._reconcile_once()
+  # Relaunch waits out the backoff instead of spinning on every pass.
+  assert launched == []
+  clock[0] += connect_outbound._RECONCILE_SECONDS
+  connect_outbound._reconcile_once()
+
+  meta = json.loads(connect_outbound._meta_path(killed).read_text(encoding="utf-8"))
+  assert meta["status"] == "active"
+  assert launched == [killed]
+
+  # Each further kill doubles the wait, up to the cap.
+  first = connect_outbound._record_kill(killed)
+  second = connect_outbound._record_kill(killed)
+  assert second == 2 * first
+  for _ in range(20):
+    last = connect_outbound._record_kill(killed)
+  assert last == connect_outbound._KILL_BACKOFF_MAX_SECONDS
+
+
+def test_outbound_reconnect_relaunches_a_stopped_connection_with_its_pairing(
+  tmp_path, monkeypatch,
+):
+  profiles = tmp_path / "outbound"
+  monkeypatch.setattr(connect_outbound, "_profiles_dir", lambda: profiles)
+  stopped, unpaired = "o_" + "8" * 16, "o_" + "9" * 16
+  for profile_id in (stopped, unpaired):
+    connect_outbound._atomic_json(connect_outbound._meta_path(profile_id), {
+      "id": profile_id, "base_url": "https://friend.example", "status": "error",
+    })
+  config = connect_outbound._runner_config_path(stopped)
+  config.parent.mkdir(parents=True, exist_ok=True)
+  config.write_text(json.dumps({
+    "url": "https://friend.example", "token": "t", "host_id": "h",
+  }), encoding="utf-8")
+  monkeypatch.setattr(connect_outbound, "_owned_processes", {})
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda _profile_id: False)
+  launched = []
+  monkeypatch.setattr(
+    connect_outbound, "_launch", lambda profile_id, *args: launched.append(profile_id),
+  )
+
+  connect_outbound._reconnect_profile(stopped)
+  with pytest.raises(connect_outbound.OutboundConnectError):
+    connect_outbound._reconnect_profile(unpaired)
+  # Reconnecting a connection that is already running leaves it alone.
+  monkeypatch.setattr(connect_outbound, "_process_alive", lambda profile_id: profile_id == stopped)
+  monkeypatch.setattr(
+    connect_outbound, "_stop_process_tree",
+    lambda profile_id: (_ for _ in ()).throw(AssertionError("stopped a live runner")),
+  )
+  assert connect_outbound._reconnect_profile(stopped)["online"] is True
+
+  def status(profile_id):
+    return json.loads(
+      connect_outbound._meta_path(profile_id).read_text(encoding="utf-8"),
+    )["status"]
+
+  assert launched == [stopped]
+  assert status(stopped) == "active"
+  assert status(unpaired) == "error"
+
+
 def test_outbound_routes_use_connect_manage_capability(
   client, auth, monkeypatch,
 ):
@@ -977,7 +1067,16 @@ def test_outbound_mutations_require_permission_and_report_domain_failures(
   path = "/api/connect/outbound"
   assert client.post(path, headers=denied, json=body).status_code == 403
   assert client.delete(path + "/o_0123456789abcdef", headers=denied).status_code == 403
+  assert client.post(path + "/o_0123456789abcdef/reconnect", headers=denied).status_code == 403
   granted = _app_auth(client, auth, granted=True)
+
+  async def unreconnectable(_profile_id):
+    raise connect_outbound.OutboundConnectError("Remove it and grant access again.")
+
+  monkeypatch.setattr(connect_outbound, "reconnect_profile", unreconnectable)
+  response = client.post(path + "/o_0123456789abcdef/reconnect", headers=granted)
+  assert response.status_code == 409
+  assert response.json()["detail"] == "Remove it and grant access again."
   assert client.post(path, headers=granted, json={**body, "label": "  "}).status_code == 422
 
   async def rejected_pairing(_label, _command, agent=False):

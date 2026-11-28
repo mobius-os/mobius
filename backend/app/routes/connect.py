@@ -774,6 +774,23 @@ async def set_outbound_agent_access(
     raise HTTPException(status_code=404, detail="No such shared access.") from exc
 
 
+@router.post(
+  "/outbound/{profile_id}/reconnect",
+  dependencies=[Depends(require_nondelegated_owner_or_app_control)],
+)
+async def reconnect_outbound_access(
+  profile_id: str,
+  _owner: models.Owner = Depends(get_owner_or_app_with_connect_manage),
+) -> dict:
+  """Restart a granted connection that stopped, with its saved pairing."""
+  try:
+    return await connect_outbound.reconnect_profile(profile_id)
+  except LookupError as exc:
+    raise HTTPException(status_code=404, detail="No such shared access.") from exc
+  except connect_outbound.OutboundConnectError as exc:
+    raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.delete(
   "/outbound/{profile_id}",
   dependencies=[Depends(require_nondelegated_owner_or_app_control)],
