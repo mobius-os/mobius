@@ -94,27 +94,19 @@ def restart_entry(run_id: str, source_boot_id: str, question_id: str) -> dict:
   }
   restart_now_id = str(uuid5(NAMESPACE_URL, f"{action_id}:restart-now"))
 
-  def summarize(paths: list[str]) -> str:
-    summary = ", ".join(paths[:3])
-    if len(paths) > 3:
-      summary += f", and {len(paths) - 3} more"
-    return summary
-
-  paths = requirement["paths"]
+  # The entry says what a restart does, not which files it loads: the list
+  # is noise to the owner. Unsaved edits are still disclosed, because they
+  # may be another chat's unfinished work going live.
   question = (
-    f"Restart to load the tested platform changes in {summarize(paths)}?"
-    if paths else "Restart Möbius now?"
+    "Restart Möbius to load platform changes?"
+    if requirement["paths"] else "Restart Möbius now?"
   )
-  uncommitted = uncommitted_restart_paths()
-  if uncommitted:
+  if uncommitted_restart_paths():
     question += (
-      f" It will also load uncommitted edits in {summarize(uncommitted)}, "
-      "which may be another chat's unfinished work."
+      " It also loads unsaved edits, which may be another chat's "
+      "unfinished work."
     )
-  question += (
-    " This interrupts active turns and Möbius may be unavailable for "
-    "tens of seconds."
-  )
+  question += " This interrupts active turns for tens of seconds."
   return {
     "kind": "restart",
     "header": "Restart Möbius",
@@ -123,7 +115,7 @@ def restart_entry(run_id: str, source_boot_id: str, question_id: str) -> dict:
       "id": restart_now_id,
       "label": "Restart now",
       "on_answer": "close",
-      "description": "Drain active work and restart once to load the current platform source.",
+      "description": "Finish active work, then restart once.",
     }],
     "platform_action": {
       "version": 2,

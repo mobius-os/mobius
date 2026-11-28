@@ -135,11 +135,6 @@
    Submit; a restart and a secret act on their own, so their controls sit
    inside their own entry and read as a separate, deliberate action. */
 
-/* An approval decides something: its header carries the accent. */
-.qcard__q--approval > .qcard__header {
-  color: var(--accent-text, var(--accent));
-}
-
 /* A secret's header pairs the sealed-input lock with its label. */
 .qcard__entry-head {
   display: flex;

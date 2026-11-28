@@ -104,7 +104,7 @@ async def test_one_card_holds_every_kind_oldest_first_in_the_published_shape(
   assert action["requirement"]["source_boot_id"] == boot
   assert restart["options"] == [{
     "id": action["restart_option_id"], "label": "Restart now", "on_answer": "close",
-    "description": "Drain active work and restart once to load the current platform source.",
+    "description": "Finish active work, then restart once.",
   }]
   # Nothing on the card holds the chat.
   assert inputs.markers(chat.id) == (None, card["question_id"])

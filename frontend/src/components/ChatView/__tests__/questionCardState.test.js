@@ -446,3 +446,8 @@ test('a typed-only question opens one line tall, the same as the box under choic
   assert.doesNotMatch(css, /qcard__answer-row--typed/)
   assert.match(css, /\.qcard__input\s*\{[^}]*min-height:\s*38px;/, 'one line plus padding')
 })
+
+test('an approval entry header reads like any other entry header', () => {
+  // Every entry is a decision; no kind's header is singled out in the accent.
+  assert.doesNotMatch(css, /\.qcard__q--approval[^{]*\{[^}]*accent/)
+})

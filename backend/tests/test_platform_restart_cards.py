@@ -1089,7 +1089,7 @@ def _save_restart_card(client, chat, db, *, objective=None) -> str:
     return block["questions"][0]["question"]
 
 
-def test_restart_card_names_proved_served_boot_debt(
+def test_restart_card_reports_proved_served_boot_debt(
   client, chat, db, monkeypatch, tmp_path,
 ):
   import subprocess
@@ -1112,10 +1112,13 @@ def test_restart_card_names_proved_served_boot_debt(
   )
 
   assert platform_restart.pending_restart_paths() == [path]
-  assert path in _save_restart_card(client, chat, db)
+  # The card says there are changes to load; the paths stay in its requirement.
+  assert _save_restart_card(client, chat, db).startswith(
+    "Restart Möbius to load platform changes?"
+  )
 
 
-def test_restart_card_names_uncommitted_edits_the_restart_would_also_load(
+def test_restart_card_discloses_unsaved_edits_the_restart_would_also_load(
   client, chat, db, monkeypatch,
 ):
   # A restart serves the whole tree, so another chat's unfinished edit goes
@@ -1132,12 +1135,12 @@ def test_restart_card_names_uncommitted_edits_the_restart_would_also_load(
 
   question = _save_restart_card(client, chat, db)
 
-  assert "tested platform changes in backend/app/routes/identity.py" in question
-  assert (
-    "also load uncommitted edits in backend/app/models.py, "
-    "backend/app/system_prompts.py" in question
-  )
-  assert question.endswith("unavailable for tens of seconds.")
+  assert question.startswith("Restart Möbius to load platform changes?")
+  assert "also loads unsaved edits" in question
+  assert "another chat's unfinished work" in question
+  # The entry says what a restart does; it never lists files.
+  assert "backend/" not in question
+  assert question.endswith("for tens of seconds.")
 
 
 def test_restart_card_stays_plain_when_the_tree_is_clean(
@@ -1152,7 +1155,7 @@ def test_restart_card_stays_plain_when_the_tree_is_clean(
   question = _save_restart_card(client, chat, db)
 
   assert question.startswith("Restart Möbius now?")
-  assert "uncommitted" not in question
+  assert "unsaved" not in question
 
 
 def test_uncommitted_restart_paths_lists_only_restart_loaded_working_edits(
